@@ -142,29 +142,65 @@ export async function createOrUpdateNamespace({
   }
 }
 
-export async function annotateDefaultServiceAccount({ namespace, role }: { namespace: string; role: string }) {
+export async function createOrUpdateServiceAccount({ namespace, role }: { namespace: string; role: string }) {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = kc.makeApiClient(k8s.CoreV1Api);
 
+  // Get the service account name from global config
+  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+  const serviceAccountName = serviceAccount?.name || 'default';
+
   const serviceAccountExists = async () => {
     try {
-      const saResponse = await client.readNamespacedServiceAccount('default', namespace);
+      const saResponse = await client.readNamespacedServiceAccount(serviceAccountName, namespace);
       return Boolean(saResponse?.body);
     } catch (error) {
       return false;
     }
   };
 
-  // Wait until the default service account exists in the given namespace
-  try {
-    await waitUntil(serviceAccountExists, {
-      timeoutMs: 120000,
-      intervalMs: 2000,
-    });
-  } catch (error) {
-    logger.error(`[NS ${namespace}] Timeout waiting for default service account to exist: ${error}`);
-    throw error;
+  // If it's not the default service account, create it first
+  if (serviceAccountName !== 'default') {
+    const serviceAccountManifest = {
+      apiVersion: 'v1',
+      kind: 'ServiceAccount',
+      metadata: {
+        name: serviceAccountName,
+      },
+    };
+
+    try {
+      // Check if service account already exists
+      if (!(await serviceAccountExists())) {
+        logger.info(`[NS ${namespace}] Creating service account ${serviceAccountName}`);
+        await client.createNamespacedServiceAccount(namespace, serviceAccountManifest);
+        logger.debug(`[NS ${namespace}] Created service account ${serviceAccountName}`);
+      } else {
+        logger.debug(`[NS ${namespace}] Service account ${serviceAccountName} already exists`);
+      }
+    } catch (err) {
+      logger.error(`[NS ${namespace}] Error creating service account ${serviceAccountName}:`, {
+        error: err,
+        statusCode: err?.response?.statusCode,
+        statusMessage: err?.response?.statusMessage,
+        body: err?.response?.body,
+        serviceAccountName,
+        namespace
+      });
+      throw err;
+    }
+  } else {
+    // Wait until the default service account exists in the given namespace
+    try {
+      await waitUntil(serviceAccountExists, {
+        timeoutMs: 120000,
+        intervalMs: 2000,
+      });
+    } catch (error) {
+      logger.error(`[NS ${namespace}] Timeout waiting for ${serviceAccountName} service account to exist: ${error}`);
+      throw error;
+    }
   }
 
   // patch the service account with the role
@@ -178,7 +214,7 @@ export async function annotateDefaultServiceAccount({ namespace, role }: { names
 
   try {
     await client.patchNamespacedServiceAccount(
-      'default', // service account name
+      serviceAccountName, // service account name
       namespace, // namespace
       patch, // patch payload
       undefined, // pretty
@@ -188,9 +224,9 @@ export async function annotateDefaultServiceAccount({ namespace, role }: { names
       undefined, // force
       { headers: { 'Content-Type': 'application/merge-patch+json' } } // patch options
     );
-    logger.debug(`[NS ${namespace}] Annotated default service account in namespace ${namespace}`);
+    logger.debug(`[NS ${namespace}] Annotated ${serviceAccountName} service account in namespace ${namespace}`);
   } catch (err) {
-    logger.error(`[NS ${namespace}] Error annotating service account: ${err}`);
+    logger.error(`[NS ${namespace}] Error annotating service account ${serviceAccountName}: ${err}`);
     throw err;
   }
 }
@@ -457,11 +493,13 @@ export function generateManifest({
   deploys,
   uuid,
   namespace,
+  serviceAccountName,
 }: {
   build: Build;
   deploys: Deploy[];
   uuid: string;
   namespace: string;
+  serviceAccountName: string;
 }) {
   // External Service only deployment
 
@@ -481,7 +519,7 @@ export function generateManifest({
   // General Deployment
 
   const disks = generatePersistentDisks(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, build.enableFullYaml, namespace);
+  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, build.enableFullYaml, namespace, serviceAccountName);
   const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
@@ -634,8 +672,10 @@ export function generateDeployManifests(
   deploys: Deploy[],
   buildUUID: string,
   enableFullYaml: boolean,
-  namespace: string
+  namespace: string,
+  serviceAccountName: string
 ) {
+
   return deploys
     .filter((deploy) => {
       return deploy.active;
@@ -1050,6 +1090,8 @@ export function generateDeployManifests(
                 securityContext: {
                   fsGroup: 2000,
                 },
+                serviceAccount: serviceAccountName,
+                serviceAccountName,
                 containers,
                 initContainers,
                 volumes,

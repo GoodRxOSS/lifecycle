@@ -908,9 +908,10 @@ export default class BuildService extends BaseService {
         const buildId = build?.id;
 
         const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+        const serviceAccountName = serviceAccount?.name || 'default';
         // create namespace and annotate the service account
         await k8s.createOrUpdateNamespace({ name: build.namespace, buildUUID: build.uuid, staticEnv: build.isStatic });
-        await k8s.annotateDefaultServiceAccount({
+        await k8s.createOrUpdateServiceAccount({
           namespace: build.namespace,
           role: serviceAccount?.role,
         });
@@ -945,7 +946,7 @@ export default class BuildService extends BaseService {
         });
         logger.debug(`[BUILD ${build.uuid}] Found ${helmDeploys.length} helm deploys`);
         logger.debug(`[BUILD ${build.uuid}] Found ${k8sDeploys.length} deploys to generate manifests for`);
-        const manifest = k8s.generateManifest({ build, deploys: k8sDeploys, uuid: build.uuid, namespace });
+        const manifest = k8s.generateManifest({ build, deploys: k8sDeploys, uuid: build.uuid, namespace, serviceAccountName });
         if (manifest && manifest.replace('---', '').trim().length > 0) {
           await build.$query().patch({ manifest });
           await k8s.applyManifests(build);
@@ -975,6 +976,10 @@ export default class BuildService extends BaseService {
             `[BUILD ${build?.uuid}][generateAndApplyManifests][buidIdError] No build ID found for this build!`
           );
         }
+
+        const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+        const serviceAccountName = serviceAccount?.name || 'default';
+
         const deploys = (
           await Deploy.query()
             .where({ buildId })
@@ -991,7 +996,7 @@ export default class BuildService extends BaseService {
               CLIDeployTypes.has(d.service.type))
         );
         logger.debug(`[${build.uuid}]: Found ${deploys.length} deploys to generate manifests for`);
-        const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace });
+        const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace, serviceAccountName });
         if (manifest && manifest.replace('---', '').trim().length > 0) {
           await build.$query().patch({ manifest });
           await k8s.applyManifests(build);

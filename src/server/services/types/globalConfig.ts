@@ -46,6 +46,7 @@ export type AppSetup = {
 
 export type RoleSettings = {
   role: string;
+  name?: string;
 };
 
 export type DatabaseSettings = {
