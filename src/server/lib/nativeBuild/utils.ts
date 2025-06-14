@@ -91,6 +91,8 @@ export function createJob(
       template: {
         spec: {
           serviceAccountName: 'runtime-sa',
+          // Resasonable grace period for container builds to avoid overly disruptive terminations.
+          terminationGracePeriodSeconds: 600,
           tolerations: [
             {
               key: 'builder',
