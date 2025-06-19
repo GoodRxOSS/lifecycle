@@ -52,6 +52,8 @@ components:
           value: default
         - name: ENVIRONMENT
           value: dev
+        - name: APP_ENV
+          value: dev
         - name: STAGE
           value: stage
         - name: PINO_PRETTY
@@ -60,8 +62,6 @@ components:
           value: debug
         - name: NODE_ENV
           value: development
-        - name: APP_ENV
-          value: staging
         - name: LIFECYCLE_MODE
           value: web
         - name: PORT
@@ -97,9 +97,9 @@ components:
         - name: JOB_VERSION
           value: default
         - name: ENVIRONMENT
-          value: staging
+          value: dev
         - name: STAGE
-          value: stage
+          value: dev
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
@@ -107,7 +107,7 @@ components:
         - name: NODE_ENV
           value: development
         - name: APP_ENV
-          value: staging
+          value: dev
         - name: AWS_REGION
           value: 'us-west-2'
         - name: AWS_PROFILE
