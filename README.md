@@ -83,7 +83,7 @@ brew install --cask docker
       githubInstallationId: "<installation_id>"
     ```
 > [!NOTE]  
-> You can create the Github app with the app creation setup flow and then copy the secrets created for local development.
+> You can create the GitHub app with the app creation setup flow and then copy the secrets created for local development.
 
 -  Start the development environment using `tilt`:
     ```shell
