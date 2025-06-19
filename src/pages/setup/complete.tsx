@@ -17,6 +17,7 @@
 import React, { useEffect, useState } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
+import Link from 'next/link';
 
 export default function SetupComplete() {
   const router = useRouter();
@@ -154,7 +155,7 @@ export default function SetupComplete() {
             >
               Configure and Restart
             </button>
-            <a
+            <Link
               href="/"
               style={{
                 padding: '0.75em 2em',
@@ -169,7 +170,7 @@ export default function SetupComplete() {
               }}
             >
               Home
-            </a>
+            </Link>
           </div>
           <div style={{ color: '#666', fontSize: 14, marginTop: 18, textAlign: 'center', padding: '1em 2em 0 2em' }}>
             {!(status?.status === 'success') && (

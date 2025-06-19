@@ -1,323 +1,661 @@
-/**
- * Copyright 2025 GoodRx, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
+import { V1Job, V1ServiceAccount, V1Role, V1RoleBinding } from '@kubernetes/client-node';
 import { shellPromise } from '../shell';
-import rootLogger from '../logger';
-import { randomAlphanumeric } from '../random';
-import Deploy from 'server/models/Deploy';
-import GlobalConfigService from 'server/services/globalConfig';
-import { TMP_PATH } from 'shared/config';
-import fs from 'fs';
+import logger from '../logger';
+import * as k8s from '@kubernetes/client-node';
+import GlobalConfigService from '../../services/globalConfig';
 
-const logger = rootLogger.child({
-  filename: 'lib/shared/utils.ts',
-});
+export async function ensureNamespaceExists(namespace: string): Promise<void> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
-export const MANIFEST_PATH = `${TMP_PATH}/build`;
-export const BACKOFF_LIMIT = 0;
-export const MAX_WAIT_TIME = 25 * 60 * 1000;
-export const GIT_USERNAME = 'x-access-token';
-export const JOB_TTL = 86400; // 24 hours
-export const JOB_NAMESPACE = 'lifecycle-app';
+  try {
+    await coreV1Api.readNamespace(namespace);
+    logger.info(`Namespace ${namespace} already exists`);
+  } catch (error) {
+    if (error?.response?.statusCode === 404) {
+      logger.info(`Creating namespace ${namespace}`);
+      await coreV1Api.createNamespace({
+        metadata: {
+          name: namespace,
+          labels: {
+            'app.kubernetes.io/managed-by': 'lifecycle',
+            'lifecycle.io/type': 'ephemeral',
+          },
+        },
+      });
 
-export interface BuildOptions {
-  tag: string;
-  ecrDomain: string;
-  namespace?: string;
-  initTag?: string;
+      await waitForNamespaceReady(namespace);
+    } else {
+      throw error;
+    }
+  }
 }
 
-export interface JobResult {
-  completed: boolean;
-  logs: string;
-  status: string;
+async function waitForNamespaceReady(namespace: string, timeout: number = 30000): Promise<void> {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const result = await shellPromise(`kubectl get namespace ${namespace} -o jsonpath='{.status.phase}'`);
+      if (result.trim() === 'Active') {
+        return;
+      }
+    } catch (error) {
+      // Namespace not ready yet, will retry
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`Namespace ${namespace} did not become ready within ${timeout}ms`);
 }
 
-export function createCloneScript(repo: string, branch: string, revision?: string, repoName?: string): string {
-  const actualRepoName = repoName || repo.split('/')[1];
+export async function setupBuildServiceAccountInNamespace(
+  namespace: string,
+  serviceAccountName: string = 'native-build-sa',
+  awsRoleArn?: string
+): Promise<void> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
+  const rbacApi = kc.makeApiClient(k8s.RbacAuthorizationV1Api);
 
-  return `
-REPO_DIR="/workspace/repo-${actualRepoName}"
-echo "Volumee space:\n$(df -h /workspace)"
-echo "Cached workspace size: $(du -sh /workspace | cut -f1)"
+  const serviceAccount: V1ServiceAccount = {
+    metadata: {
+      name: serviceAccountName,
+      namespace,
+      annotations: awsRoleArn
+        ? {
+            'eks.amazonaws.com/role-arn': awsRoleArn,
+          }
+        : {},
+    },
+  };
 
-if [ ! -d "$REPO_DIR" ]; then
-  echo "Cloning repository into $REPO_DIR"
-  git clone --depth=1 --single-branch -b ${branch} https://$GIT_USERNAME:$GIT_PASSWORD@github.com/${repo}.git $REPO_DIR
-  ${revision ? `cd $REPO_DIR && git checkout ${revision}` : ''}
-else
-  echo "Repository already exists. Updating to the latest."
-  cd $REPO_DIR
-  git fetch origin
-  git checkout ${branch} &&
-  git pull --ff-only origin ${branch} || git reset --hard origin/${branch}
-fi
-`.trim();
+  try {
+    await coreV1Api.createNamespacedServiceAccount(namespace, serviceAccount);
+  } catch (error) {
+    if (error?.response?.statusCode === 409) {
+      await coreV1Api.patchNamespacedServiceAccount(
+        serviceAccountName,
+        namespace,
+        serviceAccount,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { headers: { 'Content-Type': 'application/merge-patch+json' } }
+      );
+    } else {
+      throw error;
+    }
+  }
+
+  const role: V1Role = {
+    metadata: {
+      name: `${serviceAccountName}-role`,
+      namespace,
+    },
+    rules: [
+      {
+        apiGroups: ['batch'],
+        resources: ['jobs'],
+        verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'],
+      },
+      {
+        apiGroups: [''],
+        resources: ['pods', 'pods/log'],
+        verbs: ['get', 'list', 'watch'],
+      },
+    ],
+  };
+
+  try {
+    await rbacApi.createNamespacedRole(namespace, role);
+  } catch (error) {
+    if (error?.response?.statusCode === 409) {
+      await rbacApi.patchNamespacedRole(
+        role.metadata.name,
+        namespace,
+        role,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { headers: { 'Content-Type': 'application/merge-patch+json' } }
+      );
+    } else {
+      throw error;
+    }
+  }
+
+  const roleBinding: V1RoleBinding = {
+    metadata: {
+      name: `${serviceAccountName}-binding`,
+      namespace,
+    },
+    subjects: [
+      {
+        kind: 'ServiceAccount',
+        name: serviceAccountName,
+        namespace,
+      },
+    ],
+    roleRef: {
+      kind: 'Role',
+      name: role.metadata.name,
+      apiGroup: 'rbac.authorization.k8s.io',
+    },
+  };
+
+  try {
+    await rbacApi.createNamespacedRoleBinding(namespace, roleBinding);
+  } catch (error) {
+    if (error?.response?.statusCode === 409) {
+      // Role binding already exists, ignore
+    } else {
+      throw error;
+    }
+  }
 }
 
-// Generic function to create a job
 export function createJob(
   name: string,
   namespace: string,
-  gitUsername: string,
-  gitToken: string,
-  cloneScript: string,
-  containers: any[],
-  volumeConfig: any
-): any {
+  serviceAccount: string,
+  image: string,
+  command: string[],
+  args: string[],
+  envVars: Record<string, string>,
+  labels: Record<string, string>,
+  annotations: Record<string, string>,
+  resources?: {
+    requests?: Record<string, string>;
+    limits?: Record<string, string>;
+  },
+  ttlSecondsAfterFinished?: number
+): V1Job {
+  const env = Object.entries(envVars).map(([name, value]) => ({ name, value }));
+
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
     metadata: {
       name,
       namespace,
+      labels: {
+        'app.kubernetes.io/name': 'native-build',
+        'app.kubernetes.io/component': 'build',
+        ...labels,
+      },
+      annotations,
     },
     spec: {
-      backoffLimit: BACKOFF_LIMIT,
-      ttlSecondsAfterFinished: JOB_TTL,
+      ttlSecondsAfterFinished,
+      backoffLimit: 0, // No automatic retries
       template: {
+        metadata: {
+          labels: {
+            'app.kubernetes.io/name': 'native-build',
+            'app.kubernetes.io/component': 'build',
+            ...labels,
+          },
+          annotations,
+        },
         spec: {
-          serviceAccountName: 'runtime-sa',
-          // Resasonable grace period for container builds to avoid overly disruptive terminations.
-          terminationGracePeriodSeconds: 600,
-          tolerations: [
+          serviceAccountName: serviceAccount,
+          restartPolicy: 'Never',
+          containers: [
             {
-              key: 'builder',
-              operator: 'Equal',
-              value: 'yes',
-              effect: 'NoSchedule',
+              name: 'build',
+              image,
+              command,
+              args,
+              env,
+              resources: resources || {
+                requests: {
+                  cpu: '500m',
+                  memory: '1Gi',
+                },
+                limits: {
+                  cpu: '2',
+                  memory: '4Gi',
+                },
+              },
             },
           ],
-          ...(cloneScript
-            ? {
-                initContainers: [
-                  {
-                    name: 'clone-repo',
-                    image: 'alpine/git:latest',
-                    env: [
-                      {
-                        name: 'GIT_USERNAME',
-                        value: gitUsername,
-                      },
-                      {
-                        name: 'GIT_PASSWORD',
-                        value: gitToken,
-                      },
-                    ],
-                    command: ['/bin/sh', '-c'],
-                    args: [cloneScript],
-                    volumeMounts: [
-                      {
-                        name: volumeConfig.workspaceName,
-                        mountPath: '/workspace',
-                      },
-                    ],
-                  },
-                ],
-              }
-            : {}),
-          containers,
-          restartPolicy: 'Never',
-          volumes: volumeConfig.volumes,
         },
       },
     },
   };
 }
 
-/**
- * Helper function to wait for a job to complete and get its logs
- */
 export async function waitForJobAndGetLogs(
   jobName: string,
-  namespace: string = JOB_NAMESPACE,
-  logPrefix: string,
-  containerPrefixes: string[]
-): Promise<JobResult> {
-  logger.info(`${logPrefix} Waiting for job ${jobName} to complete...`);
+  namespace: string,
+  logPrefix?: string | number
+): Promise<{ logs: string; success: boolean; status?: string }> {
+  const timeoutSeconds = typeof logPrefix === 'number' ? logPrefix : 1800;
+  const startTime = Date.now();
+  let logs = '';
+  let podName: string | null = null;
 
-  // let jobCompleted = false;
-  let podName = '';
-
-  const jobResult: JobResult = { completed: false, logs: '', status: '' };
-  const startWaitTime = Date.now();
-
-  while (!jobResult.completed && Date.now() - startWaitTime < MAX_WAIT_TIME) {
-    const jobStatus = await shellPromise(`kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.status}'`);
-    const jobStatusObj = JSON.parse(jobStatus);
-
-    if (jobStatusObj.succeeded) {
-      jobResult.completed = true;
-      jobResult.status = 'succeeded';
-      logger.info(`${logPrefix} Job ${jobName} completed successfully`);
-    } else if (jobStatusObj.failed && jobStatusObj.failed >= BACKOFF_LIMIT) {
-      jobResult.completed = true;
-      logger.error(`${logPrefix} Job ${jobName} failed after retries`);
-    }
-
-    if (!jobResult.completed) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-
-  if (!jobResult.completed) {
-    logger.warn(`${logPrefix} Timed out waiting for job ${jobName} to complete`);
-    jobResult.completed = false;
-    jobResult.status = 'timeout';
-    jobResult.logs = `Timed out waiting for job ${jobName} to complete after ${Math.floor(
-      (Date.now() - startWaitTime) / 1000 / 60
-    )} minutes`;
-
-    return jobResult;
-  }
-
-  const podsOutput = await shellPromise(
-    `kubectl get pods -n ${namespace} -l job-name=${jobName} -o jsonpath='{.items[0].metadata.name}'`
-  );
-  podName = podsOutput.trim();
-
-  // let combinedLogs = '';
-
-  if (podName) {
+  while (!podName && Date.now() - startTime < timeoutSeconds * 1000) {
     try {
-      const cloneLogs = await shellPromise(`kubectl logs -n ${namespace} ${podName} -c clone-repo`);
-      jobResult.logs += `--- CLONE CONTAINER ---\n${cloneLogs}\n\n`;
-    } catch (error) {
-      logger.warn(`${logPrefix} Error getting logs from clone-repo container: ${error}`);
-    }
-
-    // Get logs from all relevant containers
-    for (const prefix of containerPrefixes) {
-      try {
-        const containerList = await shellPromise(
-          `kubectl get pod ${podName} -n ${namespace} -o jsonpath='{.spec.containers[*].name}'`
-        );
-
-        const mainContainerName = `${prefix}-main`;
-        if (containerList.includes(mainContainerName)) {
-          const mainContainerLogs = await shellPromise(
-            `kubectl logs -n ${namespace} ${podName} -c ${mainContainerName}`
-          );
-          jobResult.logs += `--- MAIN CONTAINER ---\n${mainContainerLogs}\n\n`;
-        }
-
-        const initContainerName = `${prefix}-init`;
-        if (containerList.includes(initContainerName)) {
-          const initContainerLogs = await shellPromise(
-            `kubectl logs -n ${namespace} ${podName} -c ${initContainerName}`
-          );
-          jobResult.logs += `--- INIT CONTAINER ---\n${initContainerLogs}`;
-        }
-      } catch (error) {
-        logger.warn(`${logPrefix} Error getting logs from ${prefix} containers: ${error}`);
+      const pods = await shellPromise(
+        `kubectl get pods -n ${namespace} -l job-name=${jobName} -o jsonpath='{.items[0].metadata.name}'`
+      );
+      if (pods.trim()) {
+        podName = pods.trim();
+        break;
       }
+    } catch (error) {
+      // Pod not ready yet, will retry
     }
-
-    logger.info(`${logPrefix} Retrieved logs from pod ${podName}`);
-  } else {
-    logger.warn(`${logPrefix} Could not find pod for job ${jobName}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 
-  return jobResult;
-}
+  if (!podName) {
+    throw new Error(`Pod for job ${jobName} was not created within timeout`);
+  }
 
-/**
- * Generic build function for applying manifests and getting results
- */
-export async function buildImage(
-  deploy: Deploy,
-  options: BuildOptions,
-  // eslint-disable-next-line no-unused-vars
-  manifestGenerator: (deploy: Deploy, jobId: string, options: BuildOptions) => Promise<string>,
-  buildEngine: string
-): Promise<JobResult> {
-  await deploy.$fetchGraph('repository');
+  let initContainersReady = false;
+  while (!initContainersReady && Date.now() - startTime < timeoutSeconds * 1000) {
+    try {
+      const initContainerStatuses = await shellPromise(
+        `kubectl get pod ${podName} -n ${namespace} -o jsonpath='{.status.initContainerStatuses}'`
+      );
 
-  const repositoryName = deploy.repository.fullName;
-  const branch = deploy.branchName;
-  const uuid = deploy.build.uuid;
-  const sha = deploy.sha;
-  const prefix = uuid ? `[DEPLOY ${uuid}][build${buildEngine}]:` : `[DEPLOY][build${buildEngine}]:`;
-  const suffix = `${repositoryName}/${branch}:${sha}`;
-  const buildStartTime = Date.now();
+      if (initContainerStatuses && initContainerStatuses !== '[]') {
+        const statuses = JSON.parse(initContainerStatuses);
+        initContainersReady = statuses.every((status: any) => status.ready || status.state.terminated);
+      } else {
+        initContainersReady = true;
+      }
+    } catch (error) {
+      // Init container status check failed, will retry
+    }
 
-  const jobId = randomAlphanumeric(4).toLowerCase();
+    if (!initContainersReady) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
 
   try {
-    logger.info(`${prefix} Generating ${buildEngine} manifest for ${suffix}`);
-    const manifest = await manifestGenerator(deploy, jobId, options);
+    const initContainerNames = await shellPromise(
+      `kubectl get pod ${podName} -n ${namespace} -o jsonpath='{.spec.initContainers[*].name}'`
+    );
 
-    const shortSha = deploy.sha.substring(0, 7);
-    let buildJobName = `${deploy.uuid}-${buildEngine.toLowerCase()}-${jobId}-${shortSha}`.substring(0, 63);
-    if (buildJobName.endsWith('-')) {
-      buildJobName = buildJobName.slice(0, -1);
+    if (initContainerNames && initContainerNames.trim()) {
+      const initNames = initContainerNames.split(' ').filter((name) => name);
+      for (const initName of initNames) {
+        try {
+          const initLogs = await shellPromise(
+            `kubectl logs -n ${namespace} ${podName} -c ${initName} --timestamps=true`
+          );
+          logs += `\n=== Init Container Logs (${initName}) ===\n${initLogs}\n`;
+        } catch (err: any) {
+          logger.debug(`Could not get logs for init container ${initName}: ${err.message || 'Unknown error'}`);
+        }
+      }
+    }
+  } catch (error: any) {
+    logger.debug(`No init containers found for pod ${podName}: ${error.message || 'Unknown error'}`);
+  }
+
+  let containerLogs = '';
+
+  let allContainersReady = false;
+  let retries = 0;
+
+  while (!allContainersReady && retries < 30 && Date.now() - startTime < timeoutSeconds * 1000) {
+    try {
+      const containerStatuses = await shellPromise(
+        `kubectl get pod ${podName} -n ${namespace} -o jsonpath='{.status.containerStatuses}'`
+      ).catch(() => '[]');
+
+      if (containerStatuses && containerStatuses !== '[]') {
+        const statuses = JSON.parse(containerStatuses);
+        allContainersReady = statuses.every((status: any) => status.state.terminated || status.state.running);
+
+        if (!allContainersReady) {
+          const waiting = statuses.find((s: any) => s.state.waiting);
+          if (waiting && waiting.state.waiting.reason) {
+            logger.info(
+              `Container ${waiting.name} is waiting: ${waiting.state.waiting.reason} - ${
+                waiting.state.waiting.message || 'no message'
+              }`
+            );
+          }
+        }
+      }
+    } catch (e) {
+      // Container status check failed, will retry
     }
 
-    const localPath = `${MANIFEST_PATH}/${buildEngine.toLowerCase()}/${deploy.uuid}-pr-${
-      deploy.build.pullRequest.pullRequestNumber
-    }-build-${shortSha}`;
-    await fs.promises.mkdir(`${MANIFEST_PATH}/${buildEngine.toLowerCase()}/`, {
-      recursive: true,
-    });
-    await fs.promises.writeFile(localPath, manifest, 'utf8');
-
-    await shellPromise(`kubectl apply -f ${localPath}`);
-
-    await deploy.$query().patchAndFetch({ buildJobName });
-    const jobResult = await waitForJobAndGetLogs(buildJobName, options.namespace || JOB_NAMESPACE, prefix, [
-      buildEngine.toLowerCase(),
-    ]);
-
-    const buildEndTime = Date.now();
-    const buildDuration = buildEndTime - buildStartTime;
-    logger
-      .child({
-        build: {
-          duration: buildDuration,
-          uuid,
-          service: deploy?.deployable?.name,
-        },
-      })
-      .info(`${prefix} ${buildEngine} build completed in ${buildDuration}ms (${(buildDuration / 1000).toFixed(2)}s)`);
-
-    await deploy.$query().patch({ buildOutput: jobResult.logs });
-
-    return jobResult;
-  } catch (error) {
-    const buildEndTime = Date.now();
-    const buildDuration = buildEndTime - buildStartTime;
-    logger
-      .child({
-        error,
-        buildDuration: `${buildDuration}ms (${(buildDuration / 1000).toFixed(2)}s)`,
-      })
-      .error(`${prefix} failed for ${suffix}`);
-    throw error;
+    if (!allContainersReady) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      retries++;
+    }
   }
+
+  let containerNames: string[] = [];
+  try {
+    const containersJson = await shellPromise(
+      `kubectl get pod ${podName} -n ${namespace} -o jsonpath='{.spec.containers[*].name}'`
+    );
+    containerNames = containersJson.split(' ').filter((name) => name);
+  } catch (error) {
+    logger.warn(`Could not get container names: ${error}`);
+  }
+
+  for (const containerName of containerNames) {
+    try {
+      const containerLog = await shellPromise(
+        `kubectl logs -n ${namespace} ${podName} -c ${containerName} --timestamps=true`,
+        { timeout: timeoutSeconds * 1000 }
+      );
+
+      if (containerLog && containerLog.trim()) {
+        containerLogs += `\n=== Container Logs (${containerName}) ===\n${containerLog}\n`;
+      }
+    } catch (error: any) {
+      logger.warn(`Error getting logs from container ${containerName}: ${error.message}`);
+      containerLogs += `\n=== Container Logs (${containerName}) ===\nError retrieving logs: ${error.message}\n`;
+    }
+  }
+
+  logs += containerLogs;
+
+  // Wait for job to complete (either succeed or fail)
+  // We wait indefinitely because the job's activeDeadlineSeconds will ensure it times out
+  // This way Kubernetes is the single source of truth for job completion
+  let jobCompleted = false;
+
+  while (!jobCompleted) {
+    try {
+      const jobConditions = await shellPromise(
+        `kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.status.conditions}'`
+      );
+
+      if (jobConditions && jobConditions !== '[]') {
+        const conditions = JSON.parse(jobConditions);
+        jobCompleted = conditions.some(
+          (condition: any) =>
+            (condition.type === 'Complete' || condition.type === 'Failed') && condition.status === 'True'
+        );
+      }
+
+      if (!jobCompleted) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    } catch (error: any) {
+      logger.debug(`Job status check failed for ${jobName}, will retry: ${error.message || 'Unknown error'}`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+
+  // Check job status - this is the source of truth
+  let success = false;
+  let status = 'failed';
+  try {
+    const jobStatus = await shellPromise(
+      `kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'`
+    );
+    success = jobStatus.trim() === 'True';
+
+    if (!success) {
+      const failedStatus = await shellPromise(
+        `kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}'`
+      );
+
+      if (failedStatus.trim() === 'True') {
+        logger.error(`Job ${jobName} failed`);
+
+        try {
+          const annotations = await shellPromise(
+            `kubectl get job ${jobName} -n ${namespace} ` +
+              `-o jsonpath='{.metadata.annotations.lifecycle\\.goodrx\\.com/termination-reason}'`
+          );
+
+          if (annotations === 'superseded-by-retry') {
+            logger.info(`${logPrefix || ''} Job ${jobName} superseded by newer deployment`);
+            success = true;
+            status = 'superseded';
+            logs = (logs || '') + '\n\n=== Job was superseded by a newer deployment attempt ===';
+          }
+        } catch (annotationError: any) {
+          logger.debug(
+            `Could not check supersession annotation for job ${jobName}: ${annotationError.message || 'Unknown error'}`
+          );
+        }
+      }
+    } else {
+      status = 'succeeded';
+    }
+  } catch (error) {
+    logger.error(`Failed to check job status for ${jobName}:`, error);
+    // If we can't determine status, assume failure
+    success = false;
+  }
+
+  return { logs, success, status };
+}
+
+export const DEFAULT_BUILD_RESOURCES = {
+  buildkit: {
+    requests: {
+      cpu: '500m',
+      memory: '1Gi',
+    },
+    limits: {
+      cpu: '2',
+      memory: '4Gi',
+    },
+  },
+  kaniko: {
+    requests: {
+      cpu: '300m',
+      memory: '750Mi',
+    },
+    limits: {
+      cpu: '1',
+      memory: '2Gi',
+    },
+  },
+};
+
+export function getBuildLabels(
+  serviceName: string,
+  uuid: string,
+  buildId: string,
+  sha: string,
+  branch: string,
+  engine: string
+): Record<string, string> {
+  return {
+    'lc-service': serviceName,
+    'lc-uuid': uuid,
+    'lc-build-id': String(buildId), // Ensure it's a string
+    'git-sha': sha,
+    'git-branch': branch,
+    'builder-engine': engine,
+    'build-method': 'native',
+  };
+}
+
+export function getBuildAnnotations(dockerfilePath: string, ecrRepo: string): Record<string, string> {
+  return {
+    'lifecycle.io/dockerfile': dockerfilePath,
+    'lifecycle.io/ecr-repo': ecrRepo,
+    'lifecycle.io/triggered-at': new Date().toISOString(),
+  };
 }
 
 export async function getGitHubToken(): Promise<string> {
   return await GlobalConfigService.getInstance().getGithubClientToken();
 }
 
-export function generateJobName(deploy: Deploy, buildTool: string, jobId: string): string {
-  const shortSha = deploy.sha.substring(0, 7);
-  return `${deploy.uuid}-${buildTool.toLowerCase()}-${shortSha}-${jobId}`;
+export const GIT_USERNAME = 'x-access-token';
+export const MANIFEST_PATH = '/tmp/manifests';
+
+export function createCloneScript(repo: string, branch: string, sha?: string): string {
+  const cloneCmd = `git clone -b ${branch} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
+  const checkoutCmd = sha ? ` && cd /workspace && git checkout ${sha}` : '';
+  return `${cloneCmd}${checkoutCmd}`;
 }
 
-export function constructBuildArgs(envVars: Record<string, string>): string[] {
-  return Object.entries(envVars).map(([key, value]) => `${key}=${value}`);
+export function createGitCloneContainer(repo: string, revision: string, gitUsername: string, gitToken: string): any {
+  return {
+    name: 'git-clone',
+    image: 'alpine/git:latest',
+    command: ['sh', '-c'],
+    args: [
+      `git config --global --add safe.directory /workspace && \
+       git clone https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace && \
+       cd /workspace && \
+       git checkout ${revision}`,
+    ],
+    env: [
+      {
+        name: 'GIT_USERNAME',
+        value: gitUsername,
+      },
+      {
+        name: 'GIT_PASSWORD',
+        value: gitToken,
+      },
+    ],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
+}
+
+export function createRepoSpecificGitCloneContainer(
+  repo: string,
+  revision: string,
+  targetDir: string,
+  gitUsername: string,
+  gitToken: string
+): any {
+  return {
+    name: 'git-clone',
+    image: 'alpine/git:latest',
+    command: ['sh', '-c'],
+    args: [
+      `git config --global --add safe.directory ${targetDir} && \
+       git clone https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git ${targetDir} && \
+       cd ${targetDir} && \
+       git checkout ${revision}`,
+    ],
+    env: [
+      {
+        name: 'GIT_USERNAME',
+        value: gitUsername,
+      },
+      {
+        name: 'GIT_PASSWORD',
+        value: gitToken,
+      },
+    ],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
+}
+
+export interface BuildJobManifestOptions {
+  jobName: string;
+  namespace: string;
+  serviceAccount: string;
+  serviceName: string;
+  deployUuid: string;
+  buildId: string;
+  shortSha: string;
+  branch: string;
+  engine: 'buildkit' | 'kaniko';
+  dockerfilePath: string;
+  ecrRepo: string;
+  jobTimeout: number;
+  ttlSecondsAfterFinished?: number;
+  gitCloneContainer: any;
+  buildContainer: any;
+  volumes: any[];
+}
+
+export function createBuildJobManifest(options: BuildJobManifestOptions): any {
+  const {
+    jobName,
+    namespace,
+    serviceAccount,
+    serviceName,
+    deployUuid,
+    buildId,
+    shortSha,
+    branch,
+    engine,
+    dockerfilePath,
+    ecrRepo,
+    jobTimeout,
+    ttlSecondsAfterFinished = 86400, // Default 24 hours
+    gitCloneContainer,
+    buildContainer,
+    volumes,
+  } = options;
+
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace,
+      labels: {
+        'app.kubernetes.io/name': 'native-build',
+        'app.kubernetes.io/component': 'build',
+        'lc-service': serviceName,
+        'lc-deploy-uuid': deployUuid,
+        'lc-build-id': String(buildId),
+        'git-sha': shortSha,
+        'git-branch': branch,
+        'builder-engine': engine,
+        'build-method': 'native',
+      },
+      annotations: {
+        'lifecycle.io/dockerfile': dockerfilePath,
+        'lifecycle.io/ecr-repo': ecrRepo,
+        'lifecycle.io/triggered-at': new Date().toISOString(),
+      },
+    },
+    spec: {
+      ttlSecondsAfterFinished,
+      backoffLimit: 0,
+      activeDeadlineSeconds: jobTimeout,
+      template: {
+        metadata: {
+          labels: {
+            'app.kubernetes.io/name': 'native-build',
+            'app.kubernetes.io/component': 'build',
+            'lc-service': serviceName,
+          },
+        },
+        spec: {
+          serviceAccountName: serviceAccount,
+          restartPolicy: 'Never',
+          initContainers: [gitCloneContainer],
+          containers: [buildContainer],
+          volumes,
+        },
+      },
+    },
+  };
 }

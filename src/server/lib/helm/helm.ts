@@ -22,26 +22,17 @@ import { TMP_PATH } from 'shared/config';
 import { DeployStatus } from 'shared/constants';
 import rootLogger from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
-import { kubeContextStep, checkPipelineStatus } from 'server/lib/codefresh';
+import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';
 import { staticEnvTolerations } from './constants';
 import { getResourceType, mergeKeyValueArrays } from 'shared/utils';
-import {
-  generateNodeSelector,
-  generateTolerationsCustomValues,
-  ingressBannerSnippet,
-  renderTemplate,
-} from 'server/lib/helm/utils';
-import { generateCheckoutStep, getCodefreshPipelineIdFromOutput } from 'server/lib/codefresh/utils';
+import { generateNodeSelector, generateTolerationsCustomValues, renderTemplate } from 'server/lib/helm/utils';
+import { generateCheckoutStep } from 'server/lib/codefresh/utils';
 import { merge } from 'lodash';
 import {
   deletePendingHelmReleaseStep,
   waitForInProgressDeploys,
 } from 'server/lib/codefresh/utils/generateCodefreshCmd';
-import { Metrics } from 'server/lib/metrics';
-import { applyHttpScaleObjectManifestYaml, patchIngress, applyExternalServiceManifestYaml } from '../kubernetes';
-import DeployService from 'server/services/deploy';
-import { nanoid } from 'nanoid';
 
 const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
 
@@ -255,131 +246,13 @@ export async function helmDeployStep(deploy: Deploy): Promise<Record<string, any
 
 /**
  * Deploys Helm charts for the provided deploys array.
- * The actual deployment is done by Codefresh.
+ * Supports both native helm and Codefresh deployment methods.
  *
  * @param {Deploy[]} deploys - An array of deploy objects.
  */
 export async function deployHelm(deploys: Deploy[]) {
-  logger.info(`[DEPLOY ${deploys.map((d) => d.uuid).join(', ')}] Deploying with helm`);
-  let statusMessage: string;
-  if (deploys?.length === 0) return;
-  const buildData = await constructHelmDeploysBuildMetaData(deploys);
-  const metrics = new Metrics('build.deploy.helm', buildData);
-  await Promise.all(
-    deploys.map(async (deploy) => {
-      const eventDetails = {
-        title: 'Deploy Finished',
-        description: `${buildData?.uuid} build ${deploy?.uuid} deploy has finished for ${buildData?.fullName} on branch ${buildData?.branchName}`,
-      };
-      let deployPipelineId: string;
-      const runUUID = deploy.runUUID ?? nanoid();
-      const deployService = new DeployService();
-      try {
-        statusMessage = `Deploying via Helm`;
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.DEPLOYING,
-            statusMessage,
-          },
-          runUUID
-        );
-
-        const { deployable, build } = deploy;
-        if (
-          deploy?.kedaScaleToZero?.type === 'http' &&
-          deploy.build.isStatic == false &&
-          deploy?.build.isStatic != undefined
-        ) {
-          await applyHttpScaleObjectManifestYaml(deploy, build.namespace);
-          await applyExternalServiceManifestYaml(deploy, build.namespace);
-        }
-        const codefreshRunCommand = await generateCodefreshRunCommand(deploy);
-
-        const output = await shellPromise(codefreshRunCommand);
-        deployPipelineId = getCodefreshPipelineIdFromOutput(output);
-        statusMessage = 'Starting deployment via Helm';
-        logger.info(`[DEPLOY ${deploy.uuid}] Deploying via codefresh build: ${deployPipelineId}`);
-
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            deployPipelineId,
-            statusMessage,
-          },
-          runUUID
-        );
-
-        await checkPipelineStatus(deployPipelineId)();
-
-        const { helm } = deployable || {};
-
-        const grpc: boolean | undefined = helm?.grpc;
-
-        logger.info(`Patching ingress for ${deploy.uuid}`);
-        try {
-          if (!grpc) {
-            await patchIngress(deploy.uuid, ingressBannerSnippet(deploy), build.namespace);
-          }
-        } catch (error) {
-          logger.warn(`[DEPLOY ${deploy.uuid}] Unable to patch ingress, badge feature might not work: ${error}`);
-        }
-
-        statusMessage = 'Successfully deployed via Helm';
-
-        logger.child({ deployPipelineId }).info(`[DEPLOY ${deploy.uuid}] ${statusMessage}`);
-
-        if (
-          deploy?.kedaScaleToZero?.type === 'http' &&
-          deploy.build.isStatic == false &&
-          deploy?.build.isStatic != undefined
-        ) {
-          const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-          fetchUntilSuccess(
-            `https://${deploy.uuid}.${domainDefaults.http}`,
-            deploy.kedaScaleToZero.maxRetries,
-            deploy.uuid,
-            build.namespace
-          );
-        }
-
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.READY,
-            statusMessage,
-          },
-          runUUID
-        );
-
-        metrics
-          .increment('total', { deployPipelineId, deployUUID: deploy?.uuid, result: 'complete', error: '' })
-          .event(eventDetails.title, eventDetails.description);
-      } catch (e) {
-        statusMessage = `Helm deployment failed for ${deploy.uuid}:\n ${e}`;
-        logger.child({ deployPipelineId }).error(`[DEPLOY ${deploy.uuid}] ${statusMessage}`);
-
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.DEPLOY_FAILED,
-            statusMessage,
-          },
-          runUUID
-        );
-
-        metrics
-          .increment('total', {
-            deployPipelineId,
-            deployUUID: deploy?.uuid,
-            result: 'error',
-            error: 'unsuccessful_deploy',
-          })
-          .event(eventDetails.title, eventDetails.description);
-        throw new Error(statusMessage);
-      }
-    })
-  );
+  const { deployHelm: nativeDeployHelm } = await import('server/lib/nativeHelm/helm');
+  return await nativeDeployHelm(deploys);
 }
 /**
  * Make request with interval of 10 seconds until return 200 status code for Keda Scale to Zero
@@ -388,7 +261,7 @@ export async function deployHelm(deploys: Deploy[]) {
  * @param  interval - The interval to fetch the url in ms
  */
 
-async function fetchUntilSuccess(url, retries, deploy, namespace) {
+export async function fetchUntilSuccess(url, retries, deploy, namespace) {
   logger.info(`[Number of maxRetries: ${retries}] Trying to fetch the url: ${url}`);
   for (let i = 0; i < retries; i++) {
     const pods = await shellPromise(

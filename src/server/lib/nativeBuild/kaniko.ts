@@ -1,196 +1,201 @@
-/**
- * Copyright 2025 GoodRx, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-import { constructEcrTag } from 'server/lib/codefresh/utils';
-import { ContainerBuildOptions } from 'server/lib/codefresh/types';
-import rootLogger from '../logger';
-import * as yaml from 'js-yaml';
-import Deploy from 'server/models/Deploy';
+import { Deploy } from '../../models';
+import { shellPromise } from '../shell';
+import logger from '../logger';
+import GlobalConfigService from '../../services/globalConfig';
 import {
-  createCloneScript,
-  createJob,
-  buildImage as genericBuildImage,
+  waitForJobAndGetLogs,
+  DEFAULT_BUILD_RESOURCES,
   getGitHubToken,
-  GIT_USERNAME,
-  JobResult,
+  createBuildJobManifest,
+  createRepoSpecificGitCloneContainer,
 } from './utils';
+import * as yaml from 'js-yaml';
 
-const logger = rootLogger.child({
-  filename: 'lib/kaniko/kaniko.ts',
-});
-
-// Interface for Kaniko options
-export interface KanikoBuildOptions extends ContainerBuildOptions {
-  namespace?: string;
-}
-
-// Utility Functions
-export function createPersistentVolumeClaim(name: string): any {
-  return {
-    apiVersion: 'v1',
-    kind: 'PersistentVolumeClaim',
-    metadata: {
-      name,
-      namespace: 'lifecycle-app',
-    },
-    spec: {
-      accessModes: ['ReadWriteOnce'],
-      resources: {
-        requests: {
-          storage: '5Gi',
-        },
-      },
-    },
+export interface KanikoBuildOptions {
+  ecrRepo: string;
+  ecrDomain: string;
+  envVars: Record<string, string>;
+  dockerfilePath: string;
+  tag: string;
+  revision: string;
+  repo: string;
+  branch: string;
+  initDockerfilePath?: string;
+  initTag?: string;
+  namespace: string;
+  buildId: string;
+  deployUuid: string; // The full deploy UUID (serviceName-buildUuid)
+  serviceAccount?: string;
+  jobTimeout?: number;
+  resources?: {
+    requests?: Record<string, string>;
+    limits?: Record<string, string>;
   };
 }
 
-export function createKanikoContainer(
-  repoName: string,
+function createKanikoContainer(
+  name: string,
   dockerfilePath: string,
   destination: string,
-  buildArgs: string[],
-  namespace: string,
-  containerName: string = 'kaniko'
+  cacheRepo: string,
+  contextPath: string,
+  resources: any,
+  buildArgs: Record<string, string>
 ): any {
-  const shortRepoName = repoName.split('/')[1] || repoName;
-  const cachePath = `${shortRepoName}-cache`;
+  const command = ['/kaniko/executor'];
+  const args = [
+    `--context=${contextPath}`,
+    `--dockerfile=${contextPath}/${dockerfilePath}`,
+    `--destination=${destination}`,
+    '--cache=true',
+    `--cache-repo=${cacheRepo}`,
+    '--insecure-registry',
+    '--push-retry=3',
+    '--snapshot-mode=time',
+  ];
+
+  Object.entries(buildArgs).forEach(([key, value]) => {
+    args.push(`--build-arg=${key}=${value}`);
+  });
 
   return {
-    name: containerName,
-    image: 'gcr.io/kaniko-project/executor:latest',
-    args: [
-      // Use a local directory context instead of git clone
-      `--context=/workspace/repo-${shortRepoName}`,
-      `--dockerfile=${dockerfilePath}`,
-      ...buildArgs.map((arg) => `--build-arg=${arg}`),
-      `--destination=${destination}`,
-      '--cache=true',
-      `--cache-repo=distribution.${namespace}.svc.cluster.local:5000/${cachePath}`,
-      `--insecure-registry=distribution.${namespace}.svc.cluster.local:5000`,
-      `--skip-tls-verify-registry=distribution.${namespace}.svc.cluster.local:5000`,
-      '--cache-copy-layers',
-      '--snapshot-mode=redo',
-      '--use-new-run',
-      '--cleanup',
-    ],
+    name,
+    image: 'gcr.io/kaniko-project/executor:v1.9.2',
+    command,
+    args,
+    env: Object.entries(buildArgs).map(([envName, value]) => ({ name: envName, value })),
     volumeMounts: [
       {
-        name: 'kaniko-cache',
-        mountPath: '/cache',
-      },
-      {
-        name: 'kaniko-workspace',
+        name: 'workspace',
         mountPath: '/workspace',
       },
     ],
+    resources,
   };
 }
 
-// Main Function to Generate Manifest
-export const generateKanikoManifest = async (
+export async function kanikoBuild(
   deploy: Deploy,
-  jobId: string,
   options: KanikoBuildOptions
-): Promise<string> => {
-  const { tag, ecrDomain, namespace = 'lifecycle-app', initTag } = options;
+): Promise<{ success: boolean; logs: string; jobName: string }> {
+  const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+  const buildDefaults = globalConfig.buildDefaults || {};
 
-  const appShort = deploy.deployable.appShort;
-  const ecrRepo = deploy.deployable.ecr;
-  const envVars = deploy.env;
-  const repo = deploy.repository.fullName;
-  const revision = deploy.sha;
-  const dockerfilePath = deploy.deployable.dockerfilePath;
-  const initDockerfilePath = deploy.deployable.initDockerfilePath;
-  const branch = deploy.branchName;
+  const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
+  const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
+  const resources = options.resources || buildDefaults.resources?.kaniko || DEFAULT_BUILD_RESOURCES.kaniko;
 
-  const gitToken = await getGitHubToken();
+  const serviceName = deploy.deployable!.name;
+  const shortRepoName = options.repo.split('/')[1] || options.repo;
+  const jobId = Math.random().toString(36).substring(2, 7);
+  const shortSha = options.revision.substring(0, 7);
+  const jobName = `${options.deployUuid}-kaniko-${jobId}-${shortSha}`.substring(0, 63);
+  const contextPath = `/workspace/repo-${shortRepoName}`;
 
-  const repoName = repo.split('/')[1] || repo;
+  logger.info(
+    `[Kaniko] Building image(s) for ${options.deployUuid}: dockerfilePath=${
+      options.dockerfilePath
+    }, initDockerfilePath=${options.initDockerfilePath || 'none'}, repo=${options.repo}`
+  );
 
-  const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
+  const githubToken = await getGitHubToken();
+  const gitUsername = 'x-access-token';
 
-  const buildArgList = Object.entries(envVars).map(([key, value]) => `${key}=${value}`);
-
-  const cachePvc = createPersistentVolumeClaim('kaniko-cache');
-
-  const cloneScript = createCloneScript(repo, branch, revision, repoName);
+  const gitCloneContainer = createRepoSpecificGitCloneContainer(
+    options.repo,
+    options.revision,
+    contextPath,
+    gitUsername,
+    githubToken
+  );
 
   const containers = [];
 
-  const mainKanikoContainer = createKanikoContainer(
-    repo,
-    dockerfilePath,
-    ecrRepoTag,
-    buildArgList,
-    namespace,
-    'kaniko-main'
+  const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;
+  const cacheRepo = `${options.ecrDomain}/${shortRepoName}/cache`;
+
+  containers.push(
+    createKanikoContainer(
+      'kaniko-main',
+      options.dockerfilePath || 'Dockerfile',
+      mainDestination,
+      cacheRepo,
+      contextPath,
+      resources,
+      options.envVars
+    )
   );
 
-  containers.push(mainKanikoContainer);
+  if (options.initDockerfilePath && options.initTag) {
+    const initDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.initTag}`;
 
-  if (initDockerfilePath && initTag) {
-    const initEcrRepoTag = constructEcrTag({ repo: ecrRepo, tag: initTag, ecrDomain });
-
-    const initKanikoContainer = createKanikoContainer(
-      repo,
-      initDockerfilePath,
-      initEcrRepoTag,
-      buildArgList,
-      namespace,
-      'kaniko-init'
+    containers.push(
+      createKanikoContainer(
+        'kaniko-init',
+        options.initDockerfilePath,
+        initDestination,
+        cacheRepo, // Share cache with main build
+        contextPath,
+        resources,
+        options.envVars
+      )
     );
 
-    containers.push(initKanikoContainer);
+    logger.info(`[Kaniko] Job ${jobName} will build both main and init images in parallel`);
   }
 
-  const shortSha = revision.substring(0, 7);
-  let jobName = `${deploy.uuid}-kaniko-${jobId}-${shortSha}`.substring(0, 63);
-  if (jobName.endsWith('-')) {
-    jobName = jobName.slice(0, -1);
-  }
-
-  const volumeConfig = {
-    workspaceName: 'kaniko-workspace',
+  const job = createBuildJobManifest({
+    jobName,
+    namespace: options.namespace,
+    serviceAccount,
+    serviceName,
+    deployUuid: options.deployUuid,
+    buildId: options.buildId,
+    shortSha,
+    branch: options.branch,
+    engine: 'kaniko',
+    dockerfilePath: options.dockerfilePath || 'Dockerfile',
+    ecrRepo: options.ecrRepo,
+    jobTimeout,
+    gitCloneContainer,
+    buildContainer: containers[0], // For backward compatibility with manifest function
     volumes: [
       {
-        name: 'kaniko-cache',
-        persistentVolumeClaim: {
-          claimName: 'kaniko-cache',
-        },
-      },
-      {
-        name: 'kaniko-workspace',
+        name: 'workspace',
         emptyDir: {},
       },
     ],
-  };
+  });
 
-  const job = createJob(jobName, namespace, GIT_USERNAME, gitToken, cloneScript, containers, volumeConfig);
+  job.spec.template.spec.containers = containers;
 
-  const manifestResources = [cachePvc, job];
+  const jobYaml = yaml.dump(job, { quotingType: '"', forceQuotes: true });
+  const applyResult = await shellPromise(`cat <<'EOF' | kubectl apply -f -
+${jobYaml}
+EOF`);
+  logger.info(`Created kaniko job ${jobName} in namespace ${options.namespace}`, { applyResult });
 
-  const manifestYaml = manifestResources.map((resource) => yaml.dump(resource)).join('\n---\n');
+  try {
+    const { logs, success } = await waitForJobAndGetLogs(jobName, options.namespace, jobTimeout);
 
-  logger.info('Generated Kaniko manifest for', { appShort, tag });
-  return manifestYaml;
-};
+    return { success, logs, jobName };
+  } catch (error) {
+    logger.error(`Error getting logs for kaniko job ${jobName}`, { error });
 
-/**
- * Helper function to build images with Kaniko
- */
-export const kanikoImageBuild = async (deploy: Deploy, options: KanikoBuildOptions): Promise<JobResult> => {
-  return genericBuildImage(deploy, options, generateKanikoManifest, 'Kaniko');
-};
+    try {
+      const jobStatus = await shellPromise(
+        `kubectl get job ${jobName} -n ${options.namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'`
+      );
+      const jobSucceeded = jobStatus.trim() === 'True';
+
+      if (jobSucceeded) {
+        logger.info(`Job ${jobName} completed successfully despite log retrieval error`);
+        return { success: true, logs: 'Log retrieval failed but job completed successfully', jobName };
+      }
+    } catch (statusError) {
+      logger.error(`Failed to check job status for ${jobName}`, { statusError });
+    }
+
+    return { success: false, logs: `Build failed: ${error.message}`, jobName };
+  }
+}

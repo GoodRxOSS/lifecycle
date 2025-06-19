@@ -14,27 +14,24 @@ import {
   formatTimestamp
 } from '../../../../../components/logs';
 
-interface BuildJobInfo {
+interface DeploymentJobInfo {
   jobName: string;
-  buildUuid: string;
+  deployUuid: string;
   sha: string;
-  status: 'Active' | 'Complete' | 'Failed' | 'Pending';
+  status: 'Active' | 'Complete' | 'Failed';
   startedAt?: string;
   completedAt?: string;
   duration?: number;
-  engine: 'buildkit' | 'kaniko' | 'unknown';
   error?: string;
   podName?: string;
 }
 
-interface BuildLogsListResponse {
-  builds: BuildJobInfo[];
+interface DeployLogsListResponse {
+  deployments: DeploymentJobInfo[];
 }
 
-interface BuildLogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
-  streamingRequired?: boolean;
-  podName?: string | null;
+interface DeployLogStreamResponse {
+  status: 'Active' | 'Complete' | 'Failed' | 'NotFound';
   websocket?: {
     endpoint: string;
     parameters: {
@@ -49,7 +46,6 @@ interface BuildLogStreamResponse {
     name: string;
     state: string;
   }>;
-  message?: string;
   error?: string;
 }
 
@@ -59,16 +55,16 @@ type LogMessage = {
   message?: string;
 };
 
-export default function BuildLogsList() {
+export default function DeployLogsList() {
   const router = useRouter();
   const { uuid, name } = router.query;
   
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [builds, setBuilds] = useState<BuildJobInfo[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentJobInfo[]>([]);
   
-  const [selectedJob, setSelectedJob] = useState<BuildJobInfo | null>(null);
-  const [jobInfo, setJobInfo] = useState<BuildLogStreamResponse | null>(null);
+  const [selectedJob, setSelectedJob] = useState<DeploymentJobInfo | null>(null);
+  const [jobInfo, setJobInfo] = useState<DeployLogStreamResponse | null>(null);
   const [activeContainer, setActiveContainer] = useState<string>('');
   const [logsByContainer, setLogsByContainer] = useState<Record<string, string[]>>({});
   const [, setSocketsByContainer] = useState<Record<string, WebSocket | null>>({});
@@ -98,7 +94,7 @@ export default function BuildLogsList() {
 
   useEffect(() => {
     if (uuid && name) {
-      fetchBuilds();
+      fetchDeployments();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uuid, name]);
@@ -108,12 +104,11 @@ export default function BuildLogsList() {
       clearInterval(pollingIntervalRef.current);
     }
 
-    const hasActiveJob = selectedJob?.status === 'Active' || selectedJob?.status === 'Pending' || 
-                        builds.some(b => b.status === 'Active' || b.status === 'Pending');
+    const hasActiveJob = selectedJob?.status === 'Active' || deployments.some(d => d.status === 'Active');
     
     if (hasActiveJob) {
       pollingIntervalRef.current = setInterval(() => {
-        fetchBuilds(true);
+        fetchDeployments(true);
       }, 5000);
     }
 
@@ -123,7 +118,7 @@ export default function BuildLogsList() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedJob, builds, uuid, name]);
+  }, [selectedJob, deployments, uuid, name]);
 
   useEffect(() => {
     if (logContainerRef.current) {
@@ -135,33 +130,32 @@ export default function BuildLogsList() {
     }
   }, [logsByContainer, activeContainer]);
 
-  const fetchBuilds = async (silent = false) => {
+  const fetchDeployments = async (silent = false) => {
     try {
-      const response = await axios.get<BuildLogsListResponse>(
-        `/api/v1/builds/${uuid}/services/${name}/buildLogs`
+      const response = await axios.get<DeployLogsListResponse>(
+        `/api/v1/builds/${uuid}/services/${name}/deployLogs`
       );
       
-      setBuilds(response.data.builds);
+      setDeployments(response.data.deployments);
       setError(null);
       
-      if (!selectedJob && response.data.builds.length > 0 && !silent) {
-        handleJobSelect(response.data.builds[0]);
+      if (!selectedJob && response.data.deployments.length > 0 && !silent) {
+        handleJobSelect(response.data.deployments[0]);
       }
       
       if (selectedJob) {
-        const updatedJob = response.data.builds.find(b => b.jobName === selectedJob.jobName);
+        const updatedJob = response.data.deployments.find(d => d.jobName === selectedJob.jobName);
         if (updatedJob && updatedJob.status !== selectedJob.status) {
           setSelectedJob(updatedJob);
-          if ((selectedJob.status === 'Active' || selectedJob.status === 'Pending') && 
-              (updatedJob.status === 'Complete' || updatedJob.status === 'Failed')) {
+          if (selectedJob.status === 'Active' && updatedJob.status !== 'Active') {
             fetchJobInfo(updatedJob);
           }
         }
       }
     } catch (err: any) {
       if (!silent) {
-        console.error('Error fetching builds:', err);
-        setError(err.response?.data?.error || err.message || 'Failed to fetch builds');
+        console.error('Error fetching deployments:', err);
+        setError(err.response?.data?.error || err.message || 'Failed to fetch deployments');
       }
     } finally {
       if (!silent) {
@@ -170,25 +164,24 @@ export default function BuildLogsList() {
     }
   };
 
-  const fetchJobInfo = async (job: BuildJobInfo) => {
+  const fetchJobInfo = async (job: DeploymentJobInfo) => {
     try {
       setLoadingJob(true);
       setError(null);
       setActiveContainer('');
       
-      const response = await axios.get<BuildLogStreamResponse>(
-        `/api/v1/builds/${uuid}/services/${name}/buildLogs/${job.jobName}`
+      const response = await axios.get<DeployLogStreamResponse>(
+        `/api/v1/builds/${uuid}/services/${name}/deployLogs/${job.jobName}`
       );
 
       setJobInfo(response.data);
       
       if (response.data.status !== 'NotFound' && response.data.status !== job.status) {
-        if (response.data.status === 'Active' || response.data.status === 'Complete' || 
-            response.data.status === 'Failed' || response.data.status === 'Pending') {
-          const validStatus = response.data.status as BuildJobInfo['status'];
+        if (response.data.status === 'Active' || response.data.status === 'Complete' || response.data.status === 'Failed') {
+          const validStatus = response.data.status as 'Active' | 'Complete' | 'Failed';
           setSelectedJob(prev => prev ? { ...prev, status: validStatus } : prev);
-          setBuilds(prev => prev.map(b => 
-            b.jobName === job.jobName ? { ...b, status: validStatus } : b
+          setDeployments(prev => prev.map(d => 
+            d.jobName === job.jobName ? { ...d, status: validStatus } : d
           ));
         }
       }
@@ -196,7 +189,7 @@ export default function BuildLogsList() {
       if (response.data.status === 'NotFound') {
         setError(response.data.error || 'Job not found');
       } else if (response.data.containers && response.data.containers.length > 0) {
-        const mainContainer = response.data.containers.find(c => c.name === 'buildkit' || c.name === 'kaniko') ||
+        const mainContainer = response.data.containers.find(c => c.name === 'helm-deploy') ||
                             response.data.containers.find(c => !c.name.includes('init')) ||
                             response.data.containers[0];
         setActiveContainer(mainContainer.name);
@@ -221,9 +214,7 @@ export default function BuildLogsList() {
   }, []);
 
   const connectToContainer = useCallback((containerName: string) => {
-    if (!jobInfo || !isMountedRef.current) return;
-
-    if (!jobInfo.websocket && !jobInfo.podName) return;
+    if (!jobInfo?.websocket || !isMountedRef.current) return;
 
     setSocketsByContainer(prev => {
       if (prev[containerName] && prev[containerName]?.readyState !== WebSocket.CLOSED) {
@@ -244,22 +235,12 @@ export default function BuildLogsList() {
     const host = window.location.host;
 
     const params = new URLSearchParams();
-    
-    if (jobInfo.websocket) {
-      params.append('podName', jobInfo.websocket.parameters.podName);
-      params.append('namespace', jobInfo.websocket.parameters.namespace);
-      params.append('containerName', containerName);
-      params.append('follow', jobInfo.websocket.parameters.follow.toString());
-      params.append('tailLines', '500');
-      params.append('timestamps', showTimestamps.toString());
-    } else if (jobInfo.podName) {
-      params.append('podName', jobInfo.podName);
-      params.append('namespace', `env-${uuid}`);
-      params.append('containerName', containerName);
-      params.append('follow', 'false');
-      params.append('tailLines', '500');
-      params.append('timestamps', showTimestamps.toString());
-    }
+    params.append('podName', jobInfo.websocket.parameters.podName);
+    params.append('namespace', jobInfo.websocket.parameters.namespace);
+    params.append('containerName', containerName);
+    params.append('follow', jobInfo.websocket.parameters.follow.toString());
+    params.append('tailLines', '500');
+    params.append('timestamps', showTimestamps.toString());
 
     const wsUrl = `${wsProtocol}//${host}/api/logs/stream?${params.toString()}`;
 
@@ -330,15 +311,15 @@ export default function BuildLogsList() {
         setConnectingContainers(prev => prev.filter(c => c !== containerName));
       }
     }
-  }, [jobInfo, uuid, showTimestamps]);
+  }, [jobInfo, showTimestamps]);
 
   useEffect(() => {
-    if (activeContainer && jobInfo) {
+    if (activeContainer && jobInfo?.websocket) {
       connectToContainer(activeContainer);
     }
   }, [activeContainer, jobInfo, connectToContainer]);
 
-  const handleJobSelect = async (job: BuildJobInfo) => {
+  const handleJobSelect = async (job: DeploymentJobInfo) => {
     closeAllConnections();
     
     setSelectedJob(job);
@@ -354,13 +335,13 @@ export default function BuildLogsList() {
   };
 
   const getContainerDisplayName = (containerName: string): string => {
-    if (containerName === 'git-clone') return 'Clone Repository';
-    if (containerName === 'buildkit' || containerName === 'kaniko') return 'Build';
+    if (containerName === 'clone-repo') return 'Clone Repository';
+    if (containerName === 'helm-deploy') return 'Helm Deploy';
     if (containerName.includes('[init]')) return containerName;
     return containerName;
   };
 
-  const getStatusColor = (status: BuildJobInfo['status']) => {
+  const getStatusColor = (status: DeploymentJobInfo['status']) => {
     switch (status) {
       case 'Failed':
         return '#dc2626';
@@ -368,78 +349,59 @@ export default function BuildLogsList() {
         return '#10b981';
       case 'Active':
         return '#3b82f6';
-      case 'Pending':
-        return '#f59e0b';
       default:
         return '#6b7280';
     }
   };
 
-  const getBackgroundColor = (build: BuildJobInfo, isSelected: boolean) => {
+  const getBackgroundColor = (deployment: DeploymentJobInfo, isSelected: boolean) => {
     if (isSelected) {
-      switch (build.status) {
+      switch (deployment.status) {
         case 'Failed':
           return '#fee2e2';
         case 'Complete':
           return '#d1fae5';
-        case 'Pending':
-          return '#fef3c7';
         default:
           return '#f3f4f6';
       }
     } else {
-      switch (build.status) {
+      switch (deployment.status) {
         case 'Failed':
           return '#fef2f2';
         case 'Complete':
           return '#f0fdf4';
-        case 'Pending':
-          return '#fffbeb';
         default:
           return 'transparent';
       }
     }
   };
 
-  const getHoverColor = (build: BuildJobInfo) => {
-    switch (build.status) {
+  const getHoverColor = (deployment: DeploymentJobInfo) => {
+    switch (deployment.status) {
       case 'Failed':
         return '#fee2e2';
       case 'Complete':
         return '#d1fae5';
-      case 'Pending':
-        return '#fef3c7';
       default:
         return '#f9fafb';
-    }
-  };
-
-  const getStatusText = (status: BuildJobInfo['status']) => {
-    switch (status) {
-      case 'Active':
-        return 'Building';
-      case 'Pending':
-        return 'Pending';
-      default:
-        return status;
     }
   };
 
   return (
     <PageLayout
       backLink={`/builds/${uuid}`}
-      title="Build Logs"
+      title="Deploy Logs"
       serviceName={name as string}
       environmentId={uuid as string}
     >
       {error && !selectedJob && <ErrorAlert error={error} />}
 
       {loading ? (
-        <LoadingBox message="Loading builds..." />
-      ) : builds.length === 0 ? (
+        <LoadingBox message="Loading deployments..." />
+      ) : deployments.length === 0 ? (
         <EmptyState
-          title="No builds found"
-          description="No build jobs have been created for this service yet."
+          title="No deployments found"
+          description="No deployment jobs have been created for this service yet."
         />
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: '600px 1fr', gap: '24px', alignItems: 'stretch', flex: 1, minHeight: 0 }}>
@@ -453,7 +415,7 @@ export default function BuildLogsList() {
             height: '100%'
           }}>
             <div style={{ padding: '16px 20px', borderBottom: '1px solid #eee' }}>
-              <h2 style={{ fontSize: '16px', fontWeight: 600, color: '#333', margin: 0 }}>Build History</h2>
+              <h2 style={{ fontSize: '16px', fontWeight: 600, color: '#333', margin: 0 }}>Deployment History</h2>
             </div>
             <div style={{ flex: 1, overflow: 'auto' }}>
               <table style={{ width: '100%', borderSpacing: 0 }}>
@@ -476,24 +438,24 @@ export default function BuildLogsList() {
                   </tr>
                 </thead>
                 <tbody>
-                  {builds.map((build) => (
+                  {deployments.map((deployment) => (
                     <tr 
-                      key={build.jobName}
-                      onClick={() => handleJobSelect(build)}
+                      key={deployment.jobName}
+                      onClick={() => handleJobSelect(deployment)}
                       style={{ 
                         cursor: 'pointer',
                         borderBottom: '1px solid #eee',
-                        backgroundColor: getBackgroundColor(build, selectedJob?.jobName === build.jobName),
+                        backgroundColor: getBackgroundColor(deployment, selectedJob?.jobName === deployment.jobName),
                         transition: 'background-color 0.15s'
                       }}
                       onMouseOver={(e) => {
-                        if (selectedJob?.jobName !== build.jobName) {
-                          e.currentTarget.style.backgroundColor = getHoverColor(build);
+                        if (selectedJob?.jobName !== deployment.jobName) {
+                          e.currentTarget.style.backgroundColor = getHoverColor(deployment);
                         }
                       }}
                       onMouseOut={(e) => {
-                        if (selectedJob?.jobName !== build.jobName) {
-                          e.currentTarget.style.backgroundColor = getBackgroundColor(build, false);
+                        if (selectedJob?.jobName !== deployment.jobName) {
+                          e.currentTarget.style.backgroundColor = getBackgroundColor(deployment, false);
                         }
                       }}
                     >
@@ -503,26 +465,26 @@ export default function BuildLogsList() {
                             width: '8px',
                             height: '8px',
                             borderRadius: '50%',
-                            backgroundColor: getStatusColor(build.status),
-                            animation: build.status === 'Active' ? 'pulse 2s infinite' : 'none'
+                            backgroundColor: getStatusColor(deployment.status),
+                            animation: deployment.status === 'Active' ? 'pulse 2s infinite' : 'none'
                           }} />
                           <span style={{ 
                             fontSize: '14px', 
                             fontWeight: 500,
-                            color: getStatusColor(build.status)
+                            color: getStatusColor(deployment.status)
                           }}>
-                            {getStatusText(build.status)}
+                            {deployment.status === 'Active' ? 'Deploying' : deployment.status}
                           </span>
                         </div>
                       </td>
                       <td style={{ padding: '16px 20px' }}>
-                        <code style={{ fontSize: '13px', color: '#555' }}>{build.sha}</code>
+                        <code style={{ fontSize: '13px', color: '#555' }}>{deployment.sha}</code>
                       </td>
                       <td style={{ padding: '16px 20px', fontSize: '14px', color: '#666' }}>
-                        {formatTimestamp(build.startedAt)}
+                        {formatTimestamp(deployment.startedAt)}
                       </td>
                       <td style={{ padding: '16px 20px', fontSize: '14px', color: '#666' }}>
-                        {formatDuration(build.duration)}
+                        {formatDuration(deployment.duration)}
                       </td>
                     </tr>
                   ))}
@@ -573,11 +535,11 @@ export default function BuildLogsList() {
                 )}
               </TerminalContainer>
             ) : (
-              <EmptyTerminalState type="build" />
+              <EmptyTerminalState type="deployment" />
             )}
           </div>
         </div>
       )}
     </PageLayout>
   );
-}
+} 

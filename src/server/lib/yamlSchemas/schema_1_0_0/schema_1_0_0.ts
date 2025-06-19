@@ -117,7 +117,7 @@ const schema_1_0_0 = {
           kedaScaleToZero,
           helm: {
             type: 'object',
-            additionalProperties: false,
+            additionalProperties: true,
             properties: {
               cfStepType: { type: 'string' },
               type: { type: 'string' },
@@ -143,7 +143,6 @@ const schema_1_0_0 = {
               overrideDefaultIpWhitelist: { type: 'boolean' },
               docker,
             },
-            required: ['repository', 'branchName'],
           },
           codefresh: {
             type: 'object',

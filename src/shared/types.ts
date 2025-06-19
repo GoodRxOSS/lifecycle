@@ -34,7 +34,7 @@ export type Link = {
 export type FeatureFlags = Record<string, boolean>;
 
 export interface ContainerInfo {
-  containerName: string;
+  name: string;
   state: string;
 }
 
@@ -58,7 +58,7 @@ export interface LogSourceStatus {
   status: 'Completed' | 'Failed' | 'NotFound' | 'Unavailable' | 'NotApplicable' | 'Unknown';
   podName?: string | null;
   streamingRequired: false;
-  containers?: string[];
+  containers?: ContainerInfo[];
   message: string;
 }
 

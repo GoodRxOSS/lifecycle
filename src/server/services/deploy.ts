@@ -34,10 +34,9 @@ import { getShaForDeploy } from 'server/lib/github';
 import GlobalConfigService from 'server/services/globalConfig';
 import { PatternInfo, extractEnvVarsWithBuildDependencies, waitForColumnValue } from 'shared/utils';
 import { getLogs } from 'server/lib/codefresh';
-import { buildkitImageBuild } from 'server/lib/nativeBuild/buildkit';
-import { kanikoImageBuild } from 'server/lib/nativeBuild/kaniko';
-import { envVars } from 'server/lib/codefresh/__fixtures__/codefresh';
+import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
+import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 
 const logger = rootLogger.child({
   filename: 'services/deploy.ts',
@@ -142,9 +141,7 @@ export default class DeployService extends BaseService {
                 sha,
               });
             } catch (error) {
-              logger.warn(
-                `[BUILD ${build.uuid}] Failed to get SHA for ${deploy.uuid} at branch ${deploy?.branchName}. Error: ${error}`
-              );
+              logger.debug(`[DEPLOY ${deploy.uuid}] Unable to get SHA, continuing: ${error}`);
             }
           }
 
@@ -628,12 +625,20 @@ export default class DeployService extends BaseService {
             const buildPipelineName = deployable?.dockerBuildPipelineName;
             const tag = generateDeployTag({ sha: shortSha, envVarsHash });
             const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
-            const ecrRepo = deployable?.ecr;
+            let ecrRepo = deployable?.ecr;
+
+            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+            if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+              ecrRepo = `${ecrRepo}/${serviceName}`;
+              logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
+            }
+
             const tagsExist =
               (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
-              (!initDockerfilePath || (await codefresh.tagExists({ tag, ecrRepo, uuid })));
+              (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
 
-            // get ecr domain from globalConfig.lifecycleDefaults
+            logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
+
             const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
             const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
             if (!ecrDomain || !registry) {
@@ -707,26 +712,37 @@ export default class DeployService extends BaseService {
             return true;
           case DeployTypes.HELM: {
             try {
-              const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
+              const chartType = await determineChartType(deploy);
 
-              if (orgChartName === deployable?.helm?.chart?.name) {
+              if (chartType !== ChartType.PUBLIC) {
                 return this.buildImageForHelmAndGithub(deploy, runUUID);
               }
-              const fullSha = await github.getShaForDeploy(deploy);
+
+              let fullSha = null;
+
+              await deploy.$fetchGraph('deployable.repository');
+              if (deploy.deployable?.repository) {
+                try {
+                  fullSha = await github.getShaForDeploy(deploy);
+                } catch (shaError) {
+                  logger.debug(
+                    `[${deploy?.uuid}] Could not get SHA for PUBLIC helm chart, continuing without it: ${shaError.message}`
+                  );
+                }
+              }
+
               await this.patchAndUpdateActivityFeed(
                 deploy,
                 {
                   status: DeployStatus.BUILT,
                   statusMessage: 'Helm chart does not need to be built',
-                  sha: fullSha,
+                  ...(fullSha && { sha: fullSha }),
                 },
                 runUUID
               );
               return true;
             } catch (error) {
-              logger
-                .child({ error })
-                .warn(`[${deploy?.uuid}] Error getting SHA for deploy. Maybe the pull request has been closed?`);
+              logger.child({ error }).warn(`[${deploy?.uuid}] Error processing Helm deployment: ${error.message}`);
               return false;
             }
           }
@@ -750,7 +766,12 @@ export default class DeployService extends BaseService {
     try {
       const id = deploy?.id;
       await this.db.models.Deploy.query().where({ id, runUUID }).patch(params);
-      if (deploy.runUUID !== runUUID) return;
+      if (deploy.runUUID !== runUUID) {
+        logger.debug(
+          `[DEPLOY ${deploy.uuid}] runUUID mismatch: deploy.runUUID=${deploy.runUUID}, provided runUUID=${runUUID}`
+        );
+        return;
+      }
       await deploy.$fetchGraph('build.[deploys.[service, deployable], pullRequest.[repository]]');
       build = deploy?.build;
       const pullRequest = build?.pullRequest;
@@ -775,7 +796,14 @@ export default class DeployService extends BaseService {
     const { build, deployable, service } = deploy;
     const uuid = build?.uuid;
     const uuidText = uuid ? `[DEPLOY ${uuid}][patchDeployWithTag]:` : '[DEPLOY][patchDeployWithTag]:';
-    const ecrRepo = deployable?.ecr;
+    let ecrRepo = deployable?.ecr;
+
+    const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
+    if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+      ecrRepo = `${ecrRepo}/${serviceName}`;
+      logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
+    }
+
     const dockerImage = codefresh.getRepositoryTag({ tag, ecrRepo, ecrDomain });
 
     if (service?.initDockerfilePath || deployable?.initDockerfilePath) {
@@ -835,6 +863,12 @@ export default class DeployService extends BaseService {
       await deployable.$fetchGraph('repository');
       await build?.$fetchGraph('pullRequest');
       const repository = deployable?.repository;
+
+      if (!repository) {
+        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
+        return false;
+      }
+
       const repo = repository?.fullName;
       const [owner, name] = repo?.split('/') || [];
       const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
@@ -863,8 +897,14 @@ export default class DeployService extends BaseService {
       const buildPipelineName = deployable?.dockerBuildPipelineName;
       const tag = generateDeployTag({ sha: shortSha, envVarsHash });
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
-      const ecrRepo = deployable?.ecr;
-      // get ecr domain from globalConfig.lifecycleDefaults
+      let ecrRepo = deployable?.ecr;
+
+      const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+      if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+        ecrRepo = `${ecrRepo}/${serviceName}`;
+        logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
+      }
+
       const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
       if (!ecrDomain || !registry) {
@@ -876,6 +916,8 @@ export default class DeployService extends BaseService {
       const tagsExist =
         (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
         (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
+
+      logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
 
       // Check for and skip duplicates
       if (!tagsExist) {
@@ -914,53 +956,35 @@ export default class DeployService extends BaseService {
           enabledFeatures,
         };
 
-        if ('buildkit' === deployable.builder.engine) {
-          logger.info(`${uuidText} Building image with buildkit`);
+        if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
+          logger.info(`${uuidText} Building image with native build (${deployable.builder.engine})`);
 
-          const jobResuls = await buildkitImageBuild(deploy, buildOptions);
-          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+          const nativeOptions = {
+            ...buildOptions,
+            namespace: deploy.build.namespace,
+            buildId: String(deploy.build.id),
+            deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+          };
 
-          if (jobResuls.status === 'succeeded') {
-            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-            if (buildOptions?.afterBuildPipelineId) {
-              const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
-
-              const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
-                ...envVars,
-                ...{ TAG: ecrRepoTag },
-                ...{ branch: branchName },
-              });
-              const completed = await codefresh.waitForImage(afterbuildPipeline);
-              if (!completed) return false;
-            }
-
-            return true;
-          } else {
-            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-            return false;
+          if (!initDockerfilePath) {
+            nativeOptions.initTag = undefined;
           }
-        }
 
-        if ('kaniko' === deployable.builder.engine) {
-          logger.info(`${uuidText} Building image with kaniko`);
+          const result = await buildWithNative(deploy, nativeOptions);
 
-          const jobResults = await kanikoImageBuild(deploy, buildOptions);
-          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-
-          if (jobResults.status === 'succeeded') {
+          if (result.success) {
             await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
             if (buildOptions?.afterBuildPipelineId) {
               const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
 
               const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
-                ...envVars,
+                ...deploy.env,
                 ...{ TAG: ecrRepoTag },
                 ...{ branch: branchName },
               });
               const completed = await codefresh.waitForImage(afterbuildPipeline);
               if (!completed) return false;
             }
-
             return true;
           } else {
             await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);

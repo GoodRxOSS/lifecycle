@@ -20,7 +20,7 @@ import rootLogger from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import Build from '../Build';
-import { DomainDefaults } from 'server/services/types/globalConfig';
+import { DomainDefaults, NativeHelmConfig } from 'server/services/types/globalConfig';
 
 const logger = rootLogger.child({
   filename: 'models/yaml/YamlService.ts',
@@ -82,7 +82,6 @@ export interface GithubService extends Service {
       readonly defaultTag: string;
       readonly app: GithubServiceAppDockerConfig;
       readonly init?: InitDockerConfig;
-      readonly builder?: Builder;
     };
     readonly deployment?: DeploymentConfig;
   };
@@ -196,6 +195,18 @@ export interface Helm {
   readonly overrideDefaultIpWhitelist?: boolean;
   readonly type?: string;
   readonly builder?: Builder;
+  readonly deploymentMethod?: 'native' | 'ci';
+  readonly nativeHelm?: NativeHelmConfig;
+  readonly envMapping?: {
+    readonly app?: {
+      readonly format: 'array' | 'map';
+      readonly path: string;
+    };
+    readonly init?: {
+      readonly format: 'array' | 'map';
+      readonly path: string;
+    };
+  };
 }
 
 export interface HelmService {
@@ -493,6 +504,7 @@ export async function getHelmConfigFromYaml(service: Service): Promise<Helm> {
   if (DeployTypes.HELM === getDeployType(service)) {
     const helmService = (service as unknown as HelmService).helm;
 
+    // First check for chart-specific configuration
     if (!globalConfig[helmService?.chart?.name]) {
       if (globalConfig?.publicChart?.block)
         throw new Error(
@@ -500,10 +512,21 @@ export async function getHelmConfigFromYaml(service: Service): Promise<Helm> {
         );
       logger.warn(`[helmChart with name: ${helmService?.chart?.name} is not currently supported, proceed with caution`);
     }
-    const helmConfig = _.merge(globalConfig[helmService?.chart?.name], helmService);
+
+    // Merge in priority order:
+    // 1. Service-specific helm config (highest priority)
+    // 2. Chart-specific global config
+    // 3. helmDefaults from global_config (lowest priority)
+    const helmDefaults = globalConfig.helmDefaults || {};
+    const chartConfig = globalConfig[helmService?.chart?.name] || {};
+
+    const helmConfig = _.merge({}, helmDefaults, chartConfig, helmService);
+
+    // Preserve value files from service config if specified
     if (helmService?.chart?.valueFiles?.length > 0) {
       helmConfig.chart.values = helmService.chart.values;
     }
+
     return helmConfig as Helm;
   }
 }

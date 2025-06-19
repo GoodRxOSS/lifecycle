@@ -106,4 +106,4 @@ export const DD_ENVS = {
   VERSION: DD_VERSION,
 };
 export const ENVIRONMENT = getServerRuntimeConfig('ENVIRONMENT', 'production');
-export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'lifecycle');
+export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:5001');

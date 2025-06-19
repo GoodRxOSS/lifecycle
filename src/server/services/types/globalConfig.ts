@@ -18,6 +18,8 @@ import { Helm, KedaScaleToZero } from 'server/models/yaml';
 
 export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
+  helmDefaults: HelmDefaults;
+  buildDefaults?: BuildDefaults;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -101,4 +103,35 @@ export type OrgChart = {
 export type DeletePendingHelmReleaseStep = {
   delete: boolean;
   static_delete?: boolean;
+};
+
+export type HelmDefaults = {
+  nativeHelm?: NativeHelmConfig;
+};
+
+export type NativeHelmConfig = {
+  enabled: boolean;
+  defaultHelmVersion?: string;
+  jobTimeout?: number;
+  serviceAccount?: string;
+  defaultArgs?: string;
+};
+
+export type BuildDefaults = {
+  jobTimeout?: number;
+  serviceAccount?: string;
+  resources?: {
+    buildkit?: ResourceRequirements;
+    kaniko?: ResourceRequirements;
+  };
+  buildkit?: {
+    endpoint?: string;
+    healthCheckTimeout?: number;
+    insecure?: boolean;
+  };
+};
+
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
 };

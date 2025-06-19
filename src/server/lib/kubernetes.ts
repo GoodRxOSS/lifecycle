@@ -186,7 +186,7 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
         statusMessage: err?.response?.statusMessage,
         body: err?.response?.body,
         serviceAccountName,
-        namespace
+        namespace,
       });
       throw err;
     }
@@ -472,6 +472,9 @@ export async function deleteNamespace(name: string) {
   if (!name.startsWith('env-')) return;
 
   try {
+    // Native helm now uses namespace-scoped RBAC (Role/RoleBinding) which gets deleted with the namespace
+    // No need for manual cleanup of cluster-level resources
+
     // adding a grace-period to make sure resources and finalizers are gone before we delete the namespace
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
     logger.info(`[DELETE ${name}] Deleted namespace`);
@@ -519,7 +522,14 @@ export function generateManifest({
   // General Deployment
 
   const disks = generatePersistentDisks(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, build.enableFullYaml, namespace, serviceAccountName);
+  const builds = generateDeployManifests(
+    build,
+    kubernetesDeploys,
+    uuid,
+    build.enableFullYaml,
+    namespace,
+    serviceAccountName
+  );
   const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
@@ -675,7 +685,6 @@ export function generateDeployManifests(
   namespace: string,
   serviceAccountName: string
 ) {
-
   return deploys
     .filter((deploy) => {
       return deploy.active;

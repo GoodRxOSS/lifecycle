@@ -15,7 +15,7 @@
 global:
   image:
     repository: lifecycleoss/app
-    tag: latest
+    tag: 0.0.4-alpha.1
     pullPolicy: IfNotPresent
   imagePullSecrets: []
 

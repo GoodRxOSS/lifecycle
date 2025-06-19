@@ -37,6 +37,8 @@ import Fastly from 'server/lib/fastly';
 import { nanoid } from 'nanoid';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
+import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import { shouldUseNativeHelm } from 'server/lib/nativeHelm';
 
 const logger = rootLogger.child({
   filename: 'services/activityStream.ts',
@@ -745,27 +747,47 @@ export default class ActivityStream extends BaseService {
       case DeployStatus.BUILDING:
         return `🏗️ BUILDING`;
       case DeployStatus.BUILT:
-        return `✅ BUILT`;
+        return `👍 BUILT`;
       case DeployStatus.ERROR:
         return `⚠️ ERROR`;
       case DeployStatus.CLONING:
         return `⬇️ CLONING`;
+      case DeployStatus.READY:
+        return `✅ READY`;
+      case DeployStatus.DEPLOYING:
+        return `🚀 DEPLOYING`;
+      case DeployStatus.DEPLOY_FAILED:
+        return `⚠️ FAILED`;
+      case DeployStatus.QUEUED:
+        return `⏳ QUEUED`;
+      case DeployStatus.WAITING:
+        return `⏳ WAITING`;
+      case DeployStatus.BUILD_FAILED:
+        return `❌ BUILD FAILED`;
       default:
         return deploy.status;
     }
   }
 
-  private getCLIStatus(deploy: Deploy) {
-    switch (deploy.status) {
-      case DeployStatus.BUILDING:
-        return `🚀 DEPLOYING`;
-      case DeployStatus.BUILT:
-        return `✅ DEPLOYED`;
-      case DeployStatus.ERROR:
-        return `⚠️ ERROR`;
-      default:
-        return deploy.status;
+  private async hasAnyServiceWithDeployLogs(deploys: Deploy[]): Promise<boolean> {
+    for (const deploy of deploys) {
+      if (await this.isNativeHelmDeployment(deploy)) {
+        return true;
+      }
     }
+    return false;
+  }
+
+  private async isNativeHelmDeployment(deploy: Deploy): Promise<boolean> {
+    return deploy.deployable?.type === DeployTypes.HELM && (await shouldUseNativeHelm(deploy));
+  }
+
+  private isNativeBuildDeployment(deploy: Deploy): boolean {
+    if (!deploy.deployable) return false;
+    return (
+      [DeployTypes.GITHUB, DeployTypes.HELM].includes(deploy.deployable.type) &&
+      ['buildkit', 'kaniko'].includes(deploy.deployable.builder?.engine)
+    );
   }
 
   /**
@@ -823,7 +845,14 @@ export default class ActivityStream extends BaseService {
     } else if (isAutoDeployingBuild || isDeploying) {
       message += '## 🚀 Deploying\n';
       message += `We're deploying your code. Please stand by....\n\n`;
-      message += `Here's where you can find your services after they're deployed:\n`;
+      message += '## Build Status\n';
+      message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+        logger
+          .child({ build, deploys, error })
+          .error(`[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`);
+        return '';
+      });
+      message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((e) => {
         logger.error(
           `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate environment comment block: ${e}`
@@ -851,10 +880,13 @@ export default class ActivityStream extends BaseService {
       if (build.status === BuildStatus.ERROR) {
         message += `## ⚠️ Deployed with Error\n`;
         message += `There was a problem deploying your code. Some services may have not rolled out successfully. Here are the URLs for your services:\n\n`;
-        message += await this.buildStatusBlock(build, deploys, this.isBuildableDeployType).catch((e) => {
-          logger.error(
-            `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status: ${e}`
-          );
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          logger
+            .child({ build, deploys, error })
+            .error(
+              `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`
+            );
           return '';
         });
         message += await this.environmentBlock(build).catch((e) => {
@@ -874,7 +906,16 @@ export default class ActivityStream extends BaseService {
         message += `Lifecycle configuration file is found but there is a problem with the file.\n\n`;
       } else if (build.status === BuildStatus.DEPLOYED) {
         message += '## ✅ Deployed\n';
-        message += `We've deployed your code. Here's where you can find your services:\n`;
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          logger
+            .child({ build, deploys, error })
+            .error(
+              `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`
+            );
+          return '';
+        });
+        message += `\nWe've deployed your code. Here's where you can find your services:\n`;
         message += await this.environmentBlock(build).catch((e) => {
           logger.error(
             `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate environment comment block: ${e}`
@@ -926,8 +967,23 @@ export default class ActivityStream extends BaseService {
     isSelectedDeployType: (deploy: Deploy, fullYamlSupport: boolean, orgChart: string) => boolean
   ): Promise<string> {
     let message = '';
-    message += '| Service | Branch | Status | Build Pipeline |\n';
-    message += '|---|---|---|---|\n';
+
+    // Check if any service should show deploy logs column
+    const hasDeployLogsColumn = await this.hasAnyServiceWithDeployLogs(deploys);
+
+    // Add table headers
+    message += '| Service | Branch | Status | Build Pipeline |';
+    if (hasDeployLogsColumn) {
+      message += ' Deploy Logs |';
+    }
+    message += '\n';
+
+    // Add separator row
+    message += '|---|---|---|---|';
+    if (hasDeployLogsColumn) {
+      message += '---|';
+    }
+    message += '\n';
 
     await build?.$fetchGraph('[deploys.[service, deployable]]');
     deploys = build.deploys;
@@ -937,7 +993,8 @@ export default class ActivityStream extends BaseService {
       deploys = deploys.sort((a, b) => a.id - b.id);
     }
 
-    deploys.forEach((deploy) => {
+    // Convert forEach to for...of to handle async/await properly
+    for (const deploy of deploys) {
       const serviceName: string = build.enableFullYaml ? deploy.deployable.name : deploy.service.name;
       const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
       const serviceNameWithUrl = deploy.deployable.repositoryId
@@ -946,32 +1003,69 @@ export default class ActivityStream extends BaseService {
 
       if (isSelectedDeployType == null || isSelectedDeployType(deploy, build.enableFullYaml, orgChartName)) {
         if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
-          // Keep existing buildLogs if available, otherwise use our link if buildJobName exists
-          const buildLogsColumn = deploy.buildLogs
-            ? deploy.buildLogs
-            : deploy.buildJobName
-            ? `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${serviceName}/buildLogs)`
-            : '';
-          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
+          // Show Build Logs link if:
+          // 1. It's a Codefresh build and buildLogs URL exists, OR
+          // 2. It's a Native Build V2 deployment
+          let buildLogsColumn = '';
+          if (deploy.buildLogs) {
+            // Keep existing Codefresh build logs URL
+            buildLogsColumn = deploy.buildLogs;
+          } else if (this.isNativeBuildDeployment(deploy)) {
+            // Always show Native Build logs link - we query Kubernetes directly
+            const actualServiceName = deploy.deployable?.name || serviceName;
+            buildLogsColumn = `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${actualServiceName}/buildLogs)`;
+          }
+
+          let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
             deploy
-          )}_ | ${buildLogsColumn} |\n`;
+          )}_ | ${buildLogsColumn} |`;
+
+          if (hasDeployLogsColumn) {
+            const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
+              ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                  deploy.deployable?.name || serviceName
+                }/deployLogs)`
+              : '';
+            row += ` ${deployLogsColumn} |`;
+          }
+
+          message += row + '\n';
         } else if (CLIDeployTypes.has(serviceType) && deploy.active) {
           if (serviceType === DeployTypes.CODEFRESH) {
-            // Keep existing buildLogs if available, otherwise use our link if buildJobName exists
-            const buildLogsColumn = deploy.buildLogs
-              ? deploy.buildLogs
-              : deploy.buildJobName
-              ? `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${serviceName}/buildLogs)`
-              : '';
-            message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getCLIStatus(
+            // For Codefresh, just keep the existing buildLogs URL if available
+            const buildLogsColumn = deploy.buildLogs || '';
+
+            let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
               deploy
-            )}_ | ${buildLogsColumn} |\n`;
+            )}_ | ${buildLogsColumn} |`;
+
+            if (hasDeployLogsColumn) {
+              const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
+                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                    deploy.deployable?.name || serviceName
+                  }/deployLogs)`
+                : '';
+              row += ` ${deployLogsColumn} |`;
+            }
+
+            message += row + '\n';
           } else {
-            message += `| ${serviceNameWithUrl} || _${this.getCLIStatus(deploy)}_ ||\n`;
+            let row = `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ ||`;
+
+            if (hasDeployLogsColumn) {
+              const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
+                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                    deploy.deployable?.name || serviceName
+                  }/deployLogs)`
+                : '';
+              row += ` ${deployLogsColumn} |`;
+            }
+
+            message += row + '\n';
           }
         }
       }
-    });
+    }
 
     return message;
   }
@@ -1011,16 +1105,16 @@ export default class ActivityStream extends BaseService {
 
     await build?.$fetchGraph('[deploys.[service, deployable]]');
 
-    const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
     let { deploys } = build;
     if (deploys.length > 1) {
       deploys = deploys.sort((a, b) => a.id - b.id);
     }
     for (const deploy of deploys) {
       const { service, deployable } = deploy;
-      const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
+      const chartType = await determineChartType(deploy);
+      const isPublicChart = chartType === ChartType.PUBLIC;
 
-      const servicePublic: boolean = build.enableFullYaml ? deployable.public || isOrgHelmChart : service.public;
+      const servicePublic: boolean = build.enableFullYaml ? deployable.public || !isPublicChart : service.public;
       const serviceName: string = build.enableFullYaml ? deployable.name : service.name;
       const serviceType: DeployTypes = build.enableFullYaml ? deployable.type : service.type;
       const serviceHostPortMapping: Record<string, any> = build.enableFullYaml
@@ -1036,7 +1130,7 @@ export default class ActivityStream extends BaseService {
         (serviceType === DeployTypes.DOCKER ||
           serviceType === DeployTypes.GITHUB ||
           serviceType === DeployTypes.CODEFRESH ||
-          isOrgHelmChart)
+          !isPublicChart)
       ) {
         if (serviceHostPortMapping && Object.keys(serviceHostPortMapping).length > 0) {
           Object.keys(serviceHostPortMapping).forEach((key) => {
