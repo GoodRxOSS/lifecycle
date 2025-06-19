@@ -192,17 +192,6 @@ k8s_resource(
     labels=["infra"]
 )
 
-# Helper function to add namespace to kubernetes resources
-def kustomize_with_helm(yaml_path, namespace):
-    yaml = helm(
-        None,
-        name="custom-namespace",
-        namespace=namespace,
-        template=[yaml_path],
-        set=["namespace={}".format(namespace)]
-    )
-    return yaml
-
 ##################################
 # DISTRIBUTION
 ##################################
