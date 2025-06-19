@@ -1,0 +1,114 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: distribution
+  namespace: 'lifecycle-app'
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: distribution
+  namespace: 'lifecycle-app'
+  labels:
+    app: distribution
+data:
+  config.yml: |
+    http:
+      addr: :5000
+      debug:
+        addr: :5001
+        prometheus:
+          enabled: true
+          path: /metrics
+    log:
+      level: debug
+    storage:
+      filesystem:
+        rootdirectory: /var/lib/registry
+    version: 0.1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: distribution
+  namespace: 'lifecycle-app'
+  labels:
+    app: distribution
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: '20Gi'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: distribution
+  namespace: 'lifecycle-app'
+  labels:
+    app: distribution
+spec:
+  selector:
+    app: distribution
+  type: ClusterIP
+  sessionAffinity: None
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 5001
+      targetPort: metrics
+      protocol: TCP
+  clusterIP: 10.96.188.230
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: distribution
+  namespace: 'lifecycle-app'
+  labels:
+    app: distribution
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: distribution
+  template:
+    metadata:
+      labels:
+        app: distribution
+    spec:
+      serviceAccountName: distribution
+      securityContext:
+        fsGroup: 1001
+      initContainers:
+      containers:
+        - name: main
+          image: docker.io/distribution/distribution:2.8.3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1001
+          env:
+          envFrom:
+          ports:
+            - name: http
+              containerPort: 5000
+          volumeMounts:
+            - name: etc
+              mountPath: /etc/docker/registry
+            - name: registry
+              mountPath: /var/lib/registry
+      volumes:
+        - name: etc
+          configMap:
+            name: distribution
+        - name: registry
+          persistentVolumeClaim:
+            claimName: distribution

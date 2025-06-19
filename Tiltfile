@@ -203,3 +203,23 @@ def kustomize_with_helm(yaml_path, namespace):
     )
     return yaml
 
+##################################
+# DISTRIBUTION
+##################################
+k8s_yaml('sysops/tilt/distribution.yaml')
+k8s_resource(
+    'distribution', 
+    port_forwards=["8088:5000"], 
+    labels=["infra"]
+)
+
+##################################
+# BUILDKIT
+##################################
+k8s_yaml('sysops/tilt/buildkit.yaml')
+k8s_resource(
+    'buildkit', 
+    port_forwards=["1234:1234"], 
+    resource_deps=['distribution'],
+    labels=["infra"]
+)
