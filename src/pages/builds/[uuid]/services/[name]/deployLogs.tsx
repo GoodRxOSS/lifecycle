@@ -11,14 +11,15 @@ import {
   EmptyTerminalState,
   LogViewer,
   formatDuration,
-  formatTimestamp
+  formatTimestamp,
+  EventsViewer
 } from '../../../../../components/logs';
 
 interface DeploymentJobInfo {
   jobName: string;
   deployUuid: string;
   sha: string;
-  status: 'Active' | 'Complete' | 'Failed';
+  status: 'Active' | 'Complete' | 'Failed' | 'Pending';
   startedAt?: string;
   completedAt?: string;
   duration?: number;
@@ -31,7 +32,7 @@ interface DeployLogsListResponse {
 }
 
 interface DeployLogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound';
+  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
   websocket?: {
     endpoint: string;
     parameters: {
@@ -55,6 +56,22 @@ type LogMessage = {
   message?: string;
 };
 
+interface K8sEvent {
+  name: string;
+  namespace: string;
+  reason: string;
+  message: string;
+  type: string;
+  count: number;
+  firstTimestamp?: string;
+  lastTimestamp?: string;
+  eventTime?: string;
+  source?: {
+    component?: string;
+    host?: string;
+  };
+}
+
 export default function DeployLogsList() {
   const router = useRouter();
   const { uuid, name } = router.query;
@@ -72,6 +89,10 @@ export default function DeployLogsList() {
   const [loadingJob, setLoadingJob] = useState(false);
   
   const [showTimestamps, setShowTimestamps] = useState(true);
+  
+  const [events, setEvents] = useState<K8sEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
   
   const isMountedRef = useRef(true);
   const logContainerRef = useRef<HTMLDivElement>(null);
@@ -99,18 +120,16 @@ export default function DeployLogsList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uuid, name]);
 
+  // Lightweight polling to check for new jobs only
   useEffect(() => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
     }
 
-    const hasActiveJob = selectedJob?.status === 'Active' || deployments.some(d => d.status === 'Active');
-    
-    if (hasActiveJob) {
-      pollingIntervalRef.current = setInterval(() => {
-        fetchDeployments(true);
-      }, 5000);
-    }
+    // Poll every 3 seconds to check for new jobs
+    pollingIntervalRef.current = setInterval(() => {
+      fetchDeployments(true); // silent fetch - no loading state
+    }, 3000);
 
     return () => {
       if (pollingIntervalRef.current) {
@@ -118,7 +137,8 @@ export default function DeployLogsList() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedJob, deployments, uuid, name]);
+  }, [uuid, name]);
+
 
   useEffect(() => {
     if (logContainerRef.current) {
@@ -147,7 +167,8 @@ export default function DeployLogsList() {
         const updatedJob = response.data.deployments.find(d => d.jobName === selectedJob.jobName);
         if (updatedJob && updatedJob.status !== selectedJob.status) {
           setSelectedJob(updatedJob);
-          if (selectedJob.status === 'Active' && updatedJob.status !== 'Active') {
+          if ((selectedJob.status === 'Active' || selectedJob.status === 'Pending') && 
+              (updatedJob.status === 'Complete' || updatedJob.status === 'Failed')) {
             fetchJobInfo(updatedJob);
           }
         }
@@ -177,8 +198,9 @@ export default function DeployLogsList() {
       setJobInfo(response.data);
       
       if (response.data.status !== 'NotFound' && response.data.status !== job.status) {
-        if (response.data.status === 'Active' || response.data.status === 'Complete' || response.data.status === 'Failed') {
-          const validStatus = response.data.status as 'Active' | 'Complete' | 'Failed';
+        if (response.data.status === 'Active' || response.data.status === 'Complete' || 
+            response.data.status === 'Failed' || response.data.status === 'Pending') {
+          const validStatus = response.data.status as DeploymentJobInfo['status'];
           setSelectedJob(prev => prev ? { ...prev, status: validStatus } : prev);
           setDeployments(prev => prev.map(d => 
             d.jobName === job.jobName ? { ...d, status: validStatus } : d
@@ -188,17 +210,40 @@ export default function DeployLogsList() {
 
       if (response.data.status === 'NotFound') {
         setError(response.data.error || 'Job not found');
-      } else if (response.data.containers && response.data.containers.length > 0) {
-        const mainContainer = response.data.containers.find(c => c.name === 'helm-deploy') ||
-                            response.data.containers.find(c => !c.name.includes('init')) ||
-                            response.data.containers[0];
-        setActiveContainer(mainContainer.name);
+      } else {
+        // Always fetch events for any job
+        fetchJobEvents(job.jobName);
+        
+        if (response.data.containers && response.data.containers.length > 0) {
+          const mainContainer = response.data.containers.find(c => c.name === 'helm-deploy') ||
+                              response.data.containers.find(c => !c.name.includes('init')) ||
+                              response.data.containers[0];
+          setActiveContainer(mainContainer.name);
+        }
       }
     } catch (err: any) {
       console.error('Error fetching job info:', err);
       setError(err.response?.data?.error || err.message || 'Failed to fetch job information');
     } finally {
       setLoadingJob(false);
+    }
+  };
+
+  const fetchJobEvents = async (jobName: string) => {
+    try {
+      setEventsLoading(true);
+      setEventsError(null);
+      
+      const response = await axios.get<{ events: K8sEvent[] }>(
+        `/api/v1/builds/${uuid}/jobs/${jobName}/events`
+      );
+      
+      setEvents(response.data.events);
+    } catch (err: any) {
+      console.error('Error fetching job events:', err);
+      setEventsError(err.response?.data?.error || err.message || 'Failed to fetch events');
+    } finally {
+      setEventsLoading(false);
     }
   };
 
@@ -314,7 +359,7 @@ export default function DeployLogsList() {
   }, [jobInfo, showTimestamps]);
 
   useEffect(() => {
-    if (activeContainer && jobInfo?.websocket) {
+    if (activeContainer && activeContainer !== 'events' && jobInfo?.websocket) {
       connectToContainer(activeContainer);
     }
   }, [activeContainer, jobInfo, connectToContainer]);
@@ -326,6 +371,8 @@ export default function DeployLogsList() {
     setLogsByContainer({});
     setJobInfo(null);
     setActiveContainer('');
+    setEvents([]);
+    setEventsError(null);
     
     await fetchJobInfo(job);
   };
@@ -349,6 +396,8 @@ export default function DeployLogsList() {
         return '#10b981';
       case 'Active':
         return '#3b82f6';
+      case 'Pending':
+        return '#f59e0b';
       default:
         return '#6b7280';
     }
@@ -361,6 +410,8 @@ export default function DeployLogsList() {
           return '#fee2e2';
         case 'Complete':
           return '#d1fae5';
+        case 'Pending':
+          return '#fef3c7';
         default:
           return '#f3f4f6';
       }
@@ -370,6 +421,8 @@ export default function DeployLogsList() {
           return '#fef2f2';
         case 'Complete':
           return '#f0fdf4';
+        case 'Pending':
+          return '#fffbeb';
         default:
           return 'transparent';
       }
@@ -382,8 +435,21 @@ export default function DeployLogsList() {
         return '#fee2e2';
       case 'Complete':
         return '#d1fae5';
+      case 'Pending':
+        return '#fef3c7';
       default:
         return '#f9fafb';
+    }
+  };
+
+  const getStatusText = (status: DeploymentJobInfo['status']) => {
+    switch (status) {
+      case 'Active':
+        return 'Deploying';
+      case 'Pending':
+        return 'Pending';
+      default:
+        return status;
     }
   };
 
@@ -473,7 +539,7 @@ export default function DeployLogsList() {
                             fontWeight: 500,
                             color: getStatusColor(deployment.status)
                           }}>
-                            {deployment.status === 'Active' ? 'Deploying' : deployment.status}
+                            {getStatusText(deployment.status)}
                           </span>
                         </div>
                       </td>
@@ -525,6 +591,12 @@ export default function DeployLogsList() {
                     <LoadingSpinner size={24} />
                     <span style={{ marginLeft: '12px' }}>Loading logs...</span>
                   </div>
+                ) : activeContainer === 'events' ? (
+                  <EventsViewer
+                    events={events}
+                    loading={eventsLoading}
+                    error={eventsError}
+                  />
                 ) : (
                   <LogViewer
                     logs={logsByContainer[activeContainer] || []}

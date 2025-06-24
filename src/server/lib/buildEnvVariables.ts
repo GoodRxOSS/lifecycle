@@ -140,7 +140,8 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
       const deploys = build?.deploys;
       const availableEnv = this.cleanup(await this.availableEnvironmentVariablesForBuild(build));
 
-      const useDeafulttUUID = !build?.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
+      const useDeafulttUUID =
+        !Array.isArray(build?.enabledFeatures) || !build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
       const promises = deploys.map(async (deploy) => {
         await deploy
           .$query()

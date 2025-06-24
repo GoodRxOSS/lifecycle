@@ -43,6 +43,7 @@ const ALLOWED_PROPERTIES = [
   'UUID',
   'internalHostname',
   'dockerImage',
+  'initDockerImage',
   'sha',
   'namespace',
 ];
@@ -95,7 +96,10 @@ export abstract class EnvironmentVariables {
               } else if (prop === 'publicUrl') {
                 propValue = deploy.deployable.defaultPublicUrl;
               } else if (prop === 'internalHostname') {
-                if (build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)) {
+                if (
+                  Array.isArray(build?.enabledFeatures) &&
+                  build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)
+                ) {
                   propValue = NO_DEFAULT_ENV_UUID;
                 } else {
                   propValue = deploy.deployable.defaultInternalHostname;
@@ -204,7 +208,7 @@ export abstract class EnvironmentVariables {
     availableEnv = await this.buildEnvironmentVariableDictionary(deploys, build.uuid, build.enableFullYaml, build, {
       buildUUID: build.uuid,
       buildSHA: build.sha,
-      pullRequestNumber: build.pullRequest.pullRequestNumber,
+      pullRequestNumber: build.pullRequest?.pullRequestNumber,
       namespace: build.namespace,
     });
 
@@ -345,7 +349,10 @@ export abstract class EnvironmentVariables {
         // we have to figure out if its an active service to decide on what namespace to use
         // hackity hack, if data[captureGroup] does not contain the buildUUID, then its an inactive service!!!
         // inactive service default to static env so find that namespace to render in the value.
-        const nsForDeploy = data[captureGroup].includes(data['buildUUID']) ? namespace : staticEnvNamespace;
+        const nsForDeploy =
+          data[captureGroup] && typeof data[captureGroup] === 'string' && data[captureGroup].includes(data['buildUUID'])
+            ? namespace
+            : staticEnvNamespace;
         if (captureGroup.includes('_internalHostname')) {
           template = template.replace(
             fullMatch,

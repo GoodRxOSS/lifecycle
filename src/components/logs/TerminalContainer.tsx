@@ -66,39 +66,57 @@ export function TerminalContainer({
         </label>
       </div>
 
-      {containers && containers.length > 0 && (
-        <div style={{ 
-          backgroundColor: '#2d2d2d',
-          display: 'flex',
-          borderBottom: '1px solid #444'
-        }}>
-          {containers.map((container) => (
-            <button
-              key={container.name}
-              onClick={() => onTabChange(container.name)}
-              style={{
-                padding: '10px 16px',
-                backgroundColor: activeContainer === container.name ? '#1a1a1a' : 'transparent',
-                color: activeContainer === container.name ? '#fff' : '#999',
-                border: 'none',
-                borderBottom: activeContainer === container.name ? '2px solid #3b82f6' : '2px solid transparent',
-                fontSize: '13px',
-                fontWeight: 500,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                transition: 'all 0.15s'
-              }}
-            >
-              {getContainerDisplayName(container.name)}
-              {connectingContainers.includes(container.name) && (
-                <LoadingSpinner size={12} />
-              )}
-            </button>
-          ))}
-        </div>
-      )}
+      <div style={{ 
+        backgroundColor: '#2d2d2d',
+        display: 'flex',
+        borderBottom: '1px solid #444'
+      }}>
+        {containers && containers.map((container) => (
+          <button
+            key={container.name}
+            onClick={() => onTabChange(container.name)}
+            style={{
+              padding: '10px 16px',
+              backgroundColor: activeContainer === container.name ? '#1a1a1a' : 'transparent',
+              color: activeContainer === container.name ? '#fff' : '#999',
+              border: 'none',
+              borderBottom: activeContainer === container.name ? '2px solid #3b82f6' : '2px solid transparent',
+              fontSize: '13px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              transition: 'all 0.15s'
+            }}
+          >
+            {getContainerDisplayName(container.name)}
+            {connectingContainers.includes(container.name) && (
+              <LoadingSpinner size={12} />
+            )}
+          </button>
+        ))}
+        <button
+          onClick={() => onTabChange('events')}
+          style={{
+            padding: '10px 16px',
+            backgroundColor: activeContainer === 'events' ? '#1a1a1a' : 'transparent',
+            color: activeContainer === 'events' ? '#fff' : '#999',
+            border: 'none',
+            borderBottom: activeContainer === 'events' ? '2px solid #3b82f6' : '2px solid transparent',
+            fontSize: '13px',
+            fontWeight: 500,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            transition: 'all 0.15s',
+            marginLeft: 'auto'
+          }}
+        >
+          Job Events
+        </button>
+      </div>
 
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         {children}

@@ -384,6 +384,7 @@ describe('EnvironmentVariables', () => {
         bad______web_UUID: 'chonkey-monkey-dev-0',
         bad______web_branchName: '',
         bad______web_dockerImage: '',
+        bad______web_initDockerImage: '',
         bad______web_internalHostname: 'chonkey-monkey-dev-0',
         bad______web_ipAddress: '',
         bad______web_namespace: '',
@@ -392,6 +393,7 @@ describe('EnvironmentVariables', () => {
         bond_branchName: null,
         bond_UUID: 'mock-test-12345',
         bond_dockerImage: null,
+        bond_initDockerImage: undefined,
         bond_internalHostname: 'bond-sun-rise-212340',
         bond_ipAddress: null,
         bond_namespace: undefined,
@@ -400,6 +402,7 @@ describe('EnvironmentVariables', () => {
         web______frontend_branchName: 'master',
         web______frontend_UUID: 'mock-test-12345',
         web______frontend_dockerImage: null,
+        web______frontend_initDockerImage: undefined,
         web______frontend_internalHostname: 'wf-black-hat-305104',
         web______frontend_ipAddress: null,
         web______frontend_namespace: undefined,
@@ -408,6 +411,7 @@ describe('EnvironmentVariables', () => {
         fastly_branchName: 'main',
         fastly_UUID: 'mock-test-12345',
         fastly_dockerImage: null,
+        fastly_initDockerImage: undefined,
         fastly_internalHostname: 'fastly-mock-test-12345.fastly.lifecycle.dev.example.com',
         fastly_ipAddress: null,
         fastly_namespace: undefined,
@@ -416,6 +420,7 @@ describe('EnvironmentVariables', () => {
         good______web_branchName: '',
         good______web_UUID: 'dev-0',
         good______web_dockerImage: '',
+        good______web_initDockerImage: '',
         good______web_internalHostname: 'good-web-pool-fun-234007',
         good______web_ipAddress: '',
         good______web_namespace: '',
@@ -424,6 +429,7 @@ describe('EnvironmentVariables', () => {
         mdb______app_branchName: 'master',
         mdb______app_UUID: 'mock-test-12345',
         mdb______app_dockerImage: null,
+        mdb______app_initDockerImage: undefined,
         mdb______app_internalHostname: 'web-mdb-app-mock-test-12345.lifecycle.dev.example.com',
         mdb______app_ipAddress: null,
         mdb______app_namespace: undefined,
@@ -432,6 +438,7 @@ describe('EnvironmentVariables', () => {
         nginx_branchName: null,
         nginx_UUID: 'mock-test-12345',
         nginx_dockerImage: 'nginx:latest',
+        nginx_initDockerImage: undefined,
         nginx_internalHostname: 'nginx-foo-bar-307777',
         nginx_ipAddress: null,
         nginx_namespace: undefined,
@@ -460,6 +467,7 @@ describe('EnvironmentVariables', () => {
         bad______web_UUID: 'chonkey-monkey-dev-0',
         bad______web_branchName: '',
         bad______web_dockerImage: '',
+        bad______web_initDockerImage: '',
         bad______web_internalHostname: 'chonkey-monkey-dev-0',
         bad______web_ipAddress: '',
         bad______web_namespace: '',
@@ -468,6 +476,7 @@ describe('EnvironmentVariables', () => {
         bond_branchName: null,
         bond_UUID: 'mock-test-12345',
         bond_dockerImage: null,
+        bond_initDockerImage: undefined,
         bond_internalHostname: 'bond-sun-rise-212340',
         bond_ipAddress: null,
         bond_namespace: undefined,
@@ -476,6 +485,7 @@ describe('EnvironmentVariables', () => {
         web______frontend_branchName: 'master',
         web______frontend_UUID: 'mock-test-12345',
         web______frontend_dockerImage: null,
+        web______frontend_initDockerImage: undefined,
         web______frontend_internalHostname: 'wf-black-hat-305104',
         web______frontend_ipAddress: null,
         web______frontend_namespace: undefined,
@@ -484,6 +494,7 @@ describe('EnvironmentVariables', () => {
         fastly_branchName: 'main',
         fastly_UUID: 'mock-test-12345',
         fastly_dockerImage: null,
+        fastly_initDockerImage: undefined,
         fastly_internalHostname: 'fastly-mock-test-12345.fastly.lifecycle.dev.example.com',
         fastly_ipAddress: null,
         fastly_namespace: undefined,
@@ -492,6 +503,7 @@ describe('EnvironmentVariables', () => {
         good______web_branchName: '',
         good______web_UUID: 'dev-0',
         good______web_dockerImage: '',
+        good______web_initDockerImage: '',
         good______web_internalHostname: 'good-web-pool-fun-234007',
         good______web_ipAddress: '',
         good______web_namespace: '',
@@ -500,6 +512,7 @@ describe('EnvironmentVariables', () => {
         mdb______app_branchName: 'master',
         mdb______app_UUID: 'mock-test-12345',
         mdb______app_dockerImage: null,
+        mdb______app_initDockerImage: undefined,
         mdb______app_internalHostname: 'web-mdb-app-mock-test-12345.lifecycle.dev.example.com',
         mdb______app_ipAddress: null,
         mdb______app_namespace: undefined,
@@ -508,6 +521,7 @@ describe('EnvironmentVariables', () => {
         nginx_branchName: null,
         nginx_UUID: 'mock-test-12345',
         nginx_dockerImage: 'nginx:latest',
+        nginx_initDockerImage: undefined,
         nginx_internalHostname: 'nginx-foo-bar-307777',
         nginx_ipAddress: null,
         nginx_namespace: undefined,
@@ -600,6 +614,19 @@ describe('EnvironmentVariables', () => {
       expect(
         await envVariables.compileEnvironmentWithAvailableEnvironment(buildArgs, availableVars, false, 'testns')
       ).toEqual(result);
+    });
+
+    test('template with initDockerImage variable', async () => {
+      const buildArgs: string = '{"APP_IMAGE":"{{nginx_dockerImage}}","INIT_IMAGE":"{{nginx_initDockerImage}}"}';
+      const availableVarsWithInit = {
+        ...availableVars,
+        nginx_dockerImage: 'nginx:latest',
+        nginx_initDockerImage: 'busybox:1.35',
+      };
+
+      expect(
+        await envVariables.compileEnvironmentWithAvailableEnvironment(buildArgs, availableVarsWithInit, false, 'testns')
+      ).toEqual('{"APP_IMAGE":"nginx:latest","INIT_IMAGE":"busybox:1.35"}');
     });
   });
 });

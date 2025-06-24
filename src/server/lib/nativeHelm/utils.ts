@@ -20,7 +20,11 @@ import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_
 import { mergeKeyValueArrays, getResourceType } from 'shared/utils';
 import { merge } from 'lodash';
 import { renderTemplate, generateTolerationsCustomValues, generateNodeSelector } from 'server/lib/helm/utils';
-import { createOrUpdateServiceAccount } from 'server/lib/kubernetes';
+import {
+  createServiceAccountUsingExistingFunction,
+  setupDeployServiceAccountInNamespace,
+} from 'server/lib/kubernetes/rbac';
+import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
 import rootLogger from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 
@@ -79,7 +83,9 @@ export async function killHelmJobsAndPods(releaseName: string, namespace: string
   logger.info(`[HELM ${releaseName}] Checking for existing helm jobs`);
 
   try {
-    const existingJobs = await shellPromise(`kubectl get jobs -n ${namespace} -l lc-uuid=${releaseName} -o json`);
+    const existingJobs = await shellPromise(
+      `kubectl get jobs -n ${namespace} -l lc-uuid=${releaseName},app.kubernetes.io/name=native-helm -o json`
+    );
     const jobsData = JSON.parse(existingJobs);
 
     if (jobsData.items && jobsData.items.length > 0) {
@@ -346,6 +352,18 @@ export async function mergeHelmConfigWithGlobal(deploy: Deploy): Promise<any> {
     return helm;
   }
 
+  // Use builder pattern for cleaner configuration merging
+  const builder = new HelmConfigBuilder(helm);
+
+  // Apply global config with proper precedence
+  if (globalConfig.version && !helm.version) {
+    builder.set('helmVersion', globalConfig.version);
+  }
+  if (globalConfig.args && !helm.args) {
+    builder.set('args', globalConfig.args);
+  }
+
+  // Build merged config with original structure
   const mergedConfig = {
     ...helm,
 
@@ -405,15 +423,8 @@ export async function setupServiceAccountInNamespace(
   serviceAccountName: string,
   role: string
 ): Promise<void> {
-  await createOrUpdateServiceAccount({ namespace, role });
-
-  await createNamespacedRoleAndBinding(namespace, serviceAccountName);
-
-  if (serviceAccountName !== 'default') {
-    logger.info(`[NS ${namespace}] Creating RBAC for default service account`);
-    await createNamespacedRoleAndBinding(namespace, 'default');
-  }
-
+  await createServiceAccountUsingExistingFunction(namespace, serviceAccountName, role);
+  await setupDeployServiceAccountInNamespace(namespace, serviceAccountName, role);
   logger.info(`[RBAC] Setup complete for '${serviceAccountName}' in ${namespace}`);
 }
 

@@ -1,8 +1,7 @@
-import { buildkitBuild, BuildkitBuildOptions } from '../buildkit';
+import { buildkitBuild, BuildkitBuildOptions } from '../engines';
 import { shellPromise } from '../../shell';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
-import { Deploy } from '../../../models';
 
 // Mock dependencies
 jest.mock('../../shell');
@@ -13,10 +12,21 @@ jest.mock('../utils', () => {
     getGitHubToken: jest.fn(),
     createBuildJobManifest: actual.createBuildJobManifest,
     createGitCloneContainer: actual.createGitCloneContainer,
+    createRepoSpecificGitCloneContainer: actual.createRepoSpecificGitCloneContainer,
+    getBuildLabels: actual.getBuildLabels,
+    getBuildAnnotations: actual.getBuildAnnotations,
     DEFAULT_BUILD_RESOURCES: actual.DEFAULT_BUILD_RESOURCES,
   };
 });
 jest.mock('../../../services/globalConfig');
+jest.mock('../../../models', () => ({
+  Build: {
+    query: jest.fn().mockReturnValue({
+      findById: jest.fn().mockResolvedValue({ isStatic: false }),
+    }),
+  },
+  Deploy: {},
+}));
 jest.mock('../../logger', () => {
   const mockLogger = {
     info: jest.fn(),
@@ -39,7 +49,9 @@ jest.mock('../../logger', () => {
 describe('buildkitBuild', () => {
   const mockDeploy = {
     deployable: { name: 'test-service' },
-  } as Deploy;
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
 
   const mockOptions: BuildkitBuildOptions = {
     ecrRepo: 'test-repo',
@@ -95,7 +107,7 @@ describe('buildkitBuild', () => {
 
     expect(result.success).toBe(true);
     expect(result.logs).toBe('Build completed successfully');
-    expect(result.jobName).toMatch(/^test-service-abc123-buildkit-[a-z0-9]{5}-abc123d$/);
+    expect(result.jobName).toMatch(/^test-service-abc123-build-[a-z0-9]{5}-abc123d$/);
 
     // Verify kubectl apply was called
     const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
@@ -116,8 +128,8 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    // Check cache uses the destination image
-    expect(fullCommand).toContain('ref=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:v1.0.0');
+    // Check cache uses repo cache
+    expect(fullCommand).toContain('ref=123456789.dkr.ecr.us-east-1.amazonaws.com/repo:cache');
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');
@@ -184,8 +196,8 @@ describe('buildkitBuild', () => {
   it('uses correct job naming pattern', async () => {
     const result = await buildkitBuild(mockDeploy, mockOptions);
 
-    // Job name should follow pattern: {deployUuid}-buildkit-{jobId}-{shortSha}
-    expect(result.jobName).toMatch(/^test-service-abc123-buildkit-[a-z0-9]{5}-abc123d$/);
+    // Job name should follow pattern: {deployUuid}-build-{jobId}-{shortSha}
+    expect(result.jobName).toMatch(/^test-service-abc123-build-[a-z0-9]{5}-abc123d$/);
     expect(result.jobName.length).toBeLessThanOrEqual(63); // Kubernetes name limit
   });
 

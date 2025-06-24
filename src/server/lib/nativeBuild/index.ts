@@ -2,10 +2,9 @@ import { Deploy } from '../../models';
 import logger from '../logger';
 import GlobalConfigService from '../../services/globalConfig';
 import { ensureNamespaceExists, setupBuildServiceAccountInNamespace } from './utils';
-import { buildkitBuild, BuildkitBuildOptions } from './buildkit';
-import { kanikoBuild, KanikoBuildOptions } from './kaniko';
+import { buildWithEngine, NativeBuildOptions } from './engines';
 
-export type NativeBuildOptions = BuildkitBuildOptions | KanikoBuildOptions;
+export { NativeBuildOptions } from './engines';
 
 export interface NativeBuildResult {
   success: boolean;
@@ -33,19 +32,11 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
     // Route to appropriate builder - both buildkit and kaniko now handle init builds internally
     let result: NativeBuildResult;
 
-    switch (builderEngine) {
-      case 'buildkit':
-        logger.info(`[Native Build] Using buildkit engine for ${options.deployUuid}`);
-        result = await buildkitBuild(deploy, options as BuildkitBuildOptions);
-        break;
-
-      case 'kaniko':
-        logger.info(`[Native Build] Using kaniko engine for ${options.deployUuid}`);
-        result = await kanikoBuild(deploy, options as KanikoBuildOptions);
-        break;
-
-      default:
-        throw new Error(`Unsupported builder engine: ${builderEngine}`);
+    if (builderEngine === 'buildkit' || builderEngine === 'kaniko') {
+      logger.info(`[Native Build] Using ${builderEngine} engine for ${options.deployUuid}`);
+      result = await buildWithEngine(deploy, options, builderEngine);
+    } else {
+      throw new Error(`Unsupported builder engine: ${builderEngine}`);
     }
 
     const duration = Date.now() - startTime;

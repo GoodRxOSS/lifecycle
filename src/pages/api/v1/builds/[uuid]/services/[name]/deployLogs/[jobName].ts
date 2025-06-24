@@ -9,7 +9,7 @@ const logger = rootLogger.child({
 });
 
 interface DeployLogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound';
+  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
   websocket?: {
     endpoint: string;
     parameters: {
@@ -31,7 +31,7 @@ async function getJobStatus(
   jobName: string,
   namespace: string
 ): Promise<{
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound';
+  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
   podName?: string;
   error?: string;
 }> {
@@ -44,7 +44,7 @@ async function getJobStatus(
     const jobResponse = await batchV1Api.readNamespacedJob(jobName, namespace);
     const job = jobResponse.body;
 
-    let status: 'Active' | 'Complete' | 'Failed' = 'Active';
+    let status: 'Active' | 'Complete' | 'Failed' | 'Pending' = 'Active';
     let error: string | undefined;
 
     if (job.status?.succeeded && job.status.succeeded > 0) {
@@ -53,6 +53,8 @@ async function getJobStatus(
       status = 'Failed';
       const failedCondition = job.status.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
       error = failedCondition?.message || 'Job failed';
+    } else if (!job.status?.active && !job.status?.succeeded && !job.status?.failed) {
+      status = 'Pending';
     }
 
     let podName: string | undefined;
@@ -132,7 +134,7 @@ const deployLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse)
         parameters: {
           podName,
           namespace,
-          follow: status === 'Active',
+          follow: status === 'Active' || status === 'Pending',
           timestamps: true,
         },
       },

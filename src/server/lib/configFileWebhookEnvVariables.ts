@@ -31,14 +31,7 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
    * @returns Environment variables key/value pairs per deploy
    */
   private async fetchEnvironmentVariablesFromWebhook(webhook: Webhook): Promise<Record<string, any>> {
-    let result: Record<string, string> = {};
-
-    if (webhook.env != null) {
-      // eslint-disable-next-line no-unused-vars
-      result = webhook.env;
-    }
-
-    return webhook.env;
+    return webhook.env || {};
   }
 
   /**
@@ -51,7 +44,8 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
     if (build != null) {
       await build?.$fetchGraph('[services, deploys.service.repository]');
       const availableEnv = this.cleanup(await this.availableEnvironmentVariablesForBuild(build));
-      const useDefaultUUID = !build?.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
+      const useDefaultUUID =
+        !Array.isArray(build?.enabledFeatures) || !build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
 
       result = this.parseTemplateData(
         await this.compileEnv(

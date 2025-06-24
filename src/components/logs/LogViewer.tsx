@@ -63,10 +63,9 @@ export function formatLogLine(line: string, showTimestamps: boolean = true): Rea
       style={{
         display: 'flex',
         alignItems: 'flex-start',
-        padding: '4px 0',
+        padding: '1px 0',
         borderRadius: '4px',
         backgroundColor: 'transparent',
-        margin: '1px 0',
       }}
     >
       {timestamp && showTimestamps && (
@@ -89,7 +88,7 @@ export function formatLogLine(line: string, showTimestamps: boolean = true): Rea
           color: logLevel?.color || '#e5e5e5',
           wordBreak: 'break-word',
           flex: 1,
-          lineHeight: '1.5',
+          lineHeight: '1.4',
           whiteSpace: 'pre-wrap',
           fontFamily: 'inherit',
         }}
@@ -167,20 +166,11 @@ export function LogViewer({ logs, isConnecting, containerRef, showTimestamps }: 
         boxSizing: 'border-box'
       }}
     >
-      {logs.map((log, index, array) => {
+      {logs.map((log, index) => {
         const formatted = formatLogLine(log, showTimestamps);
         if (!formatted) return null;
         
-        return (
-          <div 
-            key={index} 
-            style={{ 
-              marginBottom: index === array.length - 1 ? '20px' : '0' 
-            }}
-          >
-            {formatted}
-          </div>
-        );
+        return <React.Fragment key={index}>{formatted}</React.Fragment>;
       })}
     </div>
   );

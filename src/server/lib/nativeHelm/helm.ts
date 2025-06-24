@@ -38,7 +38,6 @@ import {
   ChartType,
   determineChartType,
   getHelmConfiguration,
-  createHelmJob,
   generateHelmInstallScript,
   setupServiceAccountInNamespace,
   validateHelmConfiguration,
@@ -52,6 +51,7 @@ import {
   GIT_USERNAME,
   MANIFEST_PATH,
 } from 'server/lib/nativeBuild/utils';
+import { createHelmJob as createHelmJobFromFactory } from 'server/lib/kubernetes/jobFactory';
 
 const logger = rootLogger.child({
   filename: 'lib/nativeHelm/helm.ts',
@@ -165,7 +165,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
   };
 
   const shortSha = deploy.sha ? deploy.sha.substring(0, 7) : 'no-sha';
-  let jobName = `${deploy.uuid}-helm-${jobId}-${shortSha}`.substring(0, 63);
+  let jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   if (jobName.endsWith('-')) {
     jobName = jobName.slice(0, -1);
   }
@@ -177,20 +177,20 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     deployableId: deploy.deployableId.toString(),
   };
 
-  const job = createHelmJob(
-    jobName,
-    options.namespace,
-    GIT_USERNAME,
+  const job = createHelmJobFromFactory({
+    name: jobName,
+    namespace: options.namespace,
+    serviceAccount: serviceAccountName,
+    serviceName: deploy.deployable.name,
+    isStatic: build.isStatic,
+    gitUsername: GIT_USERNAME,
     gitToken,
     cloneScript,
-    [helmContainer],
-    volumeConfig,
-    build.isStatic,
-    serviceAccountName,
-    deploy.deployable.name,
+    containers: [helmContainer],
+    volumes: volumeConfig.volumes,
     deployMetadata,
-    shouldIncludeGitClone
-  );
+    includeGitClone: shouldIncludeGitClone,
+  });
 
   return yaml.dump(job);
 }
@@ -215,7 +215,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   const manifest = await generateHelmManifest(deploy, jobId, options);
 
   const shortSha = deploy.sha ? deploy.sha.substring(0, 7) : 'no-sha';
-  let jobName = `${deploy.uuid}-helm-${jobId}-${shortSha}`.substring(0, 63);
+  let jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   if (jobName.endsWith('-')) {
     jobName = jobName.slice(0, -1);
   }
