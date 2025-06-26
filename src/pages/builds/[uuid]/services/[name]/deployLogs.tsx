@@ -12,7 +12,8 @@ import {
   LogViewer,
   formatDuration,
   formatTimestamp,
-  EventsViewer
+  EventsViewer,
+  DeploymentDetailsViewer
 } from '../../../../../components/logs';
 
 interface DeploymentJobInfo {
@@ -25,6 +26,7 @@ interface DeploymentJobInfo {
   duration?: number;
   error?: string;
   podName?: string;
+  deploymentType?: 'helm' | 'github';
 }
 
 interface DeployLogsListResponse {
@@ -72,6 +74,23 @@ interface K8sEvent {
   };
 }
 
+interface HelmDeploymentDetails {
+  type: 'helm';
+  releaseName: string;
+  chart: string;
+  version?: string;
+  values: Record<string, any>;
+  manifest?: string;
+}
+
+interface GitHubDeploymentDetails {
+  type: 'github';
+  manifestConfigMap: string;
+  manifest: string;
+}
+
+type DeploymentDetails = HelmDeploymentDetails | GitHubDeploymentDetails;
+
 export default function DeployLogsList() {
   const router = useRouter();
   const { uuid, name } = router.query;
@@ -93,6 +112,10 @@ export default function DeployLogsList() {
   const [events, setEvents] = useState<K8sEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  
+  const [deploymentDetails, setDeploymentDetails] = useState<DeploymentDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
   
   const isMountedRef = useRef(true);
   const logContainerRef = useRef<HTMLDivElement>(null);
@@ -210,16 +233,16 @@ export default function DeployLogsList() {
 
       if (response.data.status === 'NotFound') {
         setError(response.data.error || 'Job not found');
-      } else {
-        // Always fetch events for any job
-        fetchJobEvents(job.jobName);
-        
-        if (response.data.containers && response.data.containers.length > 0) {
-          const mainContainer = response.data.containers.find(c => c.name === 'helm-deploy') ||
-                              response.data.containers.find(c => !c.name.includes('init')) ||
-                              response.data.containers[0];
-          setActiveContainer(mainContainer.name);
-        }
+        return;
+      }
+      
+      fetchJobEvents(job.jobName);
+      
+      if (response.data.containers && response.data.containers.length > 0) {
+        const mainContainer = response.data.containers.find(c => c.name === 'helm-deploy') ||
+                            response.data.containers.find(c => !c.name.includes('init')) ||
+                            response.data.containers[0];
+        setActiveContainer(mainContainer.name);
       }
     } catch (err: any) {
       console.error('Error fetching job info:', err);
@@ -244,6 +267,30 @@ export default function DeployLogsList() {
       setEventsError(err.response?.data?.error || err.message || 'Failed to fetch events');
     } finally {
       setEventsLoading(false);
+    }
+  };
+
+  const fetchDeploymentDetails = async () => {
+    try {
+      setDetailsLoading(true);
+      setDetailsError(null);
+      setDeploymentDetails(null);
+      
+      const response = await axios.get<DeploymentDetails>(
+        `/api/v1/builds/${uuid}/services/${name}/deployment`
+      );
+      
+      setDeploymentDetails(response.data);
+    } catch (err: any) {
+      console.error('Error fetching deployment details:', err);
+      const errorMessage = err.response?.data?.error || err.message || 'Failed to fetch deployment details';
+      setDetailsError(errorMessage);
+      
+      if (err.response?.status !== 404) {
+        console.error('Unexpected error fetching deployment details:', err);
+      }
+    } finally {
+      setDetailsLoading(false);
     }
   };
 
@@ -359,7 +406,7 @@ export default function DeployLogsList() {
   }, [jobInfo, showTimestamps]);
 
   useEffect(() => {
-    if (activeContainer && activeContainer !== 'events' && jobInfo?.websocket) {
+    if (activeContainer && activeContainer !== 'events' && activeContainer !== 'details' && jobInfo?.websocket) {
       connectToContainer(activeContainer);
     }
   }, [activeContainer, jobInfo, connectToContainer]);
@@ -373,8 +420,13 @@ export default function DeployLogsList() {
     setActiveContainer('');
     setEvents([]);
     setEventsError(null);
+    setDeploymentDetails(null);
+    setDetailsError(null);
     
-    await fetchJobInfo(job);
+    await Promise.all([
+      fetchJobInfo(job),
+      fetchDeploymentDetails()
+    ]);
   };
 
   const handleTabChange = (containerName: string) => {
@@ -459,6 +511,7 @@ export default function DeployLogsList() {
       title="Deploy Logs"
       serviceName={name as string}
       environmentId={uuid as string}
+      deploymentType={selectedJob?.deploymentType}
     >
       {error && !selectedJob && <ErrorAlert error={error} />}
 
@@ -579,6 +632,7 @@ export default function DeployLogsList() {
                 getContainerDisplayName={getContainerDisplayName}
                 showTimestamps={showTimestamps}
                 onTimestampsToggle={() => setShowTimestamps(!showTimestamps)}
+                showDetailsTab={true}
               >
                 {loadingJob ? (
                   <div style={{ 
@@ -596,6 +650,12 @@ export default function DeployLogsList() {
                     events={events}
                     loading={eventsLoading}
                     error={eventsError}
+                  />
+                ) : activeContainer === 'details' ? (
+                  <DeploymentDetailsViewer
+                    details={deploymentDetails}
+                    loading={detailsLoading}
+                    error={detailsError}
                   />
                 ) : (
                   <LogViewer

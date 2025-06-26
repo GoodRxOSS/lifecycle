@@ -222,6 +222,8 @@ describe('Deployable Service', () => {
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
         kedaScaleToZero: null,
+        deploymentDependsOn: [],
+        helm: undefined,
       });
     });
 
@@ -381,6 +383,8 @@ describe('Deployable Service', () => {
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
+        deploymentDependsOn: [],
+        helm: undefined,
       });
     });
   });

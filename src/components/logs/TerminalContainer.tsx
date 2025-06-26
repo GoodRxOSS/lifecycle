@@ -18,6 +18,7 @@ interface TerminalContainerProps {
   children: React.ReactNode;
   showTimestamps: boolean;
   onTimestampsToggle: () => void;
+  showDetailsTab?: boolean;
 }
 
 export function TerminalContainer({
@@ -29,7 +30,8 @@ export function TerminalContainer({
   getContainerDisplayName,
   children,
   showTimestamps,
-  onTimestampsToggle
+  onTimestampsToggle,
+  showDetailsTab = false
 }: TerminalContainerProps) {
   return (
     <>
@@ -96,6 +98,28 @@ export function TerminalContainer({
             )}
           </button>
         ))}
+        {showDetailsTab && (
+          <button
+            onClick={() => onTabChange('details')}
+            style={{
+              padding: '10px 16px',
+              backgroundColor: activeContainer === 'details' ? '#1a1a1a' : 'transparent',
+              color: activeContainer === 'details' ? '#fff' : '#999',
+              border: 'none',
+              borderBottom: activeContainer === 'details' ? '2px solid #3b82f6' : '2px solid transparent',
+              fontSize: '13px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              transition: 'all 0.15s',
+              marginLeft: 'auto'
+            }}
+          >
+            Details
+          </button>
+        )}
         <button
           onClick={() => onTabChange('events')}
           style={{
@@ -111,7 +135,7 @@ export function TerminalContainer({
             alignItems: 'center',
             gap: '8px',
             transition: 'all 0.15s',
-            marginLeft: 'auto'
+            marginLeft: showDetailsTab ? undefined : 'auto'
           }}
         >
           Job Events

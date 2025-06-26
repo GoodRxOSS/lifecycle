@@ -1,3 +1,19 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
@@ -17,38 +33,61 @@ interface DeploymentJobInfo {
   duration?: number;
   error?: string;
   podName?: string;
+  deploymentType: 'helm' | 'github';
 }
 
 interface DeployLogsListResponse {
   deployments: DeploymentJobInfo[];
 }
 
-async function getHelmDeploymentJobs(serviceName: string, namespace: string): Promise<DeploymentJobInfo[]> {
+async function getDeploymentJobs(serviceName: string, namespace: string): Promise<DeploymentJobInfo[]> {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const batchV1Api = kc.makeApiClient(k8s.BatchV1Api);
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    const labelSelector = `service=${serviceName}`;
-    const jobListResponse = await batchV1Api.listNamespacedJob(
-      namespace,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      labelSelector
-    );
+    // Get both helm and kubernetes apply jobs
+    // Helm jobs have app.kubernetes.io/name=native-helm label
+    // Kubernetes apply jobs have app=lifecycle-deploy,type=kubernetes-apply labels
+    const helmLabelSelector = `app.kubernetes.io/name=native-helm,service=${serviceName}`;
+    const k8sApplyLabelSelector = `app=lifecycle-deploy,type=kubernetes-apply`;
 
-    const jobs = jobListResponse.body.items || [];
+    // Fetch both types of jobs
+    const [helmJobsResponse, k8sJobsResponse] = await Promise.all([
+      batchV1Api.listNamespacedJob(namespace, undefined, undefined, undefined, undefined, helmLabelSelector),
+      batchV1Api.listNamespacedJob(namespace, undefined, undefined, undefined, undefined, k8sApplyLabelSelector),
+    ]);
+
+    const helmJobs = helmJobsResponse.body.items || [];
+    const k8sJobs = k8sJobsResponse.body.items || [];
+
+    // Filter k8s jobs to only include those for this service
+    const relevantK8sJobs = k8sJobs.filter((job) => {
+      // Check by annotation first (most reliable)
+      const annotations = job.metadata?.annotations || {};
+      if (annotations['lifecycle/service-name'] === serviceName) {
+        return true;
+      }
+
+      // Fallback: check the service label (should match exactly)
+      const labels = job.metadata?.labels || {};
+      return labels['service'] === serviceName;
+    });
+
+    const allJobs = [...helmJobs, ...relevantK8sJobs];
     const deploymentJobs: DeploymentJobInfo[] = [];
 
-    for (const job of jobs) {
+    for (const job of allJobs) {
       const jobName = job.metadata?.name || '';
+      const labels = job.metadata?.labels || {};
 
       const nameParts = jobName.split('-');
       const deployUuid = nameParts.slice(0, -3).join('-');
       const sha = nameParts[nameParts.length - 1];
+
+      // Determine deployment type based on labels
+      const deploymentType: 'helm' | 'github' = labels['app.kubernetes.io/name'] === 'native-helm' ? 'helm' : 'github';
 
       let status: DeploymentJobInfo['status'] = 'Active';
       let error: string | undefined;
@@ -107,6 +146,7 @@ async function getHelmDeploymentJobs(serviceName: string, namespace: string): Pr
         duration,
         error,
         podName,
+        deploymentType,
       });
     }
 
@@ -118,11 +158,95 @@ async function getHelmDeploymentJobs(serviceName: string, namespace: string): Pr
 
     return deploymentJobs;
   } catch (error) {
-    logger.error(`Error listing helm deployment jobs for service ${serviceName}:`, error);
+    logger.error(`Error listing deployment jobs for service ${serviceName}:`, error);
     throw error;
   }
 }
 
+/**
+ * @openapi
+ * /api/v1/builds/{uuid}/services/{name}/deployLogs:
+ *   get:
+ *     summary: List deployment jobs for a service
+ *     description: |
+ *       Returns a list of all deployment jobs for a specific service within a build.
+ *       This includes both Helm deployment jobs and GitHub-type deployment jobs.
+ *     tags:
+ *       - Deployments
+ *     parameters:
+ *       - in: path
+ *         name: uuid
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The UUID of the build
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The name of the service
+ *     responses:
+ *       '200':
+ *         description: List of deployment jobs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 deployments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       jobName:
+ *                         type: string
+ *                         description: Kubernetes job name
+ *                         example: deploy-uuid-helm-123-abc123
+ *                       deployUuid:
+ *                         type: string
+ *                         description: Deploy UUID
+ *                         example: deploy-uuid
+ *                       sha:
+ *                         type: string
+ *                         description: Git commit SHA
+ *                         example: abc123
+ *                       status:
+ *                         type: string
+ *                         enum: [Active, Complete, Failed]
+ *                         description: Current status of the deployment job
+ *                       startedAt:
+ *                         type: string
+ *                         format: date-time
+ *                         description: When the job started
+ *                       completedAt:
+ *                         type: string
+ *                         format: date-time
+ *                         description: When the job completed
+ *                       duration:
+ *                         type: number
+ *                         description: Deployment duration in seconds
+ *                       error:
+ *                         type: string
+ *                         description: Error message if job failed
+ *                       podName:
+ *                         type: string
+ *                         description: Name of the pod running the job
+ *                       deploymentType:
+ *                         type: string
+ *                         enum: [helm, github]
+ *                         description: Type of deployment (helm or github)
+ *       '400':
+ *         description: Invalid parameters
+ *       '404':
+ *         description: Environment or service not found
+ *       '405':
+ *         description: Method not allowed
+ *       '502':
+ *         description: Failed to communicate with Kubernetes
+ *       '500':
+ *         description: Internal server error
+ */
 const deployLogsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     logger.warn({ method: req.method }, 'Method not allowed');
@@ -140,7 +264,7 @@ const deployLogsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   try {
     const namespace = `env-${uuid}`;
 
-    const deployments = await getHelmDeploymentJobs(name, namespace);
+    const deployments = await getDeploymentJobs(name, namespace);
 
     const response: DeployLogsListResponse = {
       deployments,

@@ -771,7 +771,7 @@ export default class ActivityStream extends BaseService {
 
   private async hasAnyServiceWithDeployLogs(deploys: Deploy[]): Promise<boolean> {
     for (const deploy of deploys) {
-      if (await this.isNativeHelmDeployment(deploy)) {
+      if ((await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)) {
         return true;
       }
     }
@@ -788,6 +788,12 @@ export default class ActivityStream extends BaseService {
       [DeployTypes.GITHUB, DeployTypes.HELM].includes(deploy.deployable.type) &&
       ['buildkit', 'kaniko'].includes(deploy.deployable.builder?.engine)
     );
+  }
+
+  private isGitHubKubernetesDeployment(deploy: Deploy): boolean {
+    if (!deploy.deployable) return false;
+    const deployType = deploy.deployable.type;
+    return deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType);
   }
 
   /**
@@ -1021,11 +1027,12 @@ export default class ActivityStream extends BaseService {
           )}_ | ${buildLogsColumn} |`;
 
           if (hasDeployLogsColumn) {
-            const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
-              ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                  deploy.deployable?.name || serviceName
-                }/deployLogs)`
-              : '';
+            const deployLogsColumn =
+              (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                    deploy.deployable?.name || serviceName
+                  }/deployLogs)`
+                : '';
             row += ` ${deployLogsColumn} |`;
           }
 
@@ -1040,11 +1047,12 @@ export default class ActivityStream extends BaseService {
             )}_ | ${buildLogsColumn} |`;
 
             if (hasDeployLogsColumn) {
-              const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
-                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                    deploy.deployable?.name || serviceName
-                  }/deployLogs)`
-                : '';
+              const deployLogsColumn =
+                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                      deploy.deployable?.name || serviceName
+                    }/deployLogs)`
+                  : '';
               row += ` ${deployLogsColumn} |`;
             }
 
@@ -1053,11 +1061,12 @@ export default class ActivityStream extends BaseService {
             let row = `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ ||`;
 
             if (hasDeployLogsColumn) {
-              const deployLogsColumn = (await this.isNativeHelmDeployment(deploy))
-                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                    deploy.deployable?.name || serviceName
-                  }/deployLogs)`
-                : '';
+              const deployLogsColumn =
+                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                      deploy.deployable?.name || serviceName
+                    }/deployLogs)`
+                  : '';
               row += ` ${deployLogsColumn} |`;
             }
 

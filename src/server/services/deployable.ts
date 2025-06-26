@@ -21,7 +21,7 @@ import Deployable from 'server/models/Deployable';
 import * as YamlService from 'server/models/yaml';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 
-import { Builder, Helm, isHelmService, KedaScaleToZero } from 'server/models/yaml';
+import { Builder, Helm, KedaScaleToZero } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
 
 const logger = rootLogger.child({
@@ -370,7 +370,7 @@ export default class DeployableService extends BaseService {
           active,
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
-          ...(isHelmService(service) ? { deploymentDependsOn: service.deploymentDependsOn || [] } : {}),
+          deploymentDependsOn: service.deploymentDependsOn || [],
           kedaScaleToZero: YamlService.getScaleToZeroConfig(service) ?? null,
           builder: YamlService.getBuilder(service) ?? {},
         };

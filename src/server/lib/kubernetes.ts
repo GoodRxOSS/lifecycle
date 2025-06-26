@@ -28,6 +28,7 @@ import { IncomingMessage } from 'http';
 import { APP_ENV, TMP_PATH } from 'shared/config';
 import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
+import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 
 const logger = rootLogger.child({
   filename: 'lib/kubernetes.ts',
@@ -225,8 +226,17 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
       { headers: { 'Content-Type': 'application/merge-patch+json' } } // patch options
     );
     logger.debug(`[NS ${namespace}] Annotated ${serviceAccountName} service account in namespace ${namespace}`);
+
+    // Set up RBAC for the service account
+    await setupServiceAccountWithRBAC({
+      namespace,
+      serviceAccountName,
+      awsRoleArn: role,
+      permissions: 'deploy', // Give full permissions for deployment
+    });
+    logger.info(`[NS ${namespace}] Set up RBAC for ${serviceAccountName} service account`);
   } catch (err) {
-    logger.error(`[NS ${namespace}] Error annotating service account ${serviceAccountName}: ${err}`);
+    logger.error(`[NS ${namespace}] Error setting up service account ${serviceAccountName}: ${err}`);
     throw err;
   }
 }
@@ -236,6 +246,16 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
  * @param build
  */
 export async function applyManifests(build: Build): Promise<k8s.KubernetesObject[]> {
+  // Check if this is a legacy deployment (has build.manifest)
+  if (!build.manifest || build.manifest.trim().length === 0) {
+    // New deployments are handled by DeploymentManager
+    logger.info(`[Build ${build.uuid}] No build manifest found, using new deployment pattern via DeploymentManager`);
+    return [];
+  }
+
+  // Legacy deployment path - apply manifest directly
+  logger.info(`[Build ${build.uuid}] Using legacy deployment pattern with build.manifest`);
+
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = k8s.KubernetesObjectApi.makeApiClient(kc);
@@ -1565,4 +1585,351 @@ export function getCurrentNamespaceFromFile(): string {
     logger.error('Error getting current namespace from file:', err);
     return 'default';
   }
+}
+
+export function generateDeployManifest({
+  deploy,
+  build,
+  namespace,
+  serviceAccountName,
+}: {
+  deploy: Deploy;
+  build: Build;
+  namespace: string;
+  serviceAccountName: string;
+}): string {
+  const manifests: string[] = [];
+  const enableFullYaml = build.enableFullYaml;
+
+  // Reuse existing PVC generation logic
+  const pvcManifests = generatePersistentDisks([deploy], build.uuid, enableFullYaml, namespace);
+  if (pvcManifests) manifests.push(pvcManifests);
+
+  // Generate deployment
+  const capacityType =
+    build.capacityType || (enableFullYaml ? deploy.deployable?.capacityType : deploy.service?.capacityType);
+  const affinity = generateAffinity(capacityType, build?.isStatic ?? false);
+
+  const deploymentManifest = generateSingleDeploymentManifest({
+    deploy,
+    build,
+    name: deploy.uuid,
+    namespace,
+    serviceAccountName,
+    affinity,
+    enableFullYaml,
+  });
+  manifests.push(deploymentManifest);
+
+  // Reuse existing service generation logic
+  const serviceManifests = generateNodePortManifests([deploy], build.uuid, enableFullYaml, namespace);
+  if (serviceManifests) manifests.push(serviceManifests);
+
+  const lbManifests = generateLoadBalancerManifests([deploy], build.uuid, enableFullYaml, namespace);
+  if (lbManifests) manifests.push(lbManifests);
+
+  const grpcManifests = generateGRPCMappings([deploy], build.uuid, enableFullYaml, namespace);
+  if (grpcManifests) manifests.push(grpcManifests);
+
+  // ExternalName service for CLI deploys
+  if (CLIDeployTypes.has(enableFullYaml ? deploy.deployable?.type : deploy.service?.type)) {
+    const externalHost = enableFullYaml ? deploy.deployable?.externalHost : deploy.service?.externalHost;
+    if (externalHost) {
+      manifests.push(
+        yaml.dump({
+          apiVersion: 'v1',
+          kind: 'Service',
+          metadata: {
+            namespace,
+            name: deploy.uuid,
+            labels: {
+              name: build.uuid,
+              lc_uuid: build.uuid,
+              deploy_uuid: deploy.uuid,
+            },
+          },
+          spec: {
+            type: 'ExternalName',
+            externalName: externalHost,
+          },
+        })
+      );
+    }
+  }
+
+  return manifests.filter((m) => m).join('---\n');
+}
+
+function generateSingleDeploymentManifest({
+  deploy,
+  build,
+  name,
+  namespace,
+  serviceAccountName,
+  affinity,
+  enableFullYaml,
+}: {
+  deploy: Deploy;
+  build: Build;
+  name: string;
+  namespace: string;
+  serviceAccountName: string;
+  affinity: any;
+  enableFullYaml: boolean;
+}): string {
+  const serviceName = enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+  const serviceMemory = enableFullYaml ? deploy.deployable?.memoryLimit : deploy.service?.memoryLimit;
+  const serviceCPU = enableFullYaml ? deploy.deployable?.cpuLimit : deploy.service?.cpuLimit;
+  const servicePort = enableFullYaml ? deploy.deployable?.port : deploy.service?.port;
+  const replicaCount = deploy.replicaCount ?? 1;
+
+  const envToUse = deploy.env || {};
+  const containers = [];
+  const volumes: VOLUME[] = [];
+  const volumeMounts = [];
+
+  // Handle init container if present
+  if (deploy.initDockerImage) {
+    const initEnvObj = flattenObject(build.commentInitEnv);
+    const initEnvArray = Object.entries(initEnvObj).map(([key, value]) => ({
+      name: key,
+      value: String(value),
+    }));
+
+    const initContainer = {
+      name: `init-${serviceName || 'container'}`,
+      image: deploy.initDockerImage,
+      imagePullPolicy: 'Always',
+      env: initEnvArray,
+    };
+    containers.push(initContainer);
+  }
+
+  // Handle main container
+  const mainEnvObj = flattenObject({ ...build.commentRuntimeEnv, ...envToUse });
+  const mainEnvArray = Object.entries(mainEnvObj).map(([key, value]) => ({
+    name: key,
+    value: String(value),
+  }));
+
+  const mainContainer: any = {
+    name: serviceName || 'main',
+    image: deploy.dockerImage,
+    imagePullPolicy: 'Always',
+    env: mainEnvArray,
+  };
+
+  // Only add resources if they are defined
+  if (serviceCPU || serviceMemory) {
+    mainContainer.resources = {
+      limits: {},
+      requests: {},
+    };
+
+    if (serviceCPU) {
+      mainContainer.resources.limits.cpu = serviceCPU;
+      mainContainer.resources.requests.cpu = serviceCPU;
+    }
+
+    if (serviceMemory) {
+      mainContainer.resources.limits.memory = serviceMemory;
+      mainContainer.resources.requests.memory = serviceMemory;
+    }
+  }
+
+  // Add ports if defined
+  if (servicePort) {
+    mainContainer.ports = [];
+    for (const port of servicePort.split(',')) {
+      mainContainer.ports.push({
+        containerPort: Number(port),
+      });
+    }
+  }
+
+  // Handle volumes
+  if (enableFullYaml && deploy.deployable?.serviceDisksYaml) {
+    const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
+    serviceDisks.forEach((disk) => {
+      if (disk.medium === MEDIUM_TYPE.MEMORY) {
+        volumes.push({
+          name: disk.name,
+          emptyDir: {},
+        });
+      } else {
+        volumes.push({
+          name: disk.name,
+          persistentVolumeClaim: {
+            claimName: `${name}-${disk.name}-claim`,
+          },
+        });
+      }
+      volumeMounts.push({
+        name: disk.name,
+        mountPath: disk.mountPath,
+      });
+    });
+  } else if (!enableFullYaml && deploy.service?.serviceDisks) {
+    deploy.service.serviceDisks.forEach((disk) => {
+      if (disk.medium === MEDIUM_TYPE.MEMORY) {
+        volumes.push({
+          name: disk.name,
+          emptyDir: {},
+        });
+      } else {
+        volumes.push({
+          name: disk.name,
+          persistentVolumeClaim: {
+            claimName: `${name}-${disk.name}-claim`,
+          },
+        });
+      }
+      volumeMounts.push({
+        name: disk.name,
+        mountPath: disk.mountPath,
+      });
+    });
+  }
+
+  if (volumeMounts.length > 0) {
+    mainContainer.volumeMounts = volumeMounts;
+  }
+
+  // Add probes
+  if (enableFullYaml) {
+    if (deploy.deployable?.livenessProbe) {
+      mainContainer.livenessProbe = JSON.parse(deploy.deployable.livenessProbe);
+    }
+    if (deploy.deployable?.readinessProbe) {
+      mainContainer.readinessProbe = JSON.parse(deploy.deployable.readinessProbe);
+    }
+  } else {
+    if (deploy.service?.livenessProbe) {
+      mainContainer.livenessProbe = JSON.parse(deploy.service.livenessProbe);
+    }
+    if (deploy.service?.readinessProbe) {
+      mainContainer.readinessProbe = JSON.parse(deploy.service.readinessProbe);
+    }
+  }
+
+  containers.push(mainContainer);
+
+  const deploymentSpec: any = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      namespace,
+      name,
+      labels: {
+        name,
+        lc_uuid: build.uuid,
+        deploy_uuid: deploy.uuid,
+      },
+    },
+    spec: {
+      replicas: replicaCount,
+      selector: {
+        matchLabels: {
+          name,
+        },
+      },
+      template: {
+        metadata: {
+          labels: {
+            name,
+            lc_uuid: build.uuid,
+            deploy_uuid: deploy.uuid,
+          },
+        },
+        spec: {
+          serviceAccountName,
+          affinity,
+          containers,
+        },
+      },
+    },
+  };
+
+  if (volumes.length > 0) {
+    deploymentSpec.spec.template.spec.volumes = volumes;
+  }
+
+  return yaml.dump(deploymentSpec, { lineWidth: -1 });
+}
+
+export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
+  const { uuid, build } = deploy;
+  const { namespace } = build;
+  const deployableName = deploy.deployable?.name || deploy.service?.name || 'unknown';
+
+  let retries = 0;
+  logger.info(`[DEPLOY ${uuid}] Waiting for pods service=${deployableName} namespace=${namespace}`);
+
+  // Wait up to 5 minutes for pods to be created
+  while (retries < 60) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    // Filter out job pods - we only want deployment/statefulset pods
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+
+    if (pods.length > 0) {
+      break;
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  if (retries >= 60) {
+    logger.warn(`[DEPLOY ${uuid}] No pods found within 5 minutes service=${deployableName}`);
+    return false;
+  }
+
+  retries = 0;
+
+  // Wait up to 15 minutes for pods to be ready
+  while (retries < 180) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    // Filter out job pods - we only want deployment/statefulset pods
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+
+    if (pods.length === 0) {
+      logger.warn(`[DEPLOY ${uuid}] No deployment pods found service=${deployableName}`);
+      return false;
+    }
+
+    const allReady = pods.every((pod) => {
+      const conditions = pod.status?.conditions || [];
+      const readyCondition = conditions.find((c) => c.type === 'Ready');
+      return readyCondition?.status === 'True';
+    });
+
+    if (allReady) {
+      logger.info(`[DEPLOY ${uuid}] Pods ready service=${deployableName} count=${pods.length}`);
+      return true;
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  logger.warn(`[DEPLOY ${uuid}] Pods not ready within 15 minutes service=${deployableName}`);
+  return false;
 }

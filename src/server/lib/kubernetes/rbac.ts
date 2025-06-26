@@ -156,7 +156,6 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
   }
 }
 
-// Legacy compatibility functions
 export async function setupBuildServiceAccountInNamespace(
   namespace: string,
   serviceAccountName: string = 'native-build-sa',
@@ -182,7 +181,6 @@ export async function setupDeployServiceAccountInNamespace(
     permissions: 'deploy',
   });
 
-  // For deploy, also setup default service account if different
   if (serviceAccountName !== 'default') {
     await setupServiceAccountWithRBAC({
       namespace,
@@ -192,10 +190,9 @@ export async function setupDeployServiceAccountInNamespace(
   }
 }
 
-// Helper to create service account using existing createOrUpdateServiceAccount
 export async function createServiceAccountUsingExistingFunction(
   namespace: string,
-  serviceAccountName: string,
+  _serviceAccountName: string,
   role?: string
 ): Promise<void> {
   const { createOrUpdateServiceAccount } = await import('../kubernetes');

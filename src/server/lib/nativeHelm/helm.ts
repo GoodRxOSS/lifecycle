@@ -39,7 +39,6 @@ import {
   determineChartType,
   getHelmConfiguration,
   generateHelmInstallScript,
-  setupServiceAccountInNamespace,
   validateHelmConfiguration,
   resolveHelmReleaseConflicts,
 } from './utils';
@@ -52,6 +51,7 @@ import {
   MANIFEST_PATH,
 } from 'server/lib/nativeBuild/utils';
 import { createHelmJob as createHelmJobFromFactory } from 'server/lib/kubernetes/jobFactory';
+import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
 
 const logger = rootLogger.child({
   filename: 'lib/nativeHelm/helm.ts',
@@ -121,8 +121,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
   const repository = deployable.repository;
   const helmConfig = await getHelmConfiguration(deploy);
 
-  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
-  const serviceAccountName = serviceAccount?.name || 'default';
+  const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'deploy');
 
   const chartType = await determineChartType(deploy);
   const hasValueFiles = helmConfig.valuesFiles && helmConfig.valuesFiles.length > 0;
@@ -205,10 +204,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
 
   await resolveHelmReleaseConflicts(releaseName, namespace);
 
-  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
-  const serviceAccountName = serviceAccount?.name || 'default';
-
-  await setupServiceAccountInNamespace(options.namespace, serviceAccountName, serviceAccount?.role);
+  await ensureServiceAccountForJob(options.namespace, 'deploy');
 
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
@@ -225,7 +221,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   await fs.promises.writeFile(localPath, manifest, 'utf8');
   await shellPromise(`kubectl apply -f ${localPath}`);
 
-  const jobResult = await waitForJobAndGetLogs(jobName, options.namespace, `[HELM ${deploy.uuid}]`, ['helm']);
+  const jobResult = await waitForJobAndGetLogs(jobName, options.namespace, `[HELM ${deploy.uuid}]`);
 
   await deploy.$query().patch({ buildOutput: jobResult.logs });
 

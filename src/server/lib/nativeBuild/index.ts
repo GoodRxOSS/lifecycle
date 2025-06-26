@@ -1,10 +1,10 @@
 import { Deploy } from '../../models';
 import logger from '../logger';
-import GlobalConfigService from '../../services/globalConfig';
-import { ensureNamespaceExists, setupBuildServiceAccountInNamespace } from './utils';
+import { ensureNamespaceExists } from './utils';
 import { buildWithEngine, NativeBuildOptions } from './engines';
+import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 
-export { NativeBuildOptions } from './engines';
+export type { NativeBuildOptions } from './engines';
 
 export interface NativeBuildResult {
   success: boolean;
@@ -19,22 +19,21 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
   try {
     await ensureNamespaceExists(options.namespace);
 
-    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
-    const buildDefaults = globalConfig.buildDefaults || {};
-    const awsRoleArn = globalConfig.serviceAccount?.role;
-    const serviceAccountName = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
+    const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
 
-    await setupBuildServiceAccountInNamespace(options.namespace, serviceAccountName, awsRoleArn);
+    const buildOptions = {
+      ...options,
+      serviceAccount: serviceAccountName,
+    };
 
     await deploy.$fetchGraph('[deployable]');
     const builderEngine = deploy.deployable?.builder?.engine;
 
-    // Route to appropriate builder - both buildkit and kaniko now handle init builds internally
     let result: NativeBuildResult;
 
     if (builderEngine === 'buildkit' || builderEngine === 'kaniko') {
       logger.info(`[Native Build] Using ${builderEngine} engine for ${options.deployUuid}`);
-      result = await buildWithEngine(deploy, options, builderEngine);
+      result = await buildWithEngine(deploy, buildOptions, builderEngine);
     } else {
       throw new Error(`Unsupported builder engine: ${builderEngine}`);
     }

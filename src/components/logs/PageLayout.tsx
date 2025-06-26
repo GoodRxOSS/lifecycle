@@ -6,10 +6,11 @@ interface PageLayoutProps {
   title: string;
   serviceName?: string;
   environmentId?: string;
+  deploymentType?: 'helm' | 'github';
   children: React.ReactNode;
 }
 
-export function PageLayout({ backLink, title, serviceName, environmentId, children }: PageLayoutProps) {
+export function PageLayout({ backLink, title, serviceName, environmentId, deploymentType, children }: PageLayoutProps) {
   return (
     <div style={{ 
       height: '100vh',
@@ -56,6 +57,25 @@ export function PageLayout({ backLink, title, serviceName, environmentId, childr
             <div style={{ marginTop: '8px', color: '#666', fontSize: '14px' }}>
               <span style={{ fontWeight: 500 }}>Service:</span> {serviceName} &nbsp;&nbsp;•&nbsp;&nbsp;
               <span style={{ fontWeight: 500 }}>Environment:</span> <code style={{ fontSize: '13px', color: '#555' }}>{environmentId}</code>
+              {deploymentType && (
+                <>
+                  &nbsp;&nbsp;•&nbsp;&nbsp;
+                  <span style={{ fontWeight: 500 }}>Type:</span>{' '}
+                  <span style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '2px 8px',
+                    borderRadius: '10px',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    backgroundColor: deploymentType === 'helm' ? '#dbeafe' : '#e0e7ff',
+                    color: deploymentType === 'helm' ? '#1e40af' : '#4338ca',
+                    textTransform: 'uppercase'
+                  }}>
+                    {deploymentType}
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>
