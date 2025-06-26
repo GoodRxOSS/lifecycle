@@ -25,21 +25,19 @@
     "generate:schemas": "pnpm run generate:jsonschemas && pnpm run generate:yamls"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^0.20.0",
+    "@kubernetes/client-node": "^0.22.3",
     "@octokit/auth-app": "^6.0.2",
     "@octokit/core": "^5.0.2",
     "@octokit/webhooks": "^12.0.1",
     "aws-sdk": "^2.1004.0",
-    "axios": "^0.21.1",
+    "axios": "^0.30.0",
     "bcrypt": "^5.1.0",
     "bull": "^3.16.0",
     "commander": "^7.1.0",
     "connection-string": "^3.1.0",
     "dagre": "^0.8.5",
     "dd-trace": "^5.10.0",
-    "dockerode": "^3.0.2",
     "dotenv": "^8.0.0",
-    "email-validator": "^2.0.4",
     "fastly": "^7.0.1",
     "flatted": "^3.0.4",
     "haikunator": "^2.1.2",
@@ -89,7 +87,6 @@
     "@swc/jest": "^0.2.26",
     "@types/bcrypt": "^3.0.0",
     "@types/bull": "^3.14.0",
-    "@types/dockerode": "^2.5.20",
     "@types/dotenv": "^6.1.1",
     "@types/jest": "^27.0.3",
     "@types/js-cookie": "^2.2.4",
@@ -104,7 +101,6 @@
     "@types/redlock": "^4.0.1",
     "@types/seedrandom": "^3.0.0",
     "@types/shelljs": "^0.8.5",
-    "@types/tar-fs": "^1.16.2",
     "@types/uuid": "^3.4.5",
     "@typescript-eslint/eslint-plugin": "^5.50.0",
     "@typescript-eslint/parser": "^5.50.0",
@@ -207,5 +203,10 @@
     "singleQuote": true,
     "printWidth": 120
   },
-  "packageManager": "pnpm@9.15.0+sha512.76e2379760a4328ec4415815bcd6628dee727af3779aaa4c914e3944156c4299921a89f976381ee107d41f12cfa4b66681ca9c718f0668fa0831ed4c6d8ba56c"
+  "packageManager": "pnpm@9.15.0+sha512.76e2379760a4328ec4415815bcd6628dee727af3779aaa4c914e3944156c4299921a89f976381ee107d41f12cfa4b66681ca9c718f0668fa0831ed4c6d8ba56c",
+  "pnpm": {
+    "overrides": {
+      "@kubernetes/client-node": "^0.22.3"
+    }
+  }
 }
