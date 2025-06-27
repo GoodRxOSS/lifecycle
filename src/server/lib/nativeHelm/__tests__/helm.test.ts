@@ -363,6 +363,45 @@ describe('Native Helm', () => {
       expect(result).toContain('--force --timeout 60m0s --wait');
       expect(result).not.toContain('--timeout 30m');
     });
+
+    it('should handle OCI chart URLs correctly', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'postgresql',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://registry-1.docker.io/bitnamicharts/postgresql'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release oci://registry-1.docker.io/bitnamicharts/postgresql');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--set "key=value"');
+      expect(result).toContain('-f values.yaml');
+    });
+
+    it('should handle OCI charts with custom args', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'postgresql',
+        'my-release',
+        'my-namespace',
+        ['auth.username=admin', 'auth.password=secret'],
+        [],
+        ChartType.PUBLIC,
+        '--version 12.9.0 --wait',
+        'oci://ghcr.io/myorg/charts/postgresql'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release oci://ghcr.io/myorg/charts/postgresql');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--set "auth.username=admin"');
+      expect(result).toContain('--set "auth.password=secret"');
+      expect(result).toContain('--version 12.9.0 --wait');
+    });
   });
 
   describe('createHelmContainer', () => {

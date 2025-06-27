@@ -212,7 +212,11 @@ export function constructHelmCommand(
     const normalizedPath = chartPath.startsWith('./') || chartPath.startsWith('../') ? chartPath : `./${chartPath}`;
     command += ` ${normalizedPath}`;
   } else if (chartType === ChartType.PUBLIC) {
-    if (chartPath.includes('/')) {
+    const isOciChart = chartRepoUrl?.startsWith('oci://');
+
+    if (isOciChart) {
+      command += ` ${chartRepoUrl}`;
+    } else if (chartPath.includes('/')) {
       command += ` ${chartPath}`;
     } else if (chartRepoUrl) {
       const repoAlias = getRepoAliasFromUrl(chartRepoUrl);
@@ -295,21 +299,25 @@ ls -la
   }
 
   if (chartType === ChartType.PUBLIC) {
-    if (chartPath.includes('/')) {
-      const [repoName] = chartPath.split('/');
-      const repoUrl = getRepoUrl(repoName);
-      script += `
+    const isOciChart = chartRepoUrl?.startsWith('oci://');
+
+    if (!isOciChart) {
+      if (chartPath.includes('/')) {
+        const [repoName] = chartPath.split('/');
+        const repoUrl = getRepoUrl(repoName);
+        script += `
 echo "Adding helm repository ${repoName}: ${repoUrl}"
 helm repo add ${repoName} ${repoUrl}
 helm repo update
 `;
-    } else if (chartRepoUrl) {
-      const repoAlias = getRepoAliasFromUrl(chartRepoUrl);
-      script += `
+      } else if (chartRepoUrl) {
+        const repoAlias = getRepoAliasFromUrl(chartRepoUrl);
+        script += `
 echo "Adding helm repository ${repoAlias}: ${chartRepoUrl}"
 helm repo add ${repoAlias} ${chartRepoUrl}
 helm repo update
 `;
+      }
     }
   }
 
