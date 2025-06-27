@@ -619,6 +619,7 @@ export default function BuildLogsList() {
                     isConnecting={connectingContainers.includes(activeContainer)}
                     containerRef={logContainerRef}
                     showTimestamps={showTimestamps}
+                    containerState={jobInfo?.containers?.find(c => c.name === activeContainer)?.state}
                   />
                 )}
               </TerminalContainer>

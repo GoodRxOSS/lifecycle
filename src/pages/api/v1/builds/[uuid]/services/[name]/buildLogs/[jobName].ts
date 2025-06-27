@@ -128,17 +128,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const buildService = new BuildService();
 
-    // Get the build
     const build = await buildService.db.models.Build.query().findOne({ uuid });
 
     if (!build) {
       return res.status(404).json({ error: 'Build not found' });
     }
 
-    // Construct namespace from build UUID
     const namespace = `env-${build.uuid}`;
 
-    // Get pod info for the job
     const podInfo = await getK8sJobStatusAndPod(jobName, namespace);
 
     if (!podInfo || podInfo.status === 'NotFound') {
@@ -150,24 +147,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(response);
     }
 
-    // Map status to simplified values
-    let status: BuildLogStreamResponse['status'] = 'Active';
+    let status: BuildLogStreamResponse['status'] = 'Pending';
     if (podInfo.status === 'Succeeded') {
       status = 'Complete';
     } else if (podInfo.status === 'Failed') {
       status = 'Failed';
     } else if (podInfo.status === 'Pending') {
       status = 'Pending';
+    } else if (podInfo.status === 'Running') {
+      status = 'Active';
+    } else if (podInfo.status === 'Unknown' || podInfo.status === 'NotFound') {
+      status = 'Pending';
     }
 
-    // Build response with websocket info (always include for pod access)
     const response: BuildLogStreamResponse = {
       status,
       streamingRequired: status === 'Active' || status === 'Pending',
       podName: podInfo.podName,
     };
 
-    // Always include websocket info if we have a pod
     if (podInfo.podName) {
       response.websocket = {
         endpoint: '/api/logs/stream',
@@ -180,7 +178,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       };
     }
 
-    // Add containers info if available
     if (podInfo.containers && podInfo.containers.length > 0) {
       response.containers = podInfo.containers.map((c) => ({
         name: c.name,
@@ -188,7 +185,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }));
     }
 
-    // Add message for completed/failed jobs
     if (status === 'Complete') {
       response.message = `Job pod ${podInfo.podName} has status: Completed. Streaming not active.`;
     } else if (status === 'Failed') {

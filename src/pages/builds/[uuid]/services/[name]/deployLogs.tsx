@@ -663,6 +663,7 @@ export default function DeployLogsList() {
                     isConnecting={connectingContainers.includes(activeContainer)}
                     containerRef={logContainerRef}
                     showTimestamps={showTimestamps}
+                    containerState={jobInfo?.containers?.find(c => c.name === activeContainer)?.state}
                   />
                 )}
               </TerminalContainer>

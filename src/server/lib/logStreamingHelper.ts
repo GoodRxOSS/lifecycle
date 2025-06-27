@@ -223,6 +223,22 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       }
     });
 
+    if (containers.length === 0 && latestPod.spec) {
+      const specContainers = [
+        ...(latestPod.spec.initContainers || []).map((c) => ({ name: `[init] ${c.name}`, isInit: true })),
+        ...(latestPod.spec.containers || []).map((c) => ({ name: c.name, isInit: false })),
+      ];
+
+      specContainers.forEach((c) => {
+        if (!containers.find((existing) => existing.name === c.name)) {
+          containers.push({
+            name: c.name,
+            state: 'pending',
+          });
+        }
+      });
+    }
+
     const result: K8sPodInfo = {
       podName: podName,
       namespace: namespace,
@@ -264,7 +280,6 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
     else if (phase === 'Succeeded') podStatus = 'Succeeded';
     else if (phase === 'Failed') podStatus = 'Failed';
 
-    // Extract all container info - both init containers and regular containers
     const containers: K8sContainerInfo[] = [];
     const allStatuses = [
       ...(pod.status?.initContainerStatuses || []).map((cs) => ({ ...cs, isInit: true })),
@@ -288,9 +303,7 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       }
     });
 
-    // If no container statuses found, try to get container names from the pod spec
     if (containers.length === 0 && pod.spec) {
-      // Extract from pod.spec
       const specContainers = [
         ...(pod.spec.initContainers || []).map((c) => ({ name: `[init] ${c.name}`, isInit: true })),
         ...(pod.spec.containers || []).map((c) => ({ name: c.name, isInit: false })),
@@ -300,13 +313,12 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
         if (!containers.find((existing) => existing.name === c.name)) {
           containers.push({
             name: c.name,
-            state: 'unknown', // We don't have status info
+            state: 'unknown',
           });
         }
       });
     }
 
-    // If still no containers found, at least provide one default
     if (containers.length === 0) {
       containers.push({
         name: 'main',
@@ -321,7 +333,6 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       containers,
     };
   } catch (error: any) {
-    // Handle 404 - Pod not found
     if (error instanceof HttpError && error.response?.statusCode === 404) {
       logger.warn(logCtx, `Pod not found (404): ${error.message}`);
       return {
@@ -333,7 +344,6 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       };
     }
 
-    // Handle other errors
     logger.error({ ...logCtx, err: error }, 'Error getting container information');
     throw error;
   }

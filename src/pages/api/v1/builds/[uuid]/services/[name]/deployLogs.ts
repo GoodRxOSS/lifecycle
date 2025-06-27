@@ -47,13 +47,9 @@ async function getDeploymentJobs(serviceName: string, namespace: string): Promis
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    // Get both helm and kubernetes apply jobs
-    // Helm jobs have app.kubernetes.io/name=native-helm label
-    // Kubernetes apply jobs have app=lifecycle-deploy,type=kubernetes-apply labels
     const helmLabelSelector = `app.kubernetes.io/name=native-helm,service=${serviceName}`;
     const k8sApplyLabelSelector = `app=lifecycle-deploy,type=kubernetes-apply`;
 
-    // Fetch both types of jobs
     const [helmJobsResponse, k8sJobsResponse] = await Promise.all([
       batchV1Api.listNamespacedJob(namespace, undefined, undefined, undefined, undefined, helmLabelSelector),
       batchV1Api.listNamespacedJob(namespace, undefined, undefined, undefined, undefined, k8sApplyLabelSelector),
@@ -62,15 +58,12 @@ async function getDeploymentJobs(serviceName: string, namespace: string): Promis
     const helmJobs = helmJobsResponse.body.items || [];
     const k8sJobs = k8sJobsResponse.body.items || [];
 
-    // Filter k8s jobs to only include those for this service
     const relevantK8sJobs = k8sJobs.filter((job) => {
-      // Check by annotation first (most reliable)
       const annotations = job.metadata?.annotations || {};
       if (annotations['lifecycle/service-name'] === serviceName) {
         return true;
       }
 
-      // Fallback: check the service label (should match exactly)
       const labels = job.metadata?.labels || {};
       return labels['service'] === serviceName;
     });
@@ -86,10 +79,9 @@ async function getDeploymentJobs(serviceName: string, namespace: string): Promis
       const deployUuid = nameParts.slice(0, -3).join('-');
       const sha = nameParts[nameParts.length - 1];
 
-      // Determine deployment type based on labels
       const deploymentType: 'helm' | 'github' = labels['app.kubernetes.io/name'] === 'native-helm' ? 'helm' : 'github';
 
-      let status: DeploymentJobInfo['status'] = 'Active';
+      let status: DeploymentJobInfo['status'] = 'Pending';
       let error: string | undefined;
 
       if (job.status?.succeeded && job.status.succeeded > 0) {
@@ -130,6 +122,10 @@ async function getDeploymentJobs(serviceName: string, namespace: string): Promis
           const pods = podListResponse.body.items || [];
           if (pods.length > 0) {
             podName = pods[0].metadata?.name;
+
+            if (status === 'Active' && pods[0].status?.phase === 'Pending') {
+              status = 'Pending';
+            }
           }
         } catch (podError) {
           logger.warn(`Failed to get pods for job ${jobName}:`, podError);

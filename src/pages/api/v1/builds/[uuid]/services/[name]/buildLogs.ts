@@ -47,8 +47,6 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    // Use label selector to find all build jobs for this service
-    // Native build V2 uses 'lc-service' label
     const labelSelector = `lc-service=${serviceName},app.kubernetes.io/component=build`;
     const jobListResponse = await batchV1Api.listNamespacedJob(
       namespace,
@@ -66,7 +64,6 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
       const jobName = job.metadata?.name || '';
       const labels = job.metadata?.labels || {};
 
-      // Extract info from labels
       const buildUuid = labels['lc-deploy-uuid'] || '';
       const sha = labels['git-sha'] || '';
       const engine = (labels['builder-engine'] || 'unknown') as BuildJobInfo['engine'];
@@ -94,7 +91,6 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
         duration = Math.floor((endTime - startTime) / 1000);
       }
 
-      // Get pod name for active jobs
       let podName: string | undefined;
       if (job.spec?.selector?.matchLabels) {
         const podLabelSelector = Object.entries(job.spec.selector.matchLabels)
@@ -113,6 +109,10 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
           const pods = podListResponse.body.items || [];
           if (pods.length > 0) {
             podName = pods[0].metadata?.name;
+
+            if (status === 'Active' && pods[0].status?.phase === 'Pending') {
+              status = 'Pending';
+            }
           }
         } catch (podError) {
           logger.warn(`Failed to get pods for job ${jobName}:`, podError);
@@ -133,7 +133,6 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
       });
     }
 
-    // Sort by start time, newest first
     buildJobs.sort((a, b) => {
       const aTime = a.startedAt ? new Date(a.startedAt).getTime() : 0;
       const bTime = b.startedAt ? new Date(b.startedAt).getTime() : 0;
@@ -280,10 +279,8 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   try {
-    // Build jobs run in the same namespace as deployments
     const namespace = `env-${uuid}`;
 
-    // Get all build jobs for this service using label selectors
     const buildJobs = await getNativeBuildJobs(name, namespace);
 
     const response: BuildLogsListResponse = {
