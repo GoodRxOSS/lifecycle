@@ -16,34 +16,11 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
-import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
-import BuildService from 'server/services/build';
+import unifiedLogStreamHandler from '../logs/[jobName]';
 
 const logger = rootLogger.child({
   filename: 'buildLogs/[jobName].ts',
 });
-
-interface BuildLogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
-  streamingRequired: boolean;
-  podName?: string | null;
-  websocket?: {
-    endpoint: string;
-    parameters: {
-      podName: string;
-      namespace: string;
-      follow: boolean;
-      timestamps: boolean;
-      container?: string;
-    };
-  };
-  containers?: Array<{
-    name: string;
-    state: string;
-  }>;
-  message?: string;
-  error?: string;
-}
 
 /**
  * @openapi
@@ -124,95 +101,11 @@ interface BuildLogStreamResponse {
  *         description: Internal server error
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  logger.info(
+    `method=${req.method} jobName=${req.query.jobName} message="Build logs endpoint called, delegating to unified handler"`
+  );
 
-  const { uuid, name, jobName } = req.query;
+  req.query.type = 'build';
 
-  if (
-    !uuid ||
-    !name ||
-    !jobName ||
-    typeof uuid !== 'string' ||
-    typeof name !== 'string' ||
-    typeof jobName !== 'string'
-  ) {
-    return res.status(400).json({ error: 'Invalid parameters' });
-  }
-
-  try {
-    const buildService = new BuildService();
-
-    const build = await buildService.db.models.Build.query().findOne({ uuid });
-
-    if (!build) {
-      return res.status(404).json({ error: 'Build not found' });
-    }
-
-    const namespace = `env-${build.uuid}`;
-
-    const podInfo = await getK8sJobStatusAndPod(jobName, namespace);
-
-    if (!podInfo || podInfo.status === 'NotFound') {
-      const response: BuildLogStreamResponse = {
-        status: 'NotFound',
-        streamingRequired: false,
-        message: podInfo?.message || 'Job not found',
-      };
-      return res.status(200).json(response);
-    }
-
-    let status: BuildLogStreamResponse['status'] = 'Pending';
-    if (podInfo.status === 'Succeeded') {
-      status = 'Complete';
-    } else if (podInfo.status === 'Failed') {
-      status = 'Failed';
-    } else if (podInfo.status === 'Pending') {
-      status = 'Pending';
-    } else if (podInfo.status === 'Running') {
-      status = 'Active';
-    } else if (podInfo.status === 'Unknown' || podInfo.status === 'NotFound') {
-      status = 'Pending';
-    }
-
-    const response: BuildLogStreamResponse = {
-      status,
-      streamingRequired: status === 'Active' || status === 'Pending',
-      podName: podInfo.podName,
-    };
-
-    if (podInfo.podName) {
-      response.websocket = {
-        endpoint: '/api/logs/stream',
-        parameters: {
-          podName: podInfo.podName,
-          namespace: namespace,
-          follow: status === 'Active' || status === 'Pending',
-          timestamps: true,
-        },
-      };
-    }
-
-    if (podInfo.containers && podInfo.containers.length > 0) {
-      response.containers = podInfo.containers.map((c) => ({
-        name: c.name,
-        state: c.state,
-      }));
-    }
-
-    if (status === 'Complete') {
-      response.message = `Job pod ${podInfo.podName} has status: Completed. Streaming not active.`;
-    } else if (status === 'Failed') {
-      response.message = `Job pod ${podInfo.podName} has status: Failed. Streaming not active.`;
-    }
-
-    return res.status(200).json(response);
-  } catch (error) {
-    logger.error(`Error getting build log streaming info for job ${jobName}`, { error, uuid, name });
-    if (error.message?.includes('Kubernetes') || error.statusCode === 502) {
-      return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
-    }
-    return res.status(500).json({ error: 'Internal server error occurred.' });
-  }
+  return unifiedLogStreamHandler(req, res);
 }

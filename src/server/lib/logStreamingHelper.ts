@@ -144,7 +144,9 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       }
       if (job?.status?.failed) {
         logger.warn(logCtx, 'Job failed but selector missing.');
-        return { podName: null, namespace, status: 'Failed', containers: [] };
+        const failedCondition = job.status.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
+        const failureMessage = failedCondition?.message || 'Job failed';
+        return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
       logger.error(logCtx, 'Job found, but missing spec.selector.matchLabels. Cannot find associated pods.');
       return { podName: null, namespace, status: 'Unknown', containers: [] };
@@ -173,10 +175,11 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
         return { podName: null, namespace, status: 'Succeeded', containers: [] };
       }
       if (jobStatus?.failed && jobStatus.failed > 0) {
-        const failureReason =
-          jobStatus.conditions?.find((c) => c.type === 'Failed' && c.status === 'True')?.reason || 'Failed';
+        const failedCondition = jobStatus.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
+        const failureReason = failedCondition?.reason || 'Failed';
+        const failureMessage = failedCondition?.message || 'Job failed';
         logger.warn({ ...logCtx, failureReason }, 'Job indicates failure, but no pods found.');
-        return { podName: null, namespace, status: 'Failed', containers: [] };
+        return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
       return { podName: null, namespace, status: 'NotFound', containers: [] };
     }
@@ -245,11 +248,25 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       status: podStatus,
       containers: containers,
     };
+
+    if (podStatus === 'Failed' && job.status?.conditions) {
+      const failedCondition = job.status.conditions.find((c) => c.type === 'Failed' && c.status === 'True');
+      if (failedCondition?.message) {
+        result.message = failedCondition.message;
+      }
+    }
+
     return result;
   } catch (error: any) {
     if (error instanceof HttpError && error.response?.statusCode === 404) {
       logger.warn(logCtx, `Job or associated resource not found (404) ${error.message}`);
-      return { podName: null, namespace, status: 'NotFound', containers: [] };
+      return {
+        podName: null,
+        namespace,
+        status: 'NotFound',
+        containers: [],
+        message: 'Job no longer exists. Logs have been cleaned up after 24 hours.',
+      };
     }
     logger.error({ ...logCtx, err: error }, 'Error getting K8s job/pod status');
     return null;
