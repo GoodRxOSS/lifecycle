@@ -176,21 +176,17 @@ async function getJobEvents(jobName: string, namespace: string): Promise<K8sEven
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    // Get events related to the job and its pods
     const eventsResponse = await coreV1Api.listNamespacedEvent(namespace);
     const allEvents = eventsResponse.body.items || [];
 
-    // Filter events related to this job
     const jobEvents = allEvents.filter((event) => {
       const involvedObject = event.involvedObject;
       if (!involvedObject) return false;
 
-      // Include events for the job itself
       if (involvedObject.kind === 'Job' && involvedObject.name === jobName) {
         return true;
       }
 
-      // Include events for pods created by this job
       if (involvedObject.kind === 'Pod' && involvedObject.name?.startsWith(jobName)) {
         return true;
       }
@@ -198,7 +194,6 @@ async function getJobEvents(jobName: string, namespace: string): Promise<K8sEven
       return false;
     });
 
-    // Transform to our K8sEvent interface
     const events: K8sEvent[] = jobEvents.map((event) => ({
       name: event.metadata?.name || '',
       namespace: event.metadata?.namespace || '',
@@ -217,7 +212,6 @@ async function getJobEvents(jobName: string, namespace: string): Promise<K8sEven
         : undefined,
     }));
 
-    // Sort by timestamp (most recent first)
     events.sort((a, b) => {
       const aTime = new Date(a.lastTimestamp || a.eventTime || 0).getTime();
       const bTime = new Date(b.lastTimestamp || b.eventTime || 0).getTime();

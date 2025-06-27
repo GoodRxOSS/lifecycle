@@ -4,4 +4,7 @@ export { TerminalContainer, EmptyTerminalState } from './TerminalContainer';
 export { PageLayout, ErrorAlert, EmptyState } from './PageLayout';
 export { formatDuration, formatTimestamp } from './utils';
 export { EventsViewer } from './EventsViewer';
-export { DeploymentDetailsViewer } from './DeploymentDetailsViewer'; 
+export { DeploymentDetailsViewer } from './DeploymentDetailsViewer';
+export { JobHistoryTable } from './JobHistoryTable';
+export { useWebSocketLogs } from './hooks/useWebSocketLogs';
+export { useJobPolling } from './hooks/useJobPolling'; 
