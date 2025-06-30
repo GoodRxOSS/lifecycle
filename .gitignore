@@ -28,4 +28,5 @@ helm/environments/**/secrets.yaml
 
 # Claude Code files
 CLAUDE.md
-.specs/
+llm-docs/
+llm-specs/

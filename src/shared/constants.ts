@@ -120,7 +120,7 @@ export enum FallbackLabels {
   DEPLOY = 'lifecycle-deploy!',
   DISABLED = 'lifecycle-disabled!',
   DEPLOY_STG = 'lifecycle-stg-deploy!',
-  ENABLE_LIFECYCLE_STATUS_COMMENTS = 'lifecycle-status-comments!',
+  STATUS_COMMENTS = 'lifecycle-status-comments!',
 }
 
 export enum FeatureFlags {
