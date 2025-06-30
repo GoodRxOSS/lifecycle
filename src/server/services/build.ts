@@ -523,7 +523,6 @@ export default class BuildService extends BaseService {
     const env = lifecycleConfig?.environment;
     const enabledFeatures = env?.enabledFeatures || [];
     const githubDeployments = env?.githubDeployments || false;
-    const hasGithubStatusComment = env?.hasGithubStatusComment || false;
     const build =
       (await this.db.models.Build.query()
         .where('pullRequestId', options.pullRequestId)
@@ -539,7 +538,6 @@ export default class BuildService extends BaseService {
         enableFullYaml: this.db.services.Environment.enableFullYamlSupport(environment),
         enabledFeatures: JSON.stringify(enabledFeatures),
         githubDeployments,
-        hasGithubStatusComment,
         namespace: `env-${uuid}`,
       }));
     logger.info(`[BUILD ${build.uuid}] Created build for pull request branch: ${options.repositoryBranchName}`);

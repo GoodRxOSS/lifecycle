@@ -19,14 +19,14 @@ import _ from 'lodash';
 import Service from './_service';
 import rootLogger from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
-import { GithubPullRequestActions, GithubWebhookTypes, PullRequestStatus, Labels } from 'shared/constants';
+import { GithubPullRequestActions, GithubWebhookTypes, PullRequestStatus, FallbackLabels } from 'shared/constants';
 import { JOB_VERSION } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
 import { Environment, Repository, Build, PullRequest } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
-import { enableKillSwitch, isStaging } from 'server/lib/utils';
+import { enableKillSwitch, isStaging, hasDeployLabel, getDeployLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 
 const logger = rootLogger.child({
@@ -141,13 +141,15 @@ export default class GithubService extends Service {
         });
 
         // if auto deploy, add deploy label`
-        if (isDeploy)
+        if (isDeploy) {
+          const deployLabel = await getDeployLabel();
           await github.updatePullRequestLabels({
             installationId,
             pullRequestNumber: number,
             fullName,
-            labels: labels.map((l) => l.name).concat(['lifecycle-deploy!']),
+            labels: labels.map((l) => l.name).concat([deployLabel]),
           });
+        }
       } else if (isClosed) {
         build = await this.db.models.Build.findOne({
           pullRequestId,
@@ -157,12 +159,14 @@ export default class GithubService extends Service {
           return;
         }
         await this.db.services.BuildService.deleteBuild(build);
-        // remove lifecycle-deploy! label on PR close
+        // remove deploy labels on PR close
+        const globalConfig = await this.db.services.GlobalConfig.getLabels();
+        const deployLabels = globalConfig.deploy;
         await github.updatePullRequestLabels({
           installationId,
           pullRequestNumber: number,
           fullName,
-          labels: labels.map((l) => l.name).filter((v) => v !== Labels.DEPLOY),
+          labels: labels.map((l) => l.name).filter((labelName) => !deployLabels.includes(labelName)),
         });
       }
     } catch (error) {
@@ -217,7 +221,7 @@ export default class GithubService extends Service {
     try {
       // this is a hacky way to force deploy by adding a label
       const labelNames = labels.map(({ name }) => name.toLowerCase()) || [];
-      const shouldDeploy = isStaging() && labelNames.includes(Labels.DEPLOY_STG);
+      const shouldDeploy = isStaging() && labelNames.includes(FallbackLabels.DEPLOY_STG);
       if (shouldDeploy) {
         // we overwrite the action so the handlePullRequestHook can handle the cretion
         body.action = GithubPullRequestActions.OPENED;
@@ -396,7 +400,7 @@ export default class GithubService extends Service {
       case GithubWebhookTypes.PULL_REQUEST:
         try {
           const labelNames = body.pull_request.labels.map(({ name }) => name.toLowerCase()) || [];
-          if (isStaging() && !labelNames.includes(Labels.DEPLOY_STG)) {
+          if (isStaging() && !labelNames.includes(FallbackLabels.DEPLOY_STG)) {
             logger.debug(`[GITHUB] STAGING RUN DETECTED - Skipping processing of this event`);
             return;
           }
@@ -481,8 +485,8 @@ export default class GithubService extends Service {
     const branch = pullRequest?.branchName;
     try {
       const isBot = await this.db.services.BotUser.isBotUser(user);
-      const hasDeployLabel = labelNames.includes(Labels.DEPLOY);
-      const isDeploy = hasDeployLabel || autoDeploy;
+      const deployLabelPresent = await hasDeployLabel(labelNames);
+      const isDeploy = deployLabelPresent || autoDeploy;
       const isKillSwitch = await enableKillSwitch({
         isBotUser: isBot,
         fullName,

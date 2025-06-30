@@ -17,7 +17,7 @@
 import { createAppAuth } from '@octokit/auth-app';
 import rootLogger from 'server/lib/logger';
 import BaseService from './_service';
-import { GlobalConfig } from './types/globalConfig';
+import { GlobalConfig, LabelsConfig } from './types/globalConfig';
 import { GITHUB_APP_INSTALLATION_ID, APP_AUTH, APP_ENV } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import { redisClient } from 'server/lib/dependencies';
@@ -108,6 +108,27 @@ export default class GlobalConfigService extends BaseService {
     const { features } = await this.getAllConfigs();
     if (!features) return false;
     return Boolean(features[name]);
+  }
+
+  /**
+   * Retrieves labels configuration from global config with fallback defaults
+   * @returns Promise<LabelsConfig> The labels configuration
+   */
+  async getLabels(): Promise<LabelsConfig> {
+    try {
+      const { labels } = await this.getAllConfigs();
+      if (!labels) throw new Error('Labels configuration not found in global config');
+      return labels;
+    } catch (error) {
+      logger.error('Error retrieving labels configuration, using fallback defaults', error);
+      // Return fallback defaults on error
+      return {
+        deploy: ['lifecycle-deploy!'],
+        disabled: ['lifecycle-disabled!'],
+        statusComments: ['lifecycle-status-comments!'],
+        defaultStatusComments: true,
+      };
+    }
   }
 
   private deserialize(config: unknown): GlobalConfig {

@@ -27,12 +27,21 @@ import {
   BuildStatus,
   DeployStatus,
   CommentParser,
-  Labels,
   DeployTypes,
   CLIDeployTypes,
   PullRequestStatus,
 } from 'shared/constants';
-import { flattenObject, enableKillSwitch, isStaging } from 'server/lib/utils';
+import {
+  flattenObject,
+  enableKillSwitch,
+  isStaging,
+  hasStatusCommentLabel,
+  hasDeployLabel,
+  getDeployLabel,
+  getDisabledLabel,
+  getStatusCommentLabel,
+  isDefaultStatusCommentsEnabled,
+} from 'server/lib/utils';
 import Fastly from 'server/lib/fastly';
 import { nanoid } from 'nanoid';
 import { redisClient } from 'server/lib/dependencies';
@@ -44,7 +53,11 @@ const logger = rootLogger.child({
   filename: 'services/activityStream.ts',
 });
 
-const TO_DEPLOY_THIS_ENV = `To deploy this environment, just add a \`${Labels.DEPLOY}\` label. Add a \`${Labels.DISABLED}\` to do the opposite. ↗️\n\n`;
+const createDeployMessage = async () => {
+  const deployLabel = await getDeployLabel();
+  const disabledLabel = await getDisabledLabel();
+  return `To deploy this environment, just add a \`${deployLabel}\` label. Add a \`${disabledLabel}\` to do the opposite. ↗️\n\n`;
+};
 const COMMENT_EDIT_DESCRIPTION = `You can use the section below to redeploy and update the dev environment for this pull request.\n\n\n`;
 const GIT_SERVICE_URL = 'https://github.com';
 
@@ -404,14 +417,10 @@ export default class ActivityStream extends BaseService {
     const prefix = `[BUILD ${uuid}][updatePullRequestActivityStream]`;
     const suffix = `for ${fullName}/${branchName}`;
     const isStatic = build?.isStatic ?? false;
-    const enabledFeatures = build?.enabledFeatures || [];
     const labels = pullRequest?.labels || [];
-    const hasUseDeprecatedStatusComment = labels?.includes(Labels.ENABLE_LIFECYCLE_STATUS_COMMENTS);
-    const hasGithubStatusCommentEnabled = enabledFeatures.includes('hasGithubStatusComment');
-    const isDeployed = build?.status === BuildStatus.DEPLOYED;
-    const hasPurgeFastlyServiceCachLabel = labels?.includes(Labels.PURGE_FASTLY_SERVICE_CACHE);
-    const isPurgingFastlyServiceCache = hasPurgeFastlyServiceCachLabel && isDeployed;
-    const isShowingStatusComment = isStatic || hasUseDeprecatedStatusComment || hasGithubStatusCommentEnabled;
+    const hasStatusComment = await hasStatusCommentLabel(labels);
+    const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled();
+    const isShowingStatusComment = isStatic || hasStatusComment || isDefaultStatusEnabled;
     if (!buildId) {
       logger.error(`${prefix}[buidIdError] No build ID found ${suffix}`);
       throw new Error('No build ID found for this build!');
@@ -437,7 +446,6 @@ export default class ActivityStream extends BaseService {
             .child({ error })
             .warn(`${prefix} (Full YAML: ${isFullYaml}) Unable to update ${queued} mission control comment ${suffix}`);
         });
-        if (isPurgingFastlyServiceCache) await this.purgeFastlyServiceCache(uuid);
       }
 
       if (updateStatus && isShowingStatusComment) {
@@ -477,7 +485,8 @@ export default class ActivityStream extends BaseService {
    */
   private async editCommentForBuild(build: Build, deploys: Deploy[]) {
     let message = ``;
-    const enableLifecycleStatusComments = `Add \`${Labels.ENABLE_LIFECYCLE_STATUS_COMMENTS}\``;
+    const statusCommentLabel = await getStatusCommentLabel();
+    const enableLifecycleStatusComments = `Add \`${statusCommentLabel}\``;
     message += `## ✏️ Environment Overrides\n`;
     message += '<details>\n';
     message += '<summary>Usage</summary>\n\n';
@@ -645,7 +654,7 @@ export default class ActivityStream extends BaseService {
       ].includes(buildStatus as BuildStatus);
       const isDeployed = buildStatus === BuildStatus.DEPLOYED;
       let deployStatus;
-      const hasDeployLabel = labels?.includes(Labels.DEPLOY);
+      const hasDeployLabelPresent = await hasDeployLabel(labels);
       const tags = { uuid, repositoryName, branchName, env: 'prd', service: 'lifecycle-job', statsEvent: 'deployment' };
       const eventDetails = {
         title: 'Deployment Finished',
@@ -698,8 +707,8 @@ export default class ActivityStream extends BaseService {
         metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
       }
       message = `### 💻✨ Your environment ${deployStatus}.\n`;
-      if (!hasDeployLabel && !isBot && isPending && isOpen) {
-        message += TO_DEPLOY_THIS_ENV;
+      if (!hasDeployLabelPresent && !isBot && isPending && isOpen) {
+        message += await createDeployMessage();
       }
 
       message += await this.editCommentForBuild(build, deploys).catch((error) => {
@@ -818,9 +827,11 @@ export default class ActivityStream extends BaseService {
       message += '## ⏳ Pending\n';
       message += `Lifecycle Environment either has been torn down or does not exist.`;
       if (isBot) {
-        message += `\n\n**This PR is created by a bot user, add ${Labels.DEPLOY} to build environment**`;
+        const deployLabel = await getDeployLabel();
+        message += `\n\n**This PR is created by a bot user, add ${deployLabel} to build environment**`;
       } else {
-        message += `\n\n*Note: If ${Labels.DISABLED} label present, remove to build environment*`;
+        const disabledLabel = await getDisabledLabel();
+        message += `\n\n*Note: If ${disabledLabel} label present, remove to build environment*`;
       }
     } else if (isBuilding) {
       message += '## 🏗️ Building\n';
@@ -844,7 +855,7 @@ export default class ActivityStream extends BaseService {
       });
 
       if (pullRequest.deployOnUpdate === false) {
-        message += TO_DEPLOY_THIS_ENV;
+        message += await createDeployMessage();
       } else {
         message += `\nWe'll deploy your code once we've finished this build step.`;
       }
@@ -880,7 +891,7 @@ export default class ActivityStream extends BaseService {
         );
         return '';
       });
-      message += TO_DEPLOY_THIS_ENV;
+      message += await createDeployMessage();
     } else if (pullRequest.deployOnUpdate) {
       message = '';
       if (build.status === BuildStatus.ERROR) {

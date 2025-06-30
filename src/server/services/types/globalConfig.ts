@@ -36,6 +36,7 @@ export type GlobalConfig = {
   serviceAccount: RoleSettings;
   features: Record<string, boolean>;
   app_setup: AppSetup;
+  labels: LabelsConfig;
 };
 
 export type AppSetup = {
@@ -134,4 +135,11 @@ export type BuildDefaults = {
 export type ResourceRequirements = {
   requests?: Record<string, string>;
   limits?: Record<string, string>;
+};
+
+export type LabelsConfig = {
+  deploy: string[];
+  disabled: string[];
+  statusComments: string[];
+  defaultStatusComments: boolean;
 };

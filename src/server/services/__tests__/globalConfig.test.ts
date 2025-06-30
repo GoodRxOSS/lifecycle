@@ -82,6 +82,62 @@ describe('GlobalConfigService', () => {
     });
   });
 
+  describe('getLabels', () => {
+    it('should return labels configuration from global config', async () => {
+      const mockLabelsConfig = {
+        deploy: ['lifecycle-deploy!', 'custom-deploy!'],
+        disabled: ['lifecycle-disabled!', 'no-deploy!'],
+        statusComments: ['lifecycle-status-comments!', 'show-status!'],
+        defaultStatusComments: true,
+      };
+
+      const mockGetAllConfigs = jest.spyOn(service, 'getAllConfigs').mockResolvedValueOnce({
+        labels: mockLabelsConfig,
+      });
+
+      const result = await service.getLabels();
+
+      expect(result).toEqual(mockLabelsConfig);
+      expect(mockGetAllConfigs).toHaveBeenCalled();
+
+      mockGetAllConfigs.mockRestore();
+    });
+
+    it('should return fallback defaults when labels config does not exist', async () => {
+      const mockGetAllConfigs = jest.spyOn(service, 'getAllConfigs').mockResolvedValueOnce({
+        // no labels config
+      });
+
+      const result = await service.getLabels();
+
+      expect(result).toEqual({
+        deploy: ['lifecycle-deploy!'],
+        disabled: ['lifecycle-disabled!'],
+        statusComments: ['lifecycle-status-comments!'],
+        defaultStatusComments: true,
+      });
+      expect(mockGetAllConfigs).toHaveBeenCalled();
+
+      mockGetAllConfigs.mockRestore();
+    });
+
+    it('should return fallback defaults when getAllConfigs throws an error', async () => {
+      const mockGetAllConfigs = jest.spyOn(service, 'getAllConfigs').mockRejectedValueOnce(new Error('DB error'));
+
+      const result = await service.getLabels();
+
+      expect(result).toEqual({
+        deploy: ['lifecycle-deploy!'],
+        disabled: ['lifecycle-disabled!'],
+        statusComments: ['lifecycle-status-comments!'],
+        defaultStatusComments: true,
+      });
+      expect(mockGetAllConfigs).toHaveBeenCalled();
+
+      mockGetAllConfigs.mockRestore();
+    });
+  });
+
   afterEach(() => {
     jest.clearAllMocks();
   });

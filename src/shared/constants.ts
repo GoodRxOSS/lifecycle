@@ -116,12 +116,11 @@ export enum CommentParser {
   FOOTER = `----EDIT ABOVE THIS LINE----`,
 }
 
-export enum Labels {
+export enum FallbackLabels {
   DEPLOY = 'lifecycle-deploy!',
   DISABLED = 'lifecycle-disabled!',
   DEPLOY_STG = 'lifecycle-stg-deploy!',
   ENABLE_LIFECYCLE_STATUS_COMMENTS = 'lifecycle-status-comments!',
-  PURGE_FASTLY_SERVICE_CACHE = 'lifecycle-cache-purge!',
 }
 
 export enum FeatureFlags {

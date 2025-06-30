@@ -21,7 +21,7 @@ import { UniqueViolationError } from 'objection';
 import _ from 'lodash';
 import * as github from 'server/lib/github';
 import { JOB_VERSION } from 'shared/config';
-import { Labels } from 'shared/constants';
+import GlobalConfigService from './globalConfig';
 import { redisClient } from 'server/lib/dependencies';
 
 export interface PullRequestOptions {
@@ -106,12 +106,13 @@ export default class PullRequestService extends BaseService {
     try {
       await pullRequest.$fetchGraph('repository');
 
+      const labelsConfig = await GlobalConfigService.getInstance().getLabels();
       const hasLabel = await this.pullRequestHasLabelsAndState(
         pullRequest.pullRequestNumber,
         pullRequest.repository.githubInstallationId,
         pullRequest.repository.fullName.split('/')[0],
         pullRequest.repository.fullName.split('/')[1],
-        [Labels.DEPLOY],
+        labelsConfig.deploy,
         'open'
       );
       return hasLabel;

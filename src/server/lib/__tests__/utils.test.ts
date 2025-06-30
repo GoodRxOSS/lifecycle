@@ -14,7 +14,20 @@
  * limitations under the License.
  */
 
-import { exec, generateDeployTag, waitUntil, enableKillSwitch } from 'server/lib/utils';
+import {
+  exec,
+  generateDeployTag,
+  waitUntil,
+  enableKillSwitch,
+  hasDeployLabel,
+  hasDisabledLabel,
+  hasStatusCommentLabel,
+  getDeployLabel,
+  getDisabledLabel,
+  getStatusCommentLabel,
+  isDefaultStatusCommentsEnabled,
+} from 'server/lib/utils';
+import GlobalConfigService from 'server/services/globalConfig';
 
 jest.mock('server/services/globalConfig', () => {
   return {
@@ -27,6 +40,12 @@ jest.mock('server/services/globalConfig', () => {
             organizations: ['disabledorg'],
           },
         },
+      }),
+      getLabels: jest.fn().mockResolvedValue({
+        deploy: ['lifecycle-deploy!', 'custom-deploy!'],
+        disabled: ['lifecycle-disabled!', 'no-deploy!'],
+        statusComments: ['lifecycle-status-comments!', 'show-status!'],
+        defaultStatusComments: true,
       }),
     }),
   };
@@ -213,5 +232,182 @@ describe('enableKillSwitch', () => {
     const options = { action: '', branch: '', fullName: '', githubUser: '', isOpen: true };
     const result = await enableKillSwitch(options);
     expect(result).toEqual(false);
+  });
+});
+
+describe('hasDeployLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured deploy label', async () => {
+    const result = await hasDeployLabel(['lifecycle-deploy!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when PR has multiple configured deploy labels', async () => {
+    const result = await hasDeployLabel(['custom-deploy!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no deploy labels', async () => {
+    const result = await hasDeployLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when labels array is empty', async () => {
+    const result = await hasDeployLabel([]);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).not.toHaveBeenCalled();
+  });
+
+  test('returns false when deploy config is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await hasDeployLabel(['some-label']);
+    expect(result).toBe(false);
+  });
+
+  test('returns false when deploy config is empty array', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: [],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    });
+    const result = await hasDeployLabel(['some-label']);
+    expect(result).toBe(false);
+  });
+});
+
+describe('hasDisabledLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured disabled label', async () => {
+    const result = await hasDisabledLabel(['lifecycle-disabled!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no disabled labels', async () => {
+    const result = await hasDisabledLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when labels array is empty', async () => {
+    const result = await hasDisabledLabel([]);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).not.toHaveBeenCalled();
+  });
+});
+
+describe('hasStatusCommentLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured status comment label', async () => {
+    const result = await hasStatusCommentLabel(['lifecycle-status-comments!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no status comment labels', async () => {
+    const result = await hasStatusCommentLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('getDeployLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first deploy label from configuration', async () => {
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns hardcoded fallback when deploy config is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+  });
+
+  test('returns hardcoded fallback when deploy config is empty array', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: [],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    });
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+  });
+});
+
+describe('getDisabledLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first disabled label from configuration', async () => {
+    const result = await getDisabledLabel();
+    expect(result).toBe('lifecycle-disabled!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('getStatusCommentLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first status comment label from configuration', async () => {
+    const result = await getStatusCommentLabel();
+    expect(result).toBe('lifecycle-status-comments!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('isDefaultStatusCommentsEnabled', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns defaultStatusComments setting from configuration', async () => {
+    const result = await isDefaultStatusCommentsEnabled();
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when defaultStatusComments is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+    } as any);
+    const result = await isDefaultStatusCommentsEnabled();
+    expect(result).toBe(true);
   });
 });
