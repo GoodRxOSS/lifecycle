@@ -19,15 +19,10 @@ import { ConnectionString } from 'connection-string';
 import { merge } from 'lodash';
 
 const { NODE_ENV, DATABASE_URL } = process.env;
-const { hosts, user, password, path, port = 5432, params} = new ConnectionString(DATABASE_URL);
+const { hosts, user, password, path, port = 5432, params } = new ConnectionString(DATABASE_URL);
 const host = hosts?.[0]?.name;
 const database = path?.[0];
-const ssl = params?.ssl == "true" ? { rejectUnauthorized: false } : false
-
-// console.log('Running database migrations with the following arguments 🏎️', {
-//   envValues: { NODE_ENV, DATABASE_URL },
-//   resolvedValues: { host, user, password, database, port },
-// });
+const ssl = params?.ssl == 'true' ? { rejectUnauthorized: false } : false;
 
 const defaults = {
   client: 'pg',
