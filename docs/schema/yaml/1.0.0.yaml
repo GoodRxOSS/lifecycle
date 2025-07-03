@@ -48,13 +48,35 @@ environment:
       state: ''
       # @param environment.webhooks.type (required)
       type: ''
-      # @param environment.webhooks.pipelineId (required)
+      # @param environment.webhooks.pipelineId
       pipelineId: ''
       # @param environment.webhooks.trigger (required)
       trigger: ''
       # @param environment.webhooks.env (required)
       env:
 
+      # @param environment.webhooks.docker
+      docker:
+        # @param environment.webhooks.docker.image (required)
+        image: ''
+        # @param environment.webhooks.docker.command
+        command:
+          # @param environment.webhooks.docker.command[]
+          - ''
+        # @param environment.webhooks.docker.args
+        args:
+          # @param environment.webhooks.docker.args[]
+          - ''
+        # @param environment.webhooks.docker.timeout
+        timeout: 0
+      # @param environment.webhooks.command
+      command:
+        # @param environment.webhooks.command.image (required)
+        image: ''
+        # @param environment.webhooks.command.script (required)
+        script: ''
+        # @param environment.webhooks.command.timeout
+        timeout: 0
 # @section services
 services:
   # @param services[]

@@ -20,7 +20,10 @@ import { setupServiceAccountInNamespace } from '../../nativeHelm/utils';
 
 const logger = rootLogger.child({ filename: 'lib/kubernetes/serviceAccount.ts' });
 
-export async function ensureServiceAccountForJob(namespace: string, jobType: 'build' | 'deploy'): Promise<string> {
+export async function ensureServiceAccountForJob(
+  namespace: string,
+  jobType: 'build' | 'deploy' | 'webhook'
+): Promise<string> {
   const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
   const serviceAccountName = serviceAccount?.name || 'default';
   const role = serviceAccount?.role || 'default';
