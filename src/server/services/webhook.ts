@@ -134,7 +134,6 @@ export default class WebhookService extends BaseService {
 
     try {
       let metadata: Record<string, any> = {};
-      let status = 'invoked';
 
       switch (webhook.type) {
         case 'codefresh': {
@@ -145,48 +144,82 @@ export default class WebhookService extends BaseService {
           metadata = {
             link: `https://g.codefresh.io/build/${buildId}`,
           };
+          await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata,
+            status: 'completed',
+          });
           break;
         }
 
         case 'docker': {
+          const invocation = await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata: { status: 'starting' },
+            status: 'executing',
+          });
+          logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) invoked`);
+
+          // Execute webhook (this waits for completion)
           const result = await executeDockerWebhook(webhook, build, data);
           logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) executed: ${result.jobName}`);
-          metadata = {
-            jobName: result.jobName,
-            success: result.success,
-            ...result.metadata,
-          };
-          status = result.success ? 'completed' : 'failed';
+
+          // Update the invocation record with final status
+          await invocation.$query().patch({
+            metadata: {
+              jobName: result.jobName,
+              success: result.success,
+              ...result.metadata,
+            },
+            status: result.success ? 'completed' : 'failed',
+          });
+
           break;
         }
 
         case 'command': {
+          const invocation = await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata: { status: 'starting' },
+            status: 'executing',
+          });
+          logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) invoked`);
+
+          // Execute webhook (this waits for completion)
           const result = await executeCommandWebhook(webhook, build, data);
           logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) executed: ${result.jobName}`);
-          metadata = {
-            jobName: result.jobName,
-            success: result.success,
-            ...result.metadata,
-          };
-          status = result.success ? 'completed' : 'failed';
+
+          // Update the invocation record with final status
+          await invocation.$query().patch({
+            metadata: {
+              jobName: result.jobName,
+              success: result.success,
+              ...result.metadata,
+            },
+            status: result.success ? 'completed' : 'failed',
+          });
+
           break;
         }
-
         default:
           throw new Error(`Unsupported webhook type: ${webhook.type}`);
       }
 
-      // create the invocation history record
-      await this.db.models.WebhookInvocations.create({
-        buildId: build.id,
-        runUUID: build.runUUID,
-        name: webhook.name,
-        type: webhook.type,
-        state: webhook.state,
-        yamlConfig: JSON.stringify(webhook),
-        metadata,
-        status,
-      });
       logger.debug(`[BUILD ${build.uuid}] Webhook history added for runUUID: ${build.runUUID}`);
     } catch (error) {
       logger.error(`[BUILD ${build.uuid}] Error invoking webhook: ${error}`);

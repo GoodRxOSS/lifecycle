@@ -35,6 +35,7 @@ interface UseJobPollingProps<T extends JobInfo> {
   fetchJobInfo: (job: T) => Promise<void>;
   // eslint-disable-next-line no-unused-vars
   onJobSelect: (job: T) => Promise<void>;
+  pollingInterval?: number; // in milliseconds, default 3000
 }
 
 export function useJobPolling<T extends JobInfo>({
@@ -45,6 +46,7 @@ export function useJobPolling<T extends JobInfo>({
   fetchJobs,
   fetchJobInfo,
   onJobSelect,
+  pollingInterval = 3000,
 }: UseJobPollingProps<T>) {
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -62,7 +64,7 @@ export function useJobPolling<T extends JobInfo>({
 
     pollingIntervalRef.current = setInterval(() => {
       fetchJobs(true);
-    }, 3000);
+    }, pollingInterval);
 
     return () => {
       if (pollingIntervalRef.current) {
@@ -70,7 +72,7 @@ export function useJobPolling<T extends JobInfo>({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uuid, name]);
+  }, [uuid, name, pollingInterval]);
 
   const handleJobUpdate = (jobs: T[]) => {
     if (selectedJob) {

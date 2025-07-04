@@ -35,6 +35,7 @@ interface TerminalContainerProps {
   showTimestamps: boolean;
   onTimestampsToggle: () => void;
   showDetailsTab?: boolean;
+  showEventsTab?: boolean;
 }
 
 export function TerminalContainer({
@@ -47,7 +48,8 @@ export function TerminalContainer({
   children,
   showTimestamps,
   onTimestampsToggle,
-  showDetailsTab = false
+  showDetailsTab = false,
+  showEventsTab = true
 }: TerminalContainerProps) {
   return (
     <>
@@ -136,26 +138,28 @@ export function TerminalContainer({
             Details
           </button>
         )}
-        <button
-          onClick={() => onTabChange('events')}
-          style={{
-            padding: '10px 16px',
-            backgroundColor: activeContainer === 'events' ? '#1a1a1a' : 'transparent',
-            color: activeContainer === 'events' ? '#fff' : '#999',
-            border: 'none',
-            borderBottom: activeContainer === 'events' ? '2px solid #3b82f6' : '2px solid transparent',
-            fontSize: '13px',
-            fontWeight: 500,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            transition: 'all 0.15s',
-            marginLeft: showDetailsTab ? undefined : 'auto'
-          }}
-        >
-          Job Events
-        </button>
+        {showEventsTab && (
+          <button
+            onClick={() => onTabChange('events')}
+            style={{
+              padding: '10px 16px',
+              backgroundColor: activeContainer === 'events' ? '#1a1a1a' : 'transparent',
+              color: activeContainer === 'events' ? '#fff' : '#999',
+              border: 'none',
+              borderBottom: activeContainer === 'events' ? '2px solid #3b82f6' : '2px solid transparent',
+              fontSize: '13px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              transition: 'all 0.15s',
+              marginLeft: showDetailsTab ? undefined : 'auto'
+            }}
+          >
+            Job Events
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
@@ -165,7 +169,7 @@ export function TerminalContainer({
   );
 }
 
-export function EmptyTerminalState({ type }: { type: 'build' | 'deployment' }) {
+export function EmptyTerminalState({ type }: { type: 'build' | 'deployment' | 'webhook' }) {
   return (
     <div style={{ 
       display: 'flex', 
@@ -178,13 +182,13 @@ export function EmptyTerminalState({ type }: { type: 'build' | 'deployment' }) {
       textAlign: 'center'
     }}>
       <svg width="32" height="32" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 002 2v12a2 2 0 002 2z" />
       </svg>
       <h3 style={{ marginTop: '16px', fontSize: '16px', fontWeight: 600, color: '#fff' }}>
-        Select a {type === 'build' ? 'build job' : 'deployment'}
+        Select a {type === 'build' ? 'build job' : type === 'deployment' ? 'deployment' : 'webhook'}
       </h3>
       <p style={{ marginTop: '8px', fontSize: '14px' }}>
-        Choose a {type} from the table to view its logs
+        Choose a {type} from the table to view its {type === 'webhook' ? 'details' : 'logs'}
       </p>
     </div>
   );
