@@ -40,7 +40,10 @@ export class ValidationError extends LifecycleError {
   }
 }
 
-JsonSchema.Validator.prototype.customFormats.webhookType = (input) => input === 'codefresh';
+JsonSchema.Validator.prototype.customFormats.webhookType = (input) => {
+  const validTypes = ['codefresh', 'docker', 'command'];
+  return validTypes.includes(input);
+};
 JsonSchema.Validator.prototype.customFormats.webhookState = (input) => {
   let result: boolean = false;
 

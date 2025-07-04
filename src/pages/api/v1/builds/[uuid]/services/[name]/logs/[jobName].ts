@@ -51,7 +51,7 @@
  *         required: false
  *         schema:
  *           type: string
- *           enum: [build, deploy]
+ *           enum: [build, deploy, webhook]
  *         description: The type of logs to retrieve (defaults to auto-detection based on job name)
  *     responses:
  *       200:
@@ -190,7 +190,7 @@ interface LogStreamResponse {
   error?: string;
 }
 
-type LogType = 'build' | 'deploy';
+type LogType = 'build' | 'deploy' | 'webhook';
 
 function detectLogType(jobName: string): LogType {
   if (jobName.includes('-buildkit-') || jobName.includes('-kaniko-')) {
@@ -198,6 +198,9 @@ function detectLogType(jobName: string): LogType {
   }
   if (jobName.includes('-helm-')) {
     return 'deploy';
+  }
+  if (jobName.includes('webhook') || jobName.includes('wh-')) {
+    return 'webhook';
   }
   return 'build';
 }
@@ -228,14 +231,19 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
 
   const { uuid, name, jobName, type } = req.query;
 
-  if (typeof uuid !== 'string' || typeof name !== 'string' || typeof jobName !== 'string') {
-    logger.warn(`uuid=${uuid} name=${name} jobName=${jobName} message="Missing or invalid query parameters"`);
+  // For webhook jobs, name can be undefined
+  const isWebhookRequest = type === 'webhook';
+
+  if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
+    logger.warn(
+      `uuid=${uuid} name=${name} jobName=${jobName} type=${type} message="Missing or invalid query parameters"`
+    );
     return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
 
-  if (type && (typeof type !== 'string' || !['build', 'deploy'].includes(type))) {
+  if (type && (typeof type !== 'string' || !['build', 'deploy', 'webhook'].includes(type))) {
     logger.warn(`type=${type} message="Invalid type parameter"`);
-    return res.status(400).json({ error: 'Invalid type parameter. Must be "build" or "deploy"' });
+    return res.status(400).json({ error: 'Invalid type parameter. Must be "build", "deploy", or "webhook"' });
   }
 
   try {
@@ -269,7 +277,11 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
     }
 
     const unifiedStatus = mapPodStatusToUnified(podInfo.status);
-    const streamingRequired = unifiedStatus === 'Active' || unifiedStatus === 'Pending';
+    const streamingRequired =
+      unifiedStatus === 'Active' ||
+      unifiedStatus === 'Pending' ||
+      unifiedStatus === 'Complete' ||
+      unifiedStatus === 'Failed';
 
     const response: LogStreamResponse = {
       status: unifiedStatus,
@@ -283,7 +295,7 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
         parameters: {
           podName: podInfo.podName,
           namespace: namespace,
-          follow: streamingRequired,
+          follow: unifiedStatus === 'Active' || unifiedStatus === 'Pending',
           timestamps: true,
         },
       };

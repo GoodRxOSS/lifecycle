@@ -14,12 +14,35 @@
  * limitations under the License.
  */
 
+export interface DockerWebhookConfig {
+  readonly image: string;
+  readonly command?: string[];
+  readonly args?: string[];
+  readonly timeout?: number; // seconds, default 1800 (30 min)
+}
+
+export interface CommandWebhookConfig {
+  readonly image: string;
+  readonly script: string;
+  readonly timeout?: number; // seconds, default 1800 (30 min)
+}
+
 export interface Webhook {
   readonly name?: string;
   readonly description?: string;
   readonly state: string;
-  readonly type: string;
-  readonly pipelineId: string;
-  readonly trigger: string;
+  readonly type: string; // 'codefresh' | 'docker' | 'command'
+
+  // Codefresh-specific fields (required when type === 'codefresh')
+  readonly pipelineId?: string;
+  readonly trigger?: string;
+
+  // Docker webhook configuration (required when type === 'docker')
+  readonly docker?: DockerWebhookConfig;
+
+  // Command webhook configuration (required when type === 'command')
+  readonly command?: CommandWebhookConfig;
+
+  // Environment variables for all webhook types
   readonly env: Record<string, string>;
 }

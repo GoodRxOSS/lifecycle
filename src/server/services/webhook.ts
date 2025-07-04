@@ -25,6 +25,8 @@ import { ConfigFileWebhookEnvironmentVariables } from 'server/lib/configFileWebh
 import { LifecycleError } from 'server/lib/errors';
 import { JOB_VERSION } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
+import { validateWebhook } from 'server/lib/webhook/webhookValidator';
+import { executeDockerWebhook, executeCommandWebhook } from 'server/lib/webhook';
 
 const logger = rootLogger.child({
   filename: 'services/webhook.ts',
@@ -120,30 +122,119 @@ export default class WebhookService extends BaseService {
    * @param build
    */
   private async runYamlConfigFileWebhookForBuild(webhook: YamlService.Webhook, build: Build): Promise<void> {
+    // Validate webhook configuration
+    const validationErrors = validateWebhook(webhook);
+    if (validationErrors.length > 0) {
+      const errorMessage = validationErrors.map((e) => `${e.field}: ${e.message}`).join(', ');
+      throw new Error(`Invalid webhook configuration: ${errorMessage}`);
+    }
+
     const envVariables = await new ConfigFileWebhookEnvironmentVariables(this.db).resolve(build, webhook);
     const data = merge(envVariables, build.commentRuntimeEnv);
-    try {
-      const buildId: string = await this.db.services.Codefresh.triggerYamlConfigWebhookPipeline(webhook, data);
-      logger
-        .child({ url: `https://g.codefresh.io/build/${buildId}` })
-        .info(`[BUILD ${build.uuid}] Webhook (${webhook.name}) triggered: ${buildId}`);
 
-      const metadata = {
-        link: `https://g.codefresh.io/build/${buildId}`,
-      };
-      // create the invocation history record
+    try {
+      let metadata: Record<string, any> = {};
+
+      switch (webhook.type) {
+        case 'codefresh': {
+          const buildId: string = await this.db.services.Codefresh.triggerYamlConfigWebhookPipeline(webhook, data);
+          logger
+            .child({ url: `https://g.codefresh.io/build/${buildId}` })
+            .info(`[BUILD ${build.uuid}] Webhook (${webhook.name}) triggered: ${buildId}`);
+          metadata = {
+            link: `https://g.codefresh.io/build/${buildId}`,
+          };
+          await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata,
+            status: 'completed',
+          });
+          break;
+        }
+
+        case 'docker': {
+          const invocation = await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata: { status: 'starting' },
+            status: 'executing',
+          });
+          logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) invoked`);
+
+          // Execute webhook (this waits for completion)
+          const result = await executeDockerWebhook(webhook, build, data);
+          logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) executed: ${result.jobName}`);
+
+          // Update the invocation record with final status
+          await invocation.$query().patch({
+            metadata: {
+              jobName: result.jobName,
+              success: result.success,
+              ...result.metadata,
+            },
+            status: result.success ? 'completed' : 'failed',
+          });
+
+          break;
+        }
+
+        case 'command': {
+          const invocation = await this.db.models.WebhookInvocations.create({
+            buildId: build.id,
+            runUUID: build.runUUID,
+            name: webhook.name,
+            type: webhook.type,
+            state: webhook.state,
+            yamlConfig: JSON.stringify(webhook),
+            metadata: { status: 'starting' },
+            status: 'executing',
+          });
+          logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) invoked`);
+
+          // Execute webhook (this waits for completion)
+          const result = await executeCommandWebhook(webhook, build, data);
+          logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) executed: ${result.jobName}`);
+
+          // Update the invocation record with final status
+          await invocation.$query().patch({
+            metadata: {
+              jobName: result.jobName,
+              success: result.success,
+              ...result.metadata,
+            },
+            status: result.success ? 'completed' : 'failed',
+          });
+
+          break;
+        }
+        default:
+          throw new Error(`Unsupported webhook type: ${webhook.type}`);
+      }
+
+      logger.debug(`[BUILD ${build.uuid}] Webhook history added for runUUID: ${build.runUUID}`);
+    } catch (error) {
+      logger.error(`[BUILD ${build.uuid}] Error invoking webhook: ${error}`);
+
+      // Still create a failed invocation record
       await this.db.models.WebhookInvocations.create({
         buildId: build.id,
         runUUID: build.runUUID,
         name: webhook.name,
+        type: webhook.type,
         state: webhook.state,
         yamlConfig: JSON.stringify(webhook),
-        metadata,
-        status: 'invoked',
+        metadata: { error: error.message },
+        status: 'failed',
       });
-      logger.debug(`[BUILD ${build.uuid}] Webhook history added for runUUID: ${build.runUUID}`);
-    } catch (error) {
-      logger.error(`[BUILD ${build.uuid}] Error invoking webhook: ${error}`);
     }
   }
 
