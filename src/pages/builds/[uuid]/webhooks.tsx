@@ -27,7 +27,6 @@ import {
   EmptyTerminalState,
   LogViewer,
   EventsViewer,
-  JobHistoryTable,
   useWebSocketLogs,
   useJobPolling,
 } from '../../../components/logs';
@@ -296,24 +295,6 @@ export default function WebhookHistory() {
     return containerName;
   };
 
-  const getStatusFromWebhookStatus = (status: string): 'Active' | 'Complete' | 'Failed' | 'Pending' => {
-    switch (status) {
-      case 'completed':
-        return 'Complete';
-      case 'failed':
-        return 'Failed';
-      case 'executing':
-        return 'Active';
-      default:
-        return 'Pending';
-    }
-  };
-
-  const webhooksForTable = webhooks.map((webhook) => ({
-    ...webhook,
-    status: getStatusFromWebhookStatus(webhook.status),
-  }));
-
   const renderWebhookBadges = (webhook: WebhookInvocation) => (
     <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
       <span
@@ -544,17 +525,6 @@ export default function WebhookHistory() {
 
   return (
     <>
-      <style jsx>{`
-        @keyframes pulse {
-          0%,
-          100% {
-            opacity: 1;
-          }
-          50% {
-            opacity: 0.5;
-          }
-        }
-      `}</style>
       <PageLayout backLink={`/builds/${uuid}`} title="Webhook History" environmentId={uuid as string}>
         {error && !selectedWebhook && <ErrorAlert error={error} />}
 
