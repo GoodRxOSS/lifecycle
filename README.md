@@ -19,7 +19,7 @@ lifecycle is a tool that transforms pull requests into ephemeral development env
   Isolated environments for feature branches to develop, without interference from others' work.
 
 - **Testing:**  
-  Fully connected and function environments for manula and automated testing.
+  Fully connected and function environments for manual and automated testing.
 
 - **Design Review:**  
   Live environments for product managers and designers to interact with new features.
