@@ -19,7 +19,7 @@ import rootLogger from 'server/lib/logger';
 import BuildService from 'server/services/build';
 
 const logger = rootLogger.child({
-  filename: 'deploys.ts',
+  filename: 'api/v1/deploys.ts',
 });
 
 /**

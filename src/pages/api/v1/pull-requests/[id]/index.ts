@@ -19,7 +19,7 @@ import rootLogger from 'server/lib/logger';
 import PullRequestService from 'server/services/pullRequest';
 
 const logger = rootLogger.child({
-  filename: 'pull-requests/[id].ts',
+  filename: 'api/v1/pull-requests/[id].ts',
 });
 
 /**
