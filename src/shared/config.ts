@@ -33,16 +33,16 @@ const getServerRuntimeConfig = (key: string, fallback?: any): any => {
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
   const value = config[key];
-  if (!!value || !!fallback) {
-    return value || fallback;
-  } else {
-    // The literal fallback value of "false" is valid. All other falsy fallbacks are not.
-    if (fallback === false) return fallback;
-
-    if ('yes' === process.env.BUILD_MODE) return '';
-
-    throw new Error(`Required config missing: '${key}'`);
+  if (value !== undefined && value !== null) {
+    return value;
   }
+  if (fallback !== undefined) {
+    return fallback;
+  }
+
+  if ('yes' === process.env.BUILD_MODE) return '';
+
+  throw new Error(`Required config missing: '${key}'`);
 };
 
 export const APP_ENV = getServerRuntimeConfig('APP_ENV', 'development');
@@ -51,7 +51,17 @@ export const IS_STG = APP_ENV === 'staging';
 export const IS_DEV = APP_ENV !== 'production';
 export const TMP_PATH = `/tmp/lifecycle`;
 
+/**
+ * @deprecated Use individual APP_DB_* environment variables instead (APP_DB_HOST, APP_DB_USER, APP_DB_PASSWORD, APP_DB_NAME). This will be removed in future releases.
+ */
 export const DATABASE_URL = getServerRuntimeConfig('DATABASE_URL');
+
+export const APP_DB_HOST = getServerRuntimeConfig('APP_DB_HOST', '');
+export const APP_DB_PORT = getServerRuntimeConfig('APP_DB_PORT', 5432);
+export const APP_DB_USER = getServerRuntimeConfig('APP_DB_USER', 'lifecycle');
+export const APP_DB_PASSWORD = getServerRuntimeConfig('APP_DB_PASSWORD', 'lifecycle');
+export const APP_DB_NAME = getServerRuntimeConfig('APP_DB_NAME', '');
+export const APP_DB_SSL = getServerRuntimeConfig('APP_DB_SSL', '');
 
 export const LIFECYCLE_UI_HOSTHAME_WITH_SCHEME = getServerRuntimeConfig(
   'LIFECYCLE_UI_HOSTHAME_WITH_SCHEME',
@@ -63,8 +73,16 @@ export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID');
 export const GITHUB_CLIENT_SECRET = getServerRuntimeConfig('GITHUB_CLIENT_SECRET');
 
 export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
+
+/**
+ * @deprecated Use individual APP_REDIS_* environment variables instead (APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD). This will be removed in future releases.
+ */
 export const REDIS_URL = getServerRuntimeConfig('REDIS_URL');
-export const REDIS_PORT = getServerRuntimeConfig('REDIS_PORT', 6379);
+
+export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', '');
+export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
+export const APP_REDIS_PASSWORD = getServerRuntimeConfig('APP_REDIS_PASSWORD', '');
+export const APP_REDIS_TLS = getServerRuntimeConfig('APP_REDIS_TLS', 'false');
 
 export const GITHUB_PRIVATE_KEY = getServerRuntimeConfig('GITHUB_PRIVATE_KEY')
   .replace(/\\n/g, '\n')
