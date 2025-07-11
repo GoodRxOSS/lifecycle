@@ -37,7 +37,7 @@ export async function createKubernetesApplyJob({
   kc.loadFromDefault();
   const batchApi = kc.makeApiClient(k8s.BatchV1Api);
   const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
-  const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`;
+  const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
   logger.info(`Creating Kubernetes apply job ${jobName} for deploy ${deploy.uuid} service=${serviceName}`);
