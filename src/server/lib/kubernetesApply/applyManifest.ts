@@ -36,7 +36,7 @@ export async function createKubernetesApplyJob({
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const batchApi = kc.makeApiClient(k8s.BatchV1Api);
-  const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
+  const shortSha = deploy.sha?.substring(0, 7) || '';
   const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
@@ -65,9 +65,8 @@ export async function createKubernetesApplyJob({
       },
     },
     spec: {
-      ttlSecondsAfterFinished: 86400, // 24 hours
+      ttlSecondsAfterFinished: 86400,
       backoffLimit: 3,
-      activeDeadlineSeconds: 600, // 10 minutes timeout
       template: {
         metadata: {
           labels: {
