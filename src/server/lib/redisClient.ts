@@ -16,7 +16,7 @@
 
 import Redis from 'ioredis';
 import Redlock from 'redlock';
-import { REDIS_URL } from 'shared/config';
+import { REDIS_URL, APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD, APP_REDIS_TLS } from 'shared/config';
 import rootLogger from './logger';
 
 const logger = rootLogger.child({
@@ -32,7 +32,31 @@ export class RedisClient {
   private readonly bclients: Redis[] = [];
 
   private constructor() {
-    this.redis = new Redis(REDIS_URL);
+    if (APP_REDIS_HOST) {
+      const redisConfig: any = {
+        host: APP_REDIS_HOST,
+        port: APP_REDIS_PORT ? parseInt(APP_REDIS_PORT, 10) : 6379,
+      };
+
+      if (APP_REDIS_PASSWORD) {
+        redisConfig.password = APP_REDIS_PASSWORD;
+      }
+
+      if (APP_REDIS_TLS === 'true') {
+        redisConfig.tls = {
+          rejectUnauthorized: false,
+        };
+      }
+
+      this.redis = new Redis(redisConfig);
+    } else if (REDIS_URL) {
+      this.redis = new Redis(REDIS_URL);
+    } else {
+      throw new Error(
+        'Redis configuration not found. Please provide either REDIS_URL or individual APP_REDIS_* environment variables.'
+      );
+    }
+
     this.subscriber = this.redis.duplicate();
     this.redlock = new Redlock([this.redis], {
       driftFactor: 0.01,
