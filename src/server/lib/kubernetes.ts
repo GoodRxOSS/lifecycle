@@ -1553,6 +1553,7 @@ export async function patchIngress(ingressName: string, bannerSnippet: any, name
  */
 export async function updateSecret(secretName: string, secretData: Record<string, string>, namespace: string) {
   try {
+    logger.info(`Updating secret ${secretName} in namespace ${namespace} with data:`, secretData);
     const kc = new k8s.KubeConfig();
     kc.loadFromDefault();
     const k8sApi = kc.makeApiClient(k8s.CoreV1Api);
@@ -1568,7 +1569,7 @@ export async function updateSecret(secretName: string, secretData: Record<string
     secretObject.data = updated;
     await k8sApi.replaceNamespacedSecret(secretName, namespace, secretObject);
   } catch (error) {
-    logger.error('Error updating secret:', error);
+    logger.error(`Error updating secret: ${error}`);
     throw error;
   }
 }
