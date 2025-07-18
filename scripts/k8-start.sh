@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 set -e
 
 cd /app
@@ -28,6 +27,8 @@ required_vars=(
   GITHUB_PRIVATE_KEY
   GITHUB_CLIENT_SECRET
   GITHUB_WEBHOOK_SECRET
+  SECRET_BOOTSTRAP_NAME
+  APP_HOST
 )
 
 missing=()

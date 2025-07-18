@@ -18,6 +18,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { updateSecret, getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
 import logger from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
+import { SECRET_BOOTSTRAP_NAME } from 'shared/config';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -64,7 +65,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const namespace = getCurrentNamespaceFromFile();
 
     await updateSecret(
-      'app-secrets',
+      SECRET_BOOTSTRAP_NAME,
       {
         GITHUB_APP_ID: id,
         GITHUB_CLIENT_ID: client_id,

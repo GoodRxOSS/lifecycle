@@ -18,6 +18,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { updateSecret, getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
 import logger from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
+import { SECRET_BOOTSTRAP_NAME } from 'shared/config';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { installation_id, setup_action } = req.query;
@@ -50,7 +51,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   logger.info(`Successfully recorded installation ID: ${installation_id}`);
   const namespace = getCurrentNamespaceFromFile();
   await updateSecret(
-    'app-secrets',
+    SECRET_BOOTSTRAP_NAME,
     {
       GITHUB_APP_INSTALLATION_ID: installation_id as string,
     },
