@@ -108,5 +108,5 @@ export const DD_ENVS = {
 export const ENVIRONMENT = getServerRuntimeConfig('ENVIRONMENT', 'production');
 export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:5001');
 
-export const SECRET_BOOTSTRAP_NAME = getServerRuntimeConfig('SECRET_BOOTSTRAP_NAME');
-export const SECRET_COMMON_NAME = getServerRuntimeConfig('SECRET_COMMON_NAME');
+export const SECRET_BOOTSTRAP_NAME = getServerRuntimeConfig('SECRET_BOOTSTRAP_NAME', 'lifecycle-app-secrets');
+export const SECRET_COMMON_NAME = getServerRuntimeConfig('SECRET_COMMON_NAME', 'lifecycle-common-secrets');
