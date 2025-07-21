@@ -463,7 +463,7 @@ export async function up(knex: Knex): Promise<any> {
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('features', '{"namespace":true}', now(), now(), null, 'Configuration for feature flags controlled from database');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('serviceAccount', '{"name": "default","role":"replace_me"}', now(), now(), null, 'Default IAM role name to be used to annotate service account');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('app_setup', '{"state":"","created":false,"installed":false,"restarted":false,"org":"","url":"","name":""}', now(), now(), null, 'Application setup state');
-    INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('labels', '{"deploy":["lifecycle-deploy!"],"disabled":["lifecycle-disabled!"],"statusComments":["lifecycle-status-comments!"],"defaultStatusComments":true}', now(), now(), null, 'Configurable PR labels for deploy, disabled, and status comments');
+    INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('labels', '{"deploy":["lifecycle-deploy!"],"disabled":["lifecycle-disabled!"],"statusComments":["lifecycle-status-comments!"],"defaultStatusComments":true,"defaultControlComments":true}', now(), now(), null, 'Configurable PR labels for deploy, disabled, and status comments');
   `);
 
   await knex.schema.raw(`

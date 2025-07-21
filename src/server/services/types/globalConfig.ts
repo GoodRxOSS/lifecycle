@@ -142,4 +142,5 @@ export type LabelsConfig = {
   disabled: string[];
   statusComments: string[];
   defaultStatusComments: boolean;
+  defaultControlComments: boolean;
 };
