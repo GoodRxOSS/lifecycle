@@ -256,3 +256,17 @@ export const isDefaultStatusCommentsEnabled = async (): Promise<boolean> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig.defaultStatusComments ?? true;
 };
+
+/**
+ * Check if control comments should be enabled
+ * @returns Promise<boolean> True if control comments are enabled (defaults to true if not configured)
+ */
+export const isControlCommentsEnabled = async (): Promise<boolean> => {
+  try {
+    const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+    return labelsConfig.defaultControlComments ?? true;
+  } catch (error) {
+    initialLogger.warn('[isControlCommentsEnabled] Error retrieving config, defaulting to true', error);
+    return true;
+  }
+};

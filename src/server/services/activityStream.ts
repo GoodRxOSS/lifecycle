@@ -41,6 +41,7 @@ import {
   getDisabledLabel,
   getStatusCommentLabel,
   isDefaultStatusCommentsEnabled,
+  isControlCommentsEnabled,
 } from 'server/lib/utils';
 import Fastly from 'server/lib/fastly';
 import { nanoid } from 'nanoid';
@@ -414,7 +415,7 @@ export default class ActivityStream extends BaseService {
     const isFullYaml = build?.enableFullYaml;
     const fullName = pullRequest?.fullName;
     const branchName = pullRequest?.branchName;
-    const prefix = `[BUILD ${uuid}][updatePullRequestActivityStream]`;
+    const prefix = `[BUILD ${uuid}]`;
     const suffix = `for ${fullName}/${branchName}`;
     const isStatic = build?.isStatic ?? false;
     const labels = pullRequest?.labels || [];
@@ -441,11 +442,19 @@ export default class ActivityStream extends BaseService {
 
       if (updateStatus || updateMissionControl) {
         await this.manageDeployments(build, deploys);
-        await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
-          logger
-            .child({ error })
-            .warn(`${prefix} (Full YAML: ${isFullYaml}) Unable to update ${queued} mission control comment ${suffix}`);
-        });
+
+        const isControlEnabled = await isControlCommentsEnabled();
+        if (isControlEnabled) {
+          await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
+            logger
+              .child({ error })
+              .warn(
+                `${prefix} (Full YAML: ${isFullYaml}) Unable to update ${queued} mission control comment ${suffix}`
+              );
+          });
+        } else {
+          logger.info(`${prefix} Mission control comments are disabled by configuration`);
+        }
       }
 
       if (updateStatus && isShowingStatusComment) {

@@ -46,6 +46,7 @@ jest.mock('server/services/globalConfig', () => {
         disabled: ['lifecycle-disabled!', 'no-deploy!'],
         statusComments: ['lifecycle-status-comments!', 'show-status!'],
         defaultStatusComments: true,
+        defaultControlComments: true,
       }),
     }),
   };
@@ -282,6 +283,7 @@ describe('hasDeployLabel', () => {
       disabled: ['lifecycle-disabled!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
+      defaultControlComments: true,
     });
     const result = await hasDeployLabel(['some-label']);
     expect(result).toBe(false);
@@ -359,6 +361,7 @@ describe('getDeployLabel', () => {
       disabled: ['lifecycle-disabled!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
+      defaultControlComments: true,
     });
     const result = await getDeployLabel();
     expect(result).toBe('lifecycle-deploy!');
@@ -408,6 +411,54 @@ describe('isDefaultStatusCommentsEnabled', () => {
       statusComments: ['lifecycle-status-comments!'],
     } as any);
     const result = await isDefaultStatusCommentsEnabled();
+    expect(result).toBe(true);
+  });
+});
+
+describe('isControlCommentsEnabled', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns defaultControlComments setting from configuration', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when defaultControlComments is missing', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(true);
+  });
+
+  test('returns false when defaultControlComments is explicitly false', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+      defaultControlComments: false,
+    });
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(false);
+  });
+
+  test('returns true when getLabels throws an error', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockRejectedValueOnce(new Error('Database error'));
+    const result = await isControlCommentsEnabled();
     expect(result).toBe(true);
   });
 });

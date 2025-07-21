@@ -127,6 +127,7 @@ export default class GlobalConfigService extends BaseService {
         disabled: ['lifecycle-disabled!'],
         statusComments: ['lifecycle-status-comments!'],
         defaultStatusComments: true,
+        defaultControlComments: true,
       };
     }
   }
