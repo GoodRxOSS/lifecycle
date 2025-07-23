@@ -26,6 +26,7 @@ import {
 } from './utils';
 import { createBuildJob } from '../kubernetes/jobFactory';
 import * as yaml from 'js-yaml';
+import { BUILDKIT_HOST } from 'shared/config';
 
 export interface NativeBuildOptions {
   ecrRepo: string;
@@ -203,11 +204,9 @@ export async function buildWithEngine(
   let envVars: Record<string, string> = { ...options.envVars };
 
   if (engineName === 'buildkit') {
-    const buildkitConfig = buildDefaults.buildkit || {};
-    const buildkitEndpoint = buildkitConfig.endpoint || 'tcp://buildkit.lifecycle-app.svc.cluster.local:1234';
     envVars = {
       ...envVars,
-      BUILDKIT_HOST: buildkitEndpoint,
+      BUILDKIT_HOST: BUILDKIT_HOST,
       DOCKER_BUILDKIT: '1',
       BUILDCTL_CONNECT_RETRIES_MAX: '10',
     };

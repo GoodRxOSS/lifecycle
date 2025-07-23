@@ -128,3 +128,8 @@ export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:500
 
 export const SECRET_BOOTSTRAP_NAME = getServerRuntimeConfig('SECRET_BOOTSTRAP_NAME', 'lifecycle-app-secrets');
 export const SECRET_COMMON_NAME = getServerRuntimeConfig('SECRET_COMMON_NAME', 'lifecycle-common-secrets');
+
+export const BUILDKIT_HOST = getServerRuntimeConfig(
+  'BUILDKIT_HOST',
+  'tcp://buildkit.lifecycle-app.svc.cluster.local:1234'
+);

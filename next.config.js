@@ -55,6 +55,7 @@ module.exports = {
     APP_HOST: process.env.APP_HOST,
     SECRET_BOOTSTRAP_NAME: process.env.SECRET_BOOTSTRAP_NAME,
     SECRET_COMMON_NAME: process.env.SECRET_COMMON_NAME,
+    BUILDKIT_HOST: process.env.BUILDKIT_HOST,
   },
   typescript: {
     ignoreBuildErrors: true,
