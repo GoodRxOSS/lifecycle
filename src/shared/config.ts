@@ -133,3 +133,5 @@ export const BUILDKIT_HOST = getServerRuntimeConfig(
   'BUILDKIT_HOST',
   'tcp://buildkit.lifecycle-app.svc.cluster.local:1234'
 );
+
+export const DISTRIBUTION_HOST = getServerRuntimeConfig('DISTRIBUTION_HOST', '');

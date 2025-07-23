@@ -18,7 +18,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
 import { shellPromise } from 'server/lib/shell';
 import GlobalConfigService from 'server/services/globalConfig';
-import { APP_HOST } from 'shared/config';
+import { APP_HOST, DISTRIBUTION_HOST } from 'shared/config';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const namespace = getCurrentNamespaceFromFile();
@@ -40,9 +40,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const lifecycleDefaults = await globalConfigService.getConfig('lifecycleDefaults');
     const domainDefaults = await globalConfigService.getConfig('domainDefaults');
 
+    const ecrDomain = DISTRIBUTION_HOST || `distribution.${appDomain}`;
+
     await globalConfigService.setConfig('lifecycleDefaults', {
       ...lifecycleDefaults,
-      ecrDomain: `distribution.${appDomain}`,
+      ecrDomain: ecrDomain,
       defaultPublicUrl: `dev-0.${appDomain}`,
     });
 

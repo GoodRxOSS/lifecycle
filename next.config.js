@@ -56,6 +56,7 @@ module.exports = {
     SECRET_BOOTSTRAP_NAME: process.env.SECRET_BOOTSTRAP_NAME,
     SECRET_COMMON_NAME: process.env.SECRET_COMMON_NAME,
     BUILDKIT_HOST: process.env.BUILDKIT_HOST,
+    DISTRIBUTION_HOST: process.env.DISTRIBUTION_HOST,
   },
   typescript: {
     ignoreBuildErrors: true,
