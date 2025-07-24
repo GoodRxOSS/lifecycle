@@ -195,6 +195,7 @@ export interface Helm {
   readonly overrideDefaultIpWhitelist?: boolean;
   readonly type?: string;
   readonly builder?: Builder;
+  readonly envLens?: boolean;
   readonly deploymentMethod?: 'native' | 'ci';
   readonly nativeHelm?: NativeHelmConfig;
   readonly envMapping?: {

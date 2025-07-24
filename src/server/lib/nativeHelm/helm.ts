@@ -268,10 +268,9 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
   }
 
   const { helm } = deployable;
-  const grpc = helm?.grpc;
 
   try {
-    if (!grpc) {
+    if (helm?.envLens) {
       await patchIngress(deploy.uuid, ingressBannerSnippet(deploy), build.namespace);
     }
   } catch (error) {
@@ -320,10 +319,9 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
   await checkPipelineStatus(deployPipelineId)();
 
   const { helm } = deployable;
-  const grpc = helm?.grpc;
 
   try {
-    if (!grpc) {
+    if (helm?.envLens) {
       await patchIngress(deploy.uuid, ingressBannerSnippet(deploy), build.namespace);
     }
   } catch (error) {
