@@ -177,6 +177,8 @@ services:
         builder:
           # @param services.helm.docker.builder.engine
           engine: ''
+      # @param services.helm.envLens
+      envLens: false
     # @param services.codefresh
     codefresh:
       # @param services.codefresh.repository (required)

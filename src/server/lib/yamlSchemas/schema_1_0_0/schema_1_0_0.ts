@@ -119,6 +119,7 @@ const schema_1_0_0 = {
                 },
                 required: ['name'],
               },
+              envLens: { type: 'boolean' },
               grpc: { type: 'boolean' },
               disableIngressHost: { type: 'boolean' },
               overrideDefaultIpWhitelist: { type: 'boolean' },
