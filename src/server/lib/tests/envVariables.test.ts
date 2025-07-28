@@ -15,7 +15,6 @@
  */
 
 import Database from 'server/database';
-import Redis from 'ioredis';
 import { EnvironmentVariables } from '../envVariables';
 import GlobalConfigService from 'server/services/globalConfig';
 import { IServices } from 'server/services/types';
@@ -26,9 +25,30 @@ jest.mock('server/database');
 jest.mock('redlock', () => {
   return jest.fn().mockImplementation(() => ({}));
 });
+jest.mock('bullmq', () => ({
+  Queue: jest.fn().mockImplementation(() => ({
+    add: jest.fn(),
+    close: jest.fn(),
+  })),
+  Worker: jest.fn().mockImplementation(() => ({
+    close: jest.fn(),
+  })),
+}));
 jest.mock('ioredis', () => {
-  return jest.fn().mockImplementation(() => ({
-    duplicate: jest.fn(() => new Redis()),
+  const mockRedis = jest.fn().mockImplementation(() => ({
+    duplicate: jest.fn(() => ({
+      options: {},
+      setMaxListeners: jest.fn(),
+      hgetall: jest.fn().mockResolvedValue({
+        lifecycleDefaults: JSON.stringify({
+          defaultUUID: 'dev-0',
+          defaultPublicUrl: 'dev-0.lifecycle.dev.example.com',
+        }),
+      }),
+      hmset: jest.fn(),
+      on: jest.fn(),
+      info: jest.fn().mockResolvedValue('redis_version:6.0.5'),
+    })),
     setMaxListeners: jest.fn(),
     hgetall: jest.fn().mockResolvedValue({
       lifecycleDefaults: JSON.stringify({
@@ -39,7 +59,9 @@ jest.mock('ioredis', () => {
     hmset: jest.fn(),
     on: jest.fn(),
     info: jest.fn().mockResolvedValue('redis_version:6.0.5'),
+    options: {},
   }));
+  return mockRedis;
 });
 
 class TestEnvironmentVariables extends EnvironmentVariables {

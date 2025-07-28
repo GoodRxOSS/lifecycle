@@ -20,7 +20,7 @@ import BaseService from './_service';
 import { UniqueViolationError } from 'objection';
 import _ from 'lodash';
 import * as github from 'server/lib/github';
-import { JOB_VERSION } from 'shared/config';
+import { QUEUE_NAMES } from 'shared/config';
 import GlobalConfigService from './globalConfig';
 import { redisClient } from 'server/lib/dependencies';
 
@@ -144,23 +144,22 @@ export default class PullRequestService extends BaseService {
     }
   }
 
-  cleanupClosedPRQueue = this.queueManager.registerQueue(`cleanup-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  cleanupClosedPRQueue = this.queueManager.registerQueue(QUEUE_NAMES.CLEANUP, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
     },
-    settings: {
-      maxStalledCount: 0,
-    },
   });
 
-  processCleanupClosedPRs = async (_job, done) => {
-    // Always mark as done immediately to prevent any risk of retries
-    done();
-    await this.db.services.BuildService.cleanupBuilds();
+  // eslint-disable-next-line no-unused-vars
+  processCleanupClosedPRs = async (_job) => {
+    try {
+      await this.db.services.BuildService.cleanupBuilds();
+    } catch (error) {
+      logger.error(`Error processing cleanup closed PRs:`, error);
+    }
   };
 
   /**

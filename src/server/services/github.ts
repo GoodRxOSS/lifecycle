@@ -20,7 +20,7 @@ import Service from './_service';
 import rootLogger from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
 import { GithubPullRequestActions, GithubWebhookTypes, PullRequestStatus, FallbackLabels } from 'shared/constants';
-import { JOB_VERSION } from 'shared/config';
+import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
 import { Environment, Repository, Build, PullRequest } from 'server/models';
@@ -261,7 +261,7 @@ export default class GithubService extends Service {
           .child({ build })
           .error(`[BUILD ${build?.uuid}][handleLabelWebhook][buidIdError] No build ID found for this pull request!`);
       }
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId,
       });
     } catch (error) {
@@ -331,7 +331,7 @@ export default class GithubService extends Service {
           logger.error(`[BUILD ${build?.uuid}][handlePushWebhook][buidIdError] No build ID found for this build!`);
         }
         logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
           githubRepositoryId,
         });
@@ -375,7 +375,7 @@ export default class GithubService extends Service {
       if (!build) return;
 
       logger.info(`[BUILD ${build?.uuid}] Redeploying static env for push on branch`);
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build?.id,
       });
     } catch (error) {
@@ -429,34 +429,33 @@ export default class GithubService extends Service {
     }
   };
 
-  webhookQueue = this.queueManager.registerQueue(`webhook-processing-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  webhookQueue = this.queueManager.registerQueue(QUEUE_NAMES.WEBHOOK_PROCESSING, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
     },
-    settings: {
-      maxStalledCount: 0,
-    },
   });
 
-  processWebhooks = async (job, done) => {
-    await this.db.services.GithubService.dispatchWebhook(fParse(job.data.message));
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
+  processWebhooks = async (job) => {
+    try {
+      await this.db.services.GithubService.dispatchWebhook(fParse(job.data.message));
+    } catch (error) {
+      logger.error(`Error processing webhook:`, error);
+    }
   };
 
-  githubDeploymentQueue = this.queueManager.registerQueue(`github-deployment-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  githubDeploymentQueue = this.queueManager.registerQueue(QUEUE_NAMES.GITHUB_DEPLOYMENT, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 3,
-      timeout: 3000,
       removeOnComplete: true,
     },
   });
 
   processGithubDeployment = async (job) => {
+    // This queue has 3 attempts configured, so errors will cause retries
     const { deployId, action } = job.data;
     const text = `[DEPLOYMENT ${deployId}][processGithubDeployment] ${action}`;
     const deploy = await this.db.models.Deploy.query().findById(deployId);

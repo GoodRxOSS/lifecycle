@@ -17,9 +17,8 @@
 /* eslint-disable no-unused-vars */
 import rootLogger from 'server/lib/logger';
 import BaseService from './_service';
-import Bull from 'bull';
 import fs from 'fs';
-import { JOB_VERSION, TMP_PATH } from 'shared/config';
+import { TMP_PATH, QUEUE_NAMES } from 'shared/config';
 import _ from 'lodash';
 import { IngressConfiguration } from '../../server/services/build';
 import { shellPromise } from 'server/lib/shell';
@@ -41,30 +40,24 @@ export default class IngressService extends BaseService {
   /**
    * Job for generating manifests
    */
-  ingressManifestQueue = this.queueManager.registerQueue(`ingress-manifest-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  ingressManifestQueue = this.queueManager.registerQueue(QUEUE_NAMES.INGRESS_MANIFEST, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 5,
       removeOnComplete: 100,
       removeOnFail: 100,
-    },
-    settings: {
-      maxStalledCount: 1,
     },
   });
 
   /**
    * Job for cleaning up ingress
    */
-  ingressCleanupQueue = this.queueManager.registerQueue(`ingress-cleanup-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  ingressCleanupQueue = this.queueManager.registerQueue(QUEUE_NAMES.INGRESS_CLEANUP, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 5,
       removeOnComplete: 100,
       removeOnFail: 100,
-    },
-    settings: {
-      maxStalledCount: 1,
     },
   });
 
@@ -73,7 +66,8 @@ export default class IngressService extends BaseService {
    * @param job a job with a buildId in the data object
    * @param done the done callback
    */
-  ingressCleanupForBuild = async (job: Bull.Job<any>, done: Bull.DoneCallback) => {
+  ingressCleanupForBuild = async (job) => {
+    // queue has retry attempts configured, so errors will cause retries
     const buildId = job.data.buildId;
     // For cleanup purpose, we want to include the ingresses for all the services (active or not) to cleanup just in case.
     const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, true);
@@ -91,10 +85,10 @@ export default class IngressService extends BaseService {
       // It's ok if this fails.
       logger.warn(e);
     }
-    done();
   };
 
-  createOrUpdateIngressForBuild = async (job: Bull.Job<any>, done: Bull.DoneCallback) => {
+  createOrUpdateIngressForBuild = async (job) => {
+    // queue has retry attempts configured, so errors will cause retries
     const buildId = job.data.buildId;
     // We just want to create/update ingress for active services only
     const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
@@ -105,7 +99,7 @@ export default class IngressService extends BaseService {
         this.generateNginxManifestForConfiguration({
           configuration,
           defaultUUID: lifecycleDefaults?.defaultUUID,
-          ingressClassName: lifecycleDefaults?.ingressClassName
+          ingressClassName: lifecycleDefaults?.ingressClassName,
         }),
         {
           skipInvalid: true,
@@ -115,7 +109,6 @@ export default class IngressService extends BaseService {
     manifests.forEach(async (manifest, idx) => {
       await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace);
     });
-    done();
   };
 
   /**

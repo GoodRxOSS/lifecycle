@@ -18,7 +18,7 @@ import { createAppAuth } from '@octokit/auth-app';
 import rootLogger from 'server/lib/logger';
 import BaseService from './_service';
 import { GlobalConfig, LabelsConfig } from './types/globalConfig';
-import { GITHUB_APP_INSTALLATION_ID, APP_AUTH, APP_ENV } from 'shared/config';
+import { GITHUB_APP_INSTALLATION_ID, APP_AUTH, APP_ENV, QUEUE_NAMES } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import { redisClient } from 'server/lib/dependencies';
 
@@ -39,11 +39,11 @@ export default class GlobalConfigService extends BaseService {
     return this.instance;
   }
 
-  protected cacheRefreshQueue = this.queueManager.registerQueue('globalConfigCacheRefresh', {
-    createClient: redisClient.getBullCreateClient(),
+  protected cacheRefreshQueue = this.queueManager.registerQueue(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, {
+    connection: redisClient.getConnection(),
   });
-  protected githubClient = this.queueManager.registerQueue('githubClientTokenCacheRefresh', {
-    createClient: redisClient.getBullCreateClient(),
+  protected githubClient = this.queueManager.registerQueue(QUEUE_NAMES.GITHUB_CLIENT_TOKEN_CACHE_REFRESH, {
+    connection: redisClient.getConnection(),
   });
 
   /**
@@ -174,17 +174,9 @@ export default class GlobalConfigService extends BaseService {
         logger.child({ error }).error(`Error refreshing GlobalConfig cache during boot: ${error}`);
       }
     }
-    this.cacheRefreshQueue.process(async () => {
-      try {
-        await this.getAllConfigs(true);
-        await this.getGithubClientToken(true);
-        logger.debug('GlobalConfig and Github cache refreshed successfully.');
-      } catch (error) {
-        logger.child({ error }).error('Error refreshing GlobalConfig cache');
-      }
-    });
 
     this.cacheRefreshQueue.add(
+      'refresh',
       {},
       {
         repeat: {
@@ -195,6 +187,16 @@ export default class GlobalConfigService extends BaseService {
       }
     );
   }
+
+  processCacheRefresh = async () => {
+    try {
+      await this.getAllConfigs(true);
+      await this.getGithubClientToken(true);
+      logger.debug('GlobalConfig and Github cache refreshed successfully.');
+    } catch (error) {
+      logger.child({ error }).error('Error refreshing GlobalConfig cache');
+    }
+  };
 
   /**
    * Set a config value by key directly in the database.

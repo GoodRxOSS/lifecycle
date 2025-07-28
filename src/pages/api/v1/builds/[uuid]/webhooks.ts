@@ -238,7 +238,7 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
     }
 
     const webhookService = new WebhookService();
-    await webhookService.webhookQueue.add({
+    await webhookService.webhookQueue.add('webhook', {
       buildId,
     });
     return res.status(200).json({

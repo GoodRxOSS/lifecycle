@@ -18,7 +18,7 @@ import BaseService from './_service';
 import rootLogger from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
-import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, JOB_VERSION, APP_HOST } from 'shared/config';
+import { APP_HOST, QUEUE_NAMES } from 'shared/config';
 import * as k8s from 'server/lib/kubernetes';
 import { Metrics } from 'server/lib/metrics';
 import * as psl from 'psl';
@@ -64,32 +64,39 @@ const GIT_SERVICE_URL = 'https://github.com';
 
 export default class ActivityStream extends BaseService {
   fastly = new Fastly(this.redis);
-  commentQueue = this.queueManager.registerQueue(`comment_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
-    limiter: {
-      max: MAX_GITHUB_API_REQUEST,
-      duration: GITHUB_API_REQUEST_INTERVAL,
+  commentQueue = this.queueManager.registerQueue(QUEUE_NAMES.COMMENT_QUEUE, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
     },
   });
 
-  processComments = async (job, done) => {
-    const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
-      id: job.data,
-    });
-    await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
-    const { build, repository } = pullRequest;
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-    if (!build) return;
-    await this.db.services.ActivityStream.updatePullRequestActivityStream(
-      build,
-      build.deploys,
-      pullRequest,
-      repository,
-      true,
-      true,
-      null,
-      false
-    );
+  processComments = async (job) => {
+    try {
+      const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
+        id: job.data,
+      });
+      await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
+      const { build, repository } = pullRequest;
+      if (!build) {
+        logger.warn(`[BUILD] Build id not found for pull request with id: ${job.data}`);
+        return;
+      }
+      await this.db.services.ActivityStream.updatePullRequestActivityStream(
+        build,
+        build.deploys,
+        pullRequest,
+        repository,
+        true,
+        true,
+        null,
+        false
+      );
+    } catch (error) {
+      logger.error(`Error processing comment for PR ${job.data}:`, error);
+    }
   };
 
   /**
@@ -128,7 +135,10 @@ export default class ActivityStream extends BaseService {
       if (isRedeployRequested) {
         // if redeploy from comment, add to build queue and return
         logger.info(`[BUILD ${buildUuid}] Redeploy triggered from comment edit`);
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add({ buildId, runUUID: runUuid });
+        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+          buildId,
+          runUUID: runUuid,
+        });
         return;
       }
 
@@ -200,7 +210,7 @@ export default class ActivityStream extends BaseService {
 
     // if pull request should be built and deployed again, add it to build queue
     if (pullRequest.deployOnUpdate) {
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build.id,
         runUUID: runUuid,
       });
@@ -432,8 +442,8 @@ export default class ActivityStream extends BaseService {
     try {
       lock = await this.redlock.lock(resource, 9000);
       if (queue && !error) {
-        await this.commentQueue.add(pullRequest.id, {
-          jobId: pullRequest.id,
+        await this.commentQueue.add('comment', pullRequest.id, {
+          jobId: `pr-${pullRequest.id}`,
           removeOnComplete: true,
           removeOnFail: true,
         });
@@ -465,11 +475,7 @@ export default class ActivityStream extends BaseService {
         });
       }
     } catch (error) {
-      if (error?.name !== 'LockError') {
-        logger.child({ error }).error(`${prefix} Failed to update the activity feed ${suffix}`);
-      } else {
-        logger.child({ error }).debug(`${prefix}[redlock] redlock issue ${suffix}`);
-      }
+      logger.error(`${prefix} Failed to update the activity feed ${suffix}: ${error}`);
     } finally {
       if (lock) {
         try {
@@ -968,24 +974,6 @@ export default class ActivityStream extends BaseService {
     return message;
   }
 
-  private isBuildableDeployType(deploy: Deploy, fullYamlSupport: boolean, orgChart: string): boolean {
-    let result = false;
-
-    const serviceType: DeployTypes = fullYamlSupport ? deploy.deployable.type : deploy.service.type;
-
-    if (
-      (serviceType === DeployTypes.DOCKER ||
-        serviceType === DeployTypes.GITHUB ||
-        orgChart === deploy.deployable?.helm?.chart?.name ||
-        serviceType === DeployTypes.CODEFRESH) &&
-      deploy.active
-    ) {
-      result = true;
-    }
-
-    return result;
-  }
-
   private async buildStatusBlock(
     build: Build,
     deploys: Deploy[],
@@ -1243,7 +1231,7 @@ export default class ActivityStream extends BaseService {
             return;
           }
           await this.db.services.GithubService.githubDeploymentQueue
-            .add({ deployId, action: 'create' }, { delay: 10000, jobId: deployId })
+            .add('deployment', { deployId, action: 'create' }, { delay: 10000, jobId: `deploy-${deployId}` })
             .catch((error) =>
               logger.child({ error }).warn(`[BUILD ${uuid}][manageDeployments] error with ${deployId}`)
             );
