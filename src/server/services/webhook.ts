@@ -23,7 +23,7 @@ import { merge } from 'lodash';
 import { ConfigFileWebhookEnvironmentVariables } from 'server/lib/configFileWebhookEnvVariables';
 
 import { LifecycleError } from 'server/lib/errors';
-import { JOB_VERSION } from 'shared/config';
+import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { validateWebhook } from 'server/lib/webhook/webhookValidator';
 import { executeDockerWebhook, executeCommandWebhook } from 'server/lib/webhook';
@@ -241,21 +241,16 @@ export default class WebhookService extends BaseService {
   /**
    * A queue specifically for triggering webhooks after build complete
    */
-  webhookQueue = this.queueManager.registerQueue(`webhook_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  webhookQueue = this.queueManager.registerQueue(QUEUE_NAMES.WEBHOOK_QUEUE, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
     },
-    settings: {
-      maxStalledCount: 0,
-    },
   });
 
-  processWebhookQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
+  processWebhookQueue = async (job) => {
     const buildId = job.data.buildId;
     const build = await this.db.models.Build.query().findOne({
       id: buildId,

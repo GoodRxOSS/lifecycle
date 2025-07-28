@@ -37,7 +37,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   try {
     if (LIFECYCLE_MODE === 'all') BootstrapJobs(services);
     const message = stringify({ ...req, ...{ headers: req.headers } });
-    await services.GithubService.webhookQueue.add({ message });
+    await services.GithubService.webhookQueue.add('webhook', { message });
     res.status(200).end();
   } catch (error) {
     logger.child({ error }).error(`Github Webhook failure: Error: ${error}`);
