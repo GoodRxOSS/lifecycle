@@ -1217,6 +1217,10 @@ export default class BuildService extends BaseService {
       const buildId = build?.id;
       if (!buildId) throw new Error('buildId is required but undefined');
 
+      if (!build.pullRequest.deployOnUpdate) {
+        logger.info(`[BUILD ${build.uuid}] Pull request does not have deployOnUpdate enabled. Skipping build.`);
+        return;
+      }
       // Enqueue a standard resolve build
       await this.db.services.BuildService.buildQueue.add({ buildId, githubRepositoryId });
     } catch (error) {
