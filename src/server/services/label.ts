@@ -73,6 +73,7 @@ export default class LabelService extends Service {
         if (!currentLabels.includes(deployLabel)) {
           updatedLabels = [...currentLabels, deployLabel];
         } else {
+          logger.debug(`[BUILD ${buildUuid}] Deploy label "${deployLabel}" already exists on PR, skipping update`);
           return;
         }
       } else {
