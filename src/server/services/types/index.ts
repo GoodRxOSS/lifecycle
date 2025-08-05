@@ -28,6 +28,7 @@ import Deployable from 'server/services/deployable';
 import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
 import GithubService from 'server/services/github';
+import LabelService from 'server/services/label';
 
 export interface IServices {
   BuildService: BuildService;
@@ -44,6 +45,7 @@ export interface IServices {
   Deployable: Deployable;
   BotUser: BotUser;
   GlobalConfig: GlobalConfig;
+  LabelService: LabelService;
 }
 
 export * from 'server/services/types/github';

@@ -112,6 +112,11 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 125,
   });
 
+  queueManager.registerWorker(QUEUE_NAMES.LABEL, services.LabelService.processLabelQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 10,
+  });
+
   defaultDb.services = services;
 
   if (process.env.NEXT_MANUAL_SIG_HANDLE) {
