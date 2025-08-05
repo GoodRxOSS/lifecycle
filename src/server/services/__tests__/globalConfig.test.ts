@@ -30,12 +30,15 @@ jest.mock('ioredis', () => {
 });
 
 jest.mock('server/database');
-jest.mock('bull', () => {
-  return jest.fn().mockImplementation(() => ({
-    process: jest.fn(),
+jest.mock('bullmq', () => ({
+  Queue: jest.fn().mockImplementation(() => ({
     add: jest.fn(),
-  }));
-});
+    close: jest.fn(),
+  })),
+  Worker: jest.fn().mockImplementation(() => ({
+    close: jest.fn(),
+  })),
+}));
 
 describe('GlobalConfigService', () => {
   let service;
@@ -77,7 +80,6 @@ describe('GlobalConfigService', () => {
     it('should set up a cache refresh job', async () => {
       await service.setupCacheRefreshJob();
 
-      expect(service.cacheRefreshQueue.process).toHaveBeenCalled();
       expect(service.cacheRefreshQueue.add).toHaveBeenCalled();
     });
   });

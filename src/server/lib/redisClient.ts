@@ -83,25 +83,11 @@ export class RedisClient {
     return this.redlock;
   }
 
-  public getBullCreateClient() {
-    return (type: string): Redis => {
-      switch (type) {
-        case 'client':
-          return this.redis;
-        case 'subscriber':
-          return this.subscriber;
-        case 'bclient': {
-          const bclient = this.redis.duplicate();
-          this.bclients.push(bclient);
-          return bclient;
-        }
-        default: {
-          const client = this.redis.duplicate();
-          this.bclients.push(client);
-          return client;
-        }
-      }
-    };
+  public getConnection(): Redis {
+    const connection = this.redis.duplicate();
+    // BullMQ requires maxRetriesPerRequest to be null for blocking operations
+    connection.options.maxRetriesPerRequest = null;
+    return connection;
   }
 
   public async close(): Promise<void> {

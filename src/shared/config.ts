@@ -101,7 +101,20 @@ export const MAX_GITHUB_API_REQUEST = getServerRuntimeConfig('MAX_GITHUB_API_REQ
 
 export const GITHUB_API_REQUEST_INTERVAL = getServerRuntimeConfig('GITHUB_API_REQUEST_INTERVAL', 10000);
 
-export const WEBHOOK_QUEUE_NAME = `webhook-processing-${JOB_VERSION}`;
+export const QUEUE_NAMES = {
+  WEBHOOK_PROCESSING: `webhook_processing_${JOB_VERSION}`,
+  COMMENT_QUEUE: `comment_queue_${JOB_VERSION}`,
+  CLEANUP: `cleanup_${JOB_VERSION}`,
+  GLOBAL_CONFIG_CACHE_REFRESH: 'global_config_cache_refresh',
+  GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github_client_token_cache_refresh',
+  INGRESS_MANIFEST: `ingress_manifest_${JOB_VERSION}`,
+  INGRESS_CLEANUP: `ingress_cleanup_${JOB_VERSION}`,
+  DELETE_QUEUE: `delete_queue_${JOB_VERSION}`,
+  WEBHOOK_QUEUE: `webhook_queue_${JOB_VERSION}`,
+  RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
+  BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
+  GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
+} as const;
 
 export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID');
 

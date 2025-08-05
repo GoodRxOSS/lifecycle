@@ -28,7 +28,7 @@ import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
 import BaseService from './_service';
 import _ from 'lodash';
-import { JOB_VERSION } from 'shared/config';
+import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
 import rootLogger from 'server/lib/logger';
 import { ParsingError } from 'server/lib/yamlConfigParser';
@@ -86,7 +86,7 @@ export default class BuildService extends BaseService {
               logger.error(`[BUILD ${build?.uuid}][cleanupBuilds][buidIdError] No build ID found for this build!`);
             }
             logger.info(`[BUILD ${build?.uuid}] Queuing build for deletion`);
-            await this.db.services.BuildService.deleteQueue.add({ buildId });
+            await this.db.services.BuildService.deleteQueue.add('delete', { buildId });
           }
         }
       } catch (e) {
@@ -622,12 +622,15 @@ export default class BuildService extends BaseService {
           build.deploys.map(async (deploy) => {
             await deploy.$query().patch({ status: DeployStatus.TORN_DOWN });
             if (build.githubDeployments)
-              await this.db.services.GithubService.githubDeploymentQueue.add({ deployId: deploy.id, action: 'delete' });
+              await this.db.services.GithubService.githubDeploymentQueue.add('deployment', {
+                deployId: deploy.id,
+                action: 'delete',
+              });
           })
         );
 
         await k8s.deleteNamespace(build.namespace);
-        await this.db.services.Ingress.ingressCleanupQueue.add({
+        await this.db.services.Ingress.ingressCleanupQueue.add('cleanup', {
           buildId: build.id,
         });
         logger.info(`[DELETE ${build?.uuid}] Deleted build`);
@@ -705,7 +708,7 @@ export default class BuildService extends BaseService {
       // Pull webhooks for this environment, and run them
       logger.debug(`[BUILD ${build.uuid}] Build status changed to ${build.status}.`);
 
-      await this.db.services.Webhook.webhookQueue.add({ buildId: build.id });
+      await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id });
     }
   }
 
@@ -967,7 +970,7 @@ export default class BuildService extends BaseService {
         }
 
         // Queue ingress creation after all deployments
-        await this.db.services.Ingress.ingressManifestQueue.add({
+        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
           buildId,
         });
 
@@ -1031,7 +1034,7 @@ export default class BuildService extends BaseService {
         }
 
         /* Generate the nginx manifests for this new build */
-        await this.db.services.Ingress.ingressManifestQueue.add({
+        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
           buildId,
         });
 
@@ -1091,75 +1094,61 @@ export default class BuildService extends BaseService {
   /**
    * A queue entrypoint for the purpose of performing builds and deploying to K8
    */
-  deleteQueue = this.queueManager.registerQueue(`delete_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  deleteQueue = this.queueManager.registerQueue(QUEUE_NAMES.DELETE_QUEUE, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * A queue entrypoint for the purpose of deleting builds
    */
-  buildQueue = this.queueManager.registerQueue(`build_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  buildQueue = this.queueManager.registerQueue(QUEUE_NAMES.BUILD_QUEUE, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * A queue specifically for the purpose of performing builds and deploying to K8
    */
-  resolveAndDeployBuildQueue = this.queueManager.registerQueue(`resolve_and_deploy-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  resolveAndDeployBuildQueue = this.queueManager.registerQueue(QUEUE_NAMES.RESOLVE_AND_DEPLOY, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * Process the deleion of a build async
-   * @param job the Bull job with the buildId
-   * @param done the Bull callback to invoke when we are done
+   * @param job the BullMQ job with the buildId
    */
-  processDeleteQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-    const buildId = job.data.buildId;
-    const build = await this.db.models.Build.query().findOne({
-      id: buildId,
-    });
-    await this.db.services.BuildService.deleteBuild(build);
+  processDeleteQueue = async (job) => {
+    try {
+      const buildId = job.data.buildId;
+      const build = await this.db.models.Build.query().findOne({
+        id: buildId,
+      });
+      await this.db.services.BuildService.deleteBuild(build);
+    } catch (error) {
+      logger.error(`Error processing delete queue for build ${job.data.buildId}:`, error);
+    }
   };
 
   /**
    * Kicks off the process of actually deploying a build to the kubernetes cluster
-   * @param job the Bull job with the buildID
-   * @param done the Bull callback to invoke when we're done
+   * @param job the BullMQ job with the buildID
    */
-  processBuildQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-
-    // Get the build and check the labels for this build
-
+  processBuildQueue = async (job) => {
+    // No retry behavior - catch errors and log them
     const buildId = job.data.buildId;
     const githubRepositoryId = job?.data?.githubRepositoryId;
     let build;
@@ -1197,15 +1186,11 @@ export default class BuildService extends BaseService {
    * @param job the Bull job with the buildID
    * @param done the Bull callback to invoke when we're done
    */
-  processResolveAndDeployBuildQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-
-    // Get the build and check the labels for this build
-    // The job id is used to create the build id
+  processResolveAndDeployBuildQueue = async (job) => {
     let jobId;
-    let buildId;
+    let buildId: number;
     try {
-      const jobId = job?.data?.buildId;
+      jobId = job?.data?.buildId;
       const githubRepositoryId = job?.data?.githubRepositoryId;
       if (!jobId) throw new Error('jobId is required but undefined');
       const build = await this.db.models.Build.query().findOne({
@@ -1214,7 +1199,7 @@ export default class BuildService extends BaseService {
 
       await build?.$fetchGraph('[pullRequest, environment]');
       await build.pullRequest.$fetchGraph('[repository]');
-      const buildId = build?.id;
+      buildId = build?.id;
       if (!buildId) throw new Error('buildId is required but undefined');
 
       if (!build.pullRequest.deployOnUpdate) {
@@ -1222,11 +1207,10 @@ export default class BuildService extends BaseService {
         return;
       }
       // Enqueue a standard resolve build
-      await this.db.services.BuildService.buildQueue.add({ buildId, githubRepositoryId });
+      await this.db.services.BuildService.buildQueue.add('build', { buildId, githubRepositoryId });
     } catch (error) {
       const text = `[BUILD ${buildId}][processResolveAndDeployBuildQueue] error processing buildId with the jobId, ${jobId}`;
       logger.child({ error }).error(text);
-      throw error;
     }
   };
 }
