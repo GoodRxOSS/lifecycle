@@ -26,7 +26,7 @@ import * as github from 'server/lib/github';
 import { Environment, Repository, Build, PullRequest } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
-import { enableKillSwitch, isStaging, hasDeployLabel, getDeployLabel } from 'server/lib/utils';
+import { enableKillSwitch, isStaging, hasDeployLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 
 const logger = rootLogger.child({
@@ -140,14 +140,13 @@ export default class GithubService extends Service {
           lifecycleConfig,
         });
 
-        // if auto deploy, add deploy label`
+        // if auto deploy, add deploy label via queue
         if (isDeploy) {
-          const deployLabel = await getDeployLabel();
-          await github.updatePullRequestLabels({
-            installationId,
-            pullRequestNumber: number,
-            fullName,
-            labels: labels.map((l) => l.name).concat([deployLabel]),
+          await this.db.services.LabelService.labelQueue.add('label', {
+            pullRequestId: pullRequest.id,
+            action: 'enable',
+            waitForComment: true,
+            labels: labels.map((l) => l.name),
           });
         }
       } else if (isClosed) {
@@ -159,14 +158,12 @@ export default class GithubService extends Service {
           return;
         }
         await this.db.services.BuildService.deleteBuild(build);
-        // remove deploy labels on PR close
-        const globalConfig = await this.db.services.GlobalConfig.getLabels();
-        const deployLabels = globalConfig.deploy;
-        await github.updatePullRequestLabels({
-          installationId,
-          pullRequestNumber: number,
-          fullName,
-          labels: labels.map((l) => l.name).filter((labelName) => !deployLabels.includes(labelName)),
+        // remove deploy label on PR close via queue
+        await this.db.services.LabelService.labelQueue.add('label', {
+          pullRequestId: pullRequest.id,
+          action: 'disable',
+          waitForComment: false,
+          labels: labels.map((l) => l.name),
         });
       }
     } catch (error) {
