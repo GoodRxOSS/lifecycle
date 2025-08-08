@@ -70,7 +70,12 @@ if [ ${#missing[@]} -ne 0 ]; then
   exit 1
 fi
 
-# codefresh auth create-context --api-key $CODEFRESH_API_KEY
+# Configure Codefresh CLI if API key is provided and not a placeholder
+if [ -n "$CODEFRESH_API_KEY" ] && [ "$CODEFRESH_API_KEY" != "YOUR_VALUE_HERE" ]; then
+  echo "Configuring Codefresh CLI authentication..."
+  codefresh auth create-context --api-key $CODEFRESH_API_KEY
+  echo "Codefresh CLI authentication configured successfully"
+fi
 
 forward_sigterm() {
   next_server_pid=$(ps -e | grep next-server | awk '{print $1}')
