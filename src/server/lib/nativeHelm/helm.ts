@@ -181,6 +181,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     namespace: options.namespace,
     serviceAccount: serviceAccountName,
     serviceName: deploy.deployable.name,
+    buildUUID: build.uuid,
     isStatic: build.isStatic,
     gitUsername: GIT_USERNAME,
     gitToken,

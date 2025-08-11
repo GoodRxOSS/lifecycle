@@ -15,6 +15,7 @@
  */
 
 import { V1Job } from '@kubernetes/client-node';
+import { normalizeKubernetesLabelValue } from './utils';
 
 export interface JobConfig {
   name: string;
@@ -134,7 +135,7 @@ export function createBuildJob(config: BuildJobConfig): V1Job {
       'lc-deploy-uuid': config.deployUuid,
       'lc-build-id': String(config.buildId),
       'git-sha': config.shortSha,
-      'git-branch': config.branch,
+      'git-branch': normalizeKubernetesLabelValue(config.branch),
       'builder-engine': config.engine,
       'build-method': 'native',
     },
@@ -153,6 +154,7 @@ export interface HelmJobConfig {
   namespace: string;
   serviceAccount: string;
   serviceName: string;
+  buildUUID: string;
   isStatic: boolean;
   timeout?: number;
   gitUsername?: string;
@@ -174,13 +176,13 @@ export function createHelmJob(config: HelmJobConfig): V1Job {
   const timeout = config.timeout || 1800; // 30 minutes default
 
   const labels: Record<string, string> = {
-    'lc-uuid': config.name.split('-')[0],
+    'lc-uuid': config.buildUUID,
     service: config.serviceName,
   };
 
   if (config.deployMetadata) {
     labels['git-sha'] = config.deployMetadata.sha;
-    labels['git-branch'] = config.deployMetadata.branch;
+    labels['git-branch'] = normalizeKubernetesLabelValue(config.deployMetadata.branch);
     labels['deploy-id'] = config.deployMetadata.deployId || '';
     labels['deployable-id'] = config.deployMetadata.deployableId;
   }
