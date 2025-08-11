@@ -627,12 +627,6 @@ export default class DeployService extends BaseService {
             const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
             let ecrRepo = deployable?.ecr;
 
-            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
-            if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
-              ecrRepo = `${ecrRepo}/${serviceName}`;
-              logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
-            }
-
             const tagsExist =
               (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
               (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
@@ -900,12 +894,6 @@ export default class DeployService extends BaseService {
       const tag = generateDeployTag({ sha: shortSha, envVarsHash });
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
       let ecrRepo = deployable?.ecr;
-
-      const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
-      if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
-        ecrRepo = `${ecrRepo}/${serviceName}`;
-        logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
-      }
 
       const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
