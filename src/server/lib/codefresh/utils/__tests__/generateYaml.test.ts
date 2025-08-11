@@ -39,12 +39,24 @@ describe('generateYaml', () => {
 
   it('should generate yaml', () => {
     constructBuildArgs = jest.spyOn(utils, 'constructBuildArgs').mockReturnValue([]);
-    generateCheckoutStepSpy = jest.spyOn(utils, 'generateCheckoutStep').mockReturnValue(checkoutStep);
+    generateCheckoutStepSpy = jest.spyOn(utils, 'generateCheckoutStep').mockReturnValue({
+      ...checkoutStep,
+      git: 'REPLACE_ME_ORG',
+    });
     generateBuildStepSpy = jest.spyOn(utils, 'generateBuildStep').mockReturnValue(buildStep);
     generateAfterBuildStepSpy = jest.spyOn(utils, 'generateAfterBuildStep').mockReturnValue(afterBuildStep);
     constructStagesSpy = jest.spyOn(utils, 'constructStages').mockReturnValue(['Checkout', 'Build', 'PostBuild']);
     const result = generateYaml(generateYamlOptions);
-    expect(result).toEqual(yamlContent);
+    expect(result).toEqual({
+      ...yamlContent,
+      steps: {
+        ...yamlContent.steps,
+        Checkout: {
+          ...checkoutStep,
+          git: 'REPLACE_ME_ORG',
+        },
+      },
+    });
     expect(constructBuildArgs).toHaveBeenCalledWith({});
     expect(generateCheckoutStepSpy).toHaveBeenCalled();
     expect(generateBuildStepSpy).toHaveBeenCalled();

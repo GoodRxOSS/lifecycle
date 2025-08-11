@@ -639,8 +639,9 @@ export default class DeployService extends BaseService {
 
             logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
 
-            const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+            const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
             const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+            const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
             if (!ecrDomain || !registry) {
               logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
               await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
@@ -657,6 +658,7 @@ export default class DeployService extends BaseService {
                 ecrRepo,
                 envVars: envVariables,
                 dockerfilePath,
+                gitOrg,
                 tag,
                 revision: fullSha,
                 repo: repositoryName,
@@ -905,8 +907,9 @@ export default class DeployService extends BaseService {
         logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
       }
 
-      const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+      const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+      const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
       if (!ecrDomain || !registry) {
         logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
@@ -939,6 +942,7 @@ export default class DeployService extends BaseService {
           ecrDomain,
           envVars: deploy.env,
           dockerfilePath,
+          gitOrg,
           tag,
           revision: fullSha,
           repo: repositoryName,
