@@ -5,12 +5,14 @@ on:
     types: [published]
 
 jobs:
-  build-and-push-lifecycle:
+  prepare-metadata:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      prerelease_type: ${{ steps.meta.outputs.prerelease_type }}
+      tags_suffix: ${{ steps.tags.outputs.tags_suffix }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
-
       - name: Extract release metadata
         id: meta
         run: |
@@ -33,14 +35,38 @@ jobs:
             echo "is_prerelease=false" >> $GITHUB_OUTPUT
           fi
 
-          # Output for debugging
-          echo "Version: $VERSION"
-          echo "Is Pre-release: ${{ github.event.release.prerelease }}"
+      - name: Determine Docker tags
+        id: tags
+        run: |
+          # Output tag suffixes only (without username) to avoid secret blocking
+          TAGS_SUFFIX="${{ steps.meta.outputs.version }}"
 
-      - name: Set up QEMU (for multi-arch)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
+          if [[ "${{ steps.meta.outputs.is_prerelease }}" == "true" ]]; then
+            # For pre-releases, add the pre-release type tag (beta, alpha, rc, etc.)
+            TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.prerelease_type }}"
+          else
+            # For stable releases, add the 'latest' tag
+            TAGS_SUFFIX="$TAGS_SUFFIX,latest"
+            
+            # Also add major and major.minor tags for stable releases
+            # e.g., 1.2.3 -> also tag as 1 and 1.2
+            VERSION="${{ steps.meta.outputs.version }}"
+            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              MAJOR="${BASH_REMATCH[1]}"
+              MINOR="${BASH_REMATCH[2]}"
+              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR"
+              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR.$MINOR"
+            fi
+          fi
+
+          echo "tags_suffix=$TAGS_SUFFIX" >> $GITHUB_OUTPUT
+
+  build-amd64:
+    runs-on: builder-amd64-16-core
+    needs: prepare-metadata
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -53,40 +79,123 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Determine Docker tags
-        id: tags
-        run: |
-          TAGS="${{ secrets.DOCKERHUB_USERNAME }}/app:${{ steps.meta.outputs.version }}"
-
-          if [[ "${{ steps.meta.outputs.is_prerelease }}" == "true" ]]; then
-            # For pre-releases, add the pre-release type tag (beta, alpha, rc, etc.)
-            TAGS="$TAGS,${{ secrets.DOCKERHUB_USERNAME }}/app:${{ steps.meta.outputs.prerelease_type }}"
-          else
-            # For stable releases, add the 'latest' tag
-            TAGS="$TAGS,${{ secrets.DOCKERHUB_USERNAME }}/app:latest"
-            
-            # Also add major and major.minor tags for stable releases
-            # e.g., 1.2.3 -> also tag as 1 and 1.2
-            VERSION="${{ steps.meta.outputs.version }}"
-            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              MAJOR="${BASH_REMATCH[1]}"
-              MINOR="${BASH_REMATCH[2]}"
-              TAGS="$TAGS,${{ secrets.DOCKERHUB_USERNAME }}/app:$MAJOR"
-              TAGS="$TAGS,${{ secrets.DOCKERHUB_USERNAME }}/app:$MAJOR.$MINOR"
-            fi
-          fi
-
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
-          echo "Docker tags: $TAGS"
-
-      - name: Build and push lifecycle image
+      - name: Build and push AMD64 image
+        id: build
         uses: docker/build-push-action@v4
         with:
           context: .
           file: Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.tags }}
+          platforms: linux/amd64
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/app,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             PORT=5001
             NODE_ENV=production
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-arm64:
+    runs-on: builder-arm64-16-core
+    needs: prepare-metadata
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push ARM64 image
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/app,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            PORT=5001
+            NODE_ENV=production
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-arm64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-and-push:
+    runs-on: builder-amd64-16-core
+    needs:
+      - prepare-metadata
+      - build-amd64
+      - build-arm64
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          TAGS_SUFFIX: ${{ needs.prepare-metadata.outputs.tags_suffix }}
+        run: |
+          # Find digest files
+          AMD64_DIGEST=$(find /tmp/digests/digests-amd64 -type f | head -1)
+          ARM64_DIGEST=$(find /tmp/digests/digests-arm64 -type f | head -1)
+          
+          # Get the digest values (filenames)
+          AMD64_SHA=$(basename "$AMD64_DIGEST")
+          ARM64_SHA=$(basename "$ARM64_DIGEST")
+          
+          # Build the digest list
+          DIGESTS="${DOCKER_USERNAME}/app@sha256:$AMD64_SHA ${DOCKER_USERNAME}/app@sha256:$ARM64_SHA"
+          
+          # Convert comma-separated tag suffixes to array
+          IFS=',' read -ra TAG_ARRAY <<< "$TAGS_SUFFIX"
+          
+          # Create and push manifest for each tag
+          for TAG_SUFFIX in "${TAG_ARRAY[@]}"; do
+            TAG_SUFFIX=$(echo "$TAG_SUFFIX" | xargs)  # Trim whitespace
+            FULL_TAG="${DOCKER_USERNAME}/app:${TAG_SUFFIX}"
+            docker buildx imagetools create -t "$FULL_TAG" $DIGESTS
+          done
+
+      - name: Inspect final image
+        run: |
+          docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/app:${{ needs.prepare-metadata.outputs.version }}
