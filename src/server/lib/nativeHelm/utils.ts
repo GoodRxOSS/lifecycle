@@ -205,7 +205,8 @@ export function constructHelmCommand(
   chartType: ChartType,
   args?: string,
   chartRepoUrl?: string,
-  defaultArgs?: string
+  defaultArgs?: string,
+  chartVersion?: string
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -230,6 +231,10 @@ export function constructHelmCommand(
   }
 
   command += ` --namespace ${namespace}`;
+
+  if (chartVersion && (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART)) {
+    command += ` --version ${chartVersion}`;
+  }
 
   customValues.forEach((value) => {
     const equalIndex = value.indexOf('=');
@@ -269,7 +274,8 @@ export function generateHelmInstallScript(
   chartType: ChartType,
   args?: string,
   chartRepoUrl?: string,
-  defaultArgs?: string
+  defaultArgs?: string,
+  chartVersion?: string
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -281,7 +287,8 @@ export function generateHelmInstallScript(
     chartType,
     args,
     chartRepoUrl,
-    defaultArgs
+    defaultArgs,
+    chartVersion
   );
 
   let script = `

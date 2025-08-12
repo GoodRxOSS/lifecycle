@@ -392,15 +392,116 @@ describe('Native Helm', () => {
         ['auth.username=admin', 'auth.password=secret'],
         [],
         ChartType.PUBLIC,
-        '--version 12.9.0 --wait',
-        'oci://ghcr.io/myorg/charts/postgresql'
+        '--wait',
+        'oci://ghcr.io/myorg/charts/postgresql',
+        undefined,
+        '12.9.0'
       );
 
       expect(result).toContain('helm upgrade --install my-release oci://ghcr.io/myorg/charts/postgresql');
       expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 12.9.0');
       expect(result).toContain('--set "auth.username=admin"');
       expect(result).toContain('--set "auth.password=secret"');
-      expect(result).toContain('--version 12.9.0 --wait');
+      expect(result).toContain('--wait');
+    });
+
+    it('should add chart version for PUBLIC charts when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'bitnami/postgresql',
+        'my-release',
+        'my-namespace',
+        ['auth.username=postgres_user'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://charts.bitnami.com/bitnami',
+        undefined,
+        '12.9.0'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release bitnami/postgresql');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 12.9.0');
+      expect(result).toContain('--set "auth.username=postgres_user"');
+    });
+
+    it('should not add chart version for LOCAL charts even when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        './my-local-chart',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.LOCAL,
+        undefined,
+        undefined,
+        undefined,
+        '1.0.0'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release ./my-local-chart');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
+    });
+
+    it('should not add chart version for PUBLIC charts when version is not specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'bitnami/postgresql',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://charts.bitnami.com/bitnami'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release bitnami/postgresql');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
+    });
+
+    it('should add chart version for ORG_CHART when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'helm-app',
+        'my-release',
+        'my-namespace',
+        ['deployment.appImage=myapp:latest'],
+        [],
+        ChartType.ORG_CHART,
+        undefined,
+        'cm://h.cfcr.io/helm/default',
+        undefined,
+        '2.0.9'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release helm-app');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 2.0.9');
+      expect(result).toContain('--set "deployment.appImage=myapp:latest"');
+    });
+
+    it('should not add chart version for ORG_CHART when version is not specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'helm-app',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.ORG_CHART,
+        undefined,
+        'cm://h.cfcr.io/helm/default'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release helm-app');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
     });
   });
 
@@ -417,7 +518,8 @@ describe('Native Helm', () => {
         ChartType.PUBLIC,
         '--force --timeout 60m0s --wait',
         'https://charts.example.com',
-        '--wait --timeout 30m' // defaultArgs
+        '--wait --timeout 30m',
+        '1.2.3'
       );
 
       expect(result.name).toBe('helm-deploy');
@@ -651,6 +753,92 @@ describe('Native Helm', () => {
       expect(customValues).not.toContain('SHOULD_NOT_APPEAR');
       expect(customValues).toContain('fullnameOverride=test-uuid');
       expect(customValues).toContain('commonLabels.name=build-123');
+    });
+  });
+
+  describe('Chart Version Integration', () => {
+    it('should include chart version from global config for PUBLIC charts', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        postgresql: {
+          version: '3.7.2',
+          chart: {
+            name: 'postgresql',
+            repoUrl: 'https://charts.bitnami.com/bitnami',
+            version: '12.9.0',
+            values: ['auth.username=postgres_user'],
+          },
+        },
+      });
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'postgresql',
+        'test-release',
+        'test-namespace',
+        '3.12.0',
+        ['auth.username=postgres_user'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://charts.bitnami.com/bitnami',
+        undefined,
+        '12.9.0'
+      );
+
+      expect(result.args[0]).toContain('--version 12.9.0');
+      expect(result.args[0]).toContain('bitnami/postgresql');
+    });
+
+    it('should include chart version from global config for ORG_CHART', async () => {
+      mockGetOrgChartName.mockResolvedValue('helm-app');
+      mockGetAllConfigs.mockResolvedValue({
+        'helm-app': {
+          version: '3.7.2',
+          chart: {
+            name: 'helm-app',
+            repoUrl: 'cm://h.cfcr.io/helm/default',
+            version: '2.0.9',
+            values: ['deployment.customNodeAffinity.enabled=true'],
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'myapp:v1.2.3',
+        env: {},
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: 'helm-app' },
+            docker: { app: {} },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const chartType = await determineChartType(deploy);
+      expect(chartType).toBe(ChartType.ORG_CHART);
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'helm-app',
+        'test-release',
+        'test-namespace',
+        '3.7.2',
+        ['deployment.appImage=myapp:v1.2.3', 'version=v1.2.3'],
+        [],
+        ChartType.ORG_CHART,
+        undefined,
+        'cm://h.cfcr.io/helm/default',
+        undefined,
+        '2.0.9'
+      );
+
+      expect(result.args[0]).toContain('--version 2.0.9');
+      expect(result.args[0]).toContain('helm-app');
     });
   });
 });
