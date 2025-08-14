@@ -147,18 +147,29 @@ function createBuildContainer(
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
 
+  const volumeMounts = [
+    {
+      name: 'workspace',
+      mountPath: '/workspace',
+    },
+  ];
+
+  if (engine.name === 'kaniko') {
+    volumeMounts.push({
+      name: 'workspace',
+      mountPath: '/kaniko/.docker',
+      subPath: '.docker',
+    } as any);
+    containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
+  }
+
   return {
     name,
     image: engine.image,
     command: engine.command,
     args,
     env: Object.entries(containerEnvVars).map(([envName, value]) => ({ name: envName, value })),
-    volumeMounts: [
-      {
-        name: 'workspace',
-        mountPath: '/workspace',
-      },
-    ],
+    volumeMounts,
     resources,
   };
 }
@@ -199,6 +210,42 @@ export async function buildWithEngine(
     gitUsername,
     githubToken
   );
+
+  const ecrLoginContainer = {
+    name: 'ecr-login',
+    image: 'amazon/aws-cli:2.13.0',
+    command: ['/bin/sh', '-c'],
+    args: [
+      `set -e
+echo "Getting ECR login token..."
+ECR_PASSWORD=$(aws ecr get-login-password --region ${process.env.AWS_REGION || 'us-west-2'})
+echo "Got ECR password (length: \${#ECR_PASSWORD})"
+
+if command -v docker >/dev/null 2>&1; then
+  echo "Docker CLI found, performing docker login..."
+  echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin ${options.ecrDomain}
+fi
+
+mkdir -p /workspace/.docker
+cat > /workspace/.docker/config.json <<EOF
+{
+  "auths": {
+    "${options.ecrDomain}": {
+      "auth": "$(echo -n "AWS:$ECR_PASSWORD" | base64)"
+    }
+  }
+}
+EOF
+echo "ECR credentials configured successfully"`,
+    ],
+    env: [{ name: 'AWS_REGION', value: process.env.AWS_REGION || 'us-west-2' }],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
 
   let envVars: Record<string, string> = { ...options.envVars };
 
@@ -252,6 +299,8 @@ export async function buildWithEngine(
   await deploy.$fetchGraph('build');
   const isStatic = deploy.build?.isStatic || false;
 
+  const initContainers = [gitCloneContainer, ecrLoginContainer];
+
   const job = createBuildJob({
     jobName,
     namespace: options.namespace,
@@ -266,7 +315,7 @@ export async function buildWithEngine(
     ecrRepo: options.ecrRepo,
     jobTimeout,
     isStatic,
-    gitCloneContainer,
+    initContainers,
     containers,
     volumes: [
       {
