@@ -66,6 +66,7 @@ interface BuildArgOptions {
   destination: string;
   cacheRef: string;
   buildArgs: Record<string, string>;
+  ecrDomain: string;
 }
 
 const ENGINES: Record<string, BuildEngine> = {
@@ -135,7 +136,8 @@ function createBuildContainer(
   contextPath: string,
   envVars: Record<string, string>,
   resources: any,
-  buildArgs: Record<string, string>
+  buildArgs: Record<string, string>,
+  ecrDomain: string
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -143,6 +145,7 @@ function createBuildContainer(
     destination,
     cacheRef,
     buildArgs,
+    ecrDomain,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
@@ -154,6 +157,7 @@ function createBuildContainer(
     },
   ];
 
+  // For kaniko, mount docker config from shared volume
   if (engine.name === 'kaniko') {
     volumeMounts.push({
       name: 'workspace',
@@ -161,6 +165,11 @@ function createBuildContainer(
       subPath: '.docker',
     } as any);
     containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
+  }
+
+  // For buildkit, set DOCKER_CONFIG to shared volume location
+  if (engine.name === 'buildkit') {
+    containerEnvVars['DOCKER_CONFIG'] = '/workspace/.docker';
   }
 
   return {
@@ -211,32 +220,15 @@ export async function buildWithEngine(
     githubToken
   );
 
+  // Simple ECR login init container
   const ecrLoginContainer = {
     name: 'ecr-login',
     image: 'amazon/aws-cli:2.13.0',
     command: ['/bin/sh', '-c'],
     args: [
-      `set -e
-echo "Getting ECR login token..."
-ECR_PASSWORD=$(aws ecr get-login-password --region ${process.env.AWS_REGION || 'us-west-2'})
-echo "Got ECR password (length: \${#ECR_PASSWORD})"
-
-if command -v docker >/dev/null 2>&1; then
-  echo "Docker CLI found, performing docker login..."
-  echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin ${options.ecrDomain}
-fi
-
-mkdir -p /workspace/.docker
-cat > /workspace/.docker/config.json <<EOF
-{
-  "auths": {
-    "${options.ecrDomain}": {
-      "auth": "$(echo -n "AWS:$ECR_PASSWORD" | base64)"
-    }
-  }
-}
-EOF
-echo "ECR credentials configured successfully"`,
+      `aws ecr get-login-password --region ${process.env.AWS_REGION || 'us-west-2'} | ` +
+        `{ read PASSWORD; mkdir -p /workspace/.docker && ` +
+        `echo '{"auths":{"${options.ecrDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}'> /workspace/.docker/config.json; }`,
     ],
     env: [{ name: 'AWS_REGION', value: process.env.AWS_REGION || 'us-west-2' }],
     volumeMounts: [
@@ -247,7 +239,10 @@ echo "ECR credentials configured successfully"`,
     ],
   };
 
-  let envVars: Record<string, string> = { ...options.envVars };
+  let envVars: Record<string, string> = {
+    ...options.envVars,
+    AWS_REGION: process.env.AWS_REGION || 'us-west-2',
+  };
 
   if (engineName === 'buildkit') {
     const buildkitConfig = buildDefaults.buildkit || {};
@@ -274,7 +269,8 @@ echo "ECR credentials configured successfully"`,
       contextPath,
       envVars,
       resources,
-      options.envVars
+      options.envVars,
+      options.ecrDomain
     )
   );
 
@@ -290,7 +286,8 @@ echo "ECR credentials configured successfully"`,
         contextPath,
         envVars,
         resources,
-        options.envVars
+        options.envVars,
+        options.ecrDomain
       )
     );
     logger.info(`[${engine.name}] Job ${jobName} will build both main and init images in parallel`);
@@ -298,8 +295,6 @@ echo "ECR credentials configured successfully"`,
 
   await deploy.$fetchGraph('build');
   const isStatic = deploy.build?.isStatic || false;
-
-  const initContainers = [gitCloneContainer, ecrLoginContainer];
 
   const job = createBuildJob({
     jobName,
@@ -315,7 +310,7 @@ echo "ECR credentials configured successfully"`,
     ecrRepo: options.ecrRepo,
     jobTimeout,
     isStatic,
-    initContainers,
+    initContainers: [gitCloneContainer, ecrLoginContainer],
     containers,
     volumes: [
       {
