@@ -896,7 +896,7 @@ export default class DeployService extends BaseService {
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
       let ecrRepo = deployable?.ecr;
 
-      const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+      const { lifecycleDefaults, app_setup, buildDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
       const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
       if (!ecrDomain || !registry) {
@@ -958,6 +958,7 @@ export default class DeployService extends BaseService {
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
             deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+            cacheRegistry: buildDefaults?.cacheRegistry || 'distribution.0env.com',
           };
 
           if (!initDockerfilePath) {

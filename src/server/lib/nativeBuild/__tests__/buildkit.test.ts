@@ -144,8 +144,8 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    // Check cache uses repo cache
-    expect(fullCommand).toContain('ref=123456789.dkr.ecr.us-east-1.amazonaws.com/repo:cache');
+    // Check cache uses ECR repo cache when custom buildkit endpoint is configured
+    expect(fullCommand).toContain('ref=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:cache');
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');

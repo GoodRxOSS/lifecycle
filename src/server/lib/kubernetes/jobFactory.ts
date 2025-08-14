@@ -114,7 +114,7 @@ export interface BuildJobConfig {
   ecrRepo: string;
   jobTimeout: number;
   isStatic: boolean;
-  gitCloneContainer: any;
+  initContainers: any[];
   containers: any[];
   volumes?: any[];
 }
@@ -143,7 +143,7 @@ export function createBuildJob(config: BuildJobConfig): V1Job {
       'lifecycle.io/dockerfile': config.dockerfilePath,
       'lifecycle.io/ecr-repo': config.ecrRepo,
     },
-    initContainers: [config.gitCloneContainer],
+    initContainers: config.initContainers,
     containers: config.containers,
     volumes: config.volumes || [{ name: 'workspace', emptyDir: {} }],
   });

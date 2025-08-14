@@ -307,10 +307,13 @@ export interface BuildJobManifestOptions {
 }
 
 export function createBuildJobManifest(options: BuildJobManifestOptions): any {
-  const { buildContainer, ...config } = options;
+  const { buildContainer, gitCloneContainer, volumes, isStatic = false, ...config } = options;
 
   return createBuildJob({
     ...config,
+    isStatic,
+    initContainers: gitCloneContainer ? [gitCloneContainer] : [],
     containers: [buildContainer],
+    volumes: volumes || [{ name: 'workspace', emptyDir: {} }],
   });
 }
