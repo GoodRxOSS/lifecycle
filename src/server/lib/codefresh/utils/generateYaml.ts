@@ -28,6 +28,7 @@ export const generateYaml = (options: ContainerBuildOptions) => {
   const {
     ecrRepo,
     envVars,
+    gitOrg = 'REPLACE_ME_ORG',
     repo,
     revision,
     tag,
@@ -81,7 +82,7 @@ export const generateYaml = (options: ContainerBuildOptions) => {
     mode: 'parallel',
     stages: constructStages({ initDockerfilePath, afterBuildPipelineId }),
     steps: {
-      Checkout: generateCheckoutStep(revision, repo),
+      Checkout: generateCheckoutStep(revision, repo, gitOrg),
       Build: generateBuildStep(buildOptions),
       ...(initDockerfilePath && {
         InitContainer: generateBuildStep({

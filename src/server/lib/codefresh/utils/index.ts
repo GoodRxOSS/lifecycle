@@ -23,10 +23,10 @@ export const constructBuildArgs = (envVars = {}) => {
   return envVarsItems?.length > 0 ? Object.keys(envVars).map((k) => `${k}=\${{${k}}}`) : [];
 };
 
-export const generateCheckoutStep = (revision: string, repo: string) => ({
+export const generateCheckoutStep = (revision: string, repo: string, gitOrg: string) => ({
   ...CF_CHECKOUT_STEP,
   working_directory: '.',
-  git: CF.CHECKOUT.GIT,
+  git: gitOrg,
   repo,
   revision,
   type: CF.CHECKOUT.TYPE,

@@ -27,6 +27,7 @@ export type ContainerBuildOptions = {
   dockerfilePath: string;
   ecrDomain: string;
   envVars: Record<string, string>;
+  gitOrg?: string;
   initDockerfilePath: string;
   repo: string;
   revision: string;

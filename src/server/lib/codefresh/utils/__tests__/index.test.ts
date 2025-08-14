@@ -40,8 +40,12 @@ describe('constructBuildArgs', () => {
 });
 
 test('generateCheckoutStep', () => {
-  const result = utils.generateCheckoutStep(revision, repo);
-  expect(result).toEqual(checkoutStep);
+  const gitOrg = 'test-git-org';
+  const result = utils.generateCheckoutStep(revision, repo, gitOrg);
+  expect(result).toEqual({
+    ...checkoutStep,
+    git: gitOrg,
+  });
 });
 
 test('generateBuildStep', () => {

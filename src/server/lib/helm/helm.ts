@@ -321,7 +321,7 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<strin
  */
 export async function generateHelmCodefreshYamlNoCheckout(deploy: Deploy): Promise<Record<string, unknown>> {
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
-  const kubeContext = kubeContextStep({ context: deploy.uuid, cluster: configs.lifecycleDefaults.deployCluster });
+  const kubeContext = await kubeContextStep({ context: deploy.uuid, cluster: configs.lifecycleDefaults.deployCluster });
   const helmDeploy = await helmDeployStep(deploy);
   delete helmDeploy.working_directory;
   kubeContext['stage'] = 'Checkout';
@@ -374,10 +374,11 @@ export async function generateHelmCodefreshYamlWithCheckout(deploy: Deploy): Pro
 
   const repositoryName = deploy?.repository?.fullName;
   const revision = deploy.sha;
+  const gitOrg = (configs?.app_setup?.org && configs.app_setup.org.trim()) || 'REPLACE_ME_ORG';
 
-  const Checkout = generateCheckoutStep(revision, repositoryName);
+  const Checkout = generateCheckoutStep(revision, repositoryName, gitOrg);
   delete Checkout.stage;
-  const kubeContext = kubeContextStep({ context: deploy.uuid, cluster: configs.lifecycleDefaults.deployCluster });
+  const kubeContext = await kubeContextStep({ context: deploy.uuid, cluster: configs.lifecycleDefaults.deployCluster });
   const addHelmReleaseDeletionStep = deploy?.build?.isStatic
     ? configs?.deletePendingHelmReleaseStep?.static_delete
     : configs?.deletePendingHelmReleaseStep?.delete;

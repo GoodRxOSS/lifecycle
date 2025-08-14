@@ -87,8 +87,13 @@ async function getNativeBuildJobs(serviceName: string, namespace: string): Promi
 
       if (startedAt) {
         const startTime = new Date(startedAt).getTime();
-        const endTime = completedAt ? new Date(completedAt).getTime() : Date.now();
-        duration = Math.floor((endTime - startTime) / 1000);
+
+        if (completedAt) {
+          const endTime = new Date(completedAt).getTime();
+          duration = Math.floor((endTime - startTime) / 1000);
+        } else if (status === 'Active') {
+          duration = Math.floor((Date.now() - startTime) / 1000);
+        }
       }
 
       let podName: string | undefined;

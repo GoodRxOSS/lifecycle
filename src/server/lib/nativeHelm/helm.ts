@@ -74,7 +74,8 @@ export async function createHelmContainer(
   chartType: ChartType,
   args?: string,
   chartRepoUrl?: string,
-  defaultArgs?: string
+  defaultArgs?: string,
+  chartVersion?: string
 ): Promise<any> {
   const script = generateHelmInstallScript(
     repoName,
@@ -86,7 +87,8 @@ export async function createHelmContainer(
     chartType,
     args,
     chartRepoUrl,
-    defaultArgs
+    defaultArgs,
+    chartVersion
   );
 
   return {
@@ -136,6 +138,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
   const { mergeHelmConfigWithGlobal } = await import('./utils');
   const mergedHelmConfig = await mergeHelmConfigWithGlobal(deploy);
   const chartRepoUrl = mergedHelmConfig.chart?.repoUrl;
+  const chartVersion = mergedHelmConfig.chart?.version;
   const helmArgs = mergedHelmConfig.args;
   const defaultArgs = mergedHelmConfig.nativeHelm?.defaultArgs;
 
@@ -150,7 +153,8 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     helmConfig.chartType,
     helmArgs,
     chartRepoUrl,
-    defaultArgs
+    defaultArgs,
+    chartVersion
   );
 
   const volumeConfig = {
@@ -181,6 +185,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     namespace: options.namespace,
     serviceAccount: serviceAccountName,
     serviceName: deploy.deployable.name,
+    buildUUID: build.uuid,
     isStatic: build.isStatic,
     gitUsername: GIT_USERNAME,
     gitToken,

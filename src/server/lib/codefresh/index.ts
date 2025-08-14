@@ -118,7 +118,7 @@ export const triggerPipeline = async (
   return buildId;
 };
 
-export function kubeContextStep({ context, cluster }: { context: string; cluster: string }) {
+export async function kubeContextStep({ context, cluster }: { context: string; cluster: string }) {
   let awsAccessKeyId = '${{DEPLOYMENT_AWS_ACCESS_KEY_ID}}';
   let awsSecretAccessKey = '${{DEPLOYMENT_AWS_SECRET_ACCESS_KEY}}';
 
@@ -126,11 +126,12 @@ export function kubeContextStep({ context, cluster }: { context: string; cluster
     awsAccessKeyId = '${{STG_AWS_ACCESS_KEY_ID}}';
     awsSecretAccessKey = '${{STG_AWS_SECRET_ACCESS_KEY}}';
   }
-
+  const { app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+  const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
   return {
     title: 'Set kube context',
     // this is a custom step setup to update kube context
-    type: 'REPLACE_ME_IF_NEEDED/kube-context:0.0.2',
+    type: `${gitOrg}/kube-context:0.0.2`,
     arguments: {
       app: context,
       cluster,

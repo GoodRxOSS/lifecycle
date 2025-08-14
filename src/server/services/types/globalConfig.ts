@@ -45,6 +45,7 @@ export type AppSetup = {
   restarted: boolean;
   url: string;
   state: string;
+  org?: string;
 };
 
 export type RoleSettings = {

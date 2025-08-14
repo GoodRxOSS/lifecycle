@@ -27,6 +27,7 @@ import {
 import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
 import rootLogger from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
+import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 
 const logger = rootLogger.child({
   filename: 'lib/nativeHelm/utils.ts',
@@ -204,7 +205,8 @@ export function constructHelmCommand(
   chartType: ChartType,
   args?: string,
   chartRepoUrl?: string,
-  defaultArgs?: string
+  defaultArgs?: string,
+  chartVersion?: string
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -229,6 +231,10 @@ export function constructHelmCommand(
   }
 
   command += ` --namespace ${namespace}`;
+
+  if (chartVersion && (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART)) {
+    command += ` --version ${chartVersion}`;
+  }
 
   customValues.forEach((value) => {
     const equalIndex = value.indexOf('=');
@@ -268,7 +274,8 @@ export function generateHelmInstallScript(
   chartType: ChartType,
   args?: string,
   chartRepoUrl?: string,
-  defaultArgs?: string
+  defaultArgs?: string,
+  chartVersion?: string
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -280,7 +287,8 @@ export function generateHelmInstallScript(
     chartType,
     args,
     chartRepoUrl,
-    defaultArgs
+    defaultArgs,
+    chartVersion
   );
 
   let script = `
@@ -558,6 +566,7 @@ export function createHelmJob(
   isStatic: boolean,
   serviceAccountName: string = 'default',
   serviceName: string,
+  buildUUID: string,
   deployMetadata?: {
     sha: string;
     branch: string;
@@ -571,13 +580,13 @@ export function createHelmJob(
   const labels: Record<string, string> = {
     'app.kubernetes.io/name': 'native-helm',
     'app.kubernetes.io/component': 'deployment',
-    'lc-uuid': name.split('-')[0],
+    'lc-uuid': buildUUID,
     service: serviceName,
   };
 
   if (deployMetadata) {
     labels['git-sha'] = deployMetadata.sha;
-    labels['git-branch'] = deployMetadata.branch;
+    labels['git-branch'] = normalizeKubernetesLabelValue(deployMetadata.branch);
     labels['deploy-id'] = deployMetadata.deployId || '';
     labels['deployable-id'] = deployMetadata.deployableId;
   }

@@ -16,4 +16,5 @@
 
 import { generateCheckoutStep } from 'server/lib/codefresh/utils';
 
-export const determineCheckoutStep = (revision: string, repo: string) => generateCheckoutStep(revision, repo);
+export const determineCheckoutStep = (revision: string, repo: string, gitOrg: string) =>
+  generateCheckoutStep(revision, repo, gitOrg);
