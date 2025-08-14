@@ -66,16 +66,15 @@ interface BuildArgOptions {
   destination: string;
   cacheRef: string;
   buildArgs: Record<string, string>;
-  ecrDomain: string;
 }
 
 const ENGINES: Record<string, BuildEngine> = {
   buildkit: {
     name: 'buildkit',
     image: 'moby/buildkit:v0.12.0',
-    command: ['/usr/bin/buildctl'],
+    command: ['/bin/sh', '-c'],
     createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs }) => {
-      const args = [
+      const buildctlArgs = [
         'build',
         '--frontend',
         'dockerfile.v0',
@@ -94,10 +93,30 @@ const ENGINES: Record<string, BuildEngine> = {
       ];
 
       Object.entries(buildArgs).forEach(([key, value]) => {
-        args.push('--opt', `build-arg:${key}=${value}`);
+        buildctlArgs.push('--opt', `build-arg:${key}=${value}`);
       });
 
-      return args;
+      const script = `
+set -e
+echo "Installing AWS CLI..."
+apk add --no-cache aws-cli
+
+echo "Testing AWS credentials..."
+aws sts get-caller-identity
+
+echo "Getting ECR login token..."
+ECR_PASSWORD=$(aws ecr get-login-password --region us-west-2)
+echo "Got ECR password (length: \${#ECR_PASSWORD})"
+
+echo "Setting buildctl auth environment variables..."
+export BUILDCTL_PASSWORD=$ECR_PASSWORD
+export BUILDCTL_USERNAME=AWS
+
+echo "Running buildctl..."
+buildctl ${buildctlArgs.join(' \\\n  ')}
+`;
+
+      return [script.trim()];
     },
     getCacheRef: (ecrDomain, shortRepoName) => `${ecrDomain}/${shortRepoName}:cache`,
   },
@@ -136,8 +155,7 @@ function createBuildContainer(
   contextPath: string,
   envVars: Record<string, string>,
   resources: any,
-  buildArgs: Record<string, string>,
-  ecrDomain: string
+  buildArgs: Record<string, string>
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -145,7 +163,6 @@ function createBuildContainer(
     destination,
     cacheRef,
     buildArgs,
-    ecrDomain,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
@@ -156,21 +173,6 @@ function createBuildContainer(
       mountPath: '/workspace',
     },
   ];
-
-  // For kaniko, mount docker config from shared volume
-  if (engine.name === 'kaniko') {
-    volumeMounts.push({
-      name: 'workspace',
-      mountPath: '/kaniko/.docker',
-      subPath: '.docker',
-    } as any);
-    containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
-  }
-
-  // For buildkit, set DOCKER_CONFIG to shared volume location
-  if (engine.name === 'buildkit') {
-    containerEnvVars['DOCKER_CONFIG'] = '/workspace/.docker';
-  }
 
   return {
     name,
@@ -220,25 +222,6 @@ export async function buildWithEngine(
     githubToken
   );
 
-  // Simple ECR login init container
-  const ecrLoginContainer = {
-    name: 'ecr-login',
-    image: 'amazon/aws-cli:2.13.0',
-    command: ['/bin/sh', '-c'],
-    args: [
-      `aws ecr get-login-password --region ${process.env.AWS_REGION || 'us-west-2'} | ` +
-        `{ read PASSWORD; mkdir -p /workspace/.docker && ` +
-        `echo '{"auths":{"${options.ecrDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}'> /workspace/.docker/config.json; }`,
-    ],
-    env: [{ name: 'AWS_REGION', value: process.env.AWS_REGION || 'us-west-2' }],
-    volumeMounts: [
-      {
-        name: 'workspace',
-        mountPath: '/workspace',
-      },
-    ],
-  };
-
   let envVars: Record<string, string> = {
     ...options.envVars,
     AWS_REGION: process.env.AWS_REGION || 'us-west-2',
@@ -269,8 +252,7 @@ export async function buildWithEngine(
       contextPath,
       envVars,
       resources,
-      options.envVars,
-      options.ecrDomain
+      options.envVars
     )
   );
 
@@ -286,8 +268,7 @@ export async function buildWithEngine(
         contextPath,
         envVars,
         resources,
-        options.envVars,
-        options.ecrDomain
+        options.envVars
       )
     );
     logger.info(`[${engine.name}] Job ${jobName} will build both main and init images in parallel`);
@@ -310,7 +291,7 @@ export async function buildWithEngine(
     ecrRepo: options.ecrRepo,
     jobTimeout,
     isStatic,
-    initContainers: [gitCloneContainer, ecrLoginContainer],
+    initContainers: [gitCloneContainer],
     containers,
     volumes: [
       {
