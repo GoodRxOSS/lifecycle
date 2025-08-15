@@ -43,6 +43,7 @@ export interface NativeBuildOptions {
   deployUuid: string;
   serviceAccount?: string;
   jobTimeout?: number;
+  cacheRegistry?: string;
   resources?: {
     requests?: Record<string, string>;
     limits?: Record<string, string>;
@@ -57,7 +58,7 @@ interface BuildEngine {
   createArgs: (options: BuildArgOptions) => string[];
   envVars?: Record<string, string>;
   // eslint-disable-next-line no-unused-vars
-  getCacheRef: (ecrDomain: string, shortRepoName: string) => string;
+  getCacheRef: (cacheRegistry: string, ecrRepo: string) => string;
 }
 
 interface BuildArgOptions {
@@ -121,7 +122,7 @@ buildctl ${buildctlArgs.join(' \\\n  ')}
 
       return [script.trim()];
     },
-    getCacheRef: (ecrDomain, shortRepoName) => `${ecrDomain}/${shortRepoName}:cache`,
+    getCacheRef: (cacheRegistry, ecrRepo) => `${cacheRegistry}/${ecrRepo}:cache`,
   },
   kaniko: {
     name: 'kaniko',
@@ -145,7 +146,7 @@ buildctl ${buildctlArgs.join(' \\\n  ')}
 
       return args;
     },
-    getCacheRef: (ecrDomain, shortRepoName) => `${ecrDomain}/${shortRepoName}/cache`,
+    getCacheRef: (cacheRegistry, ecrRepo) => `${cacheRegistry}/${ecrRepo}/cache`,
   },
 };
 
@@ -212,6 +213,7 @@ export async function buildWithEngine(
   const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
   const resources = options.resources || buildDefaults.resources?.[engineName] || DEFAULT_BUILD_RESOURCES[engineName];
+  const cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry || 'distribution.0env.com';
 
   const serviceName = deploy.deployable!.name;
   const shortRepoName = options.repo.split('/')[1] || options.repo;
@@ -273,7 +275,7 @@ export async function buildWithEngine(
   }
 
   const containers = [];
-  const cacheRef = engine.getCacheRef(options.ecrDomain, shortRepoName);
+  const cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
 
   const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;
   containers.push(
