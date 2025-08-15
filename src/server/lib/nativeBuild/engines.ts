@@ -89,9 +89,9 @@ const ENGINES: Record<string, BuildEngine> = {
         '--output',
         `type=image,name=${destination},push=true,registry.insecure=true,oci-mediatypes=false`,
         '--export-cache',
-        `type=registry,ref=${cacheRef},mode=max,registry.insecure=false`,
+        `type=registry,ref=${cacheRef},mode=min,compression=zstd,insecure=false`,
         '--import-cache',
-        `type=registry,ref=${cacheRef},registry.insecure=false`,
+        `type=registry,ref=${cacheRef},insecure=false`,
       ];
 
       Object.entries(buildArgs).forEach(([key, value]) => {
