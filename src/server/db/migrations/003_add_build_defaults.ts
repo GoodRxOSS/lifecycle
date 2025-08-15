@@ -26,25 +26,20 @@ export async function up(knex: Knex): Promise<any> {
     // Create new buildDefaults with cacheRegistry
     await knex('global_config').insert({
       key: 'buildDefaults',
-      config: JSON.stringify({
-        cacheRegistry,
-      }),
+      config: { cacheRegistry },
       createdAt: knex.fn.now(),
       updatedAt: knex.fn.now(),
       deletedAt: null,
-      description: 'Default configuration for native builds including cache registry.',
+      description: 'Default configuration for native builds.',
     });
   } else {
-    // Update existing buildDefaults to add cacheRegistry if not present
-    const config = JSON.parse(existingConfig.config);
+    const config = existingConfig.config || {};
 
     if (!config.cacheRegistry) {
-      config.cacheRegistry = cacheRegistry;
-
       await knex('global_config')
         .where('key', 'buildDefaults')
         .update({
-          config: JSON.stringify(config),
+          config: { ...config, cacheRegistry },
           updatedAt: knex.fn.now(),
         });
     }
@@ -55,21 +50,16 @@ export async function down(knex: Knex): Promise<any> {
   const existingConfig = await knex('global_config').where('key', 'buildDefaults').first();
 
   if (existingConfig) {
-    const config = JSON.parse(existingConfig.config);
+    const config = existingConfig.config || {};
 
-    // If buildDefaults only has cacheRegistry, delete the entire record
-    if (Object.keys(config).length === 1 && config.cacheRegistry) {
-      await knex('global_config').where('key', 'buildDefaults').delete();
-    } else if (config.cacheRegistry) {
-      // Otherwise just remove the cacheRegistry field
-      delete config.cacheRegistry;
+    if (config.cacheRegistry) {
+      // eslint-disable-next-line no-unused-vars
+      const { cacheRegistry, ...restConfig } = config;
 
-      await knex('global_config')
-        .where('key', 'buildDefaults')
-        .update({
-          config: JSON.stringify(config),
-          updatedAt: knex.fn.now(),
-        });
+      await knex('global_config').where('key', 'buildDefaults').update({
+        config: restConfig,
+        updatedAt: knex.fn.now(),
+      });
     }
   }
 }
