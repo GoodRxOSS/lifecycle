@@ -17,6 +17,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import unifiedLogStreamHandler from '../../services/[name]/logs/[jobName]';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
@@ -34,6 +35,8 @@ const logger = rootLogger.child({
  *     tags:
  *       - Webhooks
  *       - Jobs
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -101,6 +104,9 @@ const logger = rootLogger.child({
  *         description: Internal server error
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
+
   logger.info(
     `method=${req.method} jobName=${req.query.jobName} message="Job logs endpoint called, delegating to unified handler"`
   );
