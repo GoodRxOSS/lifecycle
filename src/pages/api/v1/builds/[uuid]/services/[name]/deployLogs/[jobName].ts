@@ -26,6 +26,8 @@
  *     tags:
  *       - Deployments
  *       - Native Helm
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -133,12 +135,16 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import unifiedLogStreamHandler from '../logs/[jobName]';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
 });
 
 const deployLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
+
   logger.info(
     `method=${req.method} jobName=${req.query.jobName} message="Deploy logs endpoint called, delegating to unified handler"`
   );

@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import rootLogger from 'server/lib/logger';
 import BuildService from 'server/services/build';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'deploy-summary.ts',
@@ -31,6 +32,8 @@ const logger = rootLogger.child({
  *       Retrieves deploy summary information from the deploySummary view for a specific build ID.
  *     tags:
  *       - Deploys
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: query
  *         name: buildId
@@ -115,6 +118,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   const { buildId } = req.query;
   const parsedBuildId = parseInt(buildId as string, 10);

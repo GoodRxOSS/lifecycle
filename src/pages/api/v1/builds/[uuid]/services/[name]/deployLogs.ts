@@ -18,6 +18,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
@@ -174,6 +175,8 @@ async function getDeploymentJobs(serviceName: string, namespace: string): Promis
  *       This includes both Helm deployment jobs and GitHub-type deployment jobs.
  *     tags:
  *       - Deployments
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -254,6 +257,9 @@ const deployLogsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   const { uuid, name } = req.query;
 

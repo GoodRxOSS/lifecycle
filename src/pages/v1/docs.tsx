@@ -43,9 +43,19 @@ export const getServerSideProps: GetServerSideProps = async () => {
     definition: {
       openapi: '3.0.0',
       info: {
-        title: 'My API',
+        title: 'Lifecycle API',
         version: '1.0.0',
         description: 'API documentation for lifecycle',
+      },
+      components: {
+        securitySchemes: {
+          ApiKeyAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'API Key',
+            description: 'API key authentication using `Bearer API_KEY`',
+          },
+        },
       },
     },
     // Adjust this glob pattern to match your API files

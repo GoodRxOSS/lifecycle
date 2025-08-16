@@ -22,6 +22,7 @@ import DeployService from 'server/services/deploy';
 import { DeployStatus } from 'shared/constants';
 import { nanoid } from 'nanoid';
 import BuildService from 'server/services/build';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'builds/[uuid]/services/[name]/build.ts',
@@ -37,6 +38,8 @@ const logger = rootLogger.child({
  *       will be queued for deployment and its status will be updated accordingly.
  *     tags:
  *       - Services
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -100,6 +103,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   const { uuid, name } = req.query;
 
