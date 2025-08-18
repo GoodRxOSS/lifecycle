@@ -43,6 +43,7 @@ export const generateYaml = (options: ContainerBuildOptions) => {
     initTag,
     author,
     enabledFeatures = [],
+    deployCluster,
   } = options;
   const buildArgs = constructBuildArgs(envVars);
 
@@ -65,6 +66,7 @@ export const generateYaml = (options: ContainerBuildOptions) => {
     branch: deploy?.branchName,
     repo,
     author,
+    eksCluster: deployCluster || 'unknown',
   };
   const annotations = Object.keys(annotationsObj)
     .filter((key) => annotationsObj[key])

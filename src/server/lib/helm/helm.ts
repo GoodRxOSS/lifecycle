@@ -332,6 +332,7 @@ export async function generateHelmCodefreshYamlNoCheckout(deploy: Deploy): Promi
   const annotationsObj = {
     uuid: deploy.deployable?.buildUUID,
     deployUUID: deploy.uuid,
+    eksCluster: configs?.lifecycleDefaults?.deployCluster || 'unknown',
   };
   const annotations = Object.keys(annotationsObj)
     .filter((key) => annotationsObj[key])
@@ -387,6 +388,7 @@ export async function generateHelmCodefreshYamlWithCheckout(deploy: Deploy): Pro
   const annotationsObj = {
     uuid: deploy.deployable?.buildUUID,
     deployUUID: deploy.uuid,
+    eksCluster: configs?.lifecycleDefaults?.deployCluster || 'unknown',
   };
   const annotations = Object.keys(annotationsObj)
     .filter((key) => annotationsObj[key])

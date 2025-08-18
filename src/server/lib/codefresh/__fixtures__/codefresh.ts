@@ -168,6 +168,7 @@ export const generateYamlOptions = {
   deploy,
   ecrDomain,
   ecrRepo: `lfc/app/lfc`,
+  deployCluster: undefined,
 };
 
 export const yamlDefaults = {

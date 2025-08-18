@@ -37,4 +37,5 @@ export type ContainerBuildOptions = {
   initTag?: string;
   author?: string;
   enabledFeatures?: string[];
+  deployCluster?: string;
 };

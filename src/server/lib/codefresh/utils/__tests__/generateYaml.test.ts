@@ -20,6 +20,7 @@ import {
   afterBuildStep,
   generateYamlOptions,
   yamlContent,
+  annotations,
 } from 'server/lib/codefresh/__fixtures__/codefresh';
 import { generateYaml } from 'server/lib/codefresh/utils/generateYaml';
 
@@ -49,6 +50,18 @@ describe('generateYaml', () => {
     const result = generateYaml(generateYamlOptions);
     expect(result).toEqual({
       ...yamlContent,
+      hooks: {
+        on_elected: {
+          annotations: {
+            set: [
+              {
+                annotations: [...annotations, { eksCluster: 'unknown' }],
+                display: 'deployUUID',
+              },
+            ],
+          },
+        },
+      },
       steps: {
         ...yamlContent.steps,
         Checkout: {
