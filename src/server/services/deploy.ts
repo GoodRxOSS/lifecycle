@@ -669,6 +669,7 @@ export default class DeployService extends BaseService {
                 author,
                 enabledFeatures,
                 ecrDomain,
+                deployCluster: lifecycleDefaults.deployCluster,
               });
               const buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
               await this.patchAndUpdateActivityFeed(deploy, { buildLogs }, runUUID);
@@ -946,6 +947,7 @@ export default class DeployService extends BaseService {
           initTag,
           author,
           enabledFeatures,
+          deployCluster: lifecycleDefaults.deployCluster,
         };
 
         if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
