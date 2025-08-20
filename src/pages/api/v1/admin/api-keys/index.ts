@@ -30,11 +30,27 @@ const logger = rootLogger.child({
  *     summary: Create a new API key
  *     description: |
  *       Creates a new API key for authentication. The full key is only returned once
- *       and cannot be retrieved again. Requires API key authentication.
+ *       and cannot be retrieved again.
+ *
+ *       **Bootstrap Mode**: If no API keys exist in the database, this endpoint
+ *       allows creating the first key using a bootstrap token (X-Bootstrap-Token header).
+ *       The bootstrap token is provided via the APP_BOOTSTRAP_TOKEN environment variable
+ *       during deployment. After the first key is created, all subsequent requests
+ *       require API key authentication.
  *     tags:
  *       - Admin
  *     security:
  *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: X-Bootstrap-Token
+ *         required: false
+ *         description: |
+ *           Bootstrap token required only when creating the first API key.
+ *           Must match the APP_BOOTSTRAP_TOKEN environment variable.
+ *         schema:
+ *           type: string
+ *           example: "abc123def456ghi789"
  *     requestBody:
  *       required: true
  *       content:
@@ -243,11 +259,30 @@ const logger = rootLogger.child({
  *                   example: "Internal Server Error"
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
-
   try {
     const authService = new AuthService();
+
+    // Bootstrap mode: Allow first API key creation with bootstrap token
+    if (req.method === 'POST') {
+      const hasKeys = await authService.hasApiKeys();
+
+      if (!hasKeys) {
+        const providedToken = req.headers['x-bootstrap-token'] as string;
+        const bootstrapToken = process.env.APP_BOOTSTRAP_TOKEN;
+
+        if (bootstrapToken && providedToken === bootstrapToken) {
+          logger.info('Bootstrap mode: Creating first API key with bootstrap token');
+          return await handleCreateApiKey(req, res, authService);
+        } else {
+          logger.warn('Bootstrap mode: Invalid or missing bootstrap token');
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+      }
+    }
+
+    // Validate auth if api keys exist already
+    const { valid } = await validateAuth(req, res);
+    if (!valid) return;
 
     switch (req.method) {
       case 'POST':

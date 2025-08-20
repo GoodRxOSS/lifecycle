@@ -37,6 +37,7 @@ export type GlobalConfig = {
   features: Record<string, boolean>;
   app_setup: AppSetup;
   labels: LabelsConfig;
+  apiConfig?: ApiConfig;
 };
 
 export type AppSetup = {
@@ -144,4 +145,10 @@ export type LabelsConfig = {
   statusComments: string[];
   defaultStatusComments: boolean;
   defaultControlComments: boolean;
+};
+
+export type ApiConfig = {
+  rate_limit: number;
+  rate_limit_window: number;
+  bcrypt_rounds: number;
 };

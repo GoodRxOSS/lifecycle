@@ -18,17 +18,12 @@ import Service from './_service';
 import ApiKey from '../models/ApiKey';
 import GlobalConfigService from './globalConfig';
 import { generateApiKey, parseApiKey, validateSecret } from '../lib/auth/keyGenerator';
+import { ApiConfig } from './types/globalConfig';
 import rootLogger from '../lib/logger';
 
 const logger = rootLogger.child({
   filename: 'services/auth.ts',
 });
-
-export interface ApiConfig {
-  rate_limit: number;
-  rate_limit_window: number;
-  bcrypt_rounds: number;
-}
 
 const DEFAULT_API_CONFIG: ApiConfig = {
   rate_limit: 1000,
@@ -45,6 +40,14 @@ export interface CreateApiKeyOptions {
 }
 
 export default class AuthService extends Service {
+  /**
+   * Check if any API keys exist in the database
+   */
+  async hasApiKeys(): Promise<boolean> {
+    const result = await ApiKey.query().select('id').limit(1).first();
+    return Boolean(result);
+  }
+
   /**
    * Get API configuration from global_config table using GlobalConfigService cache
    */
