@@ -19,6 +19,7 @@ import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
+import { validateAuth } from 'server/lib/auth/validate';
 
 // Constants
 const MAX_CONCURRENT_PODS = 5;
@@ -53,6 +54,8 @@ const isValidContainerType = (type: string | undefined): type is ContainerType =
  *     deprecated: true
  *     tags:
  *       - Logs
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -171,6 +174,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(405).json({ error: 'Method Not Allowed' });
     return;
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   const { uuid, name } = req.query;
   if (!uuid || !name || typeof uuid !== 'string' || typeof name !== 'string') {

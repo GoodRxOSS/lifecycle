@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import rootLogger from 'server/lib/logger';
 import BuildService from 'server/services/build';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'api/v1/builds/index.ts',
@@ -32,6 +33,8 @@ const logger = rootLogger.child({
  *       By default, excludes builds with status 'torn_down' and 'pending'.
  *     tags:
  *       - Builds
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: query
  *         name: exclude
@@ -139,6 +142,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   try {
     const buildService = new BuildService();

@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'v1/config/cache.ts',
@@ -30,6 +31,8 @@ const logger = rootLogger.child({
  *     description: Fetches the current global configuration values from cache
  *     tags:
  *       - Configuration
+ *     security:
+ *       - ApiKeyAuth: []
  *     responses:
  *       200:
  *         description: Successfully retrieved configuration
@@ -66,6 +69,8 @@ const logger = rootLogger.child({
  *     description: Forces a refresh of the cached configuration values and returns the updated configuration
  *     tags:
  *       - Configuration
+ *     security:
+ *       - ApiKeyAuth: []
  *     responses:
  *       200:
  *         description: Successfully refreshed and retrieved configuration
@@ -100,6 +105,9 @@ const logger = rootLogger.child({
  */
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
+
   try {
     switch (req.method) {
       case 'GET':

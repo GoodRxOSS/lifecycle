@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import rootLogger from 'server/lib/logger';
 import PullRequestService from 'server/services/pullRequest';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'api/v1/pull-requests/[id].ts',
@@ -31,6 +32,8 @@ const logger = rootLogger.child({
  *       Retrieves detailed information about a specific pull request by its ID.
  *     tags:
  *       - Pull Requests
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -111,6 +114,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   const { id } = req.query;
   const parsedId = parseInt(id as string, 10);

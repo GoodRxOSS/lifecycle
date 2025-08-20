@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import rootLogger from 'server/lib/logger';
 import PullRequestService from 'server/services/pullRequest';
+import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'api/v1/repos/index.ts',
@@ -32,6 +33,8 @@ const logger = rootLogger.child({
  *       Returns all repositories by default, with optional pagination support.
  *     tags:
  *       - Repositories
+ *     security:
+ *       - ApiKeyAuth: []
  *     parameters:
  *       - in: query
  *         name: page
@@ -114,6 +117,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
+
+  const { valid } = await validateAuth(req, res);
+  if (!valid) return;
 
   try {
     const pullRequestService = new PullRequestService();
