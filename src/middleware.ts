@@ -16,6 +16,7 @@
 
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { API_KEY_REGEX } from './server/lib/auth/constants';
 
 /**
  * List of public API routes that do NOT require authentication
@@ -76,8 +77,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const regex = /^lfc_([A-Za-z0-9_-]{8})_([A-Za-z0-9_-]{32})$/;
-  const match = apiKey.match(regex);
+  const match = apiKey.match(API_KEY_REGEX);
 
   if (!match) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

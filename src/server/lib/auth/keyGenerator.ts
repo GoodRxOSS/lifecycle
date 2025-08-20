@@ -16,9 +16,7 @@
 
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-
-const KEY_PREFIX = 'lfc_';
-const SECRET_BYTES = 24; // 24 bytes = 32 chars base64url
+import { API_KEY_PREFIX, API_KEY_REGEX, SECRET_BYTES } from './constants';
 
 export interface GeneratedApiKey {
   fullKey: string;
@@ -48,7 +46,7 @@ export async function generateApiKey(bcryptRounds = 12): Promise<GeneratedApiKey
   const secret = generateBase64Url(secretBytes);
 
   // Create full key
-  const fullKey = `${KEY_PREFIX}${keyId}_${secret}`;
+  const fullKey = `${API_KEY_PREFIX}${keyId}_${secret}`;
 
   // Hash the secret portion for storage
   const secretHash = await bcrypt.hash(secret, bcryptRounds);
@@ -66,8 +64,7 @@ export async function generateApiKey(bcryptRounds = 12): Promise<GeneratedApiKey
  * Returns null if the format is invalid
  */
 export function parseApiKey(apiKey: string): { keyId: string; secret: string } | null {
-  const regex = /^lfc_([A-Za-z0-9_-]{8})_([A-Za-z0-9_-]{32})$/;
-  const match = apiKey.match(regex);
+  const match = apiKey.match(API_KEY_REGEX);
 
   if (!match) {
     return null;
