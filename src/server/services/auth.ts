@@ -28,14 +28,12 @@ export interface ApiConfig {
   rate_limit: number;
   rate_limit_window: number;
   bcrypt_rounds: number;
-  require_https: boolean;
 }
 
 const DEFAULT_API_CONFIG: ApiConfig = {
   rate_limit: 1000,
   rate_limit_window: 600,
   bcrypt_rounds: 12,
-  require_https: true,
 };
 
 export interface CreateApiKeyOptions {

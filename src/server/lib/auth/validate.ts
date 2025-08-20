@@ -47,13 +47,6 @@ export async function validateAuth(
 
     const config = await authService.getApiConfig();
 
-    // Check HTTPS requirement
-    if (config.require_https && req.headers['x-forwarded-proto'] !== 'https') {
-      logger.error('HTTPS required but request not secure');
-      res.status(403).json({ error: 'Forbidden' });
-      return { valid: false };
-    }
-
     const apiKey = await authService.validateApiKey(apiKeyString);
 
     if (!apiKey) {
