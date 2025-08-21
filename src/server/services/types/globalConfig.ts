@@ -151,4 +151,5 @@ export type ApiConfig = {
   rate_limit: number;
   rate_limit_window: number;
   bcrypt_rounds: number;
+  requireAuth: boolean;
 };

@@ -264,18 +264,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Bootstrap mode: Allow first API key creation with bootstrap token
     if (req.method === 'POST') {
-      const hasKeys = await authService.hasApiKeys();
+      const config = await authService.getApiConfig();
 
-      if (!hasKeys) {
-        const providedToken = req.headers['x-bootstrap-token'] as string;
-        const bootstrapToken = process.env.APP_BOOTSTRAP_TOKEN;
+      // Skip bootstrap check if auth is disabled globally
+      if (config.requireAuth) {
+        const hasKeys = await authService.hasApiKeys();
 
-        if (bootstrapToken && providedToken === bootstrapToken) {
-          logger.info('Bootstrap mode: Creating first API key with bootstrap token');
-          return await handleCreateApiKey(req, res, authService);
-        } else {
-          logger.warn('Bootstrap mode: Invalid or missing bootstrap token');
-          return res.status(401).json({ error: 'Unauthorized' });
+        if (!hasKeys) {
+          const providedToken = req.headers['x-bootstrap-token'] as string;
+          const bootstrapToken = process.env.APP_BOOTSTRAP_TOKEN;
+
+          if (bootstrapToken && providedToken === bootstrapToken) {
+            logger.info('Bootstrap mode: Creating first API key with bootstrap token');
+            return await handleCreateApiKey(req, res, authService);
+          } else {
+            logger.warn('Bootstrap mode: Invalid or missing bootstrap token');
+            return res.status(401).json({ error: 'Unauthorized' });
+          }
         }
       }
     }
