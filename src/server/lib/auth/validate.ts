@@ -34,6 +34,14 @@ export async function validateAuth(
   res: NextApiResponse
 ): Promise<{ valid: boolean; apiKey?: ApiKey }> {
   try {
+    const authService = new AuthService();
+    const config = await authService.getApiConfig();
+
+    // Skip all authentication and rate limiting if requireAuth is false
+    if (!config.requireAuth) {
+      return { valid: true };
+    }
+
     const authHeader = req.headers.authorization as string;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       logger.error('Missing or invalid Authorization header');
@@ -42,10 +50,6 @@ export async function validateAuth(
     }
 
     const apiKeyString = authHeader.substring(7); // Remove 'Bearer ' prefix
-
-    const authService = new AuthService();
-
-    const config = await authService.getApiConfig();
 
     const apiKey = await authService.validateApiKey(apiKeyString);
 

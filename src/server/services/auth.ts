@@ -29,6 +29,7 @@ const DEFAULT_API_CONFIG: ApiConfig = {
   rate_limit: 1000,
   rate_limit_window: 600,
   bcrypt_rounds: 12,
+  requireAuth: false,
 };
 
 export interface CreateApiKeyOptions {
