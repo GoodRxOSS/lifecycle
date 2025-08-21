@@ -38,9 +38,6 @@ function isPublicApiRoute(pathname: string): boolean {
   return PUBLIC_API_ROUTES.some((route) => pathname.startsWith(route));
 }
 
-/**
- * Extract API key from request headers
- */
 function extractApiKey(request: NextRequest): string | null {
   const authHeader = request.headers.get('authorization');
 
@@ -48,7 +45,6 @@ function extractApiKey(request: NextRequest): string | null {
     return null;
   }
 
-  // Check for Bearer token format
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
   if (bearerMatch) {
     return bearerMatch[1];
@@ -60,30 +56,24 @@ function extractApiKey(request: NextRequest): string | null {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Only process API routes
   if (!pathname.startsWith('/api/')) {
     return NextResponse.next();
   }
 
-  // Allow public API routes without authentication
   if (isPublicApiRoute(pathname)) {
     return NextResponse.next();
   }
 
-  // do some basic API key validation
+  // Api key format validation before we send request to api
   const apiKey = extractApiKey(request);
 
-  if (!apiKey) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (apiKey) {
+    const match = apiKey.match(API_KEY_REGEX);
+    if (!match) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
   }
 
-  const match = apiKey.match(API_KEY_REGEX);
-
-  if (!match) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // Pass the request through - API routes will handle full validation
   return NextResponse.next();
 }
 
