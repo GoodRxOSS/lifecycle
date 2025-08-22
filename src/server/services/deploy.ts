@@ -627,6 +627,12 @@ export default class DeployService extends BaseService {
             const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
             let ecrRepo = deployable?.ecr;
 
+            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+            if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+              ecrRepo = `${ecrRepo}/${serviceName}`;
+              logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
+            }
+
             const tagsExist =
               (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
               (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
@@ -793,10 +799,10 @@ export default class DeployService extends BaseService {
     const { build, deployable, service } = deploy;
     const uuid = build?.uuid;
     const uuidText = uuid ? `[DEPLOY ${uuid}][patchDeployWithTag]:` : '[DEPLOY][patchDeployWithTag]:';
-    let ecrRepo = deployable?.ecr;
+    let ecrRepo = deployable?.ecr as string;
 
     const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
-    if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+    if (serviceName && !ecrRepo.includes('ecr') && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
       ecrRepo = `${ecrRepo}/${serviceName}`;
       logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
     }
@@ -895,6 +901,12 @@ export default class DeployService extends BaseService {
       const tag = generateDeployTag({ sha: shortSha, envVarsHash });
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
       let ecrRepo = deployable?.ecr;
+
+      const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+      if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
+        ecrRepo = `${ecrRepo}/${serviceName}`;
+        logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
+      }
 
       const { lifecycleDefaults, app_setup, buildDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
