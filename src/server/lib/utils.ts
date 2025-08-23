@@ -123,6 +123,24 @@ export const generateDeployTag = ({ prefix = 'lfc', sha, envVarsHash }: Generate
   return tag;
 };
 
+export const constructEcrRepoPath = (
+  baseEcrRepo: string,
+  serviceName: string | undefined,
+  ecrDomain: string
+): string => {
+  if (!baseEcrRepo || !serviceName) return baseEcrRepo || '';
+
+  if (ecrDomain && ecrDomain.includes('ecr')) {
+    return baseEcrRepo;
+  }
+
+  if (baseEcrRepo.endsWith(`/${serviceName}`)) {
+    return baseEcrRepo;
+  }
+
+  return `${baseEcrRepo}/${serviceName}`;
+};
+
 export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
