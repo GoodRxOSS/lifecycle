@@ -264,20 +264,18 @@ export async function buildWithEngine(
     githubToken
   );
 
-  // Create registry login script based on registry type
   let registryLoginScript = '';
   const registryDomain = options.ecrDomain;
 
-  // AWS ECR Detection
-  if (/^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$/.test(registryDomain)) {
-    const region = registryDomain.match(/\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws/)?.[1] || 'us-west-2';
+  const ecrRegex = /^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$/;
+  const ecrMatch = registryDomain.match(ecrRegex);
+  if (ecrMatch) {
+    const region = ecrMatch[1] || 'us-west-2';
     registryLoginScript =
       `aws ecr get-login-password --region ${region} | ` +
       `{ read PASSWORD; mkdir -p /workspace/.docker && ` +
       `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > /workspace/.docker/config.json; }`;
-  }
-  // In-cluster or custom registry (no auth)
-  else {
+  } else {
     registryLoginScript =
       `echo "Using in-cluster registry: ${registryDomain}"; ` +
       `mkdir -p /workspace/.docker && echo '{}' > /workspace/.docker/config.json`;
