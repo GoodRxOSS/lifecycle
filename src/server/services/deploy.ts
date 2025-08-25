@@ -28,7 +28,7 @@ import { nanoid } from 'nanoid';
 import Objection from 'objection';
 import * as YamlService from 'server/models/yaml';
 import * as github from 'server/lib/github';
-import { generateDeployTag } from 'server/lib/utils';
+import { generateDeployTag, constructEcrRepoPath } from 'server/lib/utils';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { getShaForDeploy } from 'server/lib/github';
 import GlobalConfigService from 'server/services/globalConfig';
@@ -627,14 +627,17 @@ export default class DeployService extends BaseService {
             const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
             let ecrRepo = deployable?.ecr;
 
+            const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+            const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+
+            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+            ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
+
             const tagsExist =
               (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
               (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
 
             logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
-
-            const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
-            const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
             const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
             if (!ecrDomain || !registry) {
               logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
@@ -793,13 +796,10 @@ export default class DeployService extends BaseService {
     const { build, deployable, service } = deploy;
     const uuid = build?.uuid;
     const uuidText = uuid ? `[DEPLOY ${uuid}][patchDeployWithTag]:` : '[DEPLOY][patchDeployWithTag]:';
-    let ecrRepo = deployable?.ecr;
+    let ecrRepo = deployable?.ecr as string;
 
     const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
-    if (serviceName && ecrRepo && !ecrRepo.endsWith(`/${serviceName}`)) {
-      ecrRepo = `${ecrRepo}/${serviceName}`;
-      logger.debug(`${uuidText} Auto-appended service name to ECR path: ${ecrRepo}`);
-    }
+    ecrRepo = constructEcrRepoPath(deployable?.ecr as string, serviceName, ecrDomain);
 
     const dockerImage = codefresh.getRepositoryTag({ tag, ecrRepo, ecrDomain });
 
@@ -896,8 +896,12 @@ export default class DeployService extends BaseService {
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
       let ecrRepo = deployable?.ecr;
 
-      const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+      const { lifecycleDefaults, app_setup, buildDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+
+      const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+      ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
+
       const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
       if (!ecrDomain || !registry) {
         logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
@@ -958,6 +962,7 @@ export default class DeployService extends BaseService {
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
             deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+            cacheRegistry: buildDefaults?.cacheRegistry || 'distribution.0env.com',
           };
 
           if (!initDockerfilePath) {

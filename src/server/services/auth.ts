@@ -29,7 +29,7 @@ const DEFAULT_API_CONFIG: ApiConfig = {
   rate_limit: 1000,
   rate_limit_window: 600,
   bcrypt_rounds: 12,
-  requireAuth: true,
+  requireAuth: false,
 };
 
 export interface CreateApiKeyOptions {
@@ -57,13 +57,7 @@ export default class AuthService extends Service {
       const globalConfigService = GlobalConfigService.getInstance();
       const allConfigs = await globalConfigService.getAllConfigs();
 
-      if (allConfigs.apiConfig) {
-        return { ...DEFAULT_API_CONFIG, ...allConfigs.apiConfig };
-      } else {
-        // If no config exists, create default using GlobalConfigService
-        await globalConfigService.setConfig('apiConfig', DEFAULT_API_CONFIG);
-        return DEFAULT_API_CONFIG;
-      }
+      return { ...DEFAULT_API_CONFIG, ...allConfigs?.apiConfig };
     } catch (error) {
       logger.error('Failed to fetch API config, using defaults:', error);
       return DEFAULT_API_CONFIG;

@@ -17,6 +17,7 @@
 import {
   exec,
   generateDeployTag,
+  constructEcrRepoPath,
   waitUntil,
   enableKillSwitch,
   hasDeployLabel,
@@ -105,6 +106,87 @@ describe('generateDeployTag', () => {
     });
 
     expect(tag).toEqual('lfc-abc123-1234');
+  });
+});
+
+describe('constructEcrRepoPath', () => {
+  test('returns base repo when no service name provided', () => {
+    const result = constructEcrRepoPath('my-repo', undefined, '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('returns empty string when no base repo and no service name', () => {
+    const result = constructEcrRepoPath('', undefined, '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('');
+  });
+
+  test('returns empty string when null base repo', () => {
+    const result = constructEcrRepoPath(null as any, 'my-service', '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('');
+  });
+
+  test('does not append service name for AWS ECR domains', () => {
+    const result = constructEcrRepoPath(
+      'my-repo/my-service/lfc',
+      'my-service',
+      '123456789.dkr.ecr.us-west-2.amazonaws.com'
+    );
+    expect(result).toBe('my-repo/my-service/lfc');
+  });
+
+  test('does not append service name for AWS ECR domains with different regions', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '123456789.dkr.ecr.eu-west-1.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('does not append service name for AWS ECR FIPS endpoints', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '123456789.dkr.ecr-fips.us-east-1.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('appends service name for internal registries', () => {
+    const result = constructEcrRepoPath('my-repo/my-service/lfc', 'service-name', 'distribution.0env.com');
+    expect(result).toBe('my-repo/my-service/lfc/service-name');
+  });
+
+  test('appends service name for custom registries', () => {
+    const result = constructEcrRepoPath('my-org/my-repo', 'my-service', 'registry.internal.company.com');
+    expect(result).toBe('my-org/my-repo/my-service');
+  });
+
+  test('does not append service name if already present at the end', () => {
+    const result = constructEcrRepoPath('my-repo/my-service/lfc/service-name', 'service-name', 'distribution.0env.com');
+    expect(result).toBe('my-repo/my-service/lfc/service-name');
+  });
+
+  test('appends service name even if it exists elsewhere in the path', () => {
+    const result = constructEcrRepoPath('service-name/repo', 'service-name', 'distribution.0env.com');
+    expect(result).toBe('service-name/repo/service-name');
+  });
+
+  test('handles empty ECR domain gracefully', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '');
+    expect(result).toBe('my-repo/my-service');
+  });
+
+  test('handles undefined ECR domain gracefully', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', undefined as any);
+    expect(result).toBe('my-repo/my-service');
+  });
+
+  test('does not append for public ECR', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', 'public.ecr.aws');
+    expect(result).toBe('my-repo');
+  });
+
+  test('handles service name with special characters', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service-v2.1', 'distribution.0env.com');
+    expect(result).toBe('my-repo/my-service-v2.1');
+  });
+
+  test('handles base repo with trailing slash', () => {
+    const result = constructEcrRepoPath('my-repo/', 'my-service', 'distribution.0env.com');
+    expect(result).toBe('my-repo//my-service');
   });
 });
 

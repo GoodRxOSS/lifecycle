@@ -43,6 +43,7 @@ export interface NativeBuildOptions {
   deployUuid: string;
   serviceAccount?: string;
   jobTimeout?: number;
+  cacheRegistry?: string;
   resources?: {
     requests?: Record<string, string>;
     limits?: Record<string, string>;
@@ -57,7 +58,7 @@ interface BuildEngine {
   createArgs: (options: BuildArgOptions) => string[];
   envVars?: Record<string, string>;
   // eslint-disable-next-line no-unused-vars
-  getCacheRef: (ecrDomain: string, shortRepoName: string) => string;
+  getCacheRef: (cacheRegistry: string, ecrRepo: string) => string;
 }
 
 interface BuildArgOptions {
@@ -66,15 +67,16 @@ interface BuildArgOptions {
   destination: string;
   cacheRef: string;
   buildArgs: Record<string, string>;
+  ecrDomain: string;
 }
 
 const ENGINES: Record<string, BuildEngine> = {
   buildkit: {
     name: 'buildkit',
     image: 'moby/buildkit:v0.12.0',
-    command: ['/usr/bin/buildctl'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs }) => {
-      const args = [
+    command: ['/bin/sh', '-c'],
+    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain }) => {
+      const buildctlArgs = [
         'build',
         '--frontend',
         'dockerfile.v0',
@@ -87,18 +89,62 @@ const ENGINES: Record<string, BuildEngine> = {
         '--output',
         `type=image,name=${destination},push=true,registry.insecure=true,oci-mediatypes=false`,
         '--export-cache',
-        `type=registry,ref=${cacheRef},mode=max,registry.insecure=true`,
+        `type=registry,ref=${cacheRef},mode=min,compression=zstd,insecure=true`,
         '--import-cache',
-        `type=registry,ref=${cacheRef},registry.insecure=true`,
+        `type=registry,ref=${cacheRef},insecure=true`,
       ];
 
       Object.entries(buildArgs).forEach(([key, value]) => {
-        args.push('--opt', `build-arg:${key}=${value}`);
+        buildctlArgs.push('--opt', `build-arg:${key}=${value}`);
       });
 
-      return args;
+      const script = `
+set -e
+
+# Detect registry type and perform appropriate login
+REGISTRY_DOMAIN="${ecrDomain}"
+
+# AWS ECR Detection (format: <account-id>.dkr.ecr.<region>.amazonaws.com)
+if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com$"; then
+  echo "Detected AWS ECR registry"
+  
+  # Extract region from domain
+  AWS_REGION=$(echo "\${REGISTRY_DOMAIN}" | sed -n 's/^[0-9]*\\.dkr\\.ecr\\.\\([^.]*\\)\\.amazonaws\\.com$/\\1/p')
+  echo "ECR Region: \${AWS_REGION}"
+  
+  echo "Installing AWS CLI and Docker CLI..."
+  apk add --no-cache aws-cli docker-cli
+  
+  echo "Testing AWS credentials..."
+  if aws sts get-caller-identity; then
+    echo "Getting ECR login token..."
+    ECR_PASSWORD=$(aws ecr get-login-password --region \${AWS_REGION})
+    echo "Got ECR password (length: \${#ECR_PASSWORD})"
+    
+    echo "Logging into ECR..."
+    echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin \${REGISTRY_DOMAIN}
+  else
+    echo "ERROR: AWS credentials not configured"
+    exit 1
+  fi
+
+# In-cluster or custom registry (no authentication required)
+else
+  echo "Using in-cluster registry: \${REGISTRY_DOMAIN}"
+  echo "Installing Docker CLI..."
+  apk add --no-cache docker-cli
+fi
+
+echo "Setting DOCKER_CONFIG..."
+export DOCKER_CONFIG=~/.docker
+
+echo "Running buildctl..."
+buildctl ${buildctlArgs.join(' \\\n  ')}
+`;
+
+      return [script.trim()];
     },
-    getCacheRef: (ecrDomain, shortRepoName) => `${ecrDomain}/${shortRepoName}:cache`,
+    getCacheRef: (cacheRegistry, ecrRepo) => `${cacheRegistry}/${ecrRepo}:cache`,
   },
   kaniko: {
     name: 'kaniko',
@@ -122,7 +168,7 @@ const ENGINES: Record<string, BuildEngine> = {
 
       return args;
     },
-    getCacheRef: (ecrDomain, shortRepoName) => `${ecrDomain}/${shortRepoName}/cache`,
+    getCacheRef: (cacheRegistry, ecrRepo) => `${cacheRegistry}/${ecrRepo}/cache`,
   },
 };
 
@@ -135,7 +181,8 @@ function createBuildContainer(
   contextPath: string,
   envVars: Record<string, string>,
   resources: any,
-  buildArgs: Record<string, string>
+  buildArgs: Record<string, string>,
+  ecrDomain: string
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -143,9 +190,26 @@ function createBuildContainer(
     destination,
     cacheRef,
     buildArgs,
+    ecrDomain,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
+
+  const volumeMounts = [
+    {
+      name: 'workspace',
+      mountPath: '/workspace',
+    },
+  ];
+
+  if (engine.name === 'kaniko') {
+    volumeMounts.push({
+      name: 'workspace',
+      mountPath: '/kaniko/.docker',
+      subPath: '.docker',
+    } as any);
+    containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
+  }
 
   return {
     name,
@@ -153,12 +217,7 @@ function createBuildContainer(
     command: engine.command,
     args,
     env: Object.entries(containerEnvVars).map(([envName, value]) => ({ name: envName, value })),
-    volumeMounts: [
-      {
-        name: 'workspace',
-        mountPath: '/workspace',
-      },
-    ],
+    volumeMounts,
     resources,
   };
 }
@@ -175,6 +234,11 @@ export async function buildWithEngine(
   const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
   const resources = options.resources || buildDefaults.resources?.[engineName] || DEFAULT_BUILD_RESOURCES[engineName];
+
+  let cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry || 'distribution.0env.com';
+  if (engineName === 'buildkit' && buildDefaults.buildkit?.endpoint) {
+    cacheRegistry = options.ecrDomain;
+  }
 
   const serviceName = deploy.deployable!.name;
   const shortRepoName = options.repo.split('/')[1] || options.repo;
@@ -200,7 +264,41 @@ export async function buildWithEngine(
     githubToken
   );
 
-  let envVars: Record<string, string> = { ...options.envVars };
+  let registryLoginScript = '';
+  const registryDomain = options.ecrDomain;
+
+  const ecrRegex = /^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$/;
+  const ecrMatch = registryDomain.match(ecrRegex);
+  if (ecrMatch) {
+    const region = ecrMatch[1] || 'us-west-2';
+    registryLoginScript =
+      `aws ecr get-login-password --region ${region} | ` +
+      `{ read PASSWORD; mkdir -p /workspace/.docker && ` +
+      `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > /workspace/.docker/config.json; }`;
+  } else {
+    registryLoginScript =
+      `echo "Using in-cluster registry: ${registryDomain}"; ` +
+      `mkdir -p /workspace/.docker && echo '{}' > /workspace/.docker/config.json`;
+  }
+
+  const registryLoginContainer = {
+    name: 'registry-login',
+    image: registryDomain.includes('.dkr.ecr.') ? 'amazon/aws-cli:2.13.0' : 'alpine:3.18',
+    command: ['/bin/sh', '-c'],
+    args: [registryLoginScript],
+    env: [{ name: 'AWS_REGION', value: process.env.AWS_REGION || 'us-west-2' }],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
+
+  let envVars: Record<string, string> = {
+    ...options.envVars,
+    AWS_REGION: process.env.AWS_REGION || 'us-west-2',
+  };
 
   if (engineName === 'buildkit') {
     const buildkitConfig = buildDefaults.buildkit || {};
@@ -214,7 +312,7 @@ export async function buildWithEngine(
   }
 
   const containers = [];
-  const cacheRef = engine.getCacheRef(options.ecrDomain, shortRepoName);
+  const cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
 
   const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;
   containers.push(
@@ -227,7 +325,8 @@ export async function buildWithEngine(
       contextPath,
       envVars,
       resources,
-      options.envVars
+      options.envVars,
+      options.ecrDomain
     )
   );
 
@@ -243,7 +342,8 @@ export async function buildWithEngine(
         contextPath,
         envVars,
         resources,
-        options.envVars
+        options.envVars,
+        options.ecrDomain
       )
     );
     logger.info(`[${engine.name}] Job ${jobName} will build both main and init images in parallel`);
@@ -251,6 +351,9 @@ export async function buildWithEngine(
 
   await deploy.$fetchGraph('build');
   const isStatic = deploy.build?.isStatic || false;
+
+  // For buildkit, only git clone is needed. For kaniko, we need registry login too.
+  const initContainers = engineName === 'buildkit' ? [gitCloneContainer] : [gitCloneContainer, registryLoginContainer];
 
   const job = createBuildJob({
     jobName,
@@ -266,7 +369,7 @@ export async function buildWithEngine(
     ecrRepo: options.ecrRepo,
     jobTimeout,
     isStatic,
-    gitCloneContainer,
+    initContainers,
     containers,
     volumes: [
       {

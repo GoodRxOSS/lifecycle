@@ -123,6 +123,7 @@ export type NativeHelmConfig = {
 export type BuildDefaults = {
   jobTimeout?: number;
   serviceAccount?: string;
+  cacheRegistry?: string;
   resources?: {
     buildkit?: ResourceRequirements;
     kaniko?: ResourceRequirements;
