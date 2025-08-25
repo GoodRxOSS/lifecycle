@@ -1,68 +1,69 @@
-name: Build & Push Docker Images on Release
+name: Build & Push Base Docker Image
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for the base image (e.g., v1.0.0)'
+        required: true
+        type: string
+      push_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   prepare-metadata:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
-      prerelease_type: ${{ steps.meta.outputs.prerelease_type }}
+      major: ${{ steps.meta.outputs.major }}
+      major_minor: ${{ steps.meta.outputs.major_minor }}
       tags_suffix: ${{ steps.tags.outputs.tags_suffix }}
     steps:
-      - name: Extract release metadata
+      - name: Validate version format
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Version must be in format v1.2.3"
+            exit 1
+          fi
+
+      - name: Extract version metadata
         id: meta
         run: |
-          # Get the tag name
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          # Check if this is a pre-release
-          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
-            
-            # Extract pre-release type (beta, alpha, rc, etc.)
-            if [[ "$VERSION" =~ -([a-zA-Z]+)\. ]]; then
-              PRERELEASE_TYPE="${BASH_REMATCH[1]}"
-              echo "prerelease_type=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
-            else
-              echo "prerelease_type=beta" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          # Extract major and major.minor versions
+          if [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="v${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            MAJOR_MINOR="v${BASH_REMATCH[1]}.${MINOR}"
+            echo "major=$MAJOR" >> $GITHUB_OUTPUT
+            echo "major_minor=$MAJOR_MINOR" >> $GITHUB_OUTPUT
           fi
 
       - name: Determine Docker tags
         id: tags
         run: |
-          # Output tag suffixes only (without username) to avoid secret blocking
+          # Start with the full version tag
           TAGS_SUFFIX="${{ steps.meta.outputs.version }}"
 
-          if [[ "${{ steps.meta.outputs.is_prerelease }}" == "true" ]]; then
-            # For pre-releases, add the pre-release type tag (beta, alpha, rc, etc.)
-            TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.prerelease_type }}"
-          else
-            # For stable releases, add the 'latest' tag
+          # Add major and major.minor tags
+          TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.major }}"
+          TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.major_minor }}"
+
+          # Optionally add latest tag
+          if [[ "${{ github.event.inputs.push_latest }}" == "true" ]]; then
             TAGS_SUFFIX="$TAGS_SUFFIX,latest"
-            
-            # Also add major and major.minor tags for stable releases
-            # e.g., 1.2.3 -> also tag as 1 and 1.2
-            VERSION="${{ steps.meta.outputs.version }}"
-            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              MAJOR="${BASH_REMATCH[1]}"
-              MINOR="${BASH_REMATCH[2]}"
-              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR"
-              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR.$MINOR"
-            fi
           fi
 
           echo "tags_suffix=$TAGS_SUFFIX" >> $GITHUB_OUTPUT
 
   build-amd64:
-    runs-on: builder-amd64-16-core
+    runs-on: ubuntu-latest
     needs: prepare-metadata
     steps:
       - name: Check out repository
@@ -84,12 +85,11 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: .
-          file: app.Dockerfile
+          file: base.Dockerfile
           platforms: linux/amd64
-          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/app,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            PORT=5001
-            NODE_ENV=production
+          outputs: type=image,name=lifecycleoss/app-base,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=lifecycleoss/app-base:buildcache-amd64
+          cache-to: type=registry,ref=lifecycleoss/app-base:buildcache-amd64,mode=max
 
       - name: Export digest
         run: |
@@ -106,11 +106,14 @@ jobs:
           retention-days: 1
 
   build-arm64:
-    runs-on: builder-arm64-16-core
+    runs-on: ubuntu-latest
     needs: prepare-metadata
     steps:
       - name: Check out repository
         uses: actions/checkout@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -128,12 +131,11 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: .
-          file: app.Dockerfile
+          file: base.Dockerfile
           platforms: linux/arm64
-          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/app,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            PORT=5001
-            NODE_ENV=production
+          outputs: type=image,name=lifecycleoss/app-base,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=lifecycleoss/app-base:buildcache-arm64
+          cache-to: type=registry,ref=lifecycleoss/app-base:buildcache-arm64,mode=max
 
       - name: Export digest
         run: |
@@ -150,7 +152,7 @@ jobs:
           retention-days: 1
 
   merge-and-push:
-    runs-on: builder-amd64-16-core
+    runs-on: ubuntu-latest
     needs:
       - prepare-metadata
       - build-amd64
@@ -172,7 +174,6 @@ jobs:
 
       - name: Create manifest list and push
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           TAGS_SUFFIX: ${{ needs.prepare-metadata.outputs.tags_suffix }}
         run: |
           # Find digest files
@@ -184,7 +185,7 @@ jobs:
           ARM64_SHA=$(basename "$ARM64_DIGEST")
 
           # Build the digest list
-          DIGESTS="${DOCKER_USERNAME}/app@sha256:$AMD64_SHA ${DOCKER_USERNAME}/app@sha256:$ARM64_SHA"
+          DIGESTS="lifecycleoss/app-base@sha256:$AMD64_SHA lifecycleoss/app-base@sha256:$ARM64_SHA"
 
           # Convert comma-separated tag suffixes to array
           IFS=',' read -ra TAG_ARRAY <<< "$TAGS_SUFFIX"
@@ -192,10 +193,30 @@ jobs:
           # Create and push manifest for each tag
           for TAG_SUFFIX in "${TAG_ARRAY[@]}"; do
             TAG_SUFFIX=$(echo "$TAG_SUFFIX" | xargs)  # Trim whitespace
-            FULL_TAG="${DOCKER_USERNAME}/app:${TAG_SUFFIX}"
+            FULL_TAG="lifecycleoss/app-base:${TAG_SUFFIX}"
             docker buildx imagetools create -t "$FULL_TAG" $DIGESTS
           done
 
       - name: Inspect final image
         run: |
-          docker buildx imagetools inspect ${{ secrets.DOCKERHUB_USERNAME }}/app:${{ needs.prepare-metadata.outputs.version }}
+          docker buildx imagetools inspect lifecycleoss/app-base:${{ needs.prepare-metadata.outputs.version }}
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: base-${{ needs.prepare-metadata.outputs.version }}
+          release_name: Base Image ${{ needs.prepare-metadata.outputs.version }}
+          body: |
+            Base image release for lifecycle application.
+
+            Docker Hub: `lifecycleoss/app-base:${{ needs.prepare-metadata.outputs.version }}`
+
+            Tags created:
+            - `lifecycleoss/app-base:${{ needs.prepare-metadata.outputs.version }}`
+            - `lifecycleoss/app-base:${{ needs.prepare-metadata.outputs.major }}`
+            - `lifecycleoss/app-base:${{ needs.prepare-metadata.outputs.major_minor }}`
+            ${{ github.event.inputs.push_latest == 'true' && '- `lifecycleoss/app-base:latest`' || '' }}
+          draft: false
+          prerelease: false
