@@ -44,9 +44,7 @@
                 "type": "number"
               }
             },
-            "required": [
-              "name"
-            ]
+            "required": ["name"]
           }
         },
         "optionalServices": {
@@ -69,9 +67,7 @@
                 "type": "number"
               }
             },
-            "required": [
-              "name"
-            ]
+            "required": ["name"]
           }
         },
         "webhooks": {
@@ -103,9 +99,7 @@
               },
               "env": {
                 "type": "object",
-                "required": [
-                  "branch"
-                ]
+                "required": ["branch"]
               },
               "docker": {
                 "type": "object",
@@ -130,9 +124,7 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "image"
-                ]
+                "required": ["image"]
               },
               "command": {
                 "type": "object",
@@ -148,19 +140,10 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "image",
-                  "script"
-                ]
+                "required": ["image", "script"]
               }
             },
-            "required": [
-              "state",
-              "type",
-              "env",
-              "trigger",
-              "env"
-            ]
+            "required": ["state", "type", "env", "trigger", "env"]
           }
         }
       }
@@ -192,9 +175,7 @@
                   "type": "string"
                 }
               },
-              "required": [
-                "name"
-              ]
+              "required": ["name"]
             }
           },
           "helm": {
@@ -248,9 +229,7 @@
                     }
                   }
                 },
-                "required": [
-                  "name"
-                ]
+                "required": ["name"]
               },
               "grpc": {
                 "type": "boolean"
@@ -307,9 +286,7 @@
                         "minItems": 1
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "init": {
                     "type": "object",
@@ -328,9 +305,7 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "ecr": {
                     "type": "string"
@@ -345,19 +320,13 @@
                     }
                   }
                 },
-                "required": [
-                  "defaultTag",
-                  "app"
-                ]
+                "required": ["defaultTag", "app"]
               },
               "envLens": {
                 "type": "boolean"
               }
             },
-            "required": [
-              "repository",
-              "branchName"
-            ]
+            "required": ["repository", "branchName"]
           },
           "codefresh": {
             "type": "object",
@@ -588,7 +557,7 @@
                         }
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": true
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -614,20 +583,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "repository",
-              "branchName"
-            ]
+            "required": ["repository", "branchName"]
           },
           "github": {
             "type": "object",
@@ -685,9 +647,7 @@
                         "minItems": 1
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "init": {
                     "type": "object",
@@ -706,9 +666,7 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "ecr": {
                     "type": "string"
@@ -723,10 +681,7 @@
                     }
                   }
                 },
-                "required": [
-                  "defaultTag",
-                  "app"
-                ]
+                "required": ["defaultTag", "app"]
               },
               "deployment": {
                 "type": "object",
@@ -920,7 +875,7 @@
                         }
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": true
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -946,21 +901,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "repository",
-              "branchName",
-              "docker"
-            ]
+            "required": ["repository", "branchName", "docker"]
           },
           "docker": {
             "type": "object",
@@ -1176,7 +1123,7 @@
                         }
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": true
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -1202,20 +1149,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "dockerImage",
-              "defaultTag"
-            ]
+            "required": ["dockerImage", "defaultTag"]
           },
           "externalHttp": {
             "type": "object",
@@ -1228,10 +1168,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "defaultInternalHostname",
-              "defaultPublicUrl"
-            ]
+            "required": ["defaultInternalHostname", "defaultPublicUrl"]
           },
           "auroraRestore": {
             "type": "object",
@@ -1244,10 +1181,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "command",
-              "arguments"
-            ]
+            "required": ["command", "arguments"]
           },
           "configuration": {
             "type": "object",
@@ -1260,10 +1194,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "defaultTag",
-              "branchName"
-            ]
+            "required": ["defaultTag", "branchName"]
           },
           "deploymentDependsOn": {
             "type": "array",
@@ -1330,13 +1261,9 @@
             }
           }
         },
-        "required": [
-          "name"
-        ]
+        "required": ["name"]
       }
     }
   },
-  "required": [
-    "version"
-  ]
+  "required": ["version"]
 }
