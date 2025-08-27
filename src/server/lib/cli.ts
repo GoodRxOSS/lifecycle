@@ -54,8 +54,13 @@ export async function cliDeploy(deploy: Deploy) {
 
   const { build, service, deployable } = deploy;
   const serviceCommand: string = build.enableFullYaml ? deployable.command : service.command;
-  const settings = await getSettingsFor(serviceCommand);
-  return await shellPromise(`pnpm run babel-node -- ${serviceCommand} deploy ${contextForDeploy(deploy, settings)}`);
+  const { settings, region } = await getSettingsFor(serviceCommand);
+  return await shellPromise(`pnpm run babel-node -- ${serviceCommand} deploy ${contextForDeploy(deploy, settings)}`, {
+    env: {
+      ...process.env,
+      AWS_REGION: region,
+    },
+  });
 }
 
 /**
@@ -214,11 +219,16 @@ function contextForDeploy(deploy: Deploy, settings: string) {
 async function deleteDeploy(deploy: Deploy) {
   const serviceCmd = deploy.build.enableFullYaml ? deploy.deployable.command : deploy.service.command;
 
-  const settings = await getSettingsFor(serviceCmd);
-  return await shellPromise(`pnpm run babel-node -- ${serviceCmd} destroy ${contextForDeploy(deploy, settings)}`);
+  const { settings, region } = await getSettingsFor(serviceCmd);
+  return await shellPromise(`pnpm run babel-node -- ${serviceCmd} destroy ${contextForDeploy(deploy, settings)}`, {
+    env: {
+      ...process.env,
+      AWS_REGION: region,
+    },
+  });
 }
 
-async function getSettingsFor(serviceCommand: string): Promise<string> {
+async function getSettingsFor(serviceCommand: string): Promise<{ settings: string; region: string }> {
   const { auroraRestoreSettings, rdsRestoreSettings } = await GlobalConfigService.getInstance().getAllConfigs();
   let settings: DatabaseSettings;
   if (serviceCommand.includes('aurora-helper')) {
@@ -226,5 +236,8 @@ async function getSettingsFor(serviceCommand: string): Promise<string> {
   } else if (serviceCommand.includes('rds-helper')) {
     settings = rdsRestoreSettings;
   }
-  return JSON.stringify(settings);
+  return {
+    settings: JSON.stringify(settings),
+    region: settings.region,
+  };
 }
