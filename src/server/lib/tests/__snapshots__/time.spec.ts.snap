@@ -1,5 +1,5 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
-exports[`Time utils #getTimestamp returns formatted date 1`] = `"2019-07-04 00:00:00"`;
+exports[`Time utils #getTimestamp returns formatted date 1`] = `"2019-07-04 00:00:00.0000"`;
 
 exports[`Time utils #getTimestamp takes custom formatting string 1`] = `"07/04/2019"`;
