@@ -55,12 +55,9 @@ export async function cliDeploy(deploy: Deploy) {
   const { build, service, deployable } = deploy;
   const serviceCommand: string = build.enableFullYaml ? deployable.command : service.command;
   const { settings, region } = await getSettingsFor(serviceCommand);
-  return await shellPromise(`pnpm run babel-node -- ${serviceCommand} deploy ${contextForDeploy(deploy, settings)}`, {
-    env: {
-      ...process.env,
-      AWS_REGION: region,
-    },
-  });
+  return await shellPromise(
+    `AWS_REGION=${region} pnpm run babel-node -- ${serviceCommand} deploy ${contextForDeploy(deploy, settings)}`
+  );
 }
 
 /**
@@ -220,12 +217,9 @@ async function deleteDeploy(deploy: Deploy) {
   const serviceCmd = deploy.build.enableFullYaml ? deploy.deployable.command : deploy.service.command;
 
   const { settings, region } = await getSettingsFor(serviceCmd);
-  return await shellPromise(`pnpm run babel-node -- ${serviceCmd} destroy ${contextForDeploy(deploy, settings)}`, {
-    env: {
-      ...process.env,
-      AWS_REGION: region,
-    },
-  });
+  return await shellPromise(
+    `AWS_REGION=${region} pnpm run babel-node -- ${serviceCmd} destroy ${contextForDeploy(deploy, settings)}`
+  );
 }
 
 async function getSettingsFor(serviceCommand: string): Promise<{ settings: string; region: string }> {
