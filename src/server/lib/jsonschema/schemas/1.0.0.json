@@ -44,9 +44,7 @@
                 "type": "number"
               }
             },
-            "required": [
-              "name"
-            ]
+            "required": ["name"]
           }
         },
         "optionalServices": {
@@ -69,9 +67,7 @@
                 "type": "number"
               }
             },
-            "required": [
-              "name"
-            ]
+            "required": ["name"]
           }
         },
         "webhooks": {
@@ -101,12 +97,6 @@
               "trigger": {
                 "type": "string"
               },
-              "env": {
-                "type": "object",
-                "required": [
-                  "branch"
-                ]
-              },
               "docker": {
                 "type": "object",
                 "additionalProperties": false,
@@ -130,9 +120,7 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "image"
-                ]
+                "required": ["image"]
               },
               "command": {
                 "type": "object",
@@ -148,19 +136,13 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "image",
-                  "script"
-                ]
+                "required": ["image", "script"]
+              },
+              "env": {
+                "type": "object"
               }
             },
-            "required": [
-              "state",
-              "type",
-              "env",
-              "trigger",
-              "env"
-            ]
+            "required": ["state", "type", "env"]
           }
         }
       }
@@ -192,9 +174,71 @@
                   "type": "string"
                 }
               },
-              "required": [
-                "name"
-              ]
+              "required": ["name"]
+            }
+          },
+          "deploymentDependsOn": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "type": "string"
+            }
+          },
+          "kedaScaleToZero": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "replicas": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "min": {
+                    "type": "number"
+                  },
+                  "max": {
+                    "type": "number"
+                  }
+                }
+              },
+              "scaledownPeriod": {
+                "type": "number"
+              },
+              "maxRetries": {
+                "type": "number"
+              },
+              "scalingMetric": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "requestRate": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "granularity": {
+                        "type": "string"
+                      },
+                      "targetValue": {
+                        "type": "number"
+                      },
+                      "window": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "concurrency": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "targetValue": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              }
             }
           },
           "helm": {
@@ -248,9 +292,10 @@
                     }
                   }
                 },
-                "required": [
-                  "name"
-                ]
+                "required": ["name"]
+              },
+              "envLens": {
+                "type": "boolean"
               },
               "grpc": {
                 "type": "boolean"
@@ -270,6 +315,18 @@
                   },
                   "pipelineId": {
                     "type": "string"
+                  },
+                  "ecr": {
+                    "type": "string"
+                  },
+                  "builder": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "engine": {
+                        "type": "string"
+                      }
+                    }
                   },
                   "app": {
                     "type": "object",
@@ -307,9 +364,7 @@
                         "minItems": 1
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "init": {
                     "type": "object",
@@ -328,36 +383,12 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
-                  },
-                  "ecr": {
-                    "type": "string"
-                  },
-                  "builder": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "properties": {
-                      "engine": {
-                        "type": "string"
-                      }
-                    }
+                    "required": ["dockerfilePath"]
                   }
                 },
-                "required": [
-                  "defaultTag",
-                  "app"
-                ]
-              },
-              "envLens": {
-                "type": "boolean"
+                "required": ["defaultTag", "app"]
               }
-            },
-            "required": [
-              "repository",
-              "branchName"
-            ]
+            }
           },
           "codefresh": {
             "type": "object",
@@ -527,18 +558,6 @@
                       }
                     }
                   },
-                  "scaling": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "scaleToZero": {
-                        "type": "boolean"
-                      },
-                      "scaleToZeroMetricsCheckInterval": {
-                        "type": "number"
-                      }
-                    }
-                  },
                   "hostnames": {
                     "type": "object",
                     "additionalProperties": false,
@@ -559,6 +578,7 @@
                   },
                   "network": {
                     "type": "object",
+                    "additionalProperties": true,
                     "properties": {
                       "ipWhitelist": {
                         "type": "array"
@@ -567,9 +587,6 @@
                         "type": "object"
                       },
                       "hostPortMapping": {
-                        "type": "object"
-                      },
-                      "kuma": {
                         "type": "object"
                       },
                       "grpc": {
@@ -587,8 +604,7 @@
                           }
                         }
                       }
-                    },
-                    "additionalProperties": true
+                    }
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -614,20 +630,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "repository",
-              "branchName"
-            ]
+            "required": ["repository", "branchName"]
           },
           "github": {
             "type": "object",
@@ -648,6 +657,18 @@
                   },
                   "pipelineId": {
                     "type": "string"
+                  },
+                  "ecr": {
+                    "type": "string"
+                  },
+                  "builder": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "engine": {
+                        "type": "string"
+                      }
+                    }
                   },
                   "app": {
                     "type": "object",
@@ -685,9 +706,7 @@
                         "minItems": 1
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
+                    "required": ["dockerfilePath"]
                   },
                   "init": {
                     "type": "object",
@@ -706,27 +725,10 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "dockerfilePath"
-                    ]
-                  },
-                  "ecr": {
-                    "type": "string"
-                  },
-                  "builder": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "properties": {
-                      "engine": {
-                        "type": "string"
-                      }
-                    }
+                    "required": ["dockerfilePath"]
                   }
                 },
-                "required": [
-                  "defaultTag",
-                  "app"
-                ]
+                "required": ["defaultTag", "app"]
               },
               "deployment": {
                 "type": "object",
@@ -859,18 +861,6 @@
                       }
                     }
                   },
-                  "scaling": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "scaleToZero": {
-                        "type": "boolean"
-                      },
-                      "scaleToZeroMetricsCheckInterval": {
-                        "type": "number"
-                      }
-                    }
-                  },
                   "hostnames": {
                     "type": "object",
                     "additionalProperties": false,
@@ -891,6 +881,7 @@
                   },
                   "network": {
                     "type": "object",
+                    "additionalProperties": true,
                     "properties": {
                       "ipWhitelist": {
                         "type": "array"
@@ -899,9 +890,6 @@
                         "type": "object"
                       },
                       "hostPortMapping": {
-                        "type": "object"
-                      },
-                      "kuma": {
                         "type": "object"
                       },
                       "grpc": {
@@ -919,8 +907,7 @@
                           }
                         }
                       }
-                    },
-                    "additionalProperties": true
+                    }
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -946,21 +933,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "repository",
-              "branchName",
-              "docker"
-            ]
+            "required": ["repository", "branchName", "docker"]
           },
           "docker": {
             "type": "object",
@@ -1115,18 +1094,6 @@
                       }
                     }
                   },
-                  "scaling": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "scaleToZero": {
-                        "type": "boolean"
-                      },
-                      "scaleToZeroMetricsCheckInterval": {
-                        "type": "number"
-                      }
-                    }
-                  },
                   "hostnames": {
                     "type": "object",
                     "additionalProperties": false,
@@ -1147,6 +1114,7 @@
                   },
                   "network": {
                     "type": "object",
+                    "additionalProperties": true,
                     "properties": {
                       "ipWhitelist": {
                         "type": "array"
@@ -1155,9 +1123,6 @@
                         "type": "object"
                       },
                       "hostPortMapping": {
-                        "type": "object"
-                      },
-                      "kuma": {
                         "type": "object"
                       },
                       "grpc": {
@@ -1175,8 +1140,7 @@
                           }
                         }
                       }
-                    },
-                    "additionalProperties": true
+                    }
                   },
                   "serviceDisks": {
                     "type": "array",
@@ -1202,20 +1166,13 @@
                           "type": "string"
                         }
                       },
-                      "required": [
-                        "name",
-                        "mountPath",
-                        "storageSize"
-                      ]
+                      "required": ["name", "mountPath", "storageSize"]
                     }
                   }
                 }
               }
             },
-            "required": [
-              "dockerImage",
-              "defaultTag"
-            ]
+            "required": ["dockerImage", "defaultTag"]
           },
           "externalHttp": {
             "type": "object",
@@ -1228,10 +1185,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "defaultInternalHostname",
-              "defaultPublicUrl"
-            ]
+            "required": ["defaultInternalHostname", "defaultPublicUrl"]
           },
           "auroraRestore": {
             "type": "object",
@@ -1244,10 +1198,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "command",
-              "arguments"
-            ]
+            "required": ["command", "arguments"]
           },
           "configuration": {
             "type": "object",
@@ -1260,83 +1211,11 @@
                 "type": "string"
               }
             },
-            "required": [
-              "defaultTag",
-              "branchName"
-            ]
-          },
-          "deploymentDependsOn": {
-            "type": "array",
-            "minItems": 0,
-            "items": {
-              "type": "string"
-            }
-          },
-          "kedaScaleToZero": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "type": {
-                "type": "string"
-              },
-              "replicas": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "min": {
-                    "type": "number"
-                  },
-                  "max": {
-                    "type": "number"
-                  }
-                }
-              },
-              "scaledownPeriod": {
-                "type": "number"
-              },
-              "maxRetries": {
-                "type": "number"
-              },
-              "scalingMetric": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "requestRate": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "granularity": {
-                        "type": "string"
-                      },
-                      "targetValue": {
-                        "type": "number"
-                      },
-                      "window": {
-                        "type": "string"
-                      }
-                    }
-                  },
-                  "concurrency": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "targetValue": {
-                        "type": "number"
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "required": ["defaultTag", "branchName"]
           }
         },
-        "required": [
-          "name"
-        ]
+        "required": ["name"]
       }
     }
-  },
-  "required": [
-    "version"
-  ]
+  }
 }
