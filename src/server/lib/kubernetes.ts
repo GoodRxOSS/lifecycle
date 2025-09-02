@@ -1623,6 +1623,9 @@ export function generateDeployManifest({
           externalName: externalHost,
         },
       });
+    } else {
+      logger.info(`[DEPLOY ${deploy.uuid}] No manifest generated for deploy`);
+      return '';
     }
   }
 

@@ -22,6 +22,7 @@ import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
 import rootLogger from 'server/lib/logger';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
+import { waitForDeployPodReady } from '../kubernetes';
 
 const logger = rootLogger.child({ filename: 'lib/deploymentManager/deploymentManager.ts' });
 const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
@@ -134,7 +135,8 @@ export class DeploymentManager {
 
   private shouldDeployWithKubernetes(deploy: Deploy): boolean {
     const deployType = deploy.deployable?.type || deploy.service?.type;
-    return deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType);
+    // Note: only the below types have Kubernetes manifests
+    return [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType);
   }
 
   private async deployGitHubDeploy(deploy: Deploy): Promise<void> {
@@ -170,34 +172,33 @@ export class DeploymentManager {
       const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`;
       const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
 
-      if (result.success) {
-        // Wait for the actual application pods to be ready
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+      // Wait for the actual application pods to be ready
+      await deployService.patchAndUpdateActivityFeed(
+        deploy,
+        {
+          status: DeployStatus.DEPLOYING,
+          statusMessage: 'Waiting for pods to be ready',
+        },
+        runUUID
+      );
+
+      const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
+      const isReady = cliDeploy ? true : await waitForDeployPodReady(deploy);
+
+      if (isReady) {
         await deployService.patchAndUpdateActivityFeed(
           deploy,
           {
-            status: DeployStatus.DEPLOYING,
-            statusMessage: 'Waiting for pods to be ready',
+            status: DeployStatus.READY,
+            statusMessage: cliDeploy ? 'CLI Deploy completed' : 'Kubernetes pods are ready',
           },
           runUUID
         );
-
-        const { waitForDeployPodReady } = await import('../kubernetes');
-        const isReady = await waitForDeployPodReady(deploy);
-
-        if (isReady) {
-          await deployService.patchAndUpdateActivityFeed(
-            deploy,
-            {
-              status: DeployStatus.READY,
-              statusMessage: 'Kubernetes pods are ready',
-            },
-            runUUID
-          );
-        } else {
-          throw new Error('Pods failed to become ready within timeout');
-        }
       } else {
-        throw new Error(result.message);
+        throw new Error('Pods failed to become ready within timeout');
       }
     } catch (error) {
       await deployService.patchAndUpdateActivityFeed(
