@@ -130,11 +130,11 @@ export async function up(knex: Knex): Promise<any> {
     );
     ALTER TABLE builds OWNER TO lifecycle;
     INSERT INTO builds (
-      id, uuid, status, "statusMessage", "environmentId", 
+      uuid, status, "statusMessage", "environmentId", 
       "createdAt", "updatedAt", sha, namespace
     )
     VALUES (
-      99999, 'dev-0', 'pending', 'Build is pending', 1,
+      'dev-0', 'pending', 'Build is pending', 1,
       NOW(), NOW(), 'abc123', 'env-dev-0'
     )
   `);
