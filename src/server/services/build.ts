@@ -965,7 +965,9 @@ export default class BuildService extends BaseService {
 
         // Use DeploymentManager for all active deploys (both Helm and GitHub types)
         if (activeDeploys.length > 0) {
-          const deploymentManager = new DeploymentManager(activeDeploys);
+          // we should ignore Codefresh services here since we dont deploy anything
+          const managedDeploys = activeDeploys.filter((d) => d.deployable.type !== DeployTypes.CODEFRESH);
+          const deploymentManager = new DeploymentManager(managedDeploys);
           await deploymentManager.deploy();
         }
 

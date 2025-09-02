@@ -122,7 +122,7 @@ export class DeploymentManager {
 
         await Promise.all([
           helmDeploys.length > 0 ? deployHelm(helmDeploys) : Promise.resolve(),
-          ...githubDeploys.map((deploy) => this.deployGitHubDeploy(deploy)),
+          ...githubDeploys.map((deploy) => this.deployManifests(deploy)),
         ]);
       }
     }
@@ -139,7 +139,7 @@ export class DeploymentManager {
     return [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType);
   }
 
-  private async deployGitHubDeploy(deploy: Deploy): Promise<void> {
+  private async deployManifests(deploy: Deploy): Promise<void> {
     const jobId = generateJobId();
     const deployService = new DeployService();
     const runUUID = deploy.runUUID || nanoid();
