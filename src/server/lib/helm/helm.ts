@@ -490,6 +490,11 @@ async function httpIngress(deploy: Deploy): Promise<string[]> {
 
   const { serviceDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   ingressValues = [`ingress.host=${deploy.uuid}.${domainDefaults.http}`];
+  if (domainDefaults?.altHttp) {
+    domainDefaults.altHttp.forEach((host, index) => {
+      ingressValues.push(`ingress.altHosts[${index}]=${deploy.uuid}.${host}`);
+    });
+  }
   if (!deploy.deployable.helm.overrideDefaultIpWhitelist) {
     const ipWhitelist = serviceDefaults.defaultIPWhiteList
       .trim()

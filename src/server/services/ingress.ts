@@ -19,7 +19,6 @@ import rootLogger from 'server/lib/logger';
 import BaseService from './_service';
 import fs from 'fs';
 import { TMP_PATH, QUEUE_NAMES } from 'shared/config';
-import _ from 'lodash';
 import { IngressConfiguration } from '../../server/services/build';
 import { shellPromise } from 'server/lib/shell';
 import yaml from 'js-yaml';
@@ -93,13 +92,13 @@ export default class IngressService extends BaseService {
     // We just want to create/update ingress for active services only
     const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
     const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
-    const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+    const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
     const manifests = configurations.map((configuration) => {
       return yaml.dump(
         this.generateNginxManifestForConfiguration({
           configuration,
-          defaultUUID: lifecycleDefaults?.defaultUUID,
           ingressClassName: lifecycleDefaults?.ingressClassName,
+          altHosts: domainDefaults?.altHttp || [],
         }),
         {
           skipInvalid: true,
@@ -119,12 +118,12 @@ export default class IngressService extends BaseService {
    */
   private generateNginxManifestForConfiguration = ({
     configuration,
-    defaultUUID,
     ingressClassName,
+    altHosts,
   }: {
     configuration: IngressConfiguration;
-    defaultUUID: string;
     ingressClassName?: string;
+    altHosts: string[];
   }) => {
     const annotations = {
       ...configuration.ingressAnnotations,
@@ -143,7 +142,7 @@ export default class IngressService extends BaseService {
         },
       },
       spec: {
-        rules: this.generateRulesForManifest(configuration),
+        rules: this.generateRulesForManifest(configuration, altHosts),
         ingressClassName: ingressClassName || 'nginx',
       },
     };
@@ -153,31 +152,31 @@ export default class IngressService extends BaseService {
    * Generates the rules for an ingress configuration
    * @param configuration the ingress configuration to generate rules for
    */
-  private generateRulesForManifest = (configuration: IngressConfiguration) => {
-    return _.flatten(
-      Object.entries(configuration.pathPortMapping).map((entry) => {
-        return [
+  private generateRulesForManifest = (configuration: IngressConfiguration, altHosts: string[]) => {
+    const allHosts = [configuration.host, ...altHosts.map((v) => `${configuration.deployUUID}.${v}`)];
+
+    const createRule = (host: string, path: string, port: number) => ({
+      host,
+      http: {
+        paths: [
           {
-            host: `${configuration.host}`,
-            http: {
-              paths: [
-                {
-                  path: entry[0],
-                  pathType: 'ImplementationSpecific',
-                  backend: {
-                    service: {
-                      name: configuration.serviceHost,
-                      port: {
-                        number: entry[1],
-                      },
-                    },
-                  },
+            path,
+            pathType: 'ImplementationSpecific',
+            backend: {
+              service: {
+                name: configuration.serviceHost,
+                port: {
+                  number: port,
                 },
-              ],
+              },
             },
           },
-        ];
-      })
+        ],
+      },
+    });
+
+    return allHosts.flatMap((host) =>
+      Object.entries(configuration.pathPortMapping).map(([path, port]) => createRule(host, path, port))
     );
   };
 
