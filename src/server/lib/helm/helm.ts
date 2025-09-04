@@ -161,15 +161,8 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
   const grpc: boolean | undefined = helm?.grpc;
   const ingress = await httpIngress(deploy);
   if (grpc) {
-    const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-    customValues.push(
-      `ambassadorMapping.name=${deploy.uuid}`,
-      `ambassadorMapping.env=lifecycle-${deployable.buildUUID}`,
-      `ambassadorMapping.service=${deploy.uuid}`,
-      `ambassadorMapping.version=${deploy.uuid}`,
-      `ambassadorMapping.host=${deploy.uuid}.${domainDefaults.grpc}:443`,
-      `ambassadorMapping.port=${deployable.port}`
-    );
+    const mappings = await grpcMapping(deploy);
+    customValues.push(...mappings);
     if (isDisableIngressHost === false) customValues.push(...ingress, ...addHelmCustomValues(deploy));
   } else if (!isDisableIngressHost && resourceType === 'deployment') {
     customValues.push(...ingress, ...addHelmCustomValues(deploy));
@@ -483,6 +476,26 @@ function addHelmCustomValues(deploy: Deploy): string[] {
     return ['autoscaling.enabled=true'];
   }
   return [];
+}
+
+export async function grpcMapping(deploy: Deploy): Promise<string[]> {
+  const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  const hosts = [domainDefaults.grpc, ...(domainDefaults?.altGrpc || [])];
+
+  const mappings: string[] = [];
+
+  hosts.forEach((host, index) => {
+    mappings.push(
+      `ambassadorMappings[${index}].name=${deploy.uuid}-${index}`,
+      `ambassadorMappings[${index}].env=lifecycle-${deploy.deployable.buildUUID}`,
+      `ambassadorMappings[${index}].service=${deploy.uuid}`,
+      `ambassadorMappings[${index}].version=${deploy.uuid}`,
+      `ambassadorMappings[${index}].host=${deploy.uuid}.${host}:443`,
+      `ambassadorMappings[${index}].port=${deploy.deployable.port}`
+    );
+  });
+
+  return mappings;
 }
 
 async function httpIngress(deploy: Deploy): Promise<string[]> {
