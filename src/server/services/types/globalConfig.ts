@@ -27,7 +27,7 @@ export type GlobalConfig = {
   publicChart: PublicChart;
   lifecycleIgnores: LifecycleIgnores;
   deletePendingHelmReleaseStep: DeletePendingHelmReleaseStep;
-  kedaScaleToZero: KedaScaleToZero;
+  kedaScaleToZero: KedaScaleToZero & { enabled: boolean };
   serviceDefaults: Record<string, any>;
   domainDefaults: DomainDefaults;
   orgChart: OrgChart;
