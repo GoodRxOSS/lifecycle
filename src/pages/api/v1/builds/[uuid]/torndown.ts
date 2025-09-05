@@ -20,7 +20,6 @@ import { Build } from 'server/models';
 
 import { BuildStatus, DeployStatus } from 'shared/constants';
 import BuildService from 'server/services/build';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'builds/[uuid]/torndown.ts',
@@ -36,8 +35,6 @@ const logger = rootLogger.child({
  *       UUID to torn_down. This effectively marks the environment as deleted.
  *     tags:
  *       - Builds
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -107,9 +104,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     logger.info({ method: req.method }, `[${req.method}] Method not allowed`);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const uuid = req.query?.uuid;
 

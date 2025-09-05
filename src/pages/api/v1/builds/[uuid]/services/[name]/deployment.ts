@@ -19,7 +19,6 @@ import rootLogger from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
@@ -159,8 +158,6 @@ async function getGitHubDeploymentDetails(
  *       For GitHub-type deployments, this includes the Kubernetes manifest.
  *     tags:
  *       - Deployments
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -255,9 +252,6 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const { uuid, name } = req.query;
 

@@ -22,8 +22,6 @@
  *     description: Validates a YAML config provided as content or fetched from a repo/branch.
  *     tags:
  *       - Schema
- *     security:
- *       - ApiKeyAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -108,7 +106,6 @@ import { getYamlFileContentFromBranch } from 'server/lib/github';
 import rootLogger from 'server/lib/logger';
 import { YamlConfigParser, ParsingError } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator, ValidationError } from 'server/lib/yamlConfigValidator';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'v1/schema/validate',
@@ -118,9 +115,6 @@ const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<R
   if (req.method !== 'POST') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const { source } = req.body;
   const allowedSources = ['content', 'path'];
