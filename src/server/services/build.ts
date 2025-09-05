@@ -51,8 +51,8 @@ const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
 export interface IngressConfiguration {
   host: string;
+  altHosts?: string[];
   serviceHost: string;
-  acmARN: string;
   deployUUID: string;
   ipWhitelist: string[];
   pathPortMapping: Record<string, number>;
@@ -189,7 +189,6 @@ export default class BuildService extends BaseService {
         return Object.keys(deployable.hostPortMapping).map((key) => {
           return {
             host: `${key}-${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${key}-${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -203,7 +202,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: `${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -215,7 +213,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: deploy.uuid,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -231,7 +228,6 @@ export default class BuildService extends BaseService {
         return Object.keys(service.hostPortMapping).map((key) => {
           return {
             host: `${key}-${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${key}-${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: service.ipWhitelist,
@@ -244,7 +240,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: `${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.service.ipWhitelist,
@@ -255,7 +250,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: this.db.services.Deploy.hostForServiceDeploy(deploy, service),
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: deploy.uuid,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.service.ipWhitelist,
@@ -288,10 +282,6 @@ export default class BuildService extends BaseService {
     const build = await this.db.models.Build.findOne({ id: buildId });
     await build?.$fetchGraph('deploys.[service.[repository]]');
     return this.domainsAndCertificatesForBuild(build, allServices);
-  }
-
-  async deployManually(environmentId: string) {
-    logger.debug(environmentId);
   }
 
   public async createBuildAndDeploys({
@@ -965,7 +955,9 @@ export default class BuildService extends BaseService {
 
         // Use DeploymentManager for all active deploys (both Helm and GitHub types)
         if (activeDeploys.length > 0) {
-          const deploymentManager = new DeploymentManager(activeDeploys);
+          // we should ignore Codefresh services here since we dont deploy anything
+          const managedDeploys = activeDeploys.filter((d) => d.deployable.type !== DeployTypes.CODEFRESH);
+          const deploymentManager = new DeploymentManager(managedDeploys);
           await deploymentManager.deploy();
         }
 

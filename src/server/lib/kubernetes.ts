@@ -1601,6 +1601,34 @@ export function generateDeployManifest({
   const manifests: string[] = [];
   const enableFullYaml = build.enableFullYaml;
 
+  // ExternalName service for CLI deploys
+  // return the ExternalName service if we have a cname
+  if (CLIDeployTypes.has(deploy.deployable?.type)) {
+    const externalHost = deploy.cname;
+    if (externalHost) {
+      return yaml.dump({
+        apiVersion: 'v1',
+        kind: 'Service',
+        metadata: {
+          namespace,
+          name: deploy.uuid,
+          labels: {
+            name: build.uuid,
+            lc_uuid: build.uuid,
+            deploy_uuid: deploy.uuid,
+          },
+        },
+        spec: {
+          type: 'ExternalName',
+          externalName: externalHost,
+        },
+      });
+    } else {
+      logger.info(`[DEPLOY ${deploy.uuid}] No manifest generated for deploy`);
+      return '';
+    }
+  }
+
   // Reuse existing PVC generation logic
   const pvcManifests = generatePersistentDisks([deploy], build.uuid, enableFullYaml, namespace);
   if (pvcManifests) manifests.push(pvcManifests);
@@ -1630,32 +1658,6 @@ export function generateDeployManifest({
 
   const grpcManifests = generateGRPCMappings([deploy], build.uuid, enableFullYaml, namespace);
   if (grpcManifests) manifests.push(grpcManifests);
-
-  // ExternalName service for CLI deploys
-  if (CLIDeployTypes.has(enableFullYaml ? deploy.deployable?.type : deploy.service?.type)) {
-    const externalHost = enableFullYaml ? deploy.deployable?.externalHost : deploy.service?.externalHost;
-    if (externalHost) {
-      manifests.push(
-        yaml.dump({
-          apiVersion: 'v1',
-          kind: 'Service',
-          metadata: {
-            namespace,
-            name: deploy.uuid,
-            labels: {
-              name: build.uuid,
-              lc_uuid: build.uuid,
-              deploy_uuid: deploy.uuid,
-            },
-          },
-          spec: {
-            type: 'ExternalName',
-            externalName: externalHost,
-          },
-        })
-      );
-    }
-  }
 
   return manifests.filter((m) => m).join('---\n');
 }

@@ -17,12 +17,15 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
-import { constructHelmDeploysBuildMetaData } from 'server/lib/helm';
+import { constructHelmDeploysBuildMetaData, grpcMapping } from 'server/lib/helm';
 import { Deploy } from 'server/models';
+import GlobalConfigService from 'server/services/globalConfig';
 
 jest.mock('server/lib/envVariables', () => ({
   EnvironmentVariables: class {},
 }));
+
+jest.mock('server/services/globalConfig');
 
 describe('Helm tests', () => {
   test('constructHelmDeploysBuildMetaData should return the correct metadata', async () => {
@@ -60,5 +63,96 @@ describe('Helm tests', () => {
     ];
     const metadata = await constructHelmDeploysBuildMetaData(deploys);
     expect(metadata).toEqual({ branchName: '', fullName: '', sha: '', uuid: '', error: 'no_related_build_found' });
+  });
+
+  describe('grpcMapping', () => {
+    const mockDeploy = {
+      uuid: 'test-deploy-uuid',
+      deployable: {
+        buildUUID: 'test-build-uuid',
+        port: 8080,
+      },
+    } as unknown as Deploy;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    test('should create single ambassador mapping when altGrpc is empty', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        domainDefaults: {
+          grpc: 'grpc.example.com',
+          altGrpc: [],
+        },
+      });
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+      });
+
+      const result = await grpcMapping(mockDeploy);
+
+      expect(result).toEqual([
+        'ambassadorMappings[0].name=test-deploy-uuid-0',
+        'ambassadorMappings[0].env=lifecycle-test-build-uuid',
+        'ambassadorMappings[0].service=test-deploy-uuid',
+        'ambassadorMappings[0].version=test-deploy-uuid',
+        'ambassadorMappings[0].host=test-deploy-uuid.grpc.example.com:443',
+        'ambassadorMappings[0].port=8080',
+      ]);
+    });
+
+    test('should create single ambassador mapping when altGrpc is undefined', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        domainDefaults: {
+          grpc: 'grpc.example.com',
+        },
+      });
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+      });
+
+      const result = await grpcMapping(mockDeploy);
+
+      expect(result).toEqual([
+        'ambassadorMappings[0].name=test-deploy-uuid-0',
+        'ambassadorMappings[0].env=lifecycle-test-build-uuid',
+        'ambassadorMappings[0].service=test-deploy-uuid',
+        'ambassadorMappings[0].version=test-deploy-uuid',
+        'ambassadorMappings[0].host=test-deploy-uuid.grpc.example.com:443',
+        'ambassadorMappings[0].port=8080',
+      ]);
+    });
+
+    test('should create multiple ambassador mappings when altGrpc has values', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        domainDefaults: {
+          grpc: 'grpc.example.com',
+          altGrpc: ['grpc-alt.example.com'],
+        },
+      });
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+      });
+
+      const result = await grpcMapping(mockDeploy);
+
+      expect(result).toEqual([
+        'ambassadorMappings[0].name=test-deploy-uuid-0',
+        'ambassadorMappings[0].env=lifecycle-test-build-uuid',
+        'ambassadorMappings[0].service=test-deploy-uuid',
+        'ambassadorMappings[0].version=test-deploy-uuid',
+        'ambassadorMappings[0].host=test-deploy-uuid.grpc.example.com:443',
+        'ambassadorMappings[0].port=8080',
+        'ambassadorMappings[1].name=test-deploy-uuid-1',
+        'ambassadorMappings[1].env=lifecycle-test-build-uuid',
+        'ambassadorMappings[1].service=test-deploy-uuid',
+        'ambassadorMappings[1].version=test-deploy-uuid',
+        'ambassadorMappings[1].host=test-deploy-uuid.grpc-alt.example.com:443',
+        'ambassadorMappings[1].port=8080',
+      ]);
+    });
   });
 });

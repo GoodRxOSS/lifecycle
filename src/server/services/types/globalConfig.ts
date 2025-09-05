@@ -72,6 +72,8 @@ export type DatabaseSettings = {
 export type DomainDefaults = {
   http: string;
   grpc: string;
+  altHttp?: string[];
+  altGrpc?: string[];
 };
 
 export type LifecycleIgnores = {

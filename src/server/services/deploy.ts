@@ -339,6 +339,7 @@ export default class DeployService extends BaseService {
       await deploy.$query().patch({
         status: DeployStatus.BUILDING,
         buildLogs: uuid,
+        runUUID: nanoid(),
       });
       logger.info(`[DEPLOY ${deploy?.uuid}] Restoring Aurora cluster for ${deploy?.uuid}`);
       await cli.cliDeploy(deploy);

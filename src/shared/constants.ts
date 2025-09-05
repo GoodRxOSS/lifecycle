@@ -20,7 +20,6 @@ export enum DeployTypes {
   GITHUB = 'github',
   EXTERNAL_HTTP = 'externalHTTP',
   AURORA_RESTORE = 'aurora-restore',
-  RDS_RESTORE = 'rds-restore',
   CODEFRESH = 'codefresh',
   CONFIGURATION = 'configuration',
   HELM = 'helm',

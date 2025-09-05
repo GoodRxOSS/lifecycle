@@ -98,7 +98,7 @@ export const deployment = {
     },
     network: {
       type: 'object',
-      additionalProperties: false,
+      additionalProperties: true,
       properties: {
         ipWhitelist: { type: 'array' },
         pathPortMapping: { type: 'object' },
