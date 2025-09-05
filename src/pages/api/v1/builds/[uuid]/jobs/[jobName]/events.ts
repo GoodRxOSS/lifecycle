@@ -25,8 +25,6 @@
  *     tags:
  *       - Jobs
  *       - Events
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -147,7 +145,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
@@ -234,9 +231,6 @@ const eventsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const { uuid, jobName } = req.query;
 

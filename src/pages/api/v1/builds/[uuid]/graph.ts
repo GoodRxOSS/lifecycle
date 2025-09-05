@@ -19,7 +19,6 @@ import { generateGraph } from 'server/lib/dependencyGraph';
 import rootLogger from 'server/lib/logger';
 import { Build } from 'server/models';
 import BuildService from 'server/services/build';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'builds/[uuid]/graph.ts',
@@ -36,8 +35,6 @@ const logger = rootLogger.child({
  *       relationships between different deployables in the build.
  *     tags:
  *       - Builds
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -88,9 +85,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const { uuid } = req.query;
 

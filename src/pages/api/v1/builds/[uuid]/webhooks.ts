@@ -19,7 +19,6 @@ import rootLogger from 'server/lib/logger';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
 import WebhookService from 'server/services/webhook';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: 'builds/[uuid]/webhooks.ts',
@@ -36,8 +35,6 @@ const logger = rootLogger.child({
  *     tags:
  *       - Webhooks
  *       - Builds
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -118,8 +115,6 @@ const logger = rootLogger.child({
  *     tags:
  *       - Webhooks
  *       - Builds
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -202,9 +197,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (!uuid || typeof uuid !== 'string') {
     return res.status(400).json({ error: 'Invalid UUID' });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   try {
     switch (req.method) {

@@ -27,8 +27,6 @@
  *       - Logs
  *       - Builds
  *       - Deployments
- *     security:
- *       - ApiKeyAuth: []
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -165,7 +163,6 @@ import rootLogger from 'server/lib/logger';
 import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
 import BuildService from 'server/services/build';
 import { HttpError } from '@kubernetes/client-node';
-import { validateAuth } from 'server/lib/auth/validate';
 
 const logger = rootLogger.child({
   filename: __filename,
@@ -231,9 +228,6 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
-
-  const { valid } = await validateAuth(req, res);
-  if (!valid) return;
 
   const { uuid, name, jobName, type } = req.query;
 
