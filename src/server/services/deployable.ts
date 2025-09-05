@@ -290,7 +290,7 @@ export default class DeployableService extends BaseService {
             }
           }
         }
-        const { serviceDefaults, lifecycleDefaults, domainDefaults } =
+        const { serviceDefaults, lifecycleDefaults, domainDefaults, kedaScaleToZero } =
           await GlobalConfigService.getInstance().getAllConfigs();
         //TODO check and throw error here?
         const defaultUUID = lifecycleDefaults.defaultUUID;
@@ -371,7 +371,7 @@ export default class DeployableService extends BaseService {
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
           deploymentDependsOn: service.deploymentDependsOn || [],
-          kedaScaleToZero: YamlService.getScaleToZeroConfig(service) ?? null,
+          kedaScaleToZero: kedaScaleToZero?.enabled ? YamlService.getScaleToZeroConfig(service) : null,
           builder: YamlService.getBuilder(service) ?? {},
         };
       }

@@ -145,9 +145,8 @@ export default class DeployService extends BaseService {
             }
           }
 
-          if (deployable?.kedaScaleToZero?.type == 'http') {
-            const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
-            const defaultKedaScaleToZero = globalConfig.kedaScaleToZero;
+          const { kedaScaleToZero: defaultKedaScaleToZero } = await GlobalConfigService.getInstance().getAllConfigs();
+          if (deployable?.kedaScaleToZero?.type == 'http' && defaultKedaScaleToZero.enabled === true) {
             const deployableKedaScaleToZero = deployable?.kedaScaleToZero;
 
             const kedaScaleToZero = {
@@ -157,10 +156,6 @@ export default class DeployService extends BaseService {
 
             await deploy.$query().patch({
               kedaScaleToZero,
-            });
-          } else {
-            await deploy.$query().patch({
-              kedaScaleToZero: null,
             });
           }
         })
