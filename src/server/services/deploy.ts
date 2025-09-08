@@ -146,18 +146,16 @@ export default class DeployService extends BaseService {
           }
 
           const { kedaScaleToZero: defaultKedaScaleToZero } = await GlobalConfigService.getInstance().getAllConfigs();
-          if (deployable?.kedaScaleToZero?.type == 'http' && defaultKedaScaleToZero.enabled === true) {
-            const deployableKedaScaleToZero = deployable?.kedaScaleToZero;
 
-            const kedaScaleToZero = {
-              ...defaultKedaScaleToZero,
-              ...deployableKedaScaleToZero,
-            };
+          const kedaScaleToZero =
+            deployable?.kedaScaleToZero?.type === 'http' && defaultKedaScaleToZero?.enabled
+              ? {
+                  ...defaultKedaScaleToZero,
+                  ...deployable.kedaScaleToZero,
+                }
+              : null;
 
-            await deploy.$query().patch({
-              kedaScaleToZero,
-            });
-          }
+          await deploy.$query().patch({ kedaScaleToZero });
         })
       ).catch((error) => {
         logger.error(`[BUILD ${build?.uuid}] Failed to create deploys from deployables: ${error}`);
