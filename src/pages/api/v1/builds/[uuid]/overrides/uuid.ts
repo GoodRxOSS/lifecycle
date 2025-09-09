@@ -34,7 +34,7 @@ const logger = rootLogger.child({
  *       Updates the UUID (custom identifier) for a build and all related records.
  *       This changes the build's public URL and namespace.
  *     tags:
- *       - Builds
+ *       - Overrides
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -94,9 +94,13 @@ const logger = rootLogger.child({
  *                     missing_uuid:
  *                       value: uuid is required
  *                     same_uuid:
- *                       value: UUID must be different from current UUID
+ *                       value: UUID must be different
  *                     invalid_format:
  *                       value: UUID can only contain letters, numbers, and hyphens
+ *                     invalid_length:
+ *                       value: UUID must be between 3 and 50 characters
+ *                     invalid_boundaries:
+ *                       value: UUID cannot start or end with a hyphen
  *       404:
  *         description: Build not found
  *         content:
@@ -126,7 +130,7 @@ const logger = rootLogger.child({
  *               properties:
  *                 error:
  *                   type: string
- *                   example: UUID 'my-custom-environment' is already in use
+ *                   example: UUID is not available
  *       500:
  *         description: Internal server error
  *         content:
