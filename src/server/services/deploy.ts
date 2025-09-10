@@ -956,7 +956,7 @@ export default class DeployService extends BaseService {
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
             deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
-            cacheRegistry: buildDefaults?.cacheRegistry || 'distribution.0env.com',
+            cacheRegistry: buildDefaults?.cacheRegistry,
           };
 
           if (!initDockerfilePath) {
