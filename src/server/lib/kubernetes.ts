@@ -1546,6 +1546,37 @@ export async function patchIngress(ingressName: string, bannerSnippet: any, name
 }
 
 /**
+ * Finds a secret by regex pattern in the given namespace
+ * @param pattern regex pattern to match secret names
+ * @param namespace the namespace to search in
+ * @param fallback optional fallback secret name if no match is found
+ * @returns the name of the first matching secret or the fallback
+ */
+export async function findSecretByPattern(
+  pattern: string | RegExp,
+  namespace: string,
+  fallback: string = ''
+): Promise<string | null> {
+  try {
+    const k8sApi = getK8sApi();
+    const secrets = await k8sApi.listNamespacedSecret(namespace);
+
+    const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+
+    const matchingSecret = secrets.body.items.find(
+      (secret) => secret.metadata?.name && regex.test(secret.metadata.name)
+    );
+
+    if (matchingSecret?.metadata?.name) {
+      return matchingSecret.metadata.name;
+    }
+  } catch (error) {
+    logger.debug(`No secret found by pattern '${pattern}': using fallback ${fallback}`, error);
+  }
+  return fallback;
+}
+
+/**
  * Updates a secret
  * @param secretName the name of the secret
  * @param secretData the data to update the secret with
