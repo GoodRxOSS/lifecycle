@@ -99,6 +99,8 @@ export const CODEFRESH_API_KEY = getServerRuntimeConfig('CODEFRESH_API_KEY');
 
 export const MAX_GITHUB_API_REQUEST = getServerRuntimeConfig('MAX_GITHUB_API_REQUEST', 40);
 
+export const SECRET_BOOTSTRAP_NAME = getServerRuntimeConfig('SECRET_BOOTSTRAP_NAME', 'app-secrets');
+
 export const GITHUB_API_REQUEST_INTERVAL = getServerRuntimeConfig('GITHUB_API_REQUEST_INTERVAL', 10000);
 
 export const QUEUE_NAMES = {

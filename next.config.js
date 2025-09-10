@@ -53,6 +53,7 @@ module.exports = {
     PINO_PRETTY: process.env.PINO_PRETTY,
     ENVIRONMENT: process.env.ENVIRONMENT,
     APP_HOST: process.env.APP_HOST,
+    SECRET_BOOTSTRAP_NAME: process.env.SECRET_BOOTSTRAP_NAME,
   },
   typescript: {
     ignoreBuildErrors: true,
