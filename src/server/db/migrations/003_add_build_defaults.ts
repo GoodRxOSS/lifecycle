@@ -18,7 +18,7 @@ import { Knex } from 'knex';
 
 export async function up(knex: Knex): Promise<any> {
   const IS_DEV = process.env.APP_ENV === 'dev';
-  const cacheRegistry = IS_DEV ? '10.96.188.230:5000' : 'distribution.0env.com';
+  const cacheRegistry = IS_DEV ? '10.96.188.230:5000' : process.env.DISTRIBUTION_HOST || 'distribution.example.com';
 
   const existingConfig = await knex('global_config').where('key', 'buildDefaults').first();
 

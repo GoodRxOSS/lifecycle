@@ -145,7 +145,7 @@ describe('constructEcrRepoPath', () => {
   });
 
   test('appends service name for internal registries', () => {
-    const result = constructEcrRepoPath('my-repo/my-service/lfc', 'service-name', 'distribution.0env.com');
+    const result = constructEcrRepoPath('my-repo/my-service/lfc', 'service-name', 'distribution.example.com');
     expect(result).toBe('my-repo/my-service/lfc/service-name');
   });
 
@@ -155,12 +155,16 @@ describe('constructEcrRepoPath', () => {
   });
 
   test('does not append service name if already present at the end', () => {
-    const result = constructEcrRepoPath('my-repo/my-service/lfc/service-name', 'service-name', 'distribution.0env.com');
+    const result = constructEcrRepoPath(
+      'my-repo/my-service/lfc/service-name',
+      'service-name',
+      'distribution.example.com'
+    );
     expect(result).toBe('my-repo/my-service/lfc/service-name');
   });
 
   test('appends service name even if it exists elsewhere in the path', () => {
-    const result = constructEcrRepoPath('service-name/repo', 'service-name', 'distribution.0env.com');
+    const result = constructEcrRepoPath('service-name/repo', 'service-name', 'distribution.example.com');
     expect(result).toBe('service-name/repo/service-name');
   });
 
@@ -180,12 +184,12 @@ describe('constructEcrRepoPath', () => {
   });
 
   test('handles service name with special characters', () => {
-    const result = constructEcrRepoPath('my-repo', 'my-service-v2.1', 'distribution.0env.com');
+    const result = constructEcrRepoPath('my-repo', 'my-service-v2.1', 'distribution.example.com');
     expect(result).toBe('my-repo/my-service-v2.1');
   });
 
   test('handles base repo with trailing slash', () => {
-    const result = constructEcrRepoPath('my-repo/', 'my-service', 'distribution.0env.com');
+    const result = constructEcrRepoPath('my-repo/', 'my-service', 'distribution.example.com');
     expect(result).toBe('my-repo//my-service');
   });
 });
