@@ -19,10 +19,10 @@ import rootLogger from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
 import { APP_HOST, QUEUE_NAMES } from 'shared/config';
-import * as k8s from 'server/lib/kubernetes';
 import { Metrics } from 'server/lib/metrics';
 import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
+import OverrideService from './override';
 import {
   BuildStatus,
   DeployStatus,
@@ -205,7 +205,8 @@ export default class ActivityStream extends BaseService {
 
     // handle build uuid updates here
     if (vanityUrl && vanityUrl !== build.uuid) {
-      await this.handleVanityUrlChange(build, deploys, vanityUrl);
+      const override = new OverrideService();
+      await override.updateBuildUuid(build, vanityUrl);
     }
 
     // if pull request should be built and deployed again, add it to build queue
@@ -290,42 +291,6 @@ export default class ActivityStream extends BaseService {
       const dependents = deploys.filter((d) => d.service.dependsOnServiceId === service.id);
       await Promise.all(dependents.map((d) => d.$query().patch({ active })));
     }
-  }
-
-  /**
-   * vanity url update is basically overriding the uuid with a custom string
-   * @param build - The Build object to update.
-   * @param deploys - The list of Deploy objects associated with the build.
-   * @param vanityUrl - The new vanity URL (custom UUID) to assign.
-   */
-  private async handleVanityUrlChange(build: Build, deploys: Deploy[], vanityUrl: string) {
-    logger.info(`[BUILD ${build.uuid}] Build UUID updated to '${vanityUrl}'`);
-    // delete the old namespace for cleanup
-    // dont await, if failed will cleanup later
-    k8s.deleteNamespace(build.namespace);
-
-    await build.$query().patch({
-      uuid: vanityUrl,
-      namespace: `env-${vanityUrl}`,
-    });
-
-    await this.db.models.Deployable.query().where('buildId', build.id).patch({ buildUUID: vanityUrl });
-
-    // update all deploys
-    // this will not work for database configured services
-    await Promise.all(
-      deploys.map(async (d) => {
-        const newUuid = `${d.deployable.name}-${vanityUrl}`;
-        await d.$query().patch({
-          uuid: newUuid,
-          internalHostname: newUuid,
-          publicUrl: build.enableFullYaml
-            ? this.db.services.Deploy.hostForDeployableDeploy(d, d.deployable)
-            : this.db.services.Deploy.hostForServiceDeploy(d, d.service),
-        });
-      })
-    );
-    logger.info(`[BUILD ${build.uuid}] Patched build and deploys for UUID update`);
   }
 
   private async updateMissionControlComment(
