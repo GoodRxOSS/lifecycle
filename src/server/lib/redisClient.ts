@@ -29,7 +29,7 @@ export class RedisClient {
   private readonly redis: Redis;
   private readonly subscriber: Redis;
   private readonly redlock: Redlock;
-  private readonly bclients: Redis[] = [];
+  private readonly bullConn: Redis;
 
   private constructor() {
     if (APP_REDIS_HOST) {
@@ -58,6 +58,12 @@ export class RedisClient {
     }
 
     this.subscriber = this.redis.duplicate();
+    this.bullConn = this.redis.duplicate();
+    // BullMQ requires maxRetriesPerRequest to be null for blocking operations
+    if (this.bullConn.options) {
+      this.bullConn.options.maxRetriesPerRequest = null;
+    }
+
     this.redlock = new Redlock([this.redis], {
       driftFactor: 0.01,
       retryCount: 120,
@@ -66,6 +72,7 @@ export class RedisClient {
     });
     this.redis.setMaxListeners(50);
     this.subscriber.setMaxListeners(50);
+    this.bullConn.setMaxListeners(50);
   }
 
   public static getInstance(): RedisClient {
@@ -84,23 +91,18 @@ export class RedisClient {
   }
 
   public getConnection(): Redis {
-    const connection = this.redis.duplicate();
-    // BullMQ requires maxRetriesPerRequest to be null for blocking operations
-    connection.options.maxRetriesPerRequest = null;
-    return connection;
+    return this.bullConn;
   }
 
   public async close(): Promise<void> {
     try {
-      await Promise.all([this.redis.quit(), this.subscriber.quit(), ...this.bclients.map((client) => client.quit())]);
+      await Promise.all([this.redis.quit(), this.subscriber.quit(), this.bullConn.quit()]);
       logger.info(' ✅All Redis connections closed successfully.');
     } catch (error) {
       logger.warn(' ⚠️Error closing Redis connections. Forcing disconnect.', error);
       this.redis.disconnect();
       this.subscriber.disconnect();
-      this.bclients.forEach((client) => client.disconnect());
-    } finally {
-      this.bclients.length = 0;
+      this.bullConn.disconnect();
     }
   }
 }

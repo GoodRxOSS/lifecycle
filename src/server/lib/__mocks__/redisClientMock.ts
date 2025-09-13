@@ -54,6 +54,7 @@ const mockRedisClient = () => {
       super();
       (this as any).redis = new RedisMock();
       (this as any).subscriber = (this as any).redis.duplicate();
+      (this as any).bullConn = (this as any).redis.duplicate();
       (this as any).redlock = {
         lock: jest.fn(),
         unlock: jest.fn(),
