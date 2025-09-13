@@ -47,6 +47,11 @@ export default class QueueManager {
       defaultJobOptions?: QueueOptions['defaultJobOptions'];
     }
   ): Queue {
+    const existing = this.registeredQueues.find((r) => r.queue?.name === queueName);
+    if (existing && existing.queue) {
+      return existing.queue;
+    }
+
     logger.debug(`Registering queue ${queueName}`);
 
     const queue = new Queue(queueName, {
