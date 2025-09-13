@@ -60,7 +60,9 @@ export class RedisClient {
     this.subscriber = this.redis.duplicate();
     this.bullConn = this.redis.duplicate();
     // BullMQ requires maxRetriesPerRequest to be null for blocking operations
-    this.bullConn.options.maxRetriesPerRequest = null;
+    if (this.bullConn.options) {
+      this.bullConn.options.maxRetriesPerRequest = null;
+    }
 
     this.redlock = new Redlock([this.redis], {
       driftFactor: 0.01,
