@@ -76,6 +76,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     default_permissions: {
       contents: 'read',
       deployments: 'write',
+      emails: 'read',
       issues: 'write',
       members: 'read',
       metadata: 'read',

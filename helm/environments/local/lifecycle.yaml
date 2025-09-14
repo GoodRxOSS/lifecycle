@@ -150,3 +150,69 @@ redis:
 
 rbac:
   create: true
+
+keycloak:
+  enabled: true
+  install: true
+  realm: lifecycle
+  url: localhost
+  appUrl: localhost:5001
+
+  adminUsername: admin
+  adminPassword: admin
+  defaultUserPassword: changeme
+
+  postgresUsername: keycloakdb
+  postgresPassword: keycloakdb
+
+  uiClientSecret: changeme
+
+  # Identity Provider configurations (disabled for local dev, enable as needed)
+  companyIdp:
+    enabled: true
+    clientId: app-broker
+    clientSecret: changeme
+    tokenUrl: http://localhost:8080/realms/company/protocol/openid-connect/token
+    authorizationUrl: http://localhost:8080/realms/company/protocol/openid-connect/auth
+    userInfoUrl: http://localhost:8080/realms/company/protocol/openid-connect/userinfo
+    jwksUrl: http://localhost:8080/realms/company/protocol/openid-connect/certs
+    issuer: http://localhost:8080/realms/company
+
+  githubIdp:
+    enabled: true
+    # clientId and clientSecret will be taken from secrets.githubClientId and secrets.githubClientSecret
+    # clientId
+    # clientSecret
+
+  image:
+    registry: quay.io
+    repository: keycloak/keycloak
+    tag: 26.3.4
+
+  resources:
+    requests:
+      cpu: 400m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+
+  postgresImage:
+    registry: ''
+    repository: library/postgres
+    tag: 16.3-alpine
+
+  postgresResources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  persistent: true
+  volumeSize: 1Gi
+
+  ingress:
+    enabled: false
+    className: nginx
+    tls: false

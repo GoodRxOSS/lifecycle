@@ -1,0 +1,518 @@
+{{- /*
+Copyright 2025 GoodRx, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.keycloak.enabled }}
+{{- if .Values.keycloak.install }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-keycloak-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: keycloak
+data:
+  realm-config.json: |-
+    {
+      "realm": "{{ .Values.keycloak.realm }}",
+      "displayName": "Lifecycle Realm",
+      "enabled": true,
+      "sslRequired": "none",
+
+      "roles": {
+        "realm": [
+          {
+            "name": "github-linked",
+            "description": "User has linked GitHub account"
+          },
+          {
+            "name": "broker.read-token",
+            "description": "Read access to identity provider tokens"
+          }
+        ]
+      },
+
+      "clients": [
+        {
+          "clientId": "lifecycle-api",
+          "name": "Lifecycle API",
+          "description": "Bearer-only client for Lifecycle API validation",
+          "enabled": true,
+          "bearerOnly": false,
+          "publicClient": true,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "redirectUris": ["/*"],
+          "webOrigins": ["/*"],
+          "fullScopeAllowed": true,
+          "defaultClientScopes": [
+            "web-origins",
+            "profile",
+            "roles",
+            "email"
+          ]
+        },
+        {
+          "clientId": "lifecycle-ui",
+          "name": "Lifecycle UI",
+          "description": "Confidential client for Lifecycle web UI",
+          "secret": "{{ .Values.keycloak.uiClientSecret | default "changeme" }}",
+          "enabled": true,
+          "publicClient": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "redirectUris": [
+            "http://localhost:3000/api/auth/callback/keycloak",
+            "http://lifecycle-web.{{ .Release.Namespace }}.svc.cluster.local/api/auth/callback/keycloak",
+            "https://{{ .Values.keycloak.appUrl }}/api/auth/callback/keycloak"
+          ],
+          "webOrigins": [
+            "http://localhost:3000",
+            "https://{{ .Values.keycloak.appUrl }}"
+          ],
+          "attributes": {
+            "post.logout.redirect.uris": "http://localhost:3000+https://{{ .Values.keycloak.appUrl }}",
+            "pkce.code.challenge.method": "S256"
+          },
+          "fullScopeAllowed": true,
+          "defaultClientScopes": [
+            "web-origins",
+            "profile",
+            "roles",
+            "aud-core-api",
+            "email"
+          ]
+        }
+      ],
+
+      "clientScopes": [
+        {
+          "name": "aud-core-api",
+          "description": "Audience mapper for lifecycle-api",
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "aud-core-api",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.client.audience": "lifecycle-api",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true"
+              }
+            }
+          ]
+        },
+        {
+          "name": "profile",
+          "description": "OpenID Connect built-in scope: profile",
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "given name",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "firstName",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "given_name",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "name": "family name",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "lastName",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "family_name",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "name": "username",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "username",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "preferred_username",
+                "jsonType.label": "String"
+              }
+            }
+          ]
+        },
+        {
+          "name": "email",
+          "description": "OpenID Connect built-in scope: email",
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "email",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "email",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "email",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "name": "email verified",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-property-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "emailVerified",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "email_verified",
+                "jsonType.label": "boolean"
+              }
+            }
+          ]
+        },
+        {
+          "name": "web-origins",
+          "description": "OpenID Connect scope for add allowed web origins to the access token",
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "allowed web origins",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-allowed-origins-mapper",
+              "consentRequired": false,
+              "config": {}
+            }
+          ]
+        },
+        {
+          "name": "roles",
+          "description": "OpenID Connect scope for add user roles to the access token",
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "realm roles",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-realm-role-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "foo",
+                "access.token.claim": "true",
+                "claim.name": "realm_access.roles",
+                "jsonType.label": "String",
+                "multivalued": "true"
+              }
+            },
+            {
+              "name": "client roles",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-client-role-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "foo",
+                "access.token.claim": "true",
+                "claim.name": "resource_access.${client_id}.roles",
+                "jsonType.label": "String",
+                "multivalued": "true"
+              }
+            }
+          ]
+        }
+      ],
+
+      "identityProviders": [
+        {{- if .Values.keycloak.companyIdp.enabled }}
+        {
+          "alias": "company",
+          "displayName": "Company SSO",
+          "providerId": "oidc",
+          "enabled": true,
+          "storeToken": true,
+          "addReadTokenRoleOnCreate": true,
+          "firstBrokerLoginFlowAlias": "first broker login",
+          "hideOnLogin": true,
+          "postBrokerLoginFlowAlias": "ensure-github-linked",
+          "config": {
+            "clientId": "{{ .Values.keycloak.companyIdp.clientId }}",
+            "clientSecret": "{{ .Values.keycloak.companyIdp.clientSecret }}",
+            "tokenUrl": "{{ .Values.keycloak.companyIdp.tokenUrl }}",
+            "authorizationUrl": "{{ .Values.keycloak.companyIdp.authorizationUrl }}",
+            "userInfoUrl": "{{ .Values.keycloak.companyIdp.userInfoUrl }}",
+            "jwksUrl": "{{ .Values.keycloak.companyIdp.jwksUrl }}",
+            "issuer": "{{ .Values.keycloak.companyIdp.issuer }}",
+            "validateSignature": "true",
+            "useJwksUrl": "true",
+            "syncMode": "FORCE"
+          }
+        },
+        {{- end }}
+        {{- if .Values.keycloak.githubIdp.enabled }}
+        {
+          "alias": "github",
+          "displayName": "GitHub",
+          "providerId": "github",
+          "enabled": true,
+          "storeToken": true,
+          "addReadTokenRoleOnCreate": true,
+          "firstBrokerLoginFlowAlias": "first broker login",
+          "hideOnLogin": false,
+          "config": {
+            "clientId": "{{ .Values.keycloak.githubIdp.clientId | default .Values.secrets.githubClientId }}",
+            "clientSecret": "{{ .Values.keycloak.githubIdp.clientSecret | default .Values.secrets.githubClientSecret }}"
+          }
+        }
+        {{- end }}
+      ],
+
+      {{- if .Values.keycloak.githubIdp.enabled }}
+      "identityProviderMappers": [
+        {
+          "name": "assign-github-linked-role",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "role": "github-linked"
+          }
+        },
+        {
+          "name": "assign-broker-read-token-role",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "role": "broker.read-token"
+          }
+        }
+      ],
+      {{- end }}
+
+      "users": [
+        {
+          "username": "yolo",
+          "enabled": true,
+          "emailVerified": true,
+          "email": "yolo@0env.com",
+          "firstName": "Yolo",
+          "lastName": "User",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "yolo",
+              "temporary": false
+            }
+          ],
+          "realmRoles": [
+            "broker.read-token"
+          ]
+        }
+      ],
+
+      "authenticationFlows": [
+        {{- if .Values.keycloak.githubIdp.enabled }}
+        {
+          "alias": "browser-with-github-check",
+          "description": "Browser authentication with GitHub linking check",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-spnego",
+              "authenticatorFlow": false,
+              "requirement": "DISABLED",
+              "priority": 20,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 25,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 30,
+              "flowAlias": "forms-with-github-check",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "forms-with-github-check",
+          "description": "Username/password form with GitHub check",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "REQUIRED",
+              "priority": 30,
+              "flowAlias": "Post Login GitHub Check",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "Post Login GitHub Check",
+          "description": "Check for GitHub linking after login",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorConfig": "post-login-github-role-check",
+              "authenticator": "conditional-user-role",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorConfig": "post-login-github-redirect",
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "ensure-github-linked",
+          "description": "Checks if the user has github-linked role, redirects to github IDP if not",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorFlow": true,
+              "requirement": "REQUIRED",
+              "priority": 0,
+              "flowAlias": "Check Role",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "Check Role",
+          "description": "No action if the user has github-linked role, redirect to github IDP if not",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorConfig": "ensure-github-linked-role-check",
+              "authenticator": "conditional-user-role",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 0,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorConfig": "ensure-github-linked-github-provider",
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 1,
+              "userSetupAllowed": false
+            }
+          ]
+        }
+        {{- end }}
+      ],
+
+      {{- if .Values.keycloak.githubIdp.enabled }}
+      "authenticatorConfig": [
+        {
+          "alias": "post-login-github-role-check",
+          "config": {
+            "condUserRole": "github-linked",
+            "negate": "true"
+          }
+        },
+        {
+          "alias": "post-login-github-redirect",
+          "config": {
+            "defaultProvider": "github"
+          }
+        },
+        {
+          "alias": "ensure-github-linked-role-check",
+          "config": {
+            "condUserRole": "github-linked",
+            "negate": "true"
+          }
+        },
+        {
+          "alias": "ensure-github-linked-github-provider",
+          "config": {
+            "defaultProvider": "github"
+          }
+        }
+      ],
+      {{- end }}
+
+      {{- if .Values.keycloak.githubIdp.enabled }}
+      "browserFlow": "browser-with-github-check",
+      {{- else }}
+      "browserFlow": "browser",
+      {{- end }}
+
+      "eventsEnabled": false
+    }
+{{- end }}
+{{- end }}

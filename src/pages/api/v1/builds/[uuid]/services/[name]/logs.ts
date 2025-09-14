@@ -190,7 +190,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': '*',
   });
 
   const sendSSE = (data: string) => {
