@@ -359,26 +359,25 @@ export default class DeployService extends BaseService {
               Values: [deploy.deployable.name],
             },
           ],
-          ResourceTypeFilters: ['rds:db'],
+          ResourceTypeFilters: ['rds:cluster'],
         })
         .promise();
-      const dbArn = results.ResourceTagMappingList[0].ResourceARN;
-      const params = {
-        Filters: [
-          {
-            Name: 'db-instance-id' /* required */,
-            Values: [dbArn],
-          },
-        ],
-      };
-      const instances = await rds.describeDBInstances(params, null).promise();
 
-      if (instances.DBInstances.length === 1) {
-        const database = instances.DBInstances[0];
-        const databaseAddress = database.Endpoint.Address;
-        await deploy.$query().patch({
-          cname: databaseAddress,
-        });
+      if (results.ResourceTagMappingList.length > 0) {
+        const clusterArn = results.ResourceTagMappingList[0].ResourceARN;
+        const clusterIdentifier = clusterArn.split(':').pop();
+
+        const clusters = await rds.describeDBClusters({
+          DBClusterIdentifier: clusterIdentifier,
+        }).promise();
+
+        if (clusters.DBClusters.length === 1) {
+          const cluster = clusters.DBClusters[0];
+          const clusterEndpoint = cluster.Endpoint;
+          await deploy.$query().patch({
+            cname: clusterEndpoint,
+          });
+        }
       }
       await deploy.reload();
       if (deploy.buildLogs === uuid) {
