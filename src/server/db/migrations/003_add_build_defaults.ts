@@ -52,8 +52,7 @@ export async function down(knex: Knex): Promise<any> {
     const config = existingConfig.config || {};
 
     if (config.cacheRegistry) {
-      // eslint-disable-next-line no-unused-vars
-      const { cacheRegistry, ...restConfig } = config;
+      const { cacheRegistry: _cacheRegistry, ...restConfig } = config;
 
       await knex('global_config').where('key', 'buildDefaults').update({
         config: restConfig,
