@@ -14,8 +14,14 @@
 # limitations under the License.
 
 
-# grab the CODEFRESH_API_KEY environment variables from the .env file
-export $(grep CODEFRESH_API_KEY .env | xargs -0)
+# grab the CODEFRESH_API_KEY and AI_API_KEY environment variables from the .env file
+# Filter out comments and empty lines
+export $(grep -E '^(CODEFRESH_API_KEY|AI_API_KEY)=' .env | xargs)
+
+# Map AI_API_KEY to ANTHROPIC_API_KEY for the AI debugging feature
+if [ ! -z "$AI_API_KEY" ]; then
+  export ANTHROPIC_API_KEY=$AI_API_KEY
+fi
 
 # Authenticate with Codefresh CLI
 codefresh auth create-context --api-key $CODEFRESH_API_KEY
