@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # grab the CODEFRESH_API_KEY environment variables from the .env file
 export $(grep CODEFRESH_API_KEY .env | xargs -0)
 
