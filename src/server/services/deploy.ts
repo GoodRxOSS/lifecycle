@@ -359,25 +359,46 @@ export default class DeployService extends BaseService {
               Values: [deploy.deployable.name],
             },
           ],
-          ResourceTypeFilters: ['rds:cluster'],
+          ResourceTypeFilters: ['rds:db'],
         })
         .promise();
 
-      if (results.ResourceTagMappingList.length > 0) {
-        const clusterArn = results.ResourceTagMappingList[0].ResourceARN;
-        const clusterIdentifier = clusterArn.split(':').pop();
+      const instanceArn = results.ResourceTagMappingList?.find((mapping) =>
+        mapping.ResourceARN?.includes(':db:')
+      )?.ResourceARN;
 
-        const clusters = await rds.describeDBClusters({
-          DBClusterIdentifier: clusterIdentifier,
-        }).promise();
+      let databaseAddress: string | undefined;
 
-        if (clusters.DBClusters.length === 1) {
-          const cluster = clusters.DBClusters[0];
-          const clusterEndpoint = cluster.Endpoint;
-          await deploy.$query().patch({
-            cname: clusterEndpoint,
-          });
+      if (instanceArn) {
+        const instanceIdentifier = instanceArn.split(':').pop();
+        if (instanceIdentifier) {
+          const instances = await rds
+            .describeDBInstances({
+              DBInstanceIdentifier: instanceIdentifier,
+            })
+            .promise();
+          const database = instances.DBInstances?.[0];
+          if (database) {
+            databaseAddress = database.Endpoint?.Address;
+            if (database.DBClusterIdentifier) {
+              const clusters = await rds
+                .describeDBClusters({
+                  DBClusterIdentifier: database.DBClusterIdentifier,
+                })
+                .promise();
+              const clusterEndpoint = clusters.DBClusters?.[0]?.Endpoint;
+              if (clusterEndpoint) {
+                databaseAddress = clusterEndpoint;
+              }
+            }
+          }
         }
+      }
+
+      if (databaseAddress) {
+        await deploy.$query().patch({
+          cname: databaseAddress,
+        });
       }
       await deploy.reload();
       if (deploy.buildLogs === uuid) {
