@@ -1,0 +1,60 @@
+{{- /*
+Copyright 2025 GoodRx, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.keycloak.enabled }}
+{{- if .Values.keycloak.install }}
+{{- if .Values.keycloak.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: keycloak
+  annotations:
+    {{- with .Values.keycloak.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.keycloak.ingress.className }}
+  ingressClassName: {{ .Values.keycloak.ingress.className | quote }}
+  {{- end }}
+  {{- if .Values.keycloak.ingress.tls }}
+  tls:
+  - hosts:
+    - {{ .Values.keycloak.url }}
+    {{- if .Values.keycloak.ingress.tlsSecretName }}
+    secretName: {{ .Values.keycloak.ingress.tlsSecretName }}
+    {{- else }}
+    secretName: {{ .Release.Name }}-keycloak-tls
+    {{- end }}
+  {{- end }}
+  rules:
+  - host: {{ .Values.keycloak.url }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Release.Name }}-keycloak
+            port:
+              number: 8080
+{{- end }}
+{{- end }}
+{{- end }}

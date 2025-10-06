@@ -1,0 +1,117 @@
+{{- /*
+Copyright 2025 GoodRx, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.keycloak.enabled }}
+{{- if .Values.keycloak.install }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-keycloak
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: keycloak
+spec:
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+      component: keycloak
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        component: keycloak
+    spec:
+      containers:
+      - name: keycloak-server
+        image: "{{ .Values.keycloak.image.registry }}/{{ .Values.keycloak.image.repository }}:{{ .Values.keycloak.image.tag }}"
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: management
+          containerPort: 9000
+          protocol: TCP
+        args:
+        - 'start'
+        - '--features=token-exchange'
+        - '--db=postgres'
+        - '--db-url-host={{ .Release.Name }}-keycloak-postgresql'
+        - '--db-username=$(KC_DB_USER)'
+        - '--db-password=$(KC_DB_PASSWORD)'
+        - '--hostname=https://{{ .Values.keycloak.url }}'
+        - '--hostname-admin=https://{{ .Values.keycloak.url }}'
+        - '--hostname-strict=false'
+        - '--health-enabled=true'
+        - '--import-realm'
+        - '--proxy=edge'
+        - '--http-enabled=true'
+        env:
+        - name: KEYCLOAK_ADMIN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: username
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: password
+        - name: KC_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: postgresUsername
+        - name: KC_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: postgresPassword
+        - name: KC_DB_URL_DATABASE
+          value: keycloak
+        livenessProbe:
+          httpGet:
+            path: "/health/live"
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 60
+          timeoutSeconds: 5
+          periodSeconds: 20
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: "/health/ready"
+            port: 9000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: keycloak-config
+          mountPath: "/opt/keycloak/data/import"
+        resources:
+          {{- toYaml .Values.keycloak.resources | nindent 10 }}
+      volumes:
+      - name: keycloak-config
+        configMap:
+          name: {{ .Release.Name }}-keycloak-config
+{{- end }}
+{{- end }}
