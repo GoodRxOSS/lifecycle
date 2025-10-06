@@ -357,9 +357,29 @@ export function AIDebugChat({ buildUuid }: AIDebugChatProps) {
               <div className={msg.role === 'user' ? 'user-message-content' : 'ai-message-content'}>
                 <ReactMarkdown
                   components={{
+                    a({ node, children, href, ...props }) {
+                      return (
+                        <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                          {children}
+                        </a>
+                      );
+                    },
                     code({ node, inline, className, children, ...props }) {
                       const match = /language-(\w+)/.exec(className || '');
                       const language = match ? match[1] : '';
+
+                      const fullMatch = /language-(\w+):(\d+)\{([\d,\s]+)\}/.exec(className || '');
+                      const simpleMatch = /language-(\w+)\{([\d,\s]+)\}/.exec(className || '');
+
+                      let startingLineNumber = 1;
+                      let highlightLines: number[] = [];
+
+                      if (fullMatch) {
+                        startingLineNumber = parseInt(fullMatch[2]);
+                        highlightLines = fullMatch[3].split(',').map(n => parseInt(n.trim()));
+                      } else if (simpleMatch) {
+                        highlightLines = simpleMatch[2].split(',').map(n => parseInt(n.trim()));
+                      }
 
                       return !inline && language ? (
                         <div style={{ position: 'relative' }}>
@@ -376,6 +396,22 @@ export function AIDebugChat({ buildUuid }: AIDebugChatProps) {
                             PreTag="div"
                             customStyle={{
                               background: '#282c34',
+                            }}
+                            wrapLines={highlightLines.length > 0}
+                            showLineNumbers={highlightLines.length > 0}
+                            startingLineNumber={startingLineNumber}
+                            lineProps={(lineNumber) => {
+                              if (highlightLines.includes(lineNumber)) {
+                                return {
+                                  style: {
+                                    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                                    display: 'block',
+                                    borderLeft: '3px solid #ef4444',
+                                    paddingLeft: '8px',
+                                  }
+                                };
+                              }
+                              return {};
                             }}
                             {...props}
                           >
@@ -416,9 +452,29 @@ export function AIDebugChat({ buildUuid }: AIDebugChatProps) {
               <div className="ai-message-content">
                 <ReactMarkdown
                   components={{
+                    a({ node, children, href, ...props }) {
+                      return (
+                        <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                          {children}
+                        </a>
+                      );
+                    },
                     code({ node, inline, className, children, ...props }) {
                       const match = /language-(\w+)/.exec(className || '');
                       const language = match ? match[1] : '';
+
+                      const fullMatch = /language-(\w+):(\d+)\{([\d,\s]+)\}/.exec(className || '');
+                      const simpleMatch = /language-(\w+)\{([\d,\s]+)\}/.exec(className || '');
+
+                      let startingLineNumber = 1;
+                      let highlightLines: number[] = [];
+
+                      if (fullMatch) {
+                        startingLineNumber = parseInt(fullMatch[2]);
+                        highlightLines = fullMatch[3].split(',').map(n => parseInt(n.trim()));
+                      } else if (simpleMatch) {
+                        highlightLines = simpleMatch[2].split(',').map(n => parseInt(n.trim()));
+                      }
 
                       return !inline && language ? (
                         <div style={{ position: 'relative' }}>
@@ -435,6 +491,22 @@ export function AIDebugChat({ buildUuid }: AIDebugChatProps) {
                             PreTag="div"
                             customStyle={{
                               background: '#282c34',
+                            }}
+                            wrapLines={highlightLines.length > 0}
+                            showLineNumbers={highlightLines.length > 0}
+                            startingLineNumber={startingLineNumber}
+                            lineProps={(lineNumber) => {
+                              if (highlightLines.includes(lineNumber)) {
+                                return {
+                                  style: {
+                                    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                                    display: 'block',
+                                    borderLeft: '3px solid #ef4444',
+                                    paddingLeft: '8px',
+                                  }
+                                };
+                              }
+                              return {};
                             }}
                             {...props}
                           >

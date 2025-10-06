@@ -24,7 +24,7 @@ export async function up(knex: Knex): Promise<any> {
       key: 'aiDebug',
       config: {
         enabled: false,
-        provider: 'anthropic',
+        provider: 'gemini',
         maxMessagesPerSession: 50,
         sessionTTL: 3600,
       },
