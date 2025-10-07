@@ -41,6 +41,7 @@ app_namespace = 'lifecycle-app'
 ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
 ngrok_domain = os.getenv("NGROK_LIFECYCLE_DOMAIN", "")
 ngrok_keycloak_domain = os.getenv("NGROK_KEYCLOAK_DOMAIN", "")
+ngrok_ui_domain = os.getenv("NGROK_LIFECYCLE_UI_DOMAIN", "")
 
 
 ##################################
@@ -134,6 +135,7 @@ helm_set_args = [
     'image.tag=dev',
     'keycloak.url={}'.format(ngrok_keycloak_domain or 'localhost'),
     'keycloak.appUrl={}'.format(ngrok_domain or 'localhost:5001'),
+    'keycloak.uiUrl={}'.format(ngrok_ui_domain or 'localhost:3000'),
     # Update IDP URLs to use ngrok domain or localhost
     'keycloak.companyIdp.tokenUrl=https://{}/realms/company/protocol/openid-connect/token'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.tokenUrl=http://localhost:8080/realms/company/protocol/openid-connect/token',
     'keycloak.companyIdp.authorizationUrl=https://{}/realms/company/protocol/openid-connect/auth'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.authorizationUrl=http://localhost:8080/realms/company/protocol/openid-connect/auth',

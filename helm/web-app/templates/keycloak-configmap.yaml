@@ -105,7 +105,7 @@ data:
           "clientAuthenticatorType": "client-secret",
           "secret": "{{ .Values.keycloak.lifecycleCoreClientSecret | default "changeme" }}",
           "redirectUris": ["/*"],
-          "webOrigins": ["/*"],
+          "webOrigins": ["+"],
           "notBefore": 0,
           "bearerOnly": false,
           "consentRequired": false,
@@ -170,8 +170,8 @@ data:
           "enabled": true,
           "alwaysDisplayInConsole": false,
           "clientAuthenticatorType": "client-secret",
-          "redirectUris": ["https://lc-levon-ui.ngrok.io/*"],
-          "webOrigins": ["https://lc-levon-ui.ngrok.io"],
+          "redirectUris": ["https://{{ .Values.keycloak.uiUrl }}/*"],
+          "webOrigins": ["+"],
           "notBefore": 0,
           "bearerOnly": false,
           "consentRequired": false,
@@ -610,7 +610,7 @@ data:
           "publicClient": false,
           "secret": "changeme-company-realm-broker-secret",
           "redirectUris": [
-            "https://lc-levon-auth.ngrok.io/realms/lifecycle/broker/company-sso/endpoint/*"
+            "https://{{ .Values.keycloak.url }}/realms/lifecycle/broker/company-sso/endpoint/*"
           ],
           "webOrigins": ["+"],
           "standardFlowEnabled": true,
