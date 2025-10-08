@@ -15,7 +15,6 @@ limitations under the License.
 */}}
 
 {{- if .Values.keycloak.enabled }}
-{{- if .Values.keycloak.install }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -95,5 +94,4 @@ spec:
         emptyDir:
           medium: ''
         {{- end }}
-{{- end }}
 {{- end }}

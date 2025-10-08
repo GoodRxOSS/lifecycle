@@ -15,7 +15,6 @@ limitations under the License.
 */}}
 
 {{- if .Values.keycloak.enabled }}
-{{- if .Values.keycloak.install }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -638,5 +637,4 @@ data:
         }
       ]
     }
-{{- end }}
 {{- end }}

@@ -15,7 +15,6 @@ limitations under the License.
 */}}
 
 {{- if .Values.keycloak.enabled }}
-{{- if .Values.keycloak.install }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -113,5 +112,4 @@ spec:
       - name: keycloak-config
         configMap:
           name: {{ .Release.Name }}-keycloak-config
-{{- end }}
 {{- end }}
