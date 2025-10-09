@@ -169,6 +169,7 @@ data:
           "enabled": true,
           "alwaysDisplayInConsole": false,
           "clientAuthenticatorType": "client-secret",
+          "secret": "changeme",
           "redirectUris": ["https://{{ .Values.keycloak.uiUrl }}/*"],
           "webOrigins": ["+"],
           "notBefore": 0,
@@ -178,7 +179,7 @@ data:
           "implicitFlowEnabled": false,
           "directAccessGrantsEnabled": false,
           "serviceAccountsEnabled": false,
-          "publicClient": true,
+          "publicClient": false,
           "frontchannelLogout": true,
           "protocol": "openid-connect",
           "attributes": {
@@ -203,7 +204,8 @@ data:
                 "id.token.claim": "false",
                 "lightweight.claim": "false",
                 "access.token.claim": "true",
-                "introspection.token.claim": "true"
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false",
               }
             }
           ],
