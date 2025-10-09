@@ -205,7 +205,7 @@ data:
                 "lightweight.claim": "false",
                 "access.token.claim": "true",
                 "introspection.token.claim": "true",
-                "userinfo.token.claim": "false",
+                "userinfo.token.claim": "false"
               }
             }
           ],
