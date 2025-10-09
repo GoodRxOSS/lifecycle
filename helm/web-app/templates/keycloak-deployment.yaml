@@ -61,6 +61,7 @@ spec:
         - '--health-enabled=true'
         - '--import-realm'
         - '--proxy=edge'
+        - '--proxy-headers=xforwarded'
         - '--http-enabled=true'
         env:
         - name: KEYCLOAK_ADMIN
