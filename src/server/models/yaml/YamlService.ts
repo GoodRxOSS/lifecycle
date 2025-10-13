@@ -230,6 +230,8 @@ export interface DeploymentConfig {
   readonly hostnames?: HostnamesConfig;
   readonly network?: NetworkConfig;
   readonly serviceDisks?: ServiceDiskConfig[];
+  readonly node_selector?: Record<string, string>;
+  readonly node_affinity?: any;
 }
 
 export interface ResourceConfig {

@@ -641,9 +641,17 @@ export function generatePersistentDisks(
 /**
  * Generates an affinity block based on the capacity type definition
  * @param capacityType can either be ON_DEMAND or SPOT
+ * @param isStatic whether this is a static environment
+ * @param customNodeAffinity optional custom node affinity from schema (overrides default)
  * @returns an affinity block using either requirements or preferences
  */
-function generateAffinity(capacityType: string, isStatic: boolean) {
+function generateAffinity(capacityType: string, isStatic: boolean, customNodeAffinity?: any) {
+  // If custom node affinity is provided, use it instead of default
+  if (customNodeAffinity) {
+    return { nodeAffinity: customNodeAffinity };
+  }
+
+  // Existing logic for capacity-type based affinity
   if (capacityType === 'SPOT') {
     return {
       nodeAffinity: {
@@ -716,7 +724,29 @@ export function generateDeployManifests(
         ? deploy.deployable.capacityType
         : deploy?.service.capacityType;
       const isStatic = build?.isStatic ?? false;
-      const affinity = generateAffinity(capacityType, isStatic);
+
+      // Extract custom node affinity from schema
+      const customNodeAffinity = enableFullYaml ? deploy.deployable.nodeAffinity : deploy?.service.nodeAffinity;
+
+      const affinity = generateAffinity(capacityType, isStatic, customNodeAffinity);
+
+      // Extract node selector from schema
+      const nodeSelector = enableFullYaml ? deploy.deployable.nodeSelector : deploy?.service.nodeSelector;
+
+      // Log when custom node placement is used
+      if (nodeSelector) {
+        logger.info(
+          `[BUILD ${build.uuid}][DEPLOY ${deploy.uuid}] Using custom nodeSelector: ${JSON.stringify(nodeSelector)}`
+        );
+      }
+      if (customNodeAffinity) {
+        logger.info(
+          `[BUILD ${build.uuid}][DEPLOY ${deploy.uuid}] Using custom nodeAffinity: ${JSON.stringify(
+            customNodeAffinity
+          )}`
+        );
+      }
+
       const { uuid: name, service, deployable } = deploy;
       const ports = [];
 
@@ -1116,6 +1146,7 @@ export function generateDeployManifests(
               },
               spec: {
                 affinity,
+                ...(nodeSelector && { nodeSelector }),
                 securityContext: {
                   fsGroup: 2000,
                 },
@@ -1633,10 +1664,14 @@ export function generateDeployManifest({
   const pvcManifests = generatePersistentDisks([deploy], build.uuid, enableFullYaml, namespace);
   if (pvcManifests) manifests.push(pvcManifests);
 
-  // Generate deployment
+  // Generate deployment with custom node affinity
   const capacityType =
     build.capacityType || (enableFullYaml ? deploy.deployable?.capacityType : deploy.service?.capacityType);
-  const affinity = generateAffinity(capacityType, build?.isStatic ?? false);
+
+  // Extract custom node affinity from schema
+  const customNodeAffinity = enableFullYaml ? deploy.deployable?.nodeAffinity : deploy.service?.nodeAffinity;
+
+  const affinity = generateAffinity(capacityType, build?.isStatic ?? false, customNodeAffinity);
 
   const deploymentManifest = generateSingleDeploymentManifest({
     deploy,
@@ -1684,6 +1719,9 @@ function generateSingleDeploymentManifest({
   const serviceCPU = enableFullYaml ? deploy.deployable?.cpuLimit : deploy.service?.cpuLimit;
   const servicePort = enableFullYaml ? deploy.deployable?.port : deploy.service?.port;
   const replicaCount = deploy.replicaCount ?? 1;
+
+  // Extract node selector from schema
+  const nodeSelector = enableFullYaml ? deploy.deployable?.nodeSelector : deploy.service?.nodeSelector;
 
   const envToUse = deploy.env || {};
   const containers = [];
@@ -1846,6 +1884,7 @@ function generateSingleDeploymentManifest({
         spec: {
           serviceAccountName,
           affinity,
+          ...(nodeSelector && { nodeSelector }),
           containers,
         },
       },

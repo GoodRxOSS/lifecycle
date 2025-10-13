@@ -17,6 +17,7 @@
 import Model from './_Model';
 import { DeployTypes } from 'shared/constants';
 import { Environment, Repository, ServiceDisk } from '.';
+import { createColumnMapper } from 'server/lib/columnMappers';
 
 export default class Service extends Model {
   name!: string;
@@ -106,6 +107,9 @@ export default class Service extends Model {
 
   ingressAnnotations: Record<string, any>;
 
+  nodeSelector: Record<string, string>;
+  nodeAffinity: Record<string, any>;
+
   static tableName = 'services';
   static timestamps = true;
 
@@ -146,6 +150,22 @@ export default class Service extends Model {
   };
 
   static get jsonAttributes() {
-    return ['env', 'initEnv', 'hostPortMapping', 'pathPortMapping', 'ipWhitelist'];
+    return ['env', 'initEnv', 'hostPortMapping', 'pathPortMapping', 'ipWhitelist', 'nodeSelector', 'nodeAffinity'];
+  }
+
+  // Map specific camelCase property names to snake_case column names
+  static columnNameMappers = createColumnMapper({
+    nodeSelector: 'node_selector',
+    nodeAffinity: 'node_affinity',
+  });
+
+  $parseDatabaseJson(json: any) {
+    json = super.$parseDatabaseJson(json);
+    return (this.constructor as typeof Service).columnNameMappers.parse(json);
+  }
+
+  $formatDatabaseJson(json: any) {
+    json = (this.constructor as typeof Service).columnNameMappers.format(json);
+    return super.$formatDatabaseJson(json);
   }
 }

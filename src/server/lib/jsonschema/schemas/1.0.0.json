@@ -44,7 +44,9 @@
                 "type": "number"
               }
             },
-            "required": ["name"]
+            "required": [
+              "name"
+            ]
           }
         },
         "optionalServices": {
@@ -67,7 +69,9 @@
                 "type": "number"
               }
             },
-            "required": ["name"]
+            "required": [
+              "name"
+            ]
           }
         },
         "webhooks": {
@@ -120,7 +124,9 @@
                     "type": "number"
                   }
                 },
-                "required": ["image"]
+                "required": [
+                  "image"
+                ]
               },
               "command": {
                 "type": "object",
@@ -136,13 +142,20 @@
                     "type": "number"
                   }
                 },
-                "required": ["image", "script"]
+                "required": [
+                  "image",
+                  "script"
+                ]
               },
               "env": {
                 "type": "object"
               }
             },
-            "required": ["state", "type", "env"]
+            "required": [
+              "state",
+              "type",
+              "env"
+            ]
           }
         }
       }
@@ -174,7 +187,9 @@
                   "type": "string"
                 }
               },
-              "required": ["name"]
+              "required": [
+                "name"
+              ]
             }
           },
           "deploymentDependsOn": {
@@ -292,7 +307,9 @@
                     }
                   }
                 },
-                "required": ["name"]
+                "required": [
+                  "name"
+                ]
               },
               "envLens": {
                 "type": "boolean"
@@ -364,7 +381,9 @@
                         "minItems": 1
                       }
                     },
-                    "required": ["dockerfilePath"]
+                    "required": [
+                      "dockerfilePath"
+                    ]
                   },
                   "init": {
                     "type": "object",
@@ -383,10 +402,15 @@
                         "type": "object"
                       }
                     },
-                    "required": ["dockerfilePath"]
+                    "required": [
+                      "dockerfilePath"
+                    ]
                   }
                 },
-                "required": ["defaultTag", "app"]
+                "required": [
+                  "defaultTag",
+                  "app"
+                ]
               }
             }
           },
@@ -630,13 +654,30 @@
                           "type": "string"
                         }
                       },
-                      "required": ["name", "mountPath", "storageSize"]
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
                     }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
                   }
                 }
               }
             },
-            "required": ["repository", "branchName"]
+            "required": [
+              "repository",
+              "branchName"
+            ]
           },
           "github": {
             "type": "object",
@@ -706,7 +747,9 @@
                         "minItems": 1
                       }
                     },
-                    "required": ["dockerfilePath"]
+                    "required": [
+                      "dockerfilePath"
+                    ]
                   },
                   "init": {
                     "type": "object",
@@ -725,10 +768,15 @@
                         "type": "object"
                       }
                     },
-                    "required": ["dockerfilePath"]
+                    "required": [
+                      "dockerfilePath"
+                    ]
                   }
                 },
-                "required": ["defaultTag", "app"]
+                "required": [
+                  "defaultTag",
+                  "app"
+                ]
               },
               "deployment": {
                 "type": "object",
@@ -933,13 +981,31 @@
                           "type": "string"
                         }
                       },
-                      "required": ["name", "mountPath", "storageSize"]
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
                     }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
                   }
                 }
               }
             },
-            "required": ["repository", "branchName", "docker"]
+            "required": [
+              "repository",
+              "branchName",
+              "docker"
+            ]
           },
           "docker": {
             "type": "object",
@@ -1166,13 +1232,30 @@
                           "type": "string"
                         }
                       },
-                      "required": ["name", "mountPath", "storageSize"]
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
                     }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
                   }
                 }
               }
             },
-            "required": ["dockerImage", "defaultTag"]
+            "required": [
+              "dockerImage",
+              "defaultTag"
+            ]
           },
           "externalHttp": {
             "type": "object",
@@ -1185,7 +1268,10 @@
                 "type": "string"
               }
             },
-            "required": ["defaultInternalHostname", "defaultPublicUrl"]
+            "required": [
+              "defaultInternalHostname",
+              "defaultPublicUrl"
+            ]
           },
           "auroraRestore": {
             "type": "object",
@@ -1198,7 +1284,10 @@
                 "type": "string"
               }
             },
-            "required": ["command", "arguments"]
+            "required": [
+              "command",
+              "arguments"
+            ]
           },
           "configuration": {
             "type": "object",
@@ -1211,10 +1300,15 @@
                 "type": "string"
               }
             },
-            "required": ["defaultTag", "branchName"]
+            "required": [
+              "defaultTag",
+              "branchName"
+            ]
           }
         },
-        "required": ["name"]
+        "required": [
+          "name"
+        ]
       }
     }
   }

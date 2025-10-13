@@ -15,7 +15,8 @@ environment:
   # @param environment.defaultServices
   defaultServices:
     # @param environment.defaultServices[]
-    - # @param environment.defaultServices.name (required)
+    -
+      # @param environment.defaultServices.name (required)
       name: ''
       # @param environment.defaultServices.repository
       repository: ''
@@ -26,7 +27,8 @@ environment:
   # @param environment.optionalServices
   optionalServices:
     # @param environment.optionalServices[]
-    - # @param environment.optionalServices.name (required)
+    -
+      # @param environment.optionalServices.name (required)
       name: ''
       # @param environment.optionalServices.repository
       repository: ''
@@ -37,7 +39,8 @@ environment:
   # @param environment.webhooks
   webhooks:
     # @param environment.webhooks[]
-    - # @param environment.webhooks.name
+    -
+      # @param environment.webhooks.name
       name: ''
       # @param environment.webhooks.description
       description: ''
@@ -77,7 +80,8 @@ environment:
 # @section services
 services:
   # @param services[]
-  - # @param services.name (required)
+  -
+    # @param services.name (required)
     name: ''
     # @param services.appShort
     appShort: ''
@@ -86,7 +90,8 @@ services:
     # @param services.requires
     requires:
       # @param services.requires[]
-      - # @param services.requires.name (required)
+      -
+        # @param services.requires.name (required)
         name: ''
     # @param services.deploymentDependsOn
     deploymentDependsOn:
@@ -332,7 +337,8 @@ services:
         # @param services.codefresh.deployment.serviceDisks
         serviceDisks:
           # @param services.codefresh.deployment.serviceDisks[]
-          - # @param services.codefresh.deployment.serviceDisks.name (required)
+          -
+            # @param services.codefresh.deployment.serviceDisks.name (required)
             name: ''
             # @param services.codefresh.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -342,6 +348,12 @@ services:
             storageSize: ''
             # @param services.codefresh.deployment.serviceDisks.medium
             medium: ''
+        # @param services.codefresh.deployment.node_selector
+        node_selector:
+
+        # @param services.codefresh.deployment.node_affinity
+        node_affinity:
+
     # @param services.github
     github:
       # @param services.github.repository (required)
@@ -499,7 +511,8 @@ services:
         # @param services.github.deployment.serviceDisks
         serviceDisks:
           # @param services.github.deployment.serviceDisks[]
-          - # @param services.github.deployment.serviceDisks.name (required)
+          -
+            # @param services.github.deployment.serviceDisks.name (required)
             name: ''
             # @param services.github.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -509,6 +522,12 @@ services:
             storageSize: ''
             # @param services.github.deployment.serviceDisks.medium
             medium: ''
+        # @param services.github.deployment.node_selector
+        node_selector:
+
+        # @param services.github.deployment.node_affinity
+        node_affinity:
+
     # @param services.docker
     docker:
       # @param services.docker.dockerImage (required)
@@ -631,7 +650,8 @@ services:
         # @param services.docker.deployment.serviceDisks
         serviceDisks:
           # @param services.docker.deployment.serviceDisks[]
-          - # @param services.docker.deployment.serviceDisks.name (required)
+          -
+            # @param services.docker.deployment.serviceDisks.name (required)
             name: ''
             # @param services.docker.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -641,6 +661,12 @@ services:
             storageSize: ''
             # @param services.docker.deployment.serviceDisks.medium
             medium: ''
+        # @param services.docker.deployment.node_selector
+        node_selector:
+
+        # @param services.docker.deployment.node_affinity
+        node_affinity:
+
     # @param services.externalHttp
     externalHttp:
       # @param services.externalHttp.defaultInternalHostname (required)
