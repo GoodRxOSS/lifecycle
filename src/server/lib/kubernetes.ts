@@ -727,25 +727,9 @@ export function generateDeployManifests(
 
       // Extract custom node affinity from schema
       const customNodeAffinity = enableFullYaml ? deploy.deployable.nodeAffinity : deploy?.service.nodeAffinity;
-
       const affinity = generateAffinity(capacityType, isStatic, customNodeAffinity);
-
       // Extract node selector from schema
       const nodeSelector = enableFullYaml ? deploy.deployable.nodeSelector : deploy?.service.nodeSelector;
-
-      // Log when custom node placement is used
-      if (nodeSelector) {
-        logger.info(
-          `[BUILD ${build.uuid}][DEPLOY ${deploy.uuid}] Using custom nodeSelector: ${JSON.stringify(nodeSelector)}`
-        );
-      }
-      if (customNodeAffinity) {
-        logger.info(
-          `[BUILD ${build.uuid}][DEPLOY ${deploy.uuid}] Using custom nodeAffinity: ${JSON.stringify(
-            customNodeAffinity
-          )}`
-        );
-      }
 
       const { uuid: name, service, deployable } = deploy;
       const ports = [];
