@@ -67,6 +67,9 @@ importers:
       isomorphic-unfetch:
         specifier: ^3.0.0
         version: 3.0.0
+      jose:
+        specifier: ^6.1.0
+        version: 6.1.0
       js-cookie:
         specifier: ^2.2.1
         version: 2.2.1
@@ -227,6 +230,9 @@ importers:
       '@types/shelljs':
         specifier: ^0.8.5
         version: 0.8.5
+      '@types/swagger-jsdoc':
+        specifier: ^6.0.4
+        version: 6.0.4
       '@types/uuid':
         specifier: ^3.4.5
         version: 3.4.5
@@ -1965,6 +1971,10 @@ packages:
   '@types/stack-utils@2.0.1':
     resolution:
       { integrity: sha512-Hl219/BT5fLAaz6NDkSuhzasy49dwQS/DSdu4MdggFB8zcXv7vflBI3xp7FEmkmdDkBUI2bPUNeMttp2knYdxw== }
+
+  '@types/swagger-jsdoc@6.0.4':
+    resolution:
+      { integrity: sha512-W+Xw5epcOZrF/AooUM/PccNMSAFOKWZA5dasNyMujTwsBkU74njSJBpvCCJhHAJ95XRMzQrrW844Btu0uoetwQ== }
 
   '@types/trusted-types@2.0.7':
     resolution:
@@ -4432,9 +4442,9 @@ packages:
       { integrity: sha512-+kHj8HXArPfpPEKGLZ+kB5ONRTCiGQXo8RQYL0hH8t6pWXUBBK5KkkQmTNOwKK4LEsd0yTsgtjJVm4UBSZea4w== }
     engines: { node: '>= 0.6.0' }
 
-  jose@6.0.11:
+  jose@6.1.0:
     resolution:
-      { integrity: sha512-QxG7EaliDARm1O1S8BGakqncGT9s25bKL1WSf6/oa17Tkqwi8D2ZNglqCF+DsYF88/rV66Q/Q2mFAy697E1DUg== }
+      { integrity: sha512-TTQJyoEoKcC1lscpVDCSsVgYzUDg/0Bt3WE//WiTPK6uOCQC2KZS4MpugbMWt/zyjkopgZoXhZuCi00gLudfUA== }
 
   joycon@3.1.1:
     resolution:
@@ -8865,6 +8875,8 @@ snapshots:
 
   '@types/stack-utils@2.0.1': {}
 
+  '@types/swagger-jsdoc@6.0.4': {}
+
   '@types/trusted-types@2.0.7':
     optional: true
 
@@ -11255,8 +11267,7 @@ snapshots:
 
   jmespath@0.15.0: {}
 
-  jose@6.0.11:
-    optional: true
+  jose@6.1.0: {}
 
   joycon@3.1.1: {}
 
@@ -11925,7 +11936,7 @@ snapshots:
 
   openid-client@6.6.1:
     dependencies:
-      jose: 6.0.11
+      jose: 6.1.0
       oauth4webapi: 3.5.3
     optional: true
 
