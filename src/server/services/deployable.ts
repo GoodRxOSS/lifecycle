@@ -98,6 +98,8 @@ export interface DeployableAttributes {
   deploymentDependsOn?: string[];
   kedaScaleToZero?: KedaScaleToZero;
   builder?: Builder;
+  nodeSelector?: Record<string, string>;
+  nodeAffinity?: Record<string, unknown>;
 }
 
 export default class DeployableService extends BaseService {
@@ -179,6 +181,8 @@ export default class DeployableService extends BaseService {
         dockerBuildPipelineName: service.dockerBuildPipelineName,
         active,
         defaultBranchName: service.branchName,
+        nodeSelector: service.nodeSelector ?? null,
+        nodeAffinity: service.nodeAffinity ?? null,
       };
 
       if (branch != null) {
@@ -358,6 +362,9 @@ export default class DeployableService extends BaseService {
           ingressAnnotations: deployment?.network?.ingressAnnotations ?? {},
           defaultUUID: await YamlService.getUUID(service, build),
           serviceDisksYaml: deployment?.serviceDisks ? JSON.stringify(deployment.serviceDisks) : null,
+
+          nodeSelector: deployment?.node_selector ?? null,
+          nodeAffinity: deployment?.node_affinity ?? null,
 
           deployPipelineId: YamlService.getDeployPipelineConfig(service)?.pipelineId ?? null,
 

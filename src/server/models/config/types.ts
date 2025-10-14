@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import type { DeploymentConfig } from 'server/models/yaml/YamlService';
+
 export interface DependencyService {
   name?: string;
   repository?: string;
@@ -34,65 +36,6 @@ export interface AuroraRestoreService {
 export interface ConfigurationService {
   defaultTag: string;
   branchName: string;
-}
-
-export interface DeploymentConfig {
-  public?: boolean;
-  capacityType?: string;
-  resource?: ResourceConfig;
-  readiness?: ReadinessConfig;
-  hostnames?: HostnamesConfig;
-  network?: NetworkConfig;
-  serviceDisks?: ServiceDiskConfig[];
-}
-
-export interface ResourceConfig {
-  cpu?: CapacityConfig;
-  memory?: CapacityConfig;
-}
-
-export interface CapacityConfig {
-  request?: string;
-  limit?: string;
-}
-
-export interface ReadinessConfig {
-  tcpSocketPort?: number;
-  httpGet?: {
-    path: string;
-    port: number;
-  };
-  initialDelaySeconds?: number;
-  periodSeconds?: number;
-  timeoutSeconds?: number;
-  successThreshold?: number;
-  failureThreshold?: number;
-}
-
-export interface HostnamesConfig {
-  host?: string;
-  acmARN?: string;
-  defaultInternalHostname?: string;
-  defaultPublicUrl?: string;
-}
-
-export interface NetworkConfig {
-  ipWhitelist?: string[];
-  pathPortMapping?: Record<string, string>;
-  hostPortMapping?: Record<string, string>;
-  grpc?: {
-    enable: boolean;
-    host?: string;
-    defaultHost?: string;
-  };
-}
-
-export interface ServiceDiskConfig {
-  name: string;
-  mountPath: string;
-  accessModes?: string;
-  storageSize: string;
-  medium?: string;
 }
 
 export interface AfterBuildPipelineConfig {

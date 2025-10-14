@@ -130,5 +130,15 @@ export const deployment = {
         required: ['name', 'mountPath', 'storageSize'],
       },
     },
+    node_selector: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Simple key-value pairs for Kubernetes node selector',
+    },
+    node_affinity: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Full Kubernetes nodeAffinity object for advanced node selection',
+    },
   },
 };
