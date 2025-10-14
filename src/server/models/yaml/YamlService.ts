@@ -231,7 +231,7 @@ export interface DeploymentConfig {
   readonly network?: NetworkConfig;
   readonly serviceDisks?: ServiceDiskConfig[];
   readonly node_selector?: Record<string, string>;
-  readonly node_affinity?: any;
+  readonly node_affinity?: Record<string, unknown>;
 }
 
 export interface ResourceConfig {

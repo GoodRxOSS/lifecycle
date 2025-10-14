@@ -645,7 +645,7 @@ export function generatePersistentDisks(
  * @param customNodeAffinity optional custom node affinity from schema (overrides default)
  * @returns an affinity block using either requirements or preferences
  */
-function generateAffinity(capacityType: string, isStatic: boolean, customNodeAffinity?: any) {
+function generateAffinity(capacityType: string, isStatic: boolean, customNodeAffinity?: Record<string, unknown>) {
   // If custom node affinity is provided, use it instead of default
   if (customNodeAffinity) {
     return { nodeAffinity: customNodeAffinity };

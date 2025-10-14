@@ -108,7 +108,7 @@ export default class Service extends Model {
   ingressAnnotations: Record<string, any>;
 
   nodeSelector: Record<string, string>;
-  nodeAffinity: Record<string, any>;
+  nodeAffinity: Record<string, unknown>;
 
   static tableName = 'services';
   static timestamps = true;

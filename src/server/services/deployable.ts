@@ -99,7 +99,7 @@ export interface DeployableAttributes {
   kedaScaleToZero?: KedaScaleToZero;
   builder?: Builder;
   nodeSelector?: Record<string, string>;
-  nodeAffinity?: any;
+  nodeAffinity?: Record<string, unknown>;
 }
 
 export default class DeployableService extends BaseService {
