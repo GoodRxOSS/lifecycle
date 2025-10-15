@@ -50,10 +50,12 @@ import BuildService from 'server/services/build';
  *                         type: integer
  *                       uuid:
  *                         type: string
+ *                         example: "white-poetry-596195"
  *                       status:
  *                         $ref: '#/components/schemas/BuildStatus'
  *                       namespace:
  *                         type: string
+ *                         example: "env-white-poetry-596195"
  *                       pullRequest:
  *                         type: object
  *                         properties:
@@ -61,15 +63,19 @@ import BuildService from 'server/services/build';
  *                             type: integer
  *                           title:
  *                             type: string
+ *                             example: "Add new feature"
  *                           fullName:
  *                             type: string
+ *                             example: "goodrx/lifecycle"
  *                           githubLogin:
  *                             type: string
+ *                             example: "lifecycle-bot"
  *                 metadata:
  *                   type: object
  *                 error:
- *                   type: object
- *                   nullable: true
+ *                   type: null
+ *                   example: null
+ *                   description: Always null on successful responses.
  *       500:
  *         description: Server error
  *         content:
@@ -81,6 +87,8 @@ import BuildService from 'server/services/build';
  *                   type: string
  *                 data:
  *                   type: null
+ *                   example: null
+ *                   description: Always null on error responses.
  *                 error:
  *                   type: object
  *                   properties:
