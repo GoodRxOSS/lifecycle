@@ -28,7 +28,7 @@ if (getConfig() === undefined) {
 }
 
 const getServerRuntimeConfig = (key: string, fallback?: any): any => {
-  return getProp(serverRuntimeConfig, key, fallback);
+  return getProp(serverRuntimeConfig!, key, fallback);
 };
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
