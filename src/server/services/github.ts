@@ -19,7 +19,13 @@ import _ from 'lodash';
 import Service from './_service';
 import rootLogger from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
-import { GithubPullRequestActions, GithubWebhookTypes, PullRequestStatus, FallbackLabels } from 'shared/constants';
+import {
+  GithubPullRequestActions,
+  GithubWebhookTypes,
+  PullRequestStatus,
+  FallbackLabels,
+  DeployStatus,
+} from 'shared/constants';
 import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
@@ -327,10 +333,26 @@ export default class GithubService extends Service {
         if (!buildId) {
           logger.error(`[BUILD ${build?.uuid}][handlePushWebhook][buidIdError] No build ID found for this build!`);
         }
-        logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
+
+        // Check if any deploys for this build have failed previously
+        const failedDeploys = await models.Deploy.query()
+          .where('buildId', buildId)
+          .where('active', true)
+          .whereIn('status', [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED]);
+
+        const hasFailedDeploys = failedDeploys.length > 0;
+
+        logger.info(
+          `[BUILD ${build?.uuid}] ${
+            hasFailedDeploys
+              ? `Detected ${failedDeploys.length} failed deploy(s). Triggering full redeploy`
+              : 'Deploying build'
+          } for push on repo: ${repoName} branch: ${branchName}`
+        );
+
         await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
-          githubRepositoryId,
+          ...(hasFailedDeploys ? {} : { githubRepositoryId }),
         });
       }
     } catch (error) {
