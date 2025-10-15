@@ -18,7 +18,7 @@ import 'dotenv/config';
 import getConfig from 'next/config';
 import { serverRuntimeConfig as fallbackServerRuntimeConfig } from '../../next.config';
 
-let serverRuntimeConfig = null;
+let serverRuntimeConfig: any = null;
 
 /* There are some situations where getConfig is not initialized because of how next works */
 if (getConfig() === undefined) {

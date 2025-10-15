@@ -28,9 +28,15 @@
     "jsx": "preserve",
     "incremental": true,
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "emitDecoratorMetadata": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "strictNullChecks": true
   },
-  "include": ["src/**/*", "scripts/**/*", "package.json"],
+  "include": ["src/**/*", "scripts/**/*", "package.json", ".next/types/**/*.ts"],
   "exclude": ["node_modules", "**/node_modules/*"],
   "ts-node": {
     "compilerOptions": {
