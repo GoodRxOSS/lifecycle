@@ -33,25 +33,16 @@ export async function paginate<T extends Model>(
 ): Promise<PaginatedResponse<T>> {
   const page = parseInt(searchParams.get('page') || '1', 10);
   const limit = parseInt(searchParams.get('limit') || '25', 10);
-  const isPaginated = searchParams.has('page') || searchParams.has('limit');
 
-  let results: T[];
-  let totalItems: number;
-  let metadata: PaginationMetadata;
+  const pageResult: Page<T> = await query.page(page - 1, limit);
+  const totalItems = pageResult.total;
 
-  if (isPaginated) {
-    const pageResult: Page<T> = await query.page(page - 1, limit);
-    results = pageResult.results;
-    totalItems = pageResult.total;
-    metadata = {
-      current: page,
-      total: Math.ceil(totalItems / limit),
-      items: totalItems,
-      limit,
-    };
-  } else {
-    results = await query;
-  }
+  const metadata: PaginationMetadata = {
+    current: page,
+    total: Math.ceil(totalItems / limit),
+    items: totalItems,
+    limit,
+  };
 
-  return { data: results, metadata };
+  return { data: pageResult.results, metadata };
 }
