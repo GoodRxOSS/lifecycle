@@ -10,28 +10,36 @@ interface Metadata {
   pagination?: PaginationMetadata;
 }
 
+type SuccessStatusCode = 200 | 201;
+
+type ErrorStatusCode = 400 | 401 | 404 | 500;
+
 interface SuccessResponse<T> {
-  request_id: string | null;
+  request_id: string;
   data: T | null;
   error: null;
   metadata?: Metadata;
 }
 
 interface SuccessResponseOptions {
-  status?: number;
+  status: SuccessStatusCode;
   metadata?: Metadata;
 }
 
 interface ErrorResponse {
-  request_id: string | null;
+  request_id: string;
   data: null;
   error: {
     message: string;
   };
 }
 
-export function successResponse<T>(data: T, options: SuccessResponseOptions = {}, req: NextRequest): NextResponse {
-  const { status = 200, metadata } = options;
+interface ErrorResponseOptions {
+  status: ErrorStatusCode;
+}
+
+export function successResponse<T>(data: T, options: SuccessResponseOptions, req: NextRequest): NextResponse {
+  const { status, metadata } = options;
 
   const body: SuccessResponse<T> = {
     request_id: req.headers.get('x-request-id'),
@@ -46,8 +54,18 @@ export function successResponse<T>(data: T, options: SuccessResponseOptions = {}
   return NextResponse.json(body, { status });
 }
 
-export function errorResponse(error: unknown, status: number = 500, req: NextRequest): NextResponse {
-  logger.error('Error response', { error });
+export function errorResponse(error: unknown, options: ErrorResponseOptions, req: NextRequest): NextResponse {
+  let errorMessage = 'An unexpected error occurred.';
+  let errorStack = '';
+
+  if (error instanceof Error) {
+    errorMessage = error.message;
+    errorStack = error.stack || '';
+  }
+
+  logger.error(`API Error: ${errorMessage}`, { stack: errorStack });
+
+  const { status } = options;
 
   const body: ErrorResponse = {
     request_id: req.headers.get('x-request-id'),

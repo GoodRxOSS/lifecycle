@@ -8,7 +8,7 @@ import BuildService from 'server/services/build';
  * /api/v2/builds:
  *   get:
  *     summary: Get a list of builds
- *     description: Returns a list of builds, optionally excluding certain statuses.
+ *     description: Returns a paginated list of builds, optionally excluding certain statuses. Pagination is enabled by default with a default limit of 25 items per page.
  *     tags:
  *       - Builds
  *     parameters:
@@ -25,15 +25,17 @@ import BuildService from 'server/services/build';
  *         name: page
  *         schema:
  *           type: integer
- *         description: Page number for pagination (optional).
+ *           default: 1
+ *         description: Page number for pagination (optional, default is 1).
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
- *         description: Number of items per page (optional).
+ *           default: 25
+ *         description: Number of items per page (optional, default is 25).
  *     responses:
  *       200:
- *         description: A list of builds.
+ *         description: A paginated list of builds.
  *         content:
  *           application/json:
  *             schema:
@@ -118,12 +120,12 @@ export async function GET(req: NextRequest) {
     return successResponse(
       data,
       {
-        ...(paginationMetadata && { metadata: { pagination: paginationMetadata } }),
+        metadata: { pagination: paginationMetadata },
         status: 200,
       },
       req
     );
   } catch (error) {
-    return errorResponse(error, 500, req);
+    return errorResponse(error, { status: 500 }, req);
   }
 }
