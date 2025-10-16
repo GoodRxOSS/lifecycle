@@ -14,20 +14,8 @@
  * limitations under the License.
  */
 
-/* eslint-disable react/no-unknown-property */
-import React from 'react';
-import type { AppProps } from 'next/app'
-import Head from 'next/head';
-import { HeroUIProvider } from '@heroui/react';
-import '../styles/globals.css';
-
-export default function App({ Component, pageProps }: AppProps) {
-  return (
-      <HeroUIProvider>
-        <Head>
-          <title>Lifecycle</title>
-        </Head>
-        <Component {...pageProps} />
-      </HeroUIProvider>
-    );
-  }
+export * from './base';
+export * from './anthropic';
+export * from './openai';
+export * from './gemini';
+export * from './factory';
