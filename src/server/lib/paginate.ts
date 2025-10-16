@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { Model } from 'objection';
 import { Page, QueryBuilder } from 'objection';
 
 /**
@@ -27,6 +28,16 @@ export interface PaginationMetadata {
 }
 
 /**
+ * Interface for the pagination parameters.
+ * `page` is the current page number (1-indexed).
+ * `limit` is the number of items per page.
+ */
+export interface PaginationParams {
+  page?: number;
+  limit?: number;
+}
+
+/**
  * Interface for the paginated response.
  */
 interface PaginatedResponse<T> {
@@ -35,22 +46,38 @@ interface PaginatedResponse<T> {
 }
 
 /**
- * A reusable pagination utility for Objection.js queries.
- *
- * @param query The Objection.js query builder instance.
- * @param searchParams The URLSearchParams from the NextRequest.
- * @returns A promise that resolves to an object containing results and metadata.
+ * Extracts and validates page and limit from URLSearchParams for pagination.
+ * @param searchParams - The URLSearchParams object from the request.
+ * @returns An object with page and limit numbers.
  */
-import { Model } from 'objection';
-
-export async function paginate<T extends Model>(
-  query: QueryBuilder<any, any>,
-  searchParams: URLSearchParams
-): Promise<PaginatedResponse<T>> {
+export function getPaginationParamsFromURL(searchParams: URLSearchParams): PaginationParams {
   const page = parseInt(searchParams.get('page') || '1', 10);
   const limit = parseInt(searchParams.get('limit') || '25', 10);
 
-  const pageResult: Page<T> = await query.page(page - 1, limit);
+  return {
+    page,
+    limit,
+  };
+}
+
+/**
+ * A reusable pagination utility for Objection.js queries.
+ *
+ * @param query The Objection.js query builder instance.
+ * @param paginationParams The pagination parameters.
+ * @returns A promise that resolves to an object containing results and metadata.
+ */
+
+export async function paginate<T extends Model>(
+  query: QueryBuilder<any, any>,
+  paginationParams: PaginationParams
+): Promise<PaginatedResponse<T>> {
+  const { page, limit } = paginationParams;
+
+  const currentPage = isNaN(page) || page < 1 ? 1 : page;
+  const currentLimit = isNaN(limit) || limit < 1 ? 25 : limit;
+
+  const pageResult: Page<T> = await query.page(currentPage - 1, currentLimit);
   const totalItems = pageResult.total;
 
   const metadata: PaginationMetadata = {

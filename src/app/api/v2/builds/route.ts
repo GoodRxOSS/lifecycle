@@ -15,7 +15,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { paginate } from 'server/lib/paginate';
+import { getPaginationParamsFromURL } from 'server/lib/paginate';
 import { errorResponse, successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
@@ -122,16 +122,10 @@ export async function GET(req: NextRequest) {
     const excludeQuery = searchParams.get('exclude');
     const excludeStatuses = excludeQuery ? excludeQuery.split(',').map((s) => s.trim()) : [];
 
-    const baseQuery = buildService.db.models.Build.query()
-      .select('id', 'uuid', 'status', 'namespace')
-      .whereNotIn('status', excludeStatuses)
-      .withGraphFetched('pullRequest')
-      .modifyGraph('pullRequest', (builder) => {
-        builder.select('id', 'title', 'fullName', 'githubLogin');
-      })
-      .orderBy('updatedAt', 'desc');
-
-    const { data, metadata: paginationMetadata } = await paginate(baseQuery, searchParams);
+    const { data, paginationMetadata } = await buildService.getAllBuilds(
+      excludeStatuses,
+      getPaginationParamsFromURL(searchParams)
+    );
 
     return successResponse(
       data,
