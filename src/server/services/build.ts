@@ -42,6 +42,7 @@ import { Tracer } from 'server/lib/tracer';
 import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
+import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 
 const logger = rootLogger.child({
   filename: 'services/build.ts',
@@ -104,6 +105,34 @@ export default class BuildService extends BaseService {
       .whereNot('status', 'pending')
       .withGraphFetched('deploys.[service.[repository]]');
     return builds;
+  }
+
+  /**
+   * Returns a paginated list of all builds, excluding those with specified statuses.
+   * By default, pagination is enabled with a limit of 25 items per page.
+   * @param excludeStatuses An array of build statuses to exclude from the results.
+   * @param pagination Pagination parameters including page number and limit.
+   * @returns An object containing the list of builds and pagination metadata.
+   * */
+  async getAllBuilds(
+    excludeStatuses: string[] = [],
+    pagination?: PaginationParams
+  ): Promise<{
+    data: Build[];
+    paginationMetadata: PaginationMetadata;
+  }> {
+    const baseQuery = this.db.models.Build.query()
+      .select('id', 'uuid', 'status', 'namespace')
+      .whereNotIn('status', excludeStatuses)
+      .withGraphFetched('pullRequest')
+      .modifyGraph('pullRequest', (builder) => {
+        builder.select('id', 'title', 'fullName', 'githubLogin');
+      })
+      .orderBy('updatedAt', 'desc');
+
+    const { data, metadata: paginationMetadata } = await paginate<Build>(baseQuery, pagination);
+
+    return { data, paginationMetadata };
   }
 
   /**
