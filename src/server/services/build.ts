@@ -110,20 +110,22 @@ export default class BuildService extends BaseService {
   /**
    * Returns a paginated list of all builds, excluding those with specified statuses.
    * By default, pagination is enabled with a limit of 25 items per page.
-   * @param excludeStatuses An array of build statuses to exclude from the results.
+   * @param excludeStatuses A comma-separated string of build statuses to exclude from the results.
    * @param pagination Pagination parameters including page number and limit.
    * @returns An object containing the list of builds and pagination metadata.
    * */
   async getAllBuilds(
-    excludeStatuses: string[] = [],
+    excludeStatuses: string,
     pagination?: PaginationParams
   ): Promise<{
     data: Build[];
     paginationMetadata: PaginationMetadata;
   }> {
+    const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
+
     const baseQuery = this.db.models.Build.query()
       .select('id', 'uuid', 'status', 'namespace')
-      .whereNotIn('status', excludeStatuses)
+      .whereNotIn('status', exclude)
       .withGraphFetched('pullRequest')
       .modifyGraph('pullRequest', (builder) => {
         builder.select('id', 'title', 'fullName', 'githubLogin');
