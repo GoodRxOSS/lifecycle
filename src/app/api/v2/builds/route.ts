@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { paginate } from 'server/lib/paginate';
-import { errorResponse, successResponse } from 'server/lib/standardizedResponse';
+import { errorResponse, successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
 /**
