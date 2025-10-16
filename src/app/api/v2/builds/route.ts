@@ -15,8 +15,9 @@
  */
 
 import { NextRequest } from 'next/server';
+import { createApiHandler } from 'server/lib/createApiHandler';
 import { getPaginationParamsFromURL } from 'server/lib/paginate';
-import { errorResponse, successResponse } from 'server/lib/response';
+import { successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
 /**
@@ -113,29 +114,26 @@ import BuildService from 'server/services/build';
  *                     message:
  *                       type: string
  */
-export async function GET(req: NextRequest) {
+const getHandler = async (req: NextRequest) => {
   const { searchParams } = req.nextUrl;
+  const buildService = new BuildService();
 
-  try {
-    const buildService = new BuildService();
+  const excludeQuery = searchParams.get('exclude');
+  const excludeStatuses = excludeQuery ? excludeQuery.split(',').map((s) => s.trim()) : [];
 
-    const excludeQuery = searchParams.get('exclude');
-    const excludeStatuses = excludeQuery ? excludeQuery.split(',').map((s) => s.trim()) : [];
+  const { data, paginationMetadata } = await buildService.getAllBuilds(
+    excludeStatuses,
+    getPaginationParamsFromURL(searchParams)
+  );
 
-    const { data, paginationMetadata } = await buildService.getAllBuilds(
-      excludeStatuses,
-      getPaginationParamsFromURL(searchParams)
-    );
+  return successResponse(
+    data,
+    {
+      metadata: { pagination: paginationMetadata },
+      status: 200,
+    },
+    req
+  );
+};
 
-    return successResponse(
-      data,
-      {
-        metadata: { pagination: paginationMetadata },
-        status: 200,
-      },
-      req
-    );
-  } catch (error) {
-    return errorResponse(error, { status: 500 }, req);
-  }
-}
+export const GET = createApiHandler(getHandler);
