@@ -118,11 +118,8 @@ const getHandler = async (req: NextRequest) => {
   const { searchParams } = req.nextUrl;
   const buildService = new BuildService();
 
-  const excludeQuery = searchParams.get('exclude');
-  const excludeStatuses = excludeQuery ? excludeQuery.split(',').map((s) => s.trim()) : [];
-
   const { data, paginationMetadata } = await buildService.getAllBuilds(
-    excludeStatuses,
+    searchParams.get('exclude'),
     getPaginationParamsFromURL(searchParams)
   );
 
