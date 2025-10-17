@@ -17,16 +17,24 @@
 import { NextResponse } from 'next/server';
 import type { Middleware } from './chain';
 import { verifyAuth } from 'server/lib/auth';
+import { ErrorResponse } from 'server/lib/response';
 
 export const authMiddleware: Middleware = async (request, next) => {
   if (request.url.includes('/api/v2/')) {
     const authResult = await verifyAuth(request);
 
     if (!authResult.success) {
-      return new NextResponse(JSON.stringify({ success: false, message: authResult.error?.message }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new NextResponse(
+        JSON.stringify({
+          request_id: request.headers.get('x-request-id'),
+          error: { message: authResult.error?.message || 'Unauthorized' },
+          data: null,
+        } satisfies ErrorResponse),
+        {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
     }
   }
 

@@ -15,10 +15,10 @@
  */
 
 import { NextResponse } from 'next/server';
-import { openApiSpecification } from 'src/pages/v2/docs';
+import { openApiSpecificationForV2Api } from 'shared/openApiSpec';
 import swaggerJsdoc from 'swagger-jsdoc';
 
 export async function GET() {
-  const swaggerSpec = swaggerJsdoc(openApiSpecification);
+  const swaggerSpec = swaggerJsdoc(openApiSpecificationForV2Api);
   return NextResponse.json(swaggerSpec);
 }

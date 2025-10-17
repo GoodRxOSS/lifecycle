@@ -19,8 +19,7 @@ import React from 'react';
 import dynamic from 'next/dynamic';
 import { GetServerSideProps } from 'next';
 import 'swagger-ui-react/swagger-ui.css';
-import type { OAS3Options } from 'swagger-jsdoc';
-import { BuildStatus } from 'shared/constants';
+import { openApiSpecificationForV2Api } from 'shared/openApiSpec';
 
 // Import Swagger UI dynamically so it doesn't run on the server.
 const SwaggerUI = dynamic(() => import('swagger-ui-react'), { ssr: false });
@@ -37,32 +36,11 @@ export default function DocsPage({ swaggerSpec }: DocsPageProps) {
   );
 }
 
-export const openApiSpecification: OAS3Options = {
-  definition: {
-    openapi: '3.0.0',
-    info: {
-      title: 'Lifecycle API',
-      version: '2.0.0',
-      description: 'API documentation for lifecycle',
-    },
-    components: {
-      schemas: {
-        BuildStatus: {
-          type: 'string',
-          enum: BuildStatus,
-        },
-      },
-    },
-  },
-  // Adjust this glob pattern to match your API files
-  apis: ['./src/app/api/**/*.ts'],
-};
-
 export const getServerSideProps: GetServerSideProps = async () => {
   // Dynamically import swagger-jsdoc so it's only loaded on the server.
   const swaggerJSDoc = (await import('swagger-jsdoc')).default;
 
-  const swaggerSpec = swaggerJSDoc(openApiSpecification);
+  const swaggerSpec = swaggerJSDoc(openApiSpecificationForV2Api);
 
   return {
     props: {
