@@ -19,7 +19,7 @@ import { PaginationMetadata } from './paginate';
 import rootLogger from './logger';
 
 const logger = rootLogger.child({
-  filename: 'server/lib/standardizedResponse.ts',
+  filename: 'server/lib/response.ts',
 });
 
 interface Metadata {
@@ -42,7 +42,7 @@ interface SuccessResponseOptions {
   metadata?: Metadata;
 }
 
-interface ErrorResponse {
+export interface ErrorResponse {
   request_id: string;
   data: null;
   error: {

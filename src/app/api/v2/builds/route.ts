@@ -25,94 +25,42 @@ import BuildService from 'server/services/build';
  * /api/v2/builds:
  *   get:
  *     summary: Get a list of builds
- *     description: Returns a paginated list of builds, optionally excluding certain statuses. Pagination is enabled by default with a default limit of 25 items per page.
+ *     description: Returns a paginated list of builds, optionally excluding certain statuses.
  *     tags:
  *       - Builds
+ *     operationId: getBuilds
  *     parameters:
  *       - in: query
  *         name: exclude
  *         schema:
  *           type: string
- *           default: ""
  *           example: "pending,failed"
- *         description: >
- *           Comma-separated list of build statuses to exclude from the results.
- *           Each value must be a valid BuildStatus (see Schemas -> BuildStatus).
+ *         description: Comma-separated list of build statuses to exclude.
  *       - in: query
  *         name: page
  *         schema:
  *           type: integer
  *           default: 1
- *         description: Page number for pagination (optional, default is 1).
+ *         description: Page number for pagination.
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
  *           default: 25
- *         description: Number of items per page (optional, default is 25).
+ *         description: Number of items per page.
  *     responses:
- *       200:
+ *       '200':
  *         description: A paginated list of builds.
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id:
- *                         type: integer
- *                       uuid:
- *                         type: string
- *                         example: "white-poetry-596195"
- *                       status:
- *                         $ref: '#/components/schemas/BuildStatus'
- *                       namespace:
- *                         type: string
- *                         example: "env-white-poetry-596195"
- *                       pullRequest:
- *                         type: object
- *                         properties:
- *                           id:
- *                             type: integer
- *                           title:
- *                             type: string
- *                             example: "Add new feature"
- *                           fullName:
- *                             type: string
- *                             example: "goodrx/lifecycle"
- *                           githubLogin:
- *                             type: string
- *                             example: "lifecycle-bot"
- *                 metadata:
- *                   type: object
- *                 error:
- *                   type: null
- *                   example: null
- *                   description: Always null on successful responses.
- *       500:
+ *               $ref: '#/components/schemas/GetBuildsSuccessResponse'
+ *       '500':
  *         description: Server error
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: null
- *                   example: null
- *                   description: Always null on error responses.
- *                 error:
- *                   type: object
- *                   properties:
- *                     message:
- *                       type: string
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
   const { searchParams } = req.nextUrl;
