@@ -18,7 +18,7 @@ import 'dotenv/config';
 import getConfig from 'next/config';
 import { serverRuntimeConfig as fallbackServerRuntimeConfig } from '../../next.config';
 
-let serverRuntimeConfig = null;
+let serverRuntimeConfig: Record<string, any> | null = null;
 
 /* There are some situations where getConfig is not initialized because of how next works */
 if (getConfig() === undefined) {
@@ -28,7 +28,7 @@ if (getConfig() === undefined) {
 }
 
 const getServerRuntimeConfig = (key: string, fallback?: any): any => {
-  return getProp(serverRuntimeConfig, key, fallback);
+  return getProp(serverRuntimeConfig!, key, fallback);
 };
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {

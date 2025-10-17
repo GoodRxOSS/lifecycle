@@ -31,6 +31,9 @@ data:
       "displayName": "Lifecycle",
       "displayNameHtml": "Lifecycle",
       "enabled": true,
+      "accessTokenLifespan": 300,
+      "ssoSessionIdleTimeout": 36000,
+      "ssoSessionMaxLifespan": 43200,
       "users": [
         {
           "username": "service-account-lifecycle-ui-backend",
@@ -207,6 +210,40 @@ data:
                 "introspection.token.claim": "true",
                 "userinfo.token.claim": "false"
               }
+            },
+            {
+              "id": "221e16b3-2eac-4250-9c9e-b31fa1b023c4",
+              "name": "Github profile picture",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "user.attribute": "githubProfilePicture",
+                "id.token.claim": "true",
+                "lightweight.claim": "false",
+                "access.token.claim": "true",
+                "claim.name": "github_profile_picture",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "id": "470ba990-7282-4e33-a0f8-b8765462f6c9",
+              "name": "Github username",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "user.attribute": "githubUsername",
+                "id.token.claim": "true",
+                "lightweight.claim": "false",
+                "access.token.claim": "true",
+                "claim.name": "github_username",
+                "jsonType.label": "String"
+              }
             }
           ],
           "defaultClientScopes": [
@@ -348,6 +385,30 @@ data:
           }
         }
       ],
+      "identityProviderMappers": [
+        {
+          "id": "99c4f2ee-0ad8-4e02-b69c-3f9146606040",
+          "name": "Github username",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "github-user-attribute-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "userAttribute": "githubUsername",
+            "jsonField": "login"
+          }
+        },
+        {
+          "id": "c733308c-237b-406e-aef5-b4d63560a780",
+          "name": "Github profile picture",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "github-user-attribute-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "userAttribute": "githubProfilePicture",
+            "jsonField": "avatar_url"
+          }
+        }
+      ],
       "components": {
         "org.keycloak.userprofile.UserProfileProvider": [
           {
@@ -355,7 +416,7 @@ data:
             "subComponents": {},
             "config": {
               "kc.user.profile.config": [
-                "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
+                "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"githubUsername\",\"displayName\":\"${githubUsername}\",\"validations\":{},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"githubProfilePicture\",\"displayName\":\"${githubProfilePicture}\",\"validations\":{},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
               ]
             }
           }
