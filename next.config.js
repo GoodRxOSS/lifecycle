@@ -17,6 +17,15 @@
 require('dotenv').config();
 
 module.exports = {
+  experimental: {
+    serverComponentsExternalPackages: [
+      '@kubernetes/client-node',
+      '@octokit/core',
+      '@octokit/auth-app',
+      'dd-trace',
+      'knex',
+    ],
+  },
   env: {
     GITHUB_APP_ID: process.env.GITHUB_APP_ID,
     GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
@@ -54,6 +63,10 @@ module.exports = {
     ENVIRONMENT: process.env.ENVIRONMENT,
     APP_HOST: process.env.APP_HOST,
     SECRET_BOOTSTRAP_NAME: process.env.SECRET_BOOTSTRAP_NAME,
+    KEYCLOAK_ISSUER: process.env.KEYCLOAK_ISSUER,
+    KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID,
+    KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL,
+    LIFECYCLE_UI_URL: process.env.LIFECYCLE_UI_URL,
   },
   typescript: {
     ignoreBuildErrors: true,

@@ -18,7 +18,7 @@ import 'dotenv/config';
 import getConfig from 'next/config';
 import { serverRuntimeConfig as fallbackServerRuntimeConfig } from '../../next.config';
 
-let serverRuntimeConfig = null;
+let serverRuntimeConfig: Record<string, any> | null = null;
 
 /* There are some situations where getConfig is not initialized because of how next works */
 if (getConfig() === undefined) {
@@ -28,7 +28,7 @@ if (getConfig() === undefined) {
 }
 
 const getServerRuntimeConfig = (key: string, fallback?: any): any => {
-  return getProp(serverRuntimeConfig, key, fallback);
+  return getProp(serverRuntimeConfig!, key, fallback);
 };
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
@@ -77,9 +77,9 @@ export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
 /**
  * @deprecated Use individual APP_REDIS_* environment variables instead (APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD). This will be removed in future releases.
  */
-export const REDIS_URL = getServerRuntimeConfig('REDIS_URL');
+export const REDIS_URL = getServerRuntimeConfig('REDIS_URL', '');
 
-export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', '');
+export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', 'changeme');
 export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
 export const APP_REDIS_PASSWORD = getServerRuntimeConfig('APP_REDIS_PASSWORD', '');
 export const APP_REDIS_TLS = getServerRuntimeConfig('APP_REDIS_TLS', 'false');
