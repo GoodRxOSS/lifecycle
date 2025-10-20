@@ -79,7 +79,7 @@ export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
  */
 export const REDIS_URL = getServerRuntimeConfig('REDIS_URL', '');
 
-export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', '');
+export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', 'changeme');
 export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
 export const APP_REDIS_PASSWORD = getServerRuntimeConfig('APP_REDIS_PASSWORD', '');
 export const APP_REDIS_TLS = getServerRuntimeConfig('APP_REDIS_TLS', 'false');
