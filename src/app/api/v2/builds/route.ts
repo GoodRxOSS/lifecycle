@@ -20,8 +20,6 @@ import { getPaginationParamsFromURL } from 'server/lib/paginate';
 import { successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
-export const dynamic = 'force-dynamic';
-
 /**
  * @openapi
  * /api/v2/builds:

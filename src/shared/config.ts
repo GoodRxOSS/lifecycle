@@ -77,7 +77,7 @@ export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
 /**
  * @deprecated Use individual APP_REDIS_* environment variables instead (APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD). This will be removed in future releases.
  */
-export const REDIS_URL = getServerRuntimeConfig('REDIS_URL');
+export const REDIS_URL = getServerRuntimeConfig('REDIS_URL', '');
 
 export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', '');
 export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
