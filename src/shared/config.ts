@@ -93,9 +93,9 @@ export const JOB_VERSION = getServerRuntimeConfig('JOB_VERSION', 'default');
 
 export const LOG_LEVEL = getServerRuntimeConfig('LOG_LEVEL', 'debug');
 
-export const FASTLY_TOKEN = getServerRuntimeConfig('FASTLY_TOKEN');
+export const FASTLY_TOKEN = getServerRuntimeConfig('FASTLY_TOKEN', '');
 
-export const CODEFRESH_API_KEY = getServerRuntimeConfig('CODEFRESH_API_KEY');
+export const CODEFRESH_API_KEY = getServerRuntimeConfig('CODEFRESH_API_KEY', '');
 
 export const MAX_GITHUB_API_REQUEST = getServerRuntimeConfig('MAX_GITHUB_API_REQUEST', 40);
 
