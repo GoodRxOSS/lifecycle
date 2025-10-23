@@ -333,22 +333,26 @@ export default class GithubService extends Service {
         if (!buildId) {
           logger.error(`[BUILD ${build?.uuid}][handlePushWebhook][buidIdError] No build ID found for this build!`);
         }
+        // Only check for failed deploys on PR environments, not static environments
+        let hasFailedDeploys = false;
+        if (!build.isStatic) {
+          const failedDeploys = await models.Deploy.query()
+            .where('buildId', buildId)
+            .where('active', true)
+            .whereIn('status', [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED]);
 
-        // Check if any deploys for this build have failed previously
-        const failedDeploys = await models.Deploy.query()
-          .where('buildId', buildId)
-          .where('active', true)
-          .whereIn('status', [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED]);
+          hasFailedDeploys = failedDeploys.length > 0;
 
-        const hasFailedDeploys = failedDeploys.length > 0;
+          if (hasFailedDeploys) {
+            logger.info(
+              `[BUILD ${build?.uuid}] Detected ${failedDeploys.length} failed deploy(s). Triggering full redeploy for push on repo: ${repoName} branch: ${branchName}`
+            );
+          }
+        }
 
-        logger.info(
-          `[BUILD ${build?.uuid}] ${
-            hasFailedDeploys
-              ? `Detected ${failedDeploys.length} failed deploy(s). Triggering full redeploy`
-              : 'Deploying build'
-          } for push on repo: ${repoName} branch: ${branchName}`
-        );
+        if (!hasFailedDeploys) {
+          logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
+        }
 
         await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
