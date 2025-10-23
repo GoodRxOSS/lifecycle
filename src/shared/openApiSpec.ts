@@ -120,8 +120,9 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             title: { type: 'string', example: 'Add new feature' },
             fullName: { type: 'string', example: 'goodrx/lifecycle' },
             githubLogin: { type: 'string', example: 'lifecycle-bot' },
+            pullRequestNumber: { type: 'integer', example: 42 },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin'],
+          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber'],
         },
 
         /**

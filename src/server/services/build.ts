@@ -128,7 +128,7 @@ export default class BuildService extends BaseService {
       .whereNotIn('status', exclude)
       .withGraphFetched('pullRequest')
       .modifyGraph('pullRequest', (builder) => {
-        builder.select('id', 'title', 'fullName', 'githubLogin');
+        builder.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber');
       })
       .orderBy('updatedAt', 'desc');
 
