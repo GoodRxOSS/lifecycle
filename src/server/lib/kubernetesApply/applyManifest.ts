@@ -82,7 +82,7 @@ export async function createKubernetesApplyJob({
           containers: [
             {
               name: 'kubectl-apply',
-              image: 'bitnami/kubectl:1.30',
+              image: 'bitnamilegacy/kubectl:1.30',
               command: ['/bin/bash', '-c'],
               args: [
                 `
