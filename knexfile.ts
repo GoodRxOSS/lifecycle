@@ -77,9 +77,9 @@ const defaults = {
   debug: false,
 };
 
-const environments = {};
+const environments: Record<string, any> = {};
 
-const config = merge(defaults, environments[NODE_ENV]);
+const config = merge(defaults, NODE_ENV ? environments[NODE_ENV] : {});
 
 module.exports = config;
 export default config;

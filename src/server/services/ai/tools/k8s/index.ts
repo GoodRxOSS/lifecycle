@@ -14,20 +14,8 @@
  * limitations under the License.
  */
 
-/* eslint-disable react/no-unknown-property */
-import React from 'react';
-import type { AppProps } from 'next/app'
-import Head from 'next/head';
-import { HeroUIProvider } from '@heroui/react';
-import '../styles/globals.css';
-
-export default function App({ Component, pageProps }: AppProps) {
-  return (
-      <HeroUIProvider>
-        <Head>
-          <title>Lifecycle</title>
-        </Head>
-        <Component {...pageProps} />
-      </HeroUIProvider>
-    );
-  }
+export { GetK8sResourcesTool } from './getK8sResources';
+export { GetPodLogsTool } from './getPodLogs';
+export { GetLifecycleLogsTool } from './getLifecycleLogs';
+export { PatchK8sResourceTool } from './patchK8sResource';
+export { QueryDatabaseTool } from './queryDatabase';
