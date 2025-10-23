@@ -72,11 +72,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         PaginationMetadata: {
           type: 'object',
           properties: {
-            totalItems: { type: 'integer' },
-            totalPages: { type: 'integer' },
-            currentPage: { type: 'integer' },
+            items: { type: 'integer' },
+            total: { type: 'integer' },
+            current: { type: 'integer' },
             limit: { type: 'integer' },
           },
+          required: ['items', 'total', 'current', 'limit'],
         },
 
         // ===================================================================
