@@ -353,20 +353,40 @@ export default class DeployService extends BaseService {
           ResourceTypeFilters: ['rds:db'],
         })
         .promise();
-      const dbArn = results.ResourceTagMappingList[0].ResourceARN;
-      const params = {
-        Filters: [
-          {
-            Name: 'db-instance-id' /* required */,
-            Values: [dbArn],
-          },
-        ],
-      };
-      const instances = await rds.describeDBInstances(params, null).promise();
 
-      if (instances.DBInstances.length === 1) {
-        const database = instances.DBInstances[0];
-        const databaseAddress = database.Endpoint.Address;
+      const instanceArn = results.ResourceTagMappingList?.find((mapping) =>
+        mapping.ResourceARN?.includes(':db:')
+      )?.ResourceARN;
+
+      let databaseAddress: string | undefined;
+
+      if (instanceArn) {
+        const instanceIdentifier = instanceArn.split(':').pop();
+        if (instanceIdentifier) {
+          const instances = await rds
+            .describeDBInstances({
+              DBInstanceIdentifier: instanceIdentifier,
+            })
+            .promise();
+          const database = instances.DBInstances?.[0];
+          if (database) {
+            databaseAddress = database.Endpoint?.Address;
+            if (database.DBClusterIdentifier) {
+              const clusters = await rds
+                .describeDBClusters({
+                  DBClusterIdentifier: database.DBClusterIdentifier,
+                })
+                .promise();
+              const clusterEndpoint = clusters.DBClusters?.[0]?.Endpoint;
+              if (clusterEndpoint) {
+                databaseAddress = clusterEndpoint;
+              }
+            }
+          }
+        }
+      }
+
+      if (databaseAddress) {
         await deploy.$query().patch({
           cname: databaseAddress,
         });
