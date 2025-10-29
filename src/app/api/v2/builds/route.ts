@@ -55,6 +55,11 @@ import BuildService from 'server/services/build';
  *           type: boolean
  *           default: false
  *         description: If true, only returns builds for the current user.
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search term to filter builds by various fields.
  *     responses:
  *       '200':
  *         description: A paginated list of builds.
@@ -77,6 +82,7 @@ const getHandler = async (req: NextRequest) => {
   const { data, paginationMetadata } = await buildService.getAllBuilds(
     searchParams.get('exclude'),
     searchParams.get('my_envs') === 'true' ? (user.github_username as string) || '' : '',
+    searchParams.get('search'),
     getPaginationParamsFromURL(searchParams)
   );
 
