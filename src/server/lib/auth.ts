@@ -15,10 +15,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createRemoteJWKSet, JWTPayload, jwtVerify } from 'jose';
 
 interface AuthResult {
   success: boolean;
+  payload?: JWTPayload;
   error?: {
     message: string;
     status: number;
@@ -63,13 +64,13 @@ export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
     const JWKS = createRemoteJWKSet(new URL(jwksUrl));
 
     // 4. Verify the token. This function checks the signature, expiration, issuer, and audience.
-    await jwtVerify(token, JWKS, {
+    const { payload } = await jwtVerify(token, JWKS, {
       issuer: issuer,
       audience: audience,
     });
 
     // 5. If verification is successful, return a success result.
-    return { success: true };
+    return { success: true, payload };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
     console.error('JWT Verification Error:', errorMessage);

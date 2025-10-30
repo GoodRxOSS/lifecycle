@@ -116,6 +116,8 @@ export default class BuildService extends BaseService {
    * */
   async getAllBuilds(
     excludeStatuses: string,
+    filterByAuthor?: string,
+    search?: string,
     pagination?: PaginationParams
   ): Promise<{
     data: Build[];
@@ -126,6 +128,30 @@ export default class BuildService extends BaseService {
     const baseQuery = this.db.models.Build.query()
       .select('id', 'uuid', 'status', 'namespace')
       .whereNotIn('status', exclude)
+      .modify((qb) => {
+        if (filterByAuthor) {
+          qb.whereExists(this.db.models.Build.relatedQuery('pullRequest').where('githubLogin', filterByAuthor));
+        }
+
+        const term = (search ?? '').trim();
+        if (term) {
+          const like = `%${term.toLowerCase()}%`;
+
+          qb.where((w) => {
+            // Build table columns
+            w.orWhereRaw('LOWER("uuid") LIKE ?', [like]).orWhereRaw('LOWER("namespace") LIKE ?', [like]);
+
+            // Related pullRequest columns
+            w.orWhereExists(
+              this.db.models.Build.relatedQuery('pullRequest').where((pr) => {
+                pr.whereRaw('LOWER("title") LIKE ?', [like])
+                  .orWhereRaw('LOWER("fullName") LIKE ?', [like])
+                  .orWhereRaw('LOWER("githubLogin") LIKE ?', [like]);
+              })
+            );
+          });
+        }
+      })
       .withGraphFetched('pullRequest')
       .modifyGraph('pullRequest', (builder) => {
         builder.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber');

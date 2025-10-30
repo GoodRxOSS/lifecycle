@@ -16,6 +16,7 @@
 
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
+import { getUser } from 'server/lib/get-user';
 import { getPaginationParamsFromURL } from 'server/lib/paginate';
 import { successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
@@ -48,6 +49,17 @@ import BuildService from 'server/services/build';
  *           type: integer
  *           default: 25
  *         description: Number of items per page.
+ *       - in: query
+ *         name: my_envs
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: If true, only returns builds for the current user.
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search term to filter builds by various fields.
  *     responses:
  *       '200':
  *         description: A paginated list of builds.
@@ -64,10 +76,13 @@ import BuildService from 'server/services/build';
  */
 const getHandler = async (req: NextRequest) => {
   const { searchParams } = req.nextUrl;
+  const user = getUser(req);
   const buildService = new BuildService();
 
   const { data, paginationMetadata } = await buildService.getAllBuilds(
     searchParams.get('exclude'),
+    searchParams.get('my_envs') === 'true' ? (user.github_username as string) || '' : '',
+    searchParams.get('search'),
     getPaginationParamsFromURL(searchParams)
   );
 

@@ -14,29 +14,38 @@
  * limitations under the License.
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import type { Middleware } from './chain';
 import { verifyAuth } from 'server/lib/auth';
 import { ErrorResponse } from 'server/lib/response';
 
-export const authMiddleware: Middleware = async (request, next) => {
-  if (request.url.includes('/api/v2/')) {
-    const authResult = await verifyAuth(request);
+const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj ?? {}), 'utf8').toString('base64url');
 
-    if (!authResult.success) {
-      return new NextResponse(
-        JSON.stringify({
-          request_id: request.headers.get('x-request-id'),
-          error: { message: authResult.error?.message || 'Unauthorized' },
-          data: null,
-        } satisfies ErrorResponse),
-        {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-    }
+export const authMiddleware: Middleware = async (request, next) => {
+  if (!request.url.includes('/api/v2/')) {
+    return next(request);
   }
 
-  return next(request);
+  const authResult = await verifyAuth(request);
+
+  if (!authResult.success) {
+    return new NextResponse(
+      JSON.stringify({
+        request_id: request.headers.get('x-request-id'),
+        error: { message: authResult.error?.message || 'Unauthorized' },
+        data: null,
+      } satisfies ErrorResponse),
+      {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  const headers = new Headers(request.headers);
+  headers.delete('x-user'); // prevent spoofing
+  headers.set('x-user', encode(authResult.payload));
+
+  const newRequest = new NextRequest(request.url, { ...request, headers });
+  return next(newRequest);
 };
