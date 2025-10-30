@@ -66,7 +66,7 @@ module.exports = {
     KEYCLOAK_ISSUER: process.env.KEYCLOAK_ISSUER,
     KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID,
     KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL,
-    LIFECYCLE_UI_URL: process.env.LIFECYCLE_UI_URL,
+    ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
   },
   typescript: {
     ignoreBuildErrors: true,
