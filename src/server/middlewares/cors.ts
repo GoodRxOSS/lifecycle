@@ -17,14 +17,19 @@
 import { NextResponse } from 'next/server';
 import type { Middleware } from './chain';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': process.env.LIFECYCLE_UI_URL,
-  'Access-Control-Allow-Credentials': 'true',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) => o.trim()) ?? [];
 
 export const corsMiddleware: Middleware = async (request, next) => {
+  const origin = request.headers.get('origin');
+  const isAllowedOrigin = origin && allowedOrigins.includes(origin);
+
+  const corsHeaders: Record<string, string> = {
+    'Access-Control-Allow-Origin': isAllowedOrigin ? origin : allowedOrigins[0],
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+
   if (request.method === 'OPTIONS') {
     return new NextResponse(null, { status: 204, headers: corsHeaders });
   }
