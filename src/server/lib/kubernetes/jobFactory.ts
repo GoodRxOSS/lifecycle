@@ -120,7 +120,8 @@ export interface BuildJobConfig {
 }
 
 export function createBuildJob(config: BuildJobConfig): V1Job {
-  const ttl = config.isStatic ? 86400 : undefined;
+  // Keep failed pods for 24 hours for debugging purposes
+  const ttl = 86400;
 
   return createKubernetesJob({
     name: config.jobName,
@@ -172,7 +173,8 @@ export interface HelmJobConfig {
 }
 
 export function createHelmJob(config: HelmJobConfig): V1Job {
-  const ttl = config.isStatic ? 86400 : undefined;
+  // Keep failed pods for 24 hours for debugging purposes
+  const ttl = 86400;
   const timeout = config.timeout || 1800; // 30 minutes default
 
   const labels: Record<string, string> = {

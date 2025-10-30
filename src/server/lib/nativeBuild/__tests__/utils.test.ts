@@ -80,7 +80,7 @@ describe('nativeBuild/utils', () => {
       expect(manifest.metadata.annotations['lifecycle.io/triggered-at']).toBeDefined();
 
       // Check spec
-      expect(manifest.spec.ttlSecondsAfterFinished).toBeUndefined(); // No TTL by default for non-static builds
+      expect(manifest.spec.ttlSecondsAfterFinished).toBe(86400); // 24 hours TTL for all builds
       expect(manifest.spec.backoffLimit).toBe(0);
       expect(manifest.spec.activeDeadlineSeconds).toBe(1800);
 
@@ -92,7 +92,7 @@ describe('nativeBuild/utils', () => {
       expect(manifest.spec.template.spec.volumes).toEqual([{ name: 'workspace', emptyDir: {} }]);
     });
 
-    it('sets TTL for static builds', () => {
+    it('sets TTL for all builds including static builds', () => {
       const options = {
         jobName: 'test-job',
         namespace: 'test-ns',
@@ -113,7 +113,7 @@ describe('nativeBuild/utils', () => {
       };
 
       const manifest = createBuildJobManifest(options);
-      expect(manifest.spec.ttlSecondsAfterFinished).toBe(86400); // 24 hours for static builds
+      expect(manifest.spec.ttlSecondsAfterFinished).toBe(86400); // 24 hours for all builds
     });
   });
 });
