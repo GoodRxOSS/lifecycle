@@ -315,6 +315,56 @@ export default class DeployService extends BaseService {
     return deploy;
   }
 
+  /**
+   * Helper function to check if an Aurora database already exists in AWS
+   * @param buildUuid The build UUID to search for
+   * @param serviceName The service name to search for
+   * @returns The database endpoint address if found, null otherwise
+   */
+  private async findExistingAuroraDatabase(buildUuid: string, serviceName: string): Promise<string | null> {
+    try {
+      const rds = new RDS();
+      const taggingApi = new resourceGroupsTagging();
+      const results = await taggingApi
+        .getResources({
+          TagFilters: [
+            {
+              Key: 'BuildUUID',
+              Values: [buildUuid],
+            },
+            {
+              Key: 'ServiceName',
+              Values: [serviceName],
+            },
+          ],
+          ResourceTypeFilters: ['rds:db'],
+        })
+        .promise();
+
+      if (results.ResourceTagMappingList && results.ResourceTagMappingList.length > 0) {
+        const dbArn = results.ResourceTagMappingList[0].ResourceARN;
+        const params = {
+          Filters: [
+            {
+              Name: 'db-instance-id' /* required */,
+              Values: [dbArn],
+            },
+          ],
+        };
+        const instances = await rds.describeDBInstances(params, null).promise();
+
+        if (instances.DBInstances.length === 1) {
+          const database = instances.DBInstances[0];
+          return database.Endpoint?.Address || null;
+        }
+      }
+      return null;
+    } catch (error) {
+      logger.debug(`Error checking for existing Aurora database: ${error}`);
+      return null;
+    }
+  }
+
   async deployAurora(deploy: Deploy): Promise<boolean> {
     try {
       // For now, we're just going to shell out and run the deploy
@@ -328,6 +378,19 @@ export default class DeployService extends BaseService {
         return true;
       }
 
+      // Check if database already exists in AWS before attempting to create
+      const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+      if (existingDbEndpoint) {
+        logger.info(
+          `[DEPLOY ${deploy?.uuid}] Aurora database already exists with endpoint ${existingDbEndpoint}, skipping creation`
+        );
+        await deploy.$query().patch({
+          cname: existingDbEndpoint,
+          status: DeployStatus.BUILT,
+        });
+        return true;
+      }
+
       const uuid = nanoid();
       await deploy.$query().patch({
         status: DeployStatus.BUILDING,
@@ -336,41 +399,15 @@ export default class DeployService extends BaseService {
       });
       logger.info(`[DEPLOY ${deploy?.uuid}] Restoring Aurora cluster for ${deploy?.uuid}`);
       await cli.cliDeploy(deploy);
-      const rds = new RDS();
-      const taggingApi = new resourceGroupsTagging();
-      const results = await taggingApi
-        .getResources({
-          TagFilters: [
-            {
-              Key: 'BuildUUID',
-              Values: [deploy.build.uuid],
-            },
-            {
-              Key: 'ServiceName',
-              Values: [deploy.deployable.name],
-            },
-          ],
-          ResourceTypeFilters: ['rds:db'],
-        })
-        .promise();
-      const dbArn = results.ResourceTagMappingList[0].ResourceARN;
-      const params = {
-        Filters: [
-          {
-            Name: 'db-instance-id' /* required */,
-            Values: [dbArn],
-          },
-        ],
-      };
-      const instances = await rds.describeDBInstances(params, null).promise();
 
-      if (instances.DBInstances.length === 1) {
-        const database = instances.DBInstances[0];
-        const databaseAddress = database.Endpoint.Address;
+      // After creation, find the database endpoint
+      const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+      if (dbEndpoint) {
         await deploy.$query().patch({
-          cname: databaseAddress,
+          cname: dbEndpoint,
         });
       }
+
       await deploy.reload();
       if (deploy.buildLogs === uuid) {
         await deploy.$query().patch({
