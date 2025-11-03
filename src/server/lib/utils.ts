@@ -16,7 +16,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { GithubPullRequestActions, PullRequestStatus, Labels } from 'shared/constants';
+import { GithubPullRequestActions, PullRequestStatus, FallbackLabels } from 'shared/constants';
 import GlobalConfigService from 'server/services/globalConfig';
 import { GenerateDeployTagOptions, WaitUntilOptions, EnableKillswitchOptions } from 'server/lib/types';
 
@@ -123,6 +123,24 @@ export const generateDeployTag = ({ prefix = 'lfc', sha, envVarsHash }: Generate
   return tag;
 };
 
+export const constructEcrRepoPath = (
+  baseEcrRepo: string,
+  serviceName: string | undefined,
+  ecrDomain: string
+): string => {
+  if (!baseEcrRepo || !serviceName) return baseEcrRepo || '';
+
+  if (ecrDomain && ecrDomain.includes('ecr')) {
+    return baseEcrRepo;
+  }
+
+  if (baseEcrRepo.endsWith(`/${serviceName}`)) {
+    return baseEcrRepo;
+  }
+
+  return `${baseEcrRepo}/${serviceName}`;
+};
+
 export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -145,11 +163,11 @@ export const enableKillSwitch = async ({
       action as GithubPullRequestActions
     );
     const isClosed = status === PullRequestStatus.CLOSED && !isOpened;
-    const isDisabled = labels.includes(Labels.DISABLED);
+    const isDisabled = await hasDisabledLabel(labels);
     if (isClosed || isDisabled) {
       return true;
     }
-    const isForceDeploy = labels.includes(Labels.DEPLOY);
+    const isForceDeploy = await hasDeployLabel(labels);
     if (isForceDeploy) {
       return false;
     }
@@ -183,4 +201,90 @@ export const enableKillSwitch = async ({
 
 export const isStaging = () => {
   return ENVIRONMENT === 'staging';
+};
+
+/**
+ * Check if PR has any deploy labels from configuration
+ * @param labels Array of PR labels
+ * @returns Promise<boolean> True if PR has deploy label
+ */
+export const hasDeployLabel = async (labels: string[]): Promise<boolean> => {
+  if (!labels || labels.length === 0) return false;
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  const deployLabels = labelsConfig.deploy || [];
+  return deployLabels.some((deployLabel) => labels.includes(deployLabel));
+};
+
+/**
+ * Check if PR has any disabled labels fr m configuration
+ * @param labels Array of PR labels
+ * @returns Promise<boolean> True if PR has disabled label
+ */
+export const hasDisabledLabel = async (labels: string[]): Promise<boolean> => {
+  if (!labels || labels.length === 0) return false;
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  const disabledLabels = labelsConfig.disabled || [];
+  return disabledLabels.some((disabledLabel) => labels.includes(disabledLabel));
+};
+
+/**
+ * Check if PR has any status comment labels from configuration
+ * @param labels Array of PR labels
+ * @returns Promise<boolean> True if PR has status comment label
+ */
+export const hasStatusCommentLabel = async (labels: string[]): Promise<boolean> => {
+  if (!labels || labels.length === 0) return false;
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  const statusCommentLabels = labelsConfig.statusComments || [];
+  return statusCommentLabels.some((statusLabel) => labels.includes(statusLabel));
+};
+
+/**
+ * Get the first deploy label from configuration for user-facing messages
+ * @returns Promise<string> First deploy label from config
+ */
+export const getDeployLabel = async (): Promise<string> => {
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  return labelsConfig?.deploy?.[0] || FallbackLabels.DEPLOY;
+};
+
+/**
+ * Get the first disabled label from configuration for user-facing messages
+ * @returns Promise<string> First disabled label from config
+ */
+export const getDisabledLabel = async (): Promise<string> => {
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  return labelsConfig?.disabled?.[0] || FallbackLabels.DISABLED;
+};
+
+/**
+ * Get the first status comment label from configuration for user-facing messages
+ * @returns Promise<string> First status comment label from config
+ */
+export const getStatusCommentLabel = async (): Promise<string> => {
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  return labelsConfig?.statusComments?.[0] || FallbackLabels.STATUS_COMMENTS;
+};
+
+/**
+ * Check if status comments should be enabled by default
+ * @returns Promise<boolean> True if status comments are enabled by default
+ */
+export const isDefaultStatusCommentsEnabled = async (): Promise<boolean> => {
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  return labelsConfig.defaultStatusComments ?? true;
+};
+
+/**
+ * Check if control comments should be enabled
+ * @returns Promise<boolean> True if control comments are enabled (defaults to true if not configured)
+ */
+export const isControlCommentsEnabled = async (): Promise<boolean> => {
+  try {
+    const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+    return labelsConfig.defaultControlComments ?? true;
+  } catch (error) {
+    initialLogger.warn('[isControlCommentsEnabled] Error retrieving config, defaulting to true', error);
+    return true;
+  }
 };

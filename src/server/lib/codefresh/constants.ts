@@ -20,8 +20,6 @@ export const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
 
 export const CF = {
   CHECKOUT: {
-    // this will be the Codefresh git org
-    GIT: 'REPLACE_ME_ORG',
     PATH: `${TMP_PATH}/codefresh`,
     CHECKOUT_STAGE: 'Checkout',
     TYPE: 'git-clone',

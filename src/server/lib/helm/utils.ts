@@ -20,7 +20,7 @@ import Database from 'server/database';
 import mustache from 'mustache';
 import { HYPHEN_REPLACEMENT, HYPHEN_REPLACEMENT_REGEX } from 'shared/constants';
 import { NodeAffinity, Toleration } from './types';
-import { LIFECYCLE_UI_HOSTHAME_WITH_SCHEME } from 'shared/config';
+import { LIFECYCLE_UI_HOSTHAME_WITH_SCHEME, APP_HOST } from 'shared/config';
 
 export const renderTemplate = async (build: Build, values: string[] = []): Promise<string[]> => {
   const db = build.$knex();
@@ -104,6 +104,7 @@ export function createBannerVars(options: BannerOptions[], deploy: Deploy): stri
     `window.LFC_BANNER = ${JSON.stringify(bannerItems)};`,
     `window.LFC_UUID = "${uuid}";`,
     `window.LFC_SERVICE_NAME = "${serviceName}";`,
+    `window.LFC_BASE_URL = "${APP_HOST}";`,
   ].join('\n');
 }
 
@@ -150,7 +151,7 @@ export function ingressBannerSnippet(deploy: Deploy) {
   );
 
   const inlineScript = `<script type="text/javascript">${bannerVars}</script>`;
-  const baseUrl = 'REPLACE_ME_LIFECYCLE_WEB_HOST_URL';
+  const baseUrl = APP_HOST;
   const externalScript = `<script type="text/javascript" src="${baseUrl}/utils/0-banner.js" defer></script>`;
   const fullSnippet = `${externalScript}${inlineScript}`;
   const configSnippet = [

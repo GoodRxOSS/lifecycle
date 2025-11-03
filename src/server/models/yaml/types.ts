@@ -21,7 +21,6 @@ export type LifecycleYamlConfigEnvironment = {
   optionalServices?: YamlService[];
   webhooks?: YamlWebhook[];
   enabledFeatures?: string[];
-  hasGithubStatusComment?: boolean;
 };
 
 export type LifecycleYamlConfigOptions = {

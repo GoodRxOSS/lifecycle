@@ -16,7 +16,6 @@
 
 import rootLogger from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
-import { Deploy } from 'server/models';
 import { StreamingInfo, LogSourceStatus, K8sPodInfo, K8sContainerInfo } from 'shared/types';
 import { HttpError, V1ContainerStatus } from '@kubernetes/client-node';
 
@@ -26,24 +25,21 @@ const logger = rootLogger.child({
 
 /**
  * Reusable logic to get log streaming info for a specific Kubernetes job name,
- * using context (like namespace) derived from the Deploy object.
+ * using the provided namespace.
  */
 export async function getLogStreamingInfoForJob(
-  deploy: Deploy,
-  jobName: string | null | undefined
+  jobName: string | null | undefined,
+  namespace: string
 ): Promise<StreamingInfo | LogSourceStatus> {
   if (!jobName) {
-    logger.warn(`Job name not provided for deploy ${deploy.uuid}. Cannot get logs.`);
+    logger.warn(`Job name not provided. Cannot get logs.`);
     const statusResponse: LogSourceStatus = {
       status: 'Unavailable',
       streamingRequired: false,
-      message: `Job name not found on Deploy record ${deploy.uuid}.`,
+      message: `Job name not found.`,
     };
     return statusResponse;
   }
-
-  // const namespace = deploy.build?.namespace || process.env.KUBERNETES_NAMESPACE || 'lifecycle-app';
-  const namespace = 'lifecycle-app'; // Default namespace we will need to update this to something like the above
 
   let podInfo: K8sPodInfo | null = null;
   try {
@@ -80,7 +76,7 @@ export async function getLogStreamingInfoForJob(
         },
       },
       containers: podInfo.containers.map((c) => ({
-        containerName: c.name,
+        name: c.name,
         state: c.state,
       })),
     };
@@ -110,7 +106,12 @@ export async function getLogStreamingInfoForJob(
       status: responseStatus,
       streamingRequired: false,
       podName: podNameFromInfo || null,
-      containers: podInfo?.containers ? podInfo.containers.map(c => c.name) : undefined,
+      containers: podInfo?.containers
+        ? podInfo.containers.map((c) => ({
+            name: c.name,
+            state: c.state,
+          }))
+        : undefined,
       message: message,
     };
     return statusResponse;
@@ -143,7 +144,9 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       }
       if (job?.status?.failed) {
         logger.warn(logCtx, 'Job failed but selector missing.');
-        return { podName: null, namespace, status: 'Failed', containers: [] };
+        const failedCondition = job.status.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
+        const failureMessage = failedCondition?.message || 'Job failed';
+        return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
       logger.error(logCtx, 'Job found, but missing spec.selector.matchLabels. Cannot find associated pods.');
       return { podName: null, namespace, status: 'Unknown', containers: [] };
@@ -172,10 +175,11 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
         return { podName: null, namespace, status: 'Succeeded', containers: [] };
       }
       if (jobStatus?.failed && jobStatus.failed > 0) {
-        const failureReason =
-          jobStatus.conditions?.find((c) => c.type === 'Failed' && c.status === 'True')?.reason || 'Failed';
+        const failedCondition = jobStatus.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
+        const failureReason = failedCondition?.reason || 'Failed';
+        const failureMessage = failedCondition?.message || 'Job failed';
         logger.warn({ ...logCtx, failureReason }, 'Job indicates failure, but no pods found.');
-        return { podName: null, namespace, status: 'Failed', containers: [] };
+        return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
       return { podName: null, namespace, status: 'NotFound', containers: [] };
     }
@@ -222,17 +226,47 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       }
     });
 
+    if (containers.length === 0 && latestPod.spec) {
+      const specContainers = [
+        ...(latestPod.spec.initContainers || []).map((c) => ({ name: `[init] ${c.name}`, isInit: true })),
+        ...(latestPod.spec.containers || []).map((c) => ({ name: c.name, isInit: false })),
+      ];
+
+      specContainers.forEach((c) => {
+        if (!containers.find((existing) => existing.name === c.name)) {
+          containers.push({
+            name: c.name,
+            state: 'pending',
+          });
+        }
+      });
+    }
+
     const result: K8sPodInfo = {
       podName: podName,
       namespace: namespace,
       status: podStatus,
       containers: containers,
     };
+
+    if (podStatus === 'Failed' && job.status?.conditions) {
+      const failedCondition = job.status.conditions.find((c) => c.type === 'Failed' && c.status === 'True');
+      if (failedCondition?.message) {
+        result.message = failedCondition.message;
+      }
+    }
+
     return result;
   } catch (error: any) {
     if (error instanceof HttpError && error.response?.statusCode === 404) {
       logger.warn(logCtx, `Job or associated resource not found (404) ${error.message}`);
-      return { podName: null, namespace, status: 'NotFound', containers: [] };
+      return {
+        podName: null,
+        namespace,
+        status: 'NotFound',
+        containers: [],
+        message: 'Job no longer exists. Logs have been cleaned up after 24 hours.',
+      };
     }
     logger.error({ ...logCtx, err: error }, 'Error getting K8s job/pod status');
     return null;
@@ -263,7 +297,6 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
     else if (phase === 'Succeeded') podStatus = 'Succeeded';
     else if (phase === 'Failed') podStatus = 'Failed';
 
-    // Extract all container info - both init containers and regular containers
     const containers: K8sContainerInfo[] = [];
     const allStatuses = [
       ...(pod.status?.initContainerStatuses || []).map((cs) => ({ ...cs, isInit: true })),
@@ -287,29 +320,26 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       }
     });
 
-    // If no container statuses found, try to get container names from the pod spec
     if (containers.length === 0 && pod.spec) {
-      // Extract from pod.spec
       const specContainers = [
-        ...(pod.spec.initContainers || []).map(c => ({ name: `[init] ${c.name}`, isInit: true })),
-        ...(pod.spec.containers || []).map(c => ({ name: c.name, isInit: false }))
+        ...(pod.spec.initContainers || []).map((c) => ({ name: `[init] ${c.name}`, isInit: true })),
+        ...(pod.spec.containers || []).map((c) => ({ name: c.name, isInit: false })),
       ];
 
-      specContainers.forEach(c => {
-        if (!containers.find(existing => existing.name === c.name)) {
+      specContainers.forEach((c) => {
+        if (!containers.find((existing) => existing.name === c.name)) {
           containers.push({
             name: c.name,
-            state: 'unknown' // We don't have status info
+            state: 'unknown',
           });
         }
       });
     }
 
-    // If still no containers found, at least provide one default
     if (containers.length === 0) {
       containers.push({
         name: 'main',
-        state: 'unknown'
+        state: 'unknown',
       });
     }
 
@@ -317,22 +347,20 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       podName,
       namespace,
       status: podStatus,
-      containers
+      containers,
     };
   } catch (error: any) {
-    // Handle 404 - Pod not found
     if (error instanceof HttpError && error.response?.statusCode === 404) {
       logger.warn(logCtx, `Pod not found (404): ${error.message}`);
-      return { 
-        podName: null, 
-        namespace, 
-        status: 'NotFound', 
-        containers: [], 
-        message: `Pod '${podName}' not found in namespace '${namespace}'` 
+      return {
+        podName: null,
+        namespace,
+        status: 'NotFound',
+        containers: [],
+        message: `Pod '${podName}' not found in namespace '${namespace}'`,
       };
     }
-    
-    // Handle other errors
+
     logger.error({ ...logCtx, err: error }, 'Error getting container information');
     throw error;
   }

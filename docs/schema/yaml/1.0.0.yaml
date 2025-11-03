@@ -15,7 +15,8 @@ environment:
   # @param environment.defaultServices
   defaultServices:
     # @param environment.defaultServices[]
-    - # @param environment.defaultServices.name (required)
+    -
+      # @param environment.defaultServices.name (required)
       name: ''
       # @param environment.defaultServices.repository
       repository: ''
@@ -26,7 +27,8 @@ environment:
   # @param environment.optionalServices
   optionalServices:
     # @param environment.optionalServices[]
-    - # @param environment.optionalServices.name (required)
+    -
+      # @param environment.optionalServices.name (required)
       name: ''
       # @param environment.optionalServices.repository
       repository: ''
@@ -37,7 +39,8 @@ environment:
   # @param environment.webhooks
   webhooks:
     # @param environment.webhooks[]
-    - # @param environment.webhooks.name
+    -
+      # @param environment.webhooks.name
       name: ''
       # @param environment.webhooks.description
       description: ''
@@ -45,17 +48,40 @@ environment:
       state: ''
       # @param environment.webhooks.type (required)
       type: ''
-      # @param environment.webhooks.pipelineId (required)
+      # @param environment.webhooks.pipelineId
       pipelineId: ''
-      # @param environment.webhooks.trigger (required)
+      # @param environment.webhooks.trigger
       trigger: ''
+      # @param environment.webhooks.docker
+      docker:
+        # @param environment.webhooks.docker.image (required)
+        image: ''
+        # @param environment.webhooks.docker.command
+        command:
+          # @param environment.webhooks.docker.command[]
+          - ''
+        # @param environment.webhooks.docker.args
+        args:
+          # @param environment.webhooks.docker.args[]
+          - ''
+        # @param environment.webhooks.docker.timeout
+        timeout: 0
+      # @param environment.webhooks.command
+      command:
+        # @param environment.webhooks.command.image (required)
+        image: ''
+        # @param environment.webhooks.command.script (required)
+        script: ''
+        # @param environment.webhooks.command.timeout
+        timeout: 0
       # @param environment.webhooks.env (required)
       env:
 
 # @section services
 services:
   # @param services[]
-  - # @param services.name (required)
+  -
+    # @param services.name (required)
     name: ''
     # @param services.appShort
     appShort: ''
@@ -64,8 +90,41 @@ services:
     # @param services.requires
     requires:
       # @param services.requires[]
-      - # @param services.requires.name (required)
+      -
+        # @param services.requires.name (required)
         name: ''
+    # @param services.deploymentDependsOn
+    deploymentDependsOn:
+      # @param services.deploymentDependsOn[]
+      - ''
+    # @param services.kedaScaleToZero
+    kedaScaleToZero:
+      # @param services.kedaScaleToZero.type
+      type: ''
+      # @param services.kedaScaleToZero.replicas
+      replicas:
+        # @param services.kedaScaleToZero.replicas.min
+        min: 0
+        # @param services.kedaScaleToZero.replicas.max
+        max: 0
+      # @param services.kedaScaleToZero.scaledownPeriod
+      scaledownPeriod: 0
+      # @param services.kedaScaleToZero.maxRetries
+      maxRetries: 0
+      # @param services.kedaScaleToZero.scalingMetric
+      scalingMetric:
+        # @param services.kedaScaleToZero.scalingMetric.requestRate
+        requestRate:
+          # @param services.kedaScaleToZero.scalingMetric.requestRate.granularity
+          granularity: ''
+          # @param services.kedaScaleToZero.scalingMetric.requestRate.targetValue
+          targetValue: 0
+          # @param services.kedaScaleToZero.scalingMetric.requestRate.window
+          window: ''
+        # @param services.kedaScaleToZero.scalingMetric.concurrency
+        concurrency:
+          # @param services.kedaScaleToZero.scalingMetric.concurrency.targetValue
+          targetValue: 0
     # @param services.helm
     helm:
       # @param services.helm.cfStepType
@@ -78,9 +137,9 @@ services:
       version: ''
       # @param services.helm.action
       action: ''
-      # @param services.helm.repository (required)
+      # @param services.helm.repository
       repository: ''
-      # @param services.helm.branchName (required)
+      # @param services.helm.branchName
       branchName: ''
       # @param services.helm.chart
       chart:
@@ -98,6 +157,8 @@ services:
         valueFiles:
           # @param services.helm.chart.valueFiles[]
           - ''
+      # @param services.helm.envLens
+      envLens: false
       # @param services.helm.grpc
       grpc: false
       # @param services.helm.disableIngressHost
@@ -110,6 +171,12 @@ services:
         defaultTag: ''
         # @param services.helm.docker.pipelineId
         pipelineId: ''
+        # @param services.helm.docker.ecr
+        ecr: ''
+        # @param services.helm.docker.builder
+        builder:
+          # @param services.helm.docker.builder.engine
+          engine: ''
         # @param services.helm.docker.app (required)
         app:
           # @param services.helm.docker.app.afterBuildPipelineConfig
@@ -144,12 +211,6 @@ services:
           # @param services.helm.docker.init.env
           env:
 
-        # @param services.helm.docker.ecr
-        ecr: ''
-        # @param services.helm.docker.builder
-        builder:
-          # @param services.helm.docker.builder.engine
-          engine: ''
     # @param services.codefresh
     codefresh:
       # @param services.codefresh.repository (required)
@@ -243,12 +304,6 @@ services:
           successThreshold: 0
           # @param services.codefresh.deployment.readiness.failureThreshold
           failureThreshold: 0
-        # @param services.codefresh.deployment.scaling
-        scaling:
-          # @param services.codefresh.deployment.scaling.scaleToZero
-          scaleToZero: false
-          # @param services.codefresh.deployment.scaling.scaleToZeroMetricsCheckInterval
-          scaleToZeroMetricsCheckInterval: 0
         # @param services.codefresh.deployment.hostnames
         hostnames:
           # @param services.codefresh.deployment.hostnames.host
@@ -271,9 +326,6 @@ services:
           # @param services.codefresh.deployment.network.hostPortMapping
           hostPortMapping:
 
-          # @param services.codefresh.deployment.network.kuma
-          kuma:
-
           # @param services.codefresh.deployment.network.grpc
           grpc:
             # @param services.codefresh.deployment.network.grpc.enable
@@ -285,7 +337,8 @@ services:
         # @param services.codefresh.deployment.serviceDisks
         serviceDisks:
           # @param services.codefresh.deployment.serviceDisks[]
-          - # @param services.codefresh.deployment.serviceDisks.name (required)
+          -
+            # @param services.codefresh.deployment.serviceDisks.name (required)
             name: ''
             # @param services.codefresh.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -295,6 +348,12 @@ services:
             storageSize: ''
             # @param services.codefresh.deployment.serviceDisks.medium
             medium: ''
+        # @param services.codefresh.deployment.node_selector
+        node_selector:
+
+        # @param services.codefresh.deployment.node_affinity
+        node_affinity:
+
     # @param services.github
     github:
       # @param services.github.repository (required)
@@ -307,6 +366,12 @@ services:
         defaultTag: ''
         # @param services.github.docker.pipelineId
         pipelineId: ''
+        # @param services.github.docker.ecr
+        ecr: ''
+        # @param services.github.docker.builder
+        builder:
+          # @param services.github.docker.builder.engine
+          engine: ''
         # @param services.github.docker.app (required)
         app:
           # @param services.github.docker.app.afterBuildPipelineConfig
@@ -341,12 +406,6 @@ services:
           # @param services.github.docker.init.env
           env:
 
-        # @param services.github.docker.ecr
-        ecr: ''
-        # @param services.github.docker.builder
-        builder:
-          # @param services.github.docker.builder.engine
-          engine: ''
       # @param services.github.deployment
       deployment:
         # @param services.github.deployment.helm
@@ -419,12 +478,6 @@ services:
           successThreshold: 0
           # @param services.github.deployment.readiness.failureThreshold
           failureThreshold: 0
-        # @param services.github.deployment.scaling
-        scaling:
-          # @param services.github.deployment.scaling.scaleToZero
-          scaleToZero: false
-          # @param services.github.deployment.scaling.scaleToZeroMetricsCheckInterval
-          scaleToZeroMetricsCheckInterval: 0
         # @param services.github.deployment.hostnames
         hostnames:
           # @param services.github.deployment.hostnames.host
@@ -447,9 +500,6 @@ services:
           # @param services.github.deployment.network.hostPortMapping
           hostPortMapping:
 
-          # @param services.github.deployment.network.kuma
-          kuma:
-
           # @param services.github.deployment.network.grpc
           grpc:
             # @param services.github.deployment.network.grpc.enable
@@ -461,7 +511,8 @@ services:
         # @param services.github.deployment.serviceDisks
         serviceDisks:
           # @param services.github.deployment.serviceDisks[]
-          - # @param services.github.deployment.serviceDisks.name (required)
+          -
+            # @param services.github.deployment.serviceDisks.name (required)
             name: ''
             # @param services.github.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -471,6 +522,12 @@ services:
             storageSize: ''
             # @param services.github.deployment.serviceDisks.medium
             medium: ''
+        # @param services.github.deployment.node_selector
+        node_selector:
+
+        # @param services.github.deployment.node_affinity
+        node_affinity:
+
     # @param services.docker
     docker:
       # @param services.docker.dockerImage (required)
@@ -560,12 +617,6 @@ services:
           successThreshold: 0
           # @param services.docker.deployment.readiness.failureThreshold
           failureThreshold: 0
-        # @param services.docker.deployment.scaling
-        scaling:
-          # @param services.docker.deployment.scaling.scaleToZero
-          scaleToZero: false
-          # @param services.docker.deployment.scaling.scaleToZeroMetricsCheckInterval
-          scaleToZeroMetricsCheckInterval: 0
         # @param services.docker.deployment.hostnames
         hostnames:
           # @param services.docker.deployment.hostnames.host
@@ -588,9 +639,6 @@ services:
           # @param services.docker.deployment.network.hostPortMapping
           hostPortMapping:
 
-          # @param services.docker.deployment.network.kuma
-          kuma:
-
           # @param services.docker.deployment.network.grpc
           grpc:
             # @param services.docker.deployment.network.grpc.enable
@@ -602,7 +650,8 @@ services:
         # @param services.docker.deployment.serviceDisks
         serviceDisks:
           # @param services.docker.deployment.serviceDisks[]
-          - # @param services.docker.deployment.serviceDisks.name (required)
+          -
+            # @param services.docker.deployment.serviceDisks.name (required)
             name: ''
             # @param services.docker.deployment.serviceDisks.mountPath (required)
             mountPath: ''
@@ -612,6 +661,12 @@ services:
             storageSize: ''
             # @param services.docker.deployment.serviceDisks.medium
             medium: ''
+        # @param services.docker.deployment.node_selector
+        node_selector:
+
+        # @param services.docker.deployment.node_affinity
+        node_affinity:
+
     # @param services.externalHttp
     externalHttp:
       # @param services.externalHttp.defaultInternalHostname (required)
@@ -630,35 +685,3 @@ services:
       defaultTag: ''
       # @param services.configuration.branchName (required)
       branchName: ''
-    # @param services.deploymentDependsOn
-    deploymentDependsOn:
-      # @param services.deploymentDependsOn[]
-      - ''
-    # @param services.kedaScaleToZero
-    kedaScaleToZero:
-      # @param services.kedaScaleToZero.type
-      type: ''
-      # @param services.kedaScaleToZero.replicas
-      replicas:
-        # @param services.kedaScaleToZero.replicas.min
-        min: 0
-        # @param services.kedaScaleToZero.replicas.max
-        max: 0
-      # @param services.kedaScaleToZero.scaledownPeriod
-      scaledownPeriod: 0
-      # @param services.kedaScaleToZero.maxRetries
-      maxRetries: 0
-      # @param services.kedaScaleToZero.scalingMetric
-      scalingMetric:
-        # @param services.kedaScaleToZero.scalingMetric.requestRate
-        requestRate:
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.granularity
-          granularity: ''
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.targetValue
-          targetValue: 0
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.window
-          window: ''
-        # @param services.kedaScaleToZero.scalingMetric.concurrency
-        concurrency:
-          # @param services.kedaScaleToZero.scalingMetric.concurrency.targetValue
-          targetValue: 0

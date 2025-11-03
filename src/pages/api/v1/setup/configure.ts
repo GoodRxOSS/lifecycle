@@ -54,7 +54,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     await globalConfigService.getAllConfigs(true);
     await shellPromise(
-      `kubectl rollout restart deployment -l app.kubernetes.io/instance=${releaseName} -n ${namespace}`
+      `kubectl rollout restart deployment -l app.kubernetes.io/instance=${releaseName},app.kubernetes.io/name=lifecycle -n ${namespace}`
     );
     const updated_app_setup = {
       ...app_setup,

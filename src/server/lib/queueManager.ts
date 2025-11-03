@@ -14,17 +14,22 @@
  * limitations under the License.
  */
 
-import Queue from 'bull';
-import type { Queue as BullQueue } from 'bull';
+import { Queue, Worker, QueueOptions, WorkerOptions, Processor } from 'bullmq';
+import { Redis } from 'ioredis';
 import rootLogger from './logger';
 
 const logger = rootLogger.child({
   filename: 'lib/queueManager.ts',
 });
 
+interface RegisteredQueue {
+  queue: Queue;
+  worker?: Worker;
+}
+
 export default class QueueManager {
   private static instance: QueueManager;
-  private queues: BullQueue[] = [];
+  private registeredQueues: RegisteredQueue[] = [];
 
   private constructor() {}
 
@@ -35,26 +40,92 @@ export default class QueueManager {
     return this.instance;
   }
 
-  public registerQueue(queueName: string, options: Queue.QueueOptions): BullQueue<any> {
+  public registerQueue(
+    queueName: string,
+    options: {
+      connection: Redis;
+      defaultJobOptions?: QueueOptions['defaultJobOptions'];
+    }
+  ): Queue {
+    const existing = this.registeredQueues.find((r) => r.queue?.name === queueName);
+    if (existing && existing.queue) {
+      return existing.queue;
+    }
+
     logger.debug(`Registering queue ${queueName}`);
-    const queue = new Queue(queueName, options);
-    this.queues.push(queue);
+
+    const queue = new Queue(queueName, {
+      connection: options.connection.duplicate ? options.connection.duplicate() : options.connection,
+      defaultJobOptions: options.defaultJobOptions,
+    });
+
+    this.registeredQueues.push({ queue });
     return queue;
   }
 
-  public getQueues(): BullQueue[] {
-    return this.queues;
+  public registerWorker(
+    queueName: string,
+    processor: Processor,
+    options: {
+      connection: Redis;
+      concurrency?: number;
+      settings?: WorkerOptions['settings'];
+      limiter?: {
+        max: number;
+        duration: number;
+      };
+    }
+  ): Worker {
+    logger.debug(`Registering worker for queue ${queueName}`);
+
+    const workerConnection = options.connection.duplicate ? options.connection.duplicate() : options.connection;
+    // ensure maxRetriesPerRequest is null for workers
+    if (workerConnection.options) {
+      workerConnection.options.maxRetriesPerRequest = null;
+    }
+
+    const worker = new Worker(queueName, processor, {
+      connection: workerConnection,
+      concurrency: options.concurrency,
+      settings: options.settings,
+      limiter: options.limiter,
+    });
+
+    // find queue to associate with worker
+    const registered = this.registeredQueues.find((r) => r.queue?.name === queueName);
+    if (registered) {
+      registered.worker = worker;
+    } else {
+      this.registeredQueues.push({ queue: null, worker });
+    }
+
+    return worker;
+  }
+
+  public getQueues(): Queue[] {
+    return this.registeredQueues.map((r) => r.queue).filter(Boolean);
   }
 
   public async emptyAndCloseAllQueues(): Promise<void> {
-    for (const queue of this.queues) {
-      logger.debug(`Closing queue: ${queue.name}`);
-      try {
-        await queue.close();
-      } catch (error) {
-        logger.warn(`⚠️ Error closing queue ${queue.name}:`, error.message);
+    for (const { queue, worker } of this.registeredQueues) {
+      if (worker) {
+        logger.debug(`Closing worker for queue: ${worker.name}`);
+        try {
+          await worker.close();
+        } catch (error) {
+          logger.warn(`⚠️ Error closing worker for queue ${worker.name}:`, error.message);
+        }
+      }
+
+      if (queue) {
+        logger.debug(`Closing queue: ${queue.name}`);
+        try {
+          await queue.close();
+        } catch (error) {
+          logger.warn(`⚠️ Error closing queue ${queue.name}:`, error.message);
+        }
       }
     }
-    logger.info('✅ All bull queues have been closed successfully.');
+    logger.info('✅ All queues have been closed successfully.');
   }
 }

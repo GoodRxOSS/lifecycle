@@ -13,15 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 set -e
 
 cd /app
 
 # check and error if required env vars are not set
 required_vars=(
-  DATABASE_URL
-  REDIS_URL
   GITHUB_APP_ID
   GITHUB_CLIENT_ID
   GITHUB_APP_INSTALLATION_ID
@@ -30,7 +27,32 @@ required_vars=(
   GITHUB_WEBHOOK_SECRET
 )
 
+db_configured=false
+if [ -n "$APP_DB_HOST" ] && [ -n "$APP_DB_USER" ] && [ -n "$APP_DB_PASSWORD" ] && [ -n "$APP_DB_NAME" ]; then
+  db_configured=true
+elif [ -n "$DATABASE_URL" ]; then
+  echo "⚠️  Using legacy DATABASE_URL configuration (falling back)"
+  db_configured=true
+fi
+
+redis_configured=false
+if [ -n "$APP_REDIS_HOST" ]; then
+  redis_configured=true
+elif [ -n "$REDIS_URL" ]; then
+  echo "⚠️  Using legacy REDIS_URL configuration (falling back)"
+  redis_configured=true
+fi
+
 missing=()
+
+if [ "$db_configured" = false ]; then
+  missing+=("DATABASE_URL or APP_DB_* variables")
+fi
+
+if [ "$redis_configured" = false ]; then
+  missing+=("REDIS_URL or APP_REDIS_* variables")
+fi
+
 for v in "${required_vars[@]}"; do
   if [ -z "${!v}" ]; then
     missing+=("$v")
@@ -48,7 +70,12 @@ if [ ${#missing[@]} -ne 0 ]; then
   exit 1
 fi
 
-# codefresh auth create-context --api-key $CODEFRESH_API_KEY
+# Configure Codefresh CLI if API key is provided and not a placeholder
+if [ -n "$CODEFRESH_API_KEY" ] && [ "$CODEFRESH_API_KEY" != "YOUR_VALUE_HERE" ]; then
+  echo "Configuring Codefresh CLI authentication..."
+  codefresh auth create-context --api-key $CODEFRESH_API_KEY
+  echo "Codefresh CLI authentication configured successfully"
+fi
 
 forward_sigterm() {
   next_server_pid=$(ps -e | grep next-server | awk '{print $1}')

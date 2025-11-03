@@ -28,16 +28,15 @@ import { nanoid } from 'nanoid';
 import Objection from 'objection';
 import * as YamlService from 'server/models/yaml';
 import * as github from 'server/lib/github';
-import { generateDeployTag } from 'server/lib/utils';
+import { generateDeployTag, constructEcrRepoPath } from 'server/lib/utils';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { getShaForDeploy } from 'server/lib/github';
 import GlobalConfigService from 'server/services/globalConfig';
 import { PatternInfo, extractEnvVarsWithBuildDependencies, waitForColumnValue } from 'shared/utils';
 import { getLogs } from 'server/lib/codefresh';
-import { buildkitImageBuild } from 'server/lib/nativeBuild/buildkit';
-import { kanikoImageBuild } from 'server/lib/nativeBuild/kaniko';
-import { envVars } from 'server/lib/codefresh/__fixtures__/codefresh';
+import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
+import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 
 const logger = rootLogger.child({
   filename: 'services/deploy.ts',
@@ -142,30 +141,21 @@ export default class DeployService extends BaseService {
                 sha,
               });
             } catch (error) {
-              logger.warn(
-                `[BUILD ${build.uuid}] Failed to get SHA for ${deploy.uuid} at branch ${deploy?.branchName}. Error: ${error}`
-              );
+              logger.debug(`[DEPLOY ${deploy.uuid}] Unable to get SHA, continuing: ${error}`);
             }
           }
 
-          if (deployable?.kedaScaleToZero?.type == 'http') {
-            const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
-            const defaultKedaScaleToZero = globalConfig.kedaScaleToZero;
-            const deployableKedaScaleToZero = deployable?.kedaScaleToZero;
+          const { kedaScaleToZero: defaultKedaScaleToZero } = await GlobalConfigService.getInstance().getAllConfigs();
 
-            const kedaScaleToZero = {
-              ...defaultKedaScaleToZero,
-              ...deployableKedaScaleToZero,
-            };
+          const kedaScaleToZero =
+            deployable?.kedaScaleToZero?.type === 'http' && defaultKedaScaleToZero?.enabled
+              ? {
+                  ...defaultKedaScaleToZero,
+                  ...deployable.kedaScaleToZero,
+                }
+              : null;
 
-            await deploy.$query().patch({
-              kedaScaleToZero,
-            });
-          } else {
-            await deploy.$query().patch({
-              kedaScaleToZero: null,
-            });
-          }
+          await deploy.$query().patch({ kedaScaleToZero });
         })
       ).catch((error) => {
         logger.error(`[BUILD ${build?.uuid}] Failed to create deploys from deployables: ${error}`);
@@ -325,6 +315,71 @@ export default class DeployService extends BaseService {
     return deploy;
   }
 
+  /**
+   * Helper function to check if an Aurora database already exists in AWS
+   * @param buildUuid The build UUID to search for
+   * @param serviceName The service name to search for
+   * @returns The database cluster endpoint address if found (or instance endpoint if not clustered), null otherwise
+   */
+  private async findExistingAuroraDatabase(buildUuid: string, serviceName: string): Promise<string | null> {
+    try {
+      const rds = new RDS();
+      const taggingApi = new resourceGroupsTagging();
+      const results = await taggingApi
+        .getResources({
+          TagFilters: [
+            {
+              Key: 'BuildUUID',
+              Values: [buildUuid],
+            },
+            {
+              Key: 'ServiceName',
+              Values: [serviceName],
+            },
+          ],
+          ResourceTypeFilters: ['rds:db'],
+        })
+        .promise();
+
+      const instanceArn = results.ResourceTagMappingList?.find((mapping) =>
+        mapping.ResourceARN?.includes(':db:')
+      )?.ResourceARN;
+
+      if (instanceArn) {
+        const instanceIdentifier = instanceArn.split(':').pop();
+        if (instanceIdentifier) {
+          const instances = await rds
+            .describeDBInstances({
+              DBInstanceIdentifier: instanceIdentifier,
+            })
+            .promise();
+          const database = instances.DBInstances?.[0];
+          if (database) {
+            let databaseAddress = database.Endpoint?.Address;
+            // If this instance is part of a cluster, use the cluster endpoint instead
+            // for better resilience during instance failures and replacements
+            if (database.DBClusterIdentifier) {
+              const clusters = await rds
+                .describeDBClusters({
+                  DBClusterIdentifier: database.DBClusterIdentifier,
+                })
+                .promise();
+              const clusterEndpoint = clusters.DBClusters?.[0]?.Endpoint;
+              if (clusterEndpoint) {
+                databaseAddress = clusterEndpoint;
+              }
+            }
+            return databaseAddress || null;
+          }
+        }
+      }
+      return null;
+    } catch (error) {
+      logger.debug(`Error checking for existing Aurora database: ${error}`);
+      return null;
+    }
+  }
+
   async deployAurora(deploy: Deploy): Promise<boolean> {
     try {
       // For now, we're just going to shell out and run the deploy
@@ -338,68 +393,36 @@ export default class DeployService extends BaseService {
         return true;
       }
 
+      // Check if database already exists in AWS before attempting to create
+      const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+      if (existingDbEndpoint) {
+        logger.info(
+          `[DEPLOY ${deploy?.uuid}] Aurora database already exists with endpoint ${existingDbEndpoint}, skipping creation`
+        );
+        await deploy.$query().patch({
+          cname: existingDbEndpoint,
+          status: DeployStatus.BUILT,
+        });
+        return true;
+      }
+
       const uuid = nanoid();
       await deploy.$query().patch({
         status: DeployStatus.BUILDING,
         buildLogs: uuid,
+        runUUID: nanoid(),
       });
       logger.info(`[DEPLOY ${deploy?.uuid}] Restoring Aurora cluster for ${deploy?.uuid}`);
       await cli.cliDeploy(deploy);
-      const rds = new RDS();
-      const taggingApi = new resourceGroupsTagging();
-      const results = await taggingApi
-        .getResources({
-          TagFilters: [
-            {
-              Key: 'BuildUUID',
-              Values: [deploy.build.uuid],
-            },
-            {
-              Key: 'ServiceName',
-              Values: [deploy.deployable.name],
-            },
-          ],
-          ResourceTypeFilters: ['rds:db'],
-        })
-        .promise();
 
-      const instanceArn = results.ResourceTagMappingList?.find((mapping) =>
-        mapping.ResourceARN?.includes(':db:')
-      )?.ResourceARN;
-
-      let databaseAddress: string | undefined;
-
-      if (instanceArn) {
-        const instanceIdentifier = instanceArn.split(':').pop();
-        if (instanceIdentifier) {
-          const instances = await rds
-            .describeDBInstances({
-              DBInstanceIdentifier: instanceIdentifier,
-            })
-            .promise();
-          const database = instances.DBInstances?.[0];
-          if (database) {
-            databaseAddress = database.Endpoint?.Address;
-            if (database.DBClusterIdentifier) {
-              const clusters = await rds
-                .describeDBClusters({
-                  DBClusterIdentifier: database.DBClusterIdentifier,
-                })
-                .promise();
-              const clusterEndpoint = clusters.DBClusters?.[0]?.Endpoint;
-              if (clusterEndpoint) {
-                databaseAddress = clusterEndpoint;
-              }
-            }
-          }
-        }
-      }
-
-      if (databaseAddress) {
+      // After creation, find the database endpoint
+      const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+      if (dbEndpoint) {
         await deploy.$query().patch({
-          cname: databaseAddress,
+          cname: dbEndpoint,
         });
       }
+
       await deploy.reload();
       if (deploy.buildLogs === uuid) {
         await deploy.$query().patch({
@@ -648,14 +671,20 @@ export default class DeployService extends BaseService {
             const buildPipelineName = deployable?.dockerBuildPipelineName;
             const tag = generateDeployTag({ sha: shortSha, envVarsHash });
             const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
-            const ecrRepo = deployable?.ecr;
+            let ecrRepo = deployable?.ecr;
+
+            const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+            const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+
+            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+            ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
+
             const tagsExist =
               (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
-              (!initDockerfilePath || (await codefresh.tagExists({ tag, ecrRepo, uuid })));
+              (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
 
-            // get ecr domain from globalConfig.lifecycleDefaults
-            const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-            const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+            logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
+            const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
             if (!ecrDomain || !registry) {
               logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
               await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
@@ -672,6 +701,7 @@ export default class DeployService extends BaseService {
                 ecrRepo,
                 envVars: envVariables,
                 dockerfilePath,
+                gitOrg,
                 tag,
                 revision: fullSha,
                 repo: repositoryName,
@@ -688,6 +718,7 @@ export default class DeployService extends BaseService {
                 author,
                 enabledFeatures,
                 ecrDomain,
+                deployCluster: lifecycleDefaults.deployCluster,
               });
               const buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
               await this.patchAndUpdateActivityFeed(deploy, { buildLogs }, runUUID);
@@ -727,26 +758,37 @@ export default class DeployService extends BaseService {
             return true;
           case DeployTypes.HELM: {
             try {
-              const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
+              const chartType = await determineChartType(deploy);
 
-              if (orgChartName === deployable?.helm?.chart?.name) {
+              if (chartType !== ChartType.PUBLIC) {
                 return this.buildImageForHelmAndGithub(deploy, runUUID);
               }
-              const fullSha = await github.getShaForDeploy(deploy);
+
+              let fullSha = null;
+
+              await deploy.$fetchGraph('deployable.repository');
+              if (deploy.deployable?.repository) {
+                try {
+                  fullSha = await github.getShaForDeploy(deploy);
+                } catch (shaError) {
+                  logger.debug(
+                    `[${deploy?.uuid}] Could not get SHA for PUBLIC helm chart, continuing without it: ${shaError.message}`
+                  );
+                }
+              }
+
               await this.patchAndUpdateActivityFeed(
                 deploy,
                 {
                   status: DeployStatus.BUILT,
                   statusMessage: 'Helm chart does not need to be built',
-                  sha: fullSha,
+                  ...(fullSha && { sha: fullSha }),
                 },
                 runUUID
               );
               return true;
             } catch (error) {
-              logger
-                .child({ error })
-                .warn(`[${deploy?.uuid}] Error getting SHA for deploy. Maybe the pull request has been closed?`);
+              logger.child({ error }).warn(`[${deploy?.uuid}] Error processing Helm deployment: ${error.message}`);
               return false;
             }
           }
@@ -770,7 +812,12 @@ export default class DeployService extends BaseService {
     try {
       const id = deploy?.id;
       await this.db.models.Deploy.query().where({ id, runUUID }).patch(params);
-      if (deploy.runUUID !== runUUID) return;
+      if (deploy.runUUID !== runUUID) {
+        logger.debug(
+          `[DEPLOY ${deploy.uuid}] runUUID mismatch: deploy.runUUID=${deploy.runUUID}, provided runUUID=${runUUID}`
+        );
+        return;
+      }
       await deploy.$fetchGraph('build.[deploys.[service, deployable], pullRequest.[repository]]');
       build = deploy?.build;
       const pullRequest = build?.pullRequest;
@@ -795,7 +842,11 @@ export default class DeployService extends BaseService {
     const { build, deployable, service } = deploy;
     const uuid = build?.uuid;
     const uuidText = uuid ? `[DEPLOY ${uuid}][patchDeployWithTag]:` : '[DEPLOY][patchDeployWithTag]:';
-    const ecrRepo = deployable?.ecr;
+    let ecrRepo = deployable?.ecr as string;
+
+    const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
+    ecrRepo = constructEcrRepoPath(deployable?.ecr as string, serviceName, ecrDomain);
+
     const dockerImage = codefresh.getRepositoryTag({ tag, ecrRepo, ecrDomain });
 
     if (service?.initDockerfilePath || deployable?.initDockerfilePath) {
@@ -855,6 +906,12 @@ export default class DeployService extends BaseService {
       await deployable.$fetchGraph('repository');
       await build?.$fetchGraph('pullRequest');
       const repository = deployable?.repository;
+
+      if (!repository) {
+        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
+        return false;
+      }
+
       const repo = repository?.fullName;
       const [owner, name] = repo?.split('/') || [];
       const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
@@ -883,10 +940,15 @@ export default class DeployService extends BaseService {
       const buildPipelineName = deployable?.dockerBuildPipelineName;
       const tag = generateDeployTag({ sha: shortSha, envVarsHash });
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
-      const ecrRepo = deployable?.ecr;
-      // get ecr domain from globalConfig.lifecycleDefaults
-      const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+      let ecrRepo = deployable?.ecr;
+
+      const { lifecycleDefaults, app_setup, buildDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+
+      const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+      ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
+
+      const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
       if (!ecrDomain || !registry) {
         logger.child({ lifecycleDefaults }).error(`[BUILD ${deploy.uuid}] Missing ECR config to build image`);
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
@@ -896,6 +958,8 @@ export default class DeployService extends BaseService {
       const tagsExist =
         (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
         (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
+
+      logger.debug(`${uuidText} Tags exist check for ${deploy.uuid}: ${tagsExist}`);
 
       // Check for and skip duplicates
       if (!tagsExist) {
@@ -917,6 +981,7 @@ export default class DeployService extends BaseService {
           ecrDomain,
           envVars: deploy.env,
           dockerfilePath,
+          gitOrg,
           tag,
           revision: fullSha,
           repo: repositoryName,
@@ -932,55 +997,39 @@ export default class DeployService extends BaseService {
           initTag,
           author,
           enabledFeatures,
+          deployCluster: lifecycleDefaults.deployCluster,
         };
 
-        if ('buildkit' === deployable.builder.engine) {
-          logger.info(`${uuidText} Building image with buildkit`);
+        if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
+          logger.info(`${uuidText} Building image with native build (${deployable.builder.engine})`);
 
-          const jobResuls = await buildkitImageBuild(deploy, buildOptions);
-          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+          const nativeOptions = {
+            ...buildOptions,
+            namespace: deploy.build.namespace,
+            buildId: String(deploy.build.id),
+            deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+            cacheRegistry: buildDefaults?.cacheRegistry,
+          };
 
-          if (jobResuls.status === 'succeeded') {
-            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-            if (buildOptions?.afterBuildPipelineId) {
-              const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
-
-              const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
-                ...envVars,
-                ...{ TAG: ecrRepoTag },
-                ...{ branch: branchName },
-              });
-              const completed = await codefresh.waitForImage(afterbuildPipeline);
-              if (!completed) return false;
-            }
-
-            return true;
-          } else {
-            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-            return false;
+          if (!initDockerfilePath) {
+            nativeOptions.initTag = undefined;
           }
-        }
 
-        if ('kaniko' === deployable.builder.engine) {
-          logger.info(`${uuidText} Building image with kaniko`);
+          const result = await buildWithNative(deploy, nativeOptions);
 
-          const jobResults = await kanikoImageBuild(deploy, buildOptions);
-          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-
-          if (jobResults.status === 'succeeded') {
+          if (result.success) {
             await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
             if (buildOptions?.afterBuildPipelineId) {
               const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
 
               const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
-                ...envVars,
+                ...deploy.env,
                 ...{ TAG: ecrRepoTag },
                 ...{ branch: branchName },
               });
               const completed = await codefresh.waitForImage(afterbuildPipeline);
               if (!completed) return false;
             }
-
             return true;
           } else {
             await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);

@@ -23,7 +23,6 @@ import objection, {
   QueryBuilder,
   QueryContext,
   QueryInterface,
-  raw,
   Transaction,
 } from 'objection';
 import { getUtcTimestamp } from '../lib/time';
@@ -68,11 +67,7 @@ export default class Model extends ObjectionModel {
 
   static pickJsonSchemaProperties = false;
 
-  static find<T>(
-    this: Constructor<T>,
-    scope?: Pojo | null,
-    options: IFindOptions = {}
-  ): QueryBuilder<T & Model> {
+  static find<T>(this: Constructor<T>, scope?: Pojo | null, options: IFindOptions = {}): QueryBuilder<T & Model> {
     const { eager, eagerOpts = {}, modify } = options;
 
     const query = this.query();
@@ -92,18 +87,12 @@ export default class Model extends ObjectionModel {
     return query;
   }
 
-  static async findOne<T>(
-    this: Constructor<T>,
-    query: Pojo,
-    options: IFindOptions = {}
-  ): Promise<T> {
+  static async findOne<T>(this: Constructor<T>, query: Pojo, options: IFindOptions = {}): Promise<T> {
     return this.find(query, options)
       .first()
       .then((record) => {
         if (options.required && !record) {
-          throw Error(
-            `${this.name} could not be found: ${JSON.stringify(query)}`
-          );
+          throw Error(`${this.name} could not be found: ${JSON.stringify(query)}`);
         }
         return record;
       });
@@ -138,32 +127,22 @@ export default class Model extends ObjectionModel {
     }
   }
 
-  static async create<T>(
-    this: Constructor<T>,
-    attributes: object,
-    trx?: Transaction
-  ): Promise<T> {
+  static async create<T>(this: Constructor<T>, attributes: object, trx?: Transaction): Promise<T> {
     return this.query(trx).insert(attributes);
   }
 
   static async upsert(data: Pojo, unique = ['id'], trx?: Transaction) {
-    const tryUpdate = Array.isArray(unique)
-      ? unique.some((key) => data[key])
-      : !!data[unique];
+    const tryUpdate = Array.isArray(unique) ? unique.some((key) => data[key]) : !!data[unique];
 
     if (tryUpdate) {
       const where = pick(data, unique);
-      const updatedRowCount = await this.query(trx)
-        .update(data)
-        .where(where);
+      const updatedRowCount = await this.query(trx).update(data).where(where);
 
       if (updatedRowCount === 0) {
         await this.query(trx).insert(data);
       }
 
-      return this.query(trx)
-        .where(where)
-        .first();
+      return this.query(trx).where(where).first();
     }
 
     return this.query().insert(data);
@@ -176,9 +155,7 @@ export default class Model extends ObjectionModel {
       });
     }
 
-    throw Error(
-      `${this.name} model does not have static property 'deleteable' specified.`
-    );
+    throw Error(`${this.name} model does not have static property 'deleteable' specified.`);
   }
 
   static async transact(callback: (trx: Transaction) => Promise<any>) {
@@ -195,16 +172,13 @@ export default class Model extends ObjectionModel {
 
   static transform(values: Pojo = {}): Pojo {
     if (this.transformations) {
-      return Object.entries(this.transformations).reduce(
-        (json: Pojo, [key, transformer]) => {
-          if (json[key]) {
-            json[key] = transformer.call(this, values[key]); // eslint-disable-line
-          }
+      return Object.entries(this.transformations).reduce((json: Pojo, [key, transformer]) => {
+        if (json[key]) {
+          json[key] = transformer.call(this, values[key]); // eslint-disable-line
+        }
 
-          return json;
-        },
-        values
-      );
+        return json;
+      }, values);
     }
 
     return values;
@@ -223,9 +197,7 @@ export default class Model extends ObjectionModel {
       .first();
 
     if (record) {
-      throw new Error(
-        `The field you provided is already connected with an account.`
-      );
+      throw new Error(`The field you provided is already connected with an account.`);
     }
 
     return true;

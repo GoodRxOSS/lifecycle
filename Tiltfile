@@ -18,6 +18,10 @@
 load('ext://helm_resource', 'helm_resource', 'helm_repo')
 load("ext://restart_process", "docker_build_with_restart")
 load("ext://secret", "secret_create_generic")
+load('ext://dotenv', 'dotenv')
+
+# Load .env file if it exists
+dotenv()
 
 config.define_string("aws_role", usage='AWS role to use for deployment')
 cfg = config.parse();
@@ -32,6 +36,13 @@ if aws_role:
 ##################################
 lifecycle_app = 'lifecycle-app'
 app_namespace = 'lifecycle-app'
+
+# NGROK Configuration
+ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
+ngrok_domain = os.getenv("NGROK_LIFECYCLE_DOMAIN", "")
+ngrok_keycloak_domain = os.getenv("NGROK_KEYCLOAK_DOMAIN", "")
+ngrok_ui_domain = os.getenv("NGROK_LIFECYCLE_UI_DOMAIN", "")
+
 
 ##################################
 # Create Namespace
@@ -103,24 +114,42 @@ docker_build_with_restart(
     entrypoint=["/app_setup_entrypoint.sh"],
     dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
     build_args={
-        "DATABASE_URL": "postgresql://lifecycle:lifecycle@local-postgres.{}.svc.cluster.local:5432/lifecycle".format(app_namespace),
-        "REDIS_URL": "redis://redis-master.{}.svc.cluster.local:6379".format(app_namespace),
+        "APP_DB_HOST": "local-postgres.{}.svc.cluster.local".format(app_namespace),
+        "APP_DB_PORT": "5432",
+        "APP_DB_USER": "lifecycle",
+        "APP_DB_PASSWORD": "lifecycle",
+        "APP_DB_NAME": "lifecycle",
+        "APP_DB_SSL": "false",
+        "APP_REDIS_HOST": "redis-master.{}.svc.cluster.local".format(app_namespace),
+        "APP_REDIS_PORT": "6379",
+        "APP_REDIS_PASSWORD": "",
     },
     live_update=[
         sync("./src", "/app/src"),
     ],
 )
 
+helm_set_args = [
+    'namespace={}'.format(app_namespace),
+    'image.repository={}'.format(lifecycle_app),
+    'image.tag=dev',
+    'keycloak.url={}'.format(ngrok_keycloak_domain or 'localhost'),
+    'keycloak.appUrl={}'.format(ngrok_domain or 'localhost:5001'),
+    'keycloak.uiUrl={}'.format(ngrok_ui_domain or 'localhost:3000'),
+    # Update IDP URLs to use ngrok domain or localhost
+    'keycloak.companyIdp.tokenUrl=https://{}/realms/company/protocol/openid-connect/token'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.tokenUrl=http://localhost:8080/realms/company/protocol/openid-connect/token',
+    'keycloak.companyIdp.authorizationUrl=https://{}/realms/company/protocol/openid-connect/auth'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.authorizationUrl=http://localhost:8080/realms/company/protocol/openid-connect/auth',
+    'keycloak.companyIdp.userInfoUrl=https://{}/realms/company/protocol/openid-connect/userinfo'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.userInfoUrl=http://localhost:8080/realms/company/protocol/openid-connect/userinfo',
+    'keycloak.companyIdp.jwksUrl=https://{}/realms/company/protocol/openid-connect/certs'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.jwksUrl=http://localhost:8080/realms/company/protocol/openid-connect/certs',
+    'keycloak.companyIdp.issuer=https://{}/realms/company'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.issuer=http://localhost:8080/realms/company',
+]
+
 lifecycle_deployment = decode_yaml_stream(helm(
     './helm/web-app/',
     name='lifecycle',
     namespace=app_namespace,
     values=['./helm/environments/local/lifecycle.yaml', './helm/environments/local/secrets.yaml'],
-    set=[
-        'namespace={}'.format(app_namespace),
-        'image.repository={}'.format(lifecycle_app),
-        'image.tag=dev',
-    ]
+    set=helm_set_args
 ))
 
 patched_deploy = []
@@ -153,6 +182,11 @@ for r in patched_deploy:
         name = r["metadata"]["name"]
         labels = []
         port_forwards = []
+        resource_deps = []
+
+        # Don't add postgres/redis deps for keycloak resources
+        if "keycloak" not in name:
+            resource_deps = ['local-postgres', 'redis']
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']
@@ -160,7 +194,7 @@ for r in patched_deploy:
             labels = ["worker"]
         k8s_resource(
             name,
-            resource_deps=['local-postgres', 'redis'],
+            resource_deps=resource_deps,
             labels=labels,
             port_forwards=port_forwards
         )
@@ -168,8 +202,6 @@ for r in patched_deploy:
 ##################################
 # NGROK
 ##################################
-ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
-ngrok_domain = os.getenv("NGROK_LIFECYCLE_DOMAIN", "")
 
 ngrok_secret_yaml = """
 apiVersion: v1
@@ -181,10 +213,13 @@ type: Opaque
 stringData:
   NGROK_AUTHTOKEN: "{}"
   NGROK_LIFECYCLE_DOMAIN: "{}"
-""".format(app_namespace, ngrok_authtoken, ngrok_domain)
+  NGROK_KEYCLOAK_DOMAIN: "{}"
+""".format(app_namespace, ngrok_authtoken, ngrok_domain, ngrok_keycloak_domain)
 
 ngrok_secret_obj = decode_yaml_stream(ngrok_secret_yaml)
 k8s_yaml(encode_yaml_stream(ngrok_secret_obj))
+
+# Main app ngrok
 k8s_yaml('sysops/tilt/ngrok.yaml')
 k8s_resource(
     'ngrok',
@@ -192,14 +227,47 @@ k8s_resource(
     labels=["infra"]
 )
 
-# Helper function to add namespace to kubernetes resources
-def kustomize_with_helm(yaml_path, namespace):
-    yaml = helm(
-        None,
-        name="custom-namespace",
-        namespace=namespace,
-        template=[yaml_path],
-        set=["namespace={}".format(namespace)]
-    )
-    return yaml
+# Ngrok for Keycloak
+k8s_yaml('sysops/tilt/ngrok-keycloak.yaml')
+k8s_resource(
+    'ngrok-keycloak',
+    port_forwards=['4041:4040'],  # Different local port for Keycloak ngrok admin
+    labels=["infra"]
+)
 
+##################################
+# Keycloak (deployed via Helm)
+##################################
+# Keycloak is deployed as part of the lifecycle helm release
+# We just need to configure the resources for Tilt UI
+k8s_resource(
+    'lifecycle-keycloak',
+    port_forwards=['8081:8080'],
+    labels=["infra"],
+    resource_deps=['lifecycle-keycloak-postgresql']
+)
+k8s_resource(
+    'lifecycle-keycloak-postgresql',
+    labels=["infra"]
+)
+
+##################################
+# DISTRIBUTION
+##################################
+k8s_yaml('sysops/tilt/distribution.yaml')
+k8s_resource(
+    'distribution', 
+    port_forwards=["8088:5000"], 
+    labels=["infra"]
+)
+
+##################################
+# BUILDKIT
+##################################
+k8s_yaml('sysops/tilt/buildkit.yaml')
+k8s_resource(
+    'buildkit', 
+    port_forwards=["1234:1234"], 
+    resource_deps=['distribution'],
+    labels=["infra"]
+)

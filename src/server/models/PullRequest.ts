@@ -68,7 +68,7 @@ export default class PullRequest extends Model {
   githubLogin: string;
 
   branchName: string;
-  labels: string[] | string;
+  labels: string[];
   latestCommit: string;
 
   static tableName = 'pull_requests';

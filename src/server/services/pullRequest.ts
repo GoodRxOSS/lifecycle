@@ -20,8 +20,8 @@ import BaseService from './_service';
 import { UniqueViolationError } from 'objection';
 import _ from 'lodash';
 import * as github from 'server/lib/github';
-import { JOB_VERSION } from 'shared/config';
-import { Labels } from 'shared/constants';
+import { QUEUE_NAMES } from 'shared/config';
+import GlobalConfigService from './globalConfig';
 import { redisClient } from 'server/lib/dependencies';
 
 export interface PullRequestOptions {
@@ -47,23 +47,15 @@ export default class PullRequestService extends BaseService {
    * @returns Pull request model
    */
   async findOrCreatePullRequest(repository: Repository, githubPullRequestId: number, options: PullRequestOptions) {
-    const { title, status, number: pullRequestNumber, fullName, deployOnUpdate } = options;
+    const { title, status, number: pullRequestNumber, fullName, deployOnUpdate, githubLogin } = options;
 
     let pullRequest = await this.db.models.PullRequest.findOne({
       repositoryId: repository.id,
       githubPullRequestId,
     });
 
-    if (pullRequest != null) {
-      if (pullRequest.githubLogin == null) {
-        await pullRequest.$query().patch({ githubLogin: options?.githubLogin });
-      }
-      if (status === 'open' && !pullRequest.deployOnUpdate) {
-        await pullRequest.$query().patch({
-          deployOnUpdate,
-        });
-      }
-    } else {
+    if (!pullRequest) {
+      // If not found, try to create new one
       try {
         pullRequest = await this.db.models.PullRequest.create({
           githubPullRequestId,
@@ -71,31 +63,46 @@ export default class PullRequestService extends BaseService {
           deployOnUpdate,
           githubLogin: options.githubLogin,
           branchName: options.branch,
-        }).catch((error) => {
-          logger.error(`[REPO]${options.fullName} [PR#]${options.number} ${error}`);
-          return null;
         });
-      } catch (e) {
-        logger.error(`[REPO]${repository.fullName} [PR NUM]${options.number}: ${e}`);
-
-        // If there is more than 1 entry, pick one to return.
-        if (e instanceof UniqueViolationError) {
+      } catch (error) {
+        if (error instanceof UniqueViolationError) {
+          logger.info(
+            `[REPO]${fullName} [PR#]${pullRequestNumber} Pull request already exists, fetching existing record`
+          );
           pullRequest = await this.db.models.PullRequest.findOne({
             repositoryId: repository.id,
             githubPullRequestId,
           });
+
+          if (!pullRequest) {
+            // should never happen, but just in case
+            throw new Error(
+              `Failed to find pull request after unique violation for repo ${repository.id}, PR ${githubPullRequestId}`
+            );
+          }
         } else {
-          throw e;
+          logger.error(`[REPO]${fullName} [PR#]${pullRequestNumber} Failed to create pull request: ${error}`);
+          throw error;
         }
       }
     }
 
-    await pullRequest.$query().patch({
+    const updates: any = {
       title,
       status,
       pullRequestNumber,
       fullName,
-    });
+    };
+
+    if (pullRequest.githubLogin == null && githubLogin) {
+      updates.githubLogin = githubLogin;
+    }
+
+    if (status === 'open' && !pullRequest.deployOnUpdate && deployOnUpdate) {
+      updates.deployOnUpdate = deployOnUpdate;
+    }
+
+    await pullRequest.$query().patch(updates);
 
     pullRequest.$setRelated('repository', repository);
     return pullRequest;
@@ -106,12 +113,13 @@ export default class PullRequestService extends BaseService {
     try {
       await pullRequest.$fetchGraph('repository');
 
+      const labelsConfig = await GlobalConfigService.getInstance().getLabels();
       const hasLabel = await this.pullRequestHasLabelsAndState(
         pullRequest.pullRequestNumber,
         pullRequest.repository.githubInstallationId,
         pullRequest.repository.fullName.split('/')[0],
         pullRequest.repository.fullName.split('/')[1],
-        [Labels.DEPLOY],
+        labelsConfig.deploy,
         'open'
       );
       return hasLabel;
@@ -143,23 +151,22 @@ export default class PullRequestService extends BaseService {
     }
   }
 
-  cleanupClosedPRQueue = this.queueManager.registerQueue(`cleanup-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  cleanupClosedPRQueue = this.queueManager.registerQueue(QUEUE_NAMES.CLEANUP, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
     },
-    settings: {
-      maxStalledCount: 0,
-    },
   });
 
-  processCleanupClosedPRs = async (_job, done) => {
-    // Always mark as done immediately to prevent any risk of retries
-    done();
-    await this.db.services.BuildService.cleanupBuilds();
+  // eslint-disable-next-line no-unused-vars
+  processCleanupClosedPRs = async (_job) => {
+    try {
+      await this.db.services.BuildService.cleanupBuilds();
+    } catch (error) {
+      logger.error(`Error processing cleanup closed PRs:`, error);
+    }
   };
 
   /**

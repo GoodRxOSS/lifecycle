@@ -1,0 +1,33 @@
+name: Node.js CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+      - name: Load .env file
+        uses: xom9ikk/dotenv@v2
+        with:
+          mode: ci
+      - run: pnpm install -r --frozen-lockfile
+      - run: pnpm lint
+      # - run: pnpm ts-check need fixes
+      - run: pnpm test
+      - run: pnpm build
+        env:
+          CI: true

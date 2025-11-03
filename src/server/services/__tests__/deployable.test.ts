@@ -218,10 +218,14 @@ describe('Deployable Service', () => {
         dockerBuildPipelineName: lifecycleDefaults.buildPipeline,
         runtimeName: '',
         serviceDisksYaml: null,
+        nodeSelector: null,
+        nodeAffinity: null,
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
         kedaScaleToZero: null,
+        deploymentDependsOn: [],
+        helm: undefined,
       });
     });
 
@@ -378,9 +382,13 @@ describe('Deployable Service', () => {
         dockerBuildPipelineName: lifecycleDefaults.buildPipeline,
         runtimeName: '',
         serviceDisksYaml: null,
+        nodeSelector: null,
+        nodeAffinity: null,
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
+        deploymentDependsOn: [],
+        helm: undefined,
       });
     });
   });

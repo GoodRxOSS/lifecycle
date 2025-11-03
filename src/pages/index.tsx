@@ -16,6 +16,7 @@
 
 import React from 'react';
 import Head from 'next/head';
+import Link from 'next/link';
 
 export default function Home() {
   return (
@@ -79,12 +80,12 @@ export default function Home() {
           <span
             style={{ height: '1.2em', width: '1px', background: '#ddd', display: 'inline-block', margin: '0 0.5em' }}
           />
-          <a
+          <Link
             href="/schema/validate"
             style={{ color: '#666', textDecoration: 'none', fontWeight: 500, fontSize: '1rem' }}
           >
             Schema Validation
-          </a>
+          </Link>
           <span
             style={{ height: '1.2em', width: '1px', background: '#ddd', display: 'inline-block', margin: '0 0.5em' }}
           />

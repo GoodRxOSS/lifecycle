@@ -429,9 +429,8 @@
     return logText;
   }
 
-  // TO_UPDATE:  this function should return the lifecycle web app's public URL(same as the github webhook URL)
   function getBaseUrl() {
-    return 'PLEASE_UPDATE';
+    return window.LFC_BASE_URL || 'PLEASE_UPDATE';
   }
 
   function showLogsModal() {

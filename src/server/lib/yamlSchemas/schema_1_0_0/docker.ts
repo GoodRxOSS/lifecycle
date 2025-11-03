@@ -23,7 +23,7 @@ export const docker = {
     ecr: { type: 'string' },
     builder: {
       type: 'object',
-      additionalProperties: false,
+      additionalProperties: true,
       properties: {
         engine: { type: 'string' },
       },

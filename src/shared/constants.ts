@@ -20,7 +20,6 @@ export enum DeployTypes {
   GITHUB = 'github',
   EXTERNAL_HTTP = 'externalHTTP',
   AURORA_RESTORE = 'aurora-restore',
-  RDS_RESTORE = 'rds-restore',
   CODEFRESH = 'codefresh',
   CONFIGURATION = 'configuration',
   HELM = 'helm',
@@ -116,12 +115,11 @@ export enum CommentParser {
   FOOTER = `----EDIT ABOVE THIS LINE----`,
 }
 
-export enum Labels {
+export enum FallbackLabels {
   DEPLOY = 'lifecycle-deploy!',
   DISABLED = 'lifecycle-disabled!',
   DEPLOY_STG = 'lifecycle-stg-deploy!',
-  ENABLE_LIFECYCLE_STATUS_COMMENTS = 'lifecycle-status-comments!',
-  PURGE_FASTLY_SERVICE_CACHE = 'lifecycle-cache-purge!',
+  STATUS_COMMENTS = 'lifecycle-status-comments!',
 }
 
 export enum FeatureFlags {

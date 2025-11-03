@@ -19,14 +19,20 @@ import _ from 'lodash';
 import Service from './_service';
 import rootLogger from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
-import { GithubPullRequestActions, GithubWebhookTypes, PullRequestStatus, Labels } from 'shared/constants';
-import { JOB_VERSION } from 'shared/config';
+import {
+  GithubPullRequestActions,
+  GithubWebhookTypes,
+  PullRequestStatus,
+  FallbackLabels,
+  DeployStatus,
+} from 'shared/constants';
+import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
 import { Environment, Repository, Build, PullRequest } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
-import { enableKillSwitch, isStaging } from 'server/lib/utils';
+import { enableKillSwitch, isStaging, hasDeployLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 
 const logger = rootLogger.child({
@@ -140,14 +146,15 @@ export default class GithubService extends Service {
           lifecycleConfig,
         });
 
-        // if auto deploy, add deploy label`
-        if (isDeploy)
-          await github.updatePullRequestLabels({
-            installationId,
-            pullRequestNumber: number,
-            fullName,
-            labels: labels.map((l) => l.name).concat(['lifecycle-deploy!']),
+        // if auto deploy, add deploy label via queue
+        if (isDeploy) {
+          await this.db.services.LabelService.labelQueue.add('label', {
+            pullRequestId: pullRequest.id,
+            action: 'enable',
+            waitForComment: true,
+            labels: labels.map((l) => l.name),
           });
+        }
       } else if (isClosed) {
         build = await this.db.models.Build.findOne({
           pullRequestId,
@@ -157,12 +164,12 @@ export default class GithubService extends Service {
           return;
         }
         await this.db.services.BuildService.deleteBuild(build);
-        // remove lifecycle-deploy! label on PR close
-        await github.updatePullRequestLabels({
-          installationId,
-          pullRequestNumber: number,
-          fullName,
-          labels: labels.map((l) => l.name).filter((v) => v !== Labels.DEPLOY),
+        // remove deploy label on PR close via queue
+        await this.db.services.LabelService.labelQueue.add('label', {
+          pullRequestId: pullRequest.id,
+          action: 'disable',
+          waitForComment: false,
+          labels: labels.map((l) => l.name),
         });
       }
     } catch (error) {
@@ -217,7 +224,7 @@ export default class GithubService extends Service {
     try {
       // this is a hacky way to force deploy by adding a label
       const labelNames = labels.map(({ name }) => name.toLowerCase()) || [];
-      const shouldDeploy = isStaging() && labelNames.includes(Labels.DEPLOY_STG);
+      const shouldDeploy = isStaging() && labelNames.includes(FallbackLabels.DEPLOY_STG);
       if (shouldDeploy) {
         // we overwrite the action so the handlePullRequestHook can handle the cretion
         body.action = GithubPullRequestActions.OPENED;
@@ -257,7 +264,7 @@ export default class GithubService extends Service {
           .child({ build })
           .error(`[BUILD ${build?.uuid}][handleLabelWebhook][buidIdError] No build ID found for this pull request!`);
       }
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId,
       });
     } catch (error) {
@@ -326,10 +333,30 @@ export default class GithubService extends Service {
         if (!buildId) {
           logger.error(`[BUILD ${build?.uuid}][handlePushWebhook][buidIdError] No build ID found for this build!`);
         }
-        logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+        // Only check for failed deploys on PR environments, not static environments
+        let hasFailedDeploys = false;
+        if (!build.isStatic) {
+          const failedDeploys = await models.Deploy.query()
+            .where('buildId', buildId)
+            .where('active', true)
+            .whereIn('status', [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED]);
+
+          hasFailedDeploys = failedDeploys.length > 0;
+
+          if (hasFailedDeploys) {
+            logger.info(
+              `[BUILD ${build?.uuid}] Detected ${failedDeploys.length} failed deploy(s). Triggering full redeploy for push on repo: ${repoName} branch: ${branchName}`
+            );
+          }
+        }
+
+        if (!hasFailedDeploys) {
+          logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
+        }
+
+        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
-          githubRepositoryId,
+          ...(hasFailedDeploys ? {} : { githubRepositoryId }),
         });
       }
     } catch (error) {
@@ -371,7 +398,7 @@ export default class GithubService extends Service {
       if (!build) return;
 
       logger.info(`[BUILD ${build?.uuid}] Redeploying static env for push on branch`);
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build?.id,
       });
     } catch (error) {
@@ -396,7 +423,7 @@ export default class GithubService extends Service {
       case GithubWebhookTypes.PULL_REQUEST:
         try {
           const labelNames = body.pull_request.labels.map(({ name }) => name.toLowerCase()) || [];
-          if (isStaging() && !labelNames.includes(Labels.DEPLOY_STG)) {
+          if (isStaging() && !labelNames.includes(FallbackLabels.DEPLOY_STG)) {
             logger.debug(`[GITHUB] STAGING RUN DETECTED - Skipping processing of this event`);
             return;
           }
@@ -425,34 +452,33 @@ export default class GithubService extends Service {
     }
   };
 
-  webhookQueue = this.queueManager.registerQueue(`webhook-processing-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  webhookQueue = this.queueManager.registerQueue(QUEUE_NAMES.WEBHOOK_PROCESSING, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
     },
-    settings: {
-      maxStalledCount: 0,
-    },
   });
 
-  processWebhooks = async (job, done) => {
-    await this.db.services.GithubService.dispatchWebhook(fParse(job.data.message));
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
+  processWebhooks = async (job) => {
+    try {
+      await this.db.services.GithubService.dispatchWebhook(fParse(job.data.message));
+    } catch (error) {
+      logger.error(`Error processing webhook:`, error);
+    }
   };
 
-  githubDeploymentQueue = this.queueManager.registerQueue(`github-deployment-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  githubDeploymentQueue = this.queueManager.registerQueue(QUEUE_NAMES.GITHUB_DEPLOYMENT, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 3,
-      timeout: 3000,
       removeOnComplete: true,
     },
   });
 
   processGithubDeployment = async (job) => {
+    // This queue has 3 attempts configured, so errors will cause retries
     const { deployId, action } = job.data;
     const text = `[DEPLOYMENT ${deployId}][processGithubDeployment] ${action}`;
     const deploy = await this.db.models.Deploy.query().findById(deployId);
@@ -481,8 +507,8 @@ export default class GithubService extends Service {
     const branch = pullRequest?.branchName;
     try {
       const isBot = await this.db.services.BotUser.isBotUser(user);
-      const hasDeployLabel = labelNames.includes(Labels.DEPLOY);
-      const isDeploy = hasDeployLabel || autoDeploy;
+      const deployLabelPresent = await hasDeployLabel(labelNames);
+      const isDeploy = deployLabelPresent || autoDeploy;
       const isKillSwitch = await enableKillSwitch({
         isBotUser: isBot,
         fullName,

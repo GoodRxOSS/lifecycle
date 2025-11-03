@@ -14,7 +14,21 @@
  * limitations under the License.
  */
 
-import { exec, generateDeployTag, waitUntil, enableKillSwitch } from 'server/lib/utils';
+import {
+  exec,
+  generateDeployTag,
+  constructEcrRepoPath,
+  waitUntil,
+  enableKillSwitch,
+  hasDeployLabel,
+  hasDisabledLabel,
+  hasStatusCommentLabel,
+  getDeployLabel,
+  getDisabledLabel,
+  getStatusCommentLabel,
+  isDefaultStatusCommentsEnabled,
+} from 'server/lib/utils';
+import GlobalConfigService from 'server/services/globalConfig';
 
 jest.mock('server/services/globalConfig', () => {
   return {
@@ -27,6 +41,13 @@ jest.mock('server/services/globalConfig', () => {
             organizations: ['disabledorg'],
           },
         },
+      }),
+      getLabels: jest.fn().mockResolvedValue({
+        deploy: ['lifecycle-deploy!', 'custom-deploy!'],
+        disabled: ['lifecycle-disabled!', 'no-deploy!'],
+        statusComments: ['lifecycle-status-comments!', 'show-status!'],
+        defaultStatusComments: true,
+        defaultControlComments: true,
       }),
     }),
   };
@@ -85,6 +106,91 @@ describe('generateDeployTag', () => {
     });
 
     expect(tag).toEqual('lfc-abc123-1234');
+  });
+});
+
+describe('constructEcrRepoPath', () => {
+  test('returns base repo when no service name provided', () => {
+    const result = constructEcrRepoPath('my-repo', undefined, '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('returns empty string when no base repo and no service name', () => {
+    const result = constructEcrRepoPath('', undefined, '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('');
+  });
+
+  test('returns empty string when null base repo', () => {
+    const result = constructEcrRepoPath(null as any, 'my-service', '123456789.dkr.ecr.us-west-2.amazonaws.com');
+    expect(result).toBe('');
+  });
+
+  test('does not append service name for AWS ECR domains', () => {
+    const result = constructEcrRepoPath(
+      'my-repo/my-service/lfc',
+      'my-service',
+      '123456789.dkr.ecr.us-west-2.amazonaws.com'
+    );
+    expect(result).toBe('my-repo/my-service/lfc');
+  });
+
+  test('does not append service name for AWS ECR domains with different regions', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '123456789.dkr.ecr.eu-west-1.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('does not append service name for AWS ECR FIPS endpoints', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '123456789.dkr.ecr-fips.us-east-1.amazonaws.com');
+    expect(result).toBe('my-repo');
+  });
+
+  test('appends service name for internal registries', () => {
+    const result = constructEcrRepoPath('my-repo/my-service/lfc', 'service-name', 'distribution.example.com');
+    expect(result).toBe('my-repo/my-service/lfc/service-name');
+  });
+
+  test('appends service name for custom registries', () => {
+    const result = constructEcrRepoPath('my-org/my-repo', 'my-service', 'registry.internal.company.com');
+    expect(result).toBe('my-org/my-repo/my-service');
+  });
+
+  test('does not append service name if already present at the end', () => {
+    const result = constructEcrRepoPath(
+      'my-repo/my-service/lfc/service-name',
+      'service-name',
+      'distribution.example.com'
+    );
+    expect(result).toBe('my-repo/my-service/lfc/service-name');
+  });
+
+  test('appends service name even if it exists elsewhere in the path', () => {
+    const result = constructEcrRepoPath('service-name/repo', 'service-name', 'distribution.example.com');
+    expect(result).toBe('service-name/repo/service-name');
+  });
+
+  test('handles empty ECR domain gracefully', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', '');
+    expect(result).toBe('my-repo/my-service');
+  });
+
+  test('handles undefined ECR domain gracefully', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', undefined as any);
+    expect(result).toBe('my-repo/my-service');
+  });
+
+  test('does not append for public ECR', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service', 'public.ecr.aws');
+    expect(result).toBe('my-repo');
+  });
+
+  test('handles service name with special characters', () => {
+    const result = constructEcrRepoPath('my-repo', 'my-service-v2.1', 'distribution.example.com');
+    expect(result).toBe('my-repo/my-service-v2.1');
+  });
+
+  test('handles base repo with trailing slash', () => {
+    const result = constructEcrRepoPath('my-repo/', 'my-service', 'distribution.example.com');
+    expect(result).toBe('my-repo//my-service');
   });
 });
 
@@ -213,5 +319,232 @@ describe('enableKillSwitch', () => {
     const options = { action: '', branch: '', fullName: '', githubUser: '', isOpen: true };
     const result = await enableKillSwitch(options);
     expect(result).toEqual(false);
+  });
+});
+
+describe('hasDeployLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured deploy label', async () => {
+    const result = await hasDeployLabel(['lifecycle-deploy!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when PR has multiple configured deploy labels', async () => {
+    const result = await hasDeployLabel(['custom-deploy!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no deploy labels', async () => {
+    const result = await hasDeployLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when labels array is empty', async () => {
+    const result = await hasDeployLabel([]);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).not.toHaveBeenCalled();
+  });
+
+  test('returns false when deploy config is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await hasDeployLabel(['some-label']);
+    expect(result).toBe(false);
+  });
+
+  test('returns false when deploy config is empty array', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: [],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+      defaultControlComments: true,
+    });
+    const result = await hasDeployLabel(['some-label']);
+    expect(result).toBe(false);
+  });
+});
+
+describe('hasDisabledLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured disabled label', async () => {
+    const result = await hasDisabledLabel(['lifecycle-disabled!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no disabled labels', async () => {
+    const result = await hasDisabledLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when labels array is empty', async () => {
+    const result = await hasDisabledLabel([]);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).not.toHaveBeenCalled();
+  });
+});
+
+describe('hasStatusCommentLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true when PR has a configured status comment label', async () => {
+    const result = await hasStatusCommentLabel(['lifecycle-status-comments!', 'other-label']);
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns false when PR has no status comment labels', async () => {
+    const result = await hasStatusCommentLabel(['other-label', 'another-label']);
+    expect(result).toBe(false);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('getDeployLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first deploy label from configuration', async () => {
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns hardcoded fallback when deploy config is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+  });
+
+  test('returns hardcoded fallback when deploy config is empty array', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: [],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+      defaultControlComments: true,
+    });
+    const result = await getDeployLabel();
+    expect(result).toBe('lifecycle-deploy!');
+  });
+});
+
+describe('getDisabledLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first disabled label from configuration', async () => {
+    const result = await getDisabledLabel();
+    expect(result).toBe('lifecycle-disabled!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('getStatusCommentLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns first status comment label from configuration', async () => {
+    const result = await getStatusCommentLabel();
+    expect(result).toBe('lifecycle-status-comments!');
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+});
+
+describe('isDefaultStatusCommentsEnabled', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns defaultStatusComments setting from configuration', async () => {
+    const result = await isDefaultStatusCommentsEnabled();
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when defaultStatusComments is missing', async () => {
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+    } as any);
+    const result = await isDefaultStatusCommentsEnabled();
+    expect(result).toBe(true);
+  });
+});
+
+describe('isControlCommentsEnabled', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns defaultControlComments setting from configuration', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(true);
+    expect(GlobalConfigService.getInstance().getLabels).toHaveBeenCalled();
+  });
+
+  test('returns true when defaultControlComments is missing', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+    } as any);
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(true);
+  });
+
+  test('returns false when defaultControlComments is explicitly false', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockResolvedValueOnce({
+      deploy: ['lifecycle-deploy!'],
+      disabled: ['lifecycle-disabled!'],
+      statusComments: ['lifecycle-status-comments!'],
+      defaultStatusComments: true,
+      defaultControlComments: false,
+    });
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(false);
+  });
+
+  test('returns true when getLabels throws an error', async () => {
+    const { isControlCommentsEnabled } = await import('../utils');
+    const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
+    mockService.getLabels.mockRejectedValueOnce(new Error('Database error'));
+    const result = await isControlCommentsEnabled();
+    expect(result).toBe(true);
   });
 });

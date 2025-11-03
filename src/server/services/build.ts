@@ -23,11 +23,12 @@ import { customAlphabet, nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
 import { Build, Deploy, Environment, Service, BuildServiceOverride } from 'server/models';
-import { BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes, HelmDeployTypes } from 'shared/constants';
+import { BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
 import { type DeployOptions } from './deploy';
+import DeployService from './deploy';
 import BaseService from './_service';
 import _ from 'lodash';
-import { JOB_VERSION } from 'shared/config';
+import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
 import rootLogger from 'server/lib/logger';
 import { ParsingError } from 'server/lib/yamlConfigParser';
@@ -41,6 +42,7 @@ import { Tracer } from 'server/lib/tracer';
 import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
+import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 
 const logger = rootLogger.child({
   filename: 'services/build.ts',
@@ -50,8 +52,8 @@ const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
 export interface IngressConfiguration {
   host: string;
+  altHosts?: string[];
   serviceHost: string;
-  acmARN: string;
   deployUUID: string;
   ipWhitelist: string[];
   pathPortMapping: Record<string, number>;
@@ -85,7 +87,7 @@ export default class BuildService extends BaseService {
               logger.error(`[BUILD ${build?.uuid}][cleanupBuilds][buidIdError] No build ID found for this build!`);
             }
             logger.info(`[BUILD ${build?.uuid}] Queuing build for deletion`);
-            await this.db.services.BuildService.deleteQueue.add({ buildId });
+            await this.db.services.BuildService.deleteQueue.add('delete', { buildId });
           }
         }
       } catch (e) {
@@ -103,6 +105,62 @@ export default class BuildService extends BaseService {
       .whereNot('status', 'pending')
       .withGraphFetched('deploys.[service.[repository]]');
     return builds;
+  }
+
+  /**
+   * Returns a paginated list of all builds, excluding those with specified statuses.
+   * By default, pagination is enabled with a limit of 25 items per page.
+   * @param excludeStatuses A comma-separated string of build statuses to exclude from the results.
+   * @param pagination Pagination parameters including page number and limit.
+   * @returns An object containing the list of builds and pagination metadata.
+   * */
+  async getAllBuilds(
+    excludeStatuses: string,
+    filterByAuthor?: string,
+    search?: string,
+    pagination?: PaginationParams
+  ): Promise<{
+    data: Build[];
+    paginationMetadata: PaginationMetadata;
+  }> {
+    const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
+
+    const baseQuery = this.db.models.Build.query()
+      .select('id', 'uuid', 'status', 'namespace')
+      .whereNotIn('status', exclude)
+      .modify((qb) => {
+        if (filterByAuthor) {
+          qb.whereExists(this.db.models.Build.relatedQuery('pullRequest').where('githubLogin', filterByAuthor));
+        }
+
+        const term = (search ?? '').trim();
+        if (term) {
+          const like = `%${term.toLowerCase()}%`;
+
+          qb.where((w) => {
+            // Build table columns
+            w.orWhereRaw('LOWER("uuid") LIKE ?', [like]).orWhereRaw('LOWER("namespace") LIKE ?', [like]);
+
+            // Related pullRequest columns
+            w.orWhereExists(
+              this.db.models.Build.relatedQuery('pullRequest').where((pr) => {
+                pr.whereRaw('LOWER("title") LIKE ?', [like])
+                  .orWhereRaw('LOWER("fullName") LIKE ?', [like])
+                  .orWhereRaw('LOWER("githubLogin") LIKE ?', [like]);
+              })
+            );
+          });
+        }
+      })
+      .withGraphFetched('pullRequest')
+      .modifyGraph('pullRequest', (builder) => {
+        builder.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber');
+      })
+      .orderBy('updatedAt', 'desc');
+
+    const { data, metadata: paginationMetadata } = await paginate<Build>(baseQuery, pagination);
+
+    return { data, paginationMetadata };
   }
 
   /**
@@ -188,7 +246,6 @@ export default class BuildService extends BaseService {
         return Object.keys(deployable.hostPortMapping).map((key) => {
           return {
             host: `${key}-${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${key}-${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -202,7 +259,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: `${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -214,7 +270,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: deploy.uuid,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.deployable.ipWhitelist,
@@ -230,7 +285,6 @@ export default class BuildService extends BaseService {
         return Object.keys(service.hostPortMapping).map((key) => {
           return {
             host: `${key}-${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${key}-${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: service.ipWhitelist,
@@ -243,7 +297,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: `${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: `${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.service.ipWhitelist,
@@ -254,7 +307,6 @@ export default class BuildService extends BaseService {
         return [
           {
             host: this.db.services.Deploy.hostForServiceDeploy(deploy, service),
-            acmARN: this.db.services.Deploy.acmARNForDeploy(deploy, build.enableFullYaml),
             deployUUID: deploy.uuid,
             serviceHost: `${deploy.uuid}`,
             ipWhitelist: deploy.service.ipWhitelist,
@@ -287,10 +339,6 @@ export default class BuildService extends BaseService {
     const build = await this.db.models.Build.findOne({ id: buildId });
     await build?.$fetchGraph('deploys.[service.[repository]]');
     return this.domainsAndCertificatesForBuild(build, allServices);
-  }
-
-  async deployManually(environmentId: string) {
-    logger.debug(environmentId);
   }
 
   public async createBuildAndDeploys({
@@ -465,6 +513,7 @@ export default class BuildService extends BaseService {
         this.buildImages(build, githubRepositoryId),
         this.deployCLIServices(build, githubRepositoryId),
       ]);
+      logger.debug(`[BUILD ${uuid}] Build results: buildImages=${results[0]}, deployCLIServices=${results[1]}`);
       const success = _.every(results);
       /* Verify that all deploys are successfully built that are active */
       if (success) {
@@ -521,7 +570,6 @@ export default class BuildService extends BaseService {
     const env = lifecycleConfig?.environment;
     const enabledFeatures = env?.enabledFeatures || [];
     const githubDeployments = env?.githubDeployments || false;
-    const hasGithubStatusComment = env?.hasGithubStatusComment || false;
     const build =
       (await this.db.models.Build.query()
         .where('pullRequestId', options.pullRequestId)
@@ -537,7 +585,6 @@ export default class BuildService extends BaseService {
         enableFullYaml: this.db.services.Environment.enableFullYamlSupport(environment),
         enabledFeatures: JSON.stringify(enabledFeatures),
         githubDeployments,
-        hasGithubStatusComment,
         namespace: `env-${uuid}`,
       }));
     logger.info(`[BUILD ${build.uuid}] Created build for pull request branch: ${options.repositoryBranchName}`);
@@ -622,12 +669,15 @@ export default class BuildService extends BaseService {
           build.deploys.map(async (deploy) => {
             await deploy.$query().patch({ status: DeployStatus.TORN_DOWN });
             if (build.githubDeployments)
-              await this.db.services.GithubService.githubDeploymentQueue.add({ deployId: deploy.id, action: 'delete' });
+              await this.db.services.GithubService.githubDeploymentQueue.add('deployment', {
+                deployId: deploy.id,
+                action: 'delete',
+              });
           })
         );
 
         await k8s.deleteNamespace(build.namespace);
-        await this.db.services.Ingress.ingressCleanupQueue.add({
+        await this.db.services.Ingress.ingressCleanupQueue.add('cleanup', {
           buildId: build.id,
         });
         logger.info(`[DELETE ${build?.uuid}] Deleted build`);
@@ -705,7 +755,7 @@ export default class BuildService extends BaseService {
       // Pull webhooks for this environment, and run them
       logger.debug(`[BUILD ${build.uuid}] Build status changed to ${build.status}.`);
 
-      await this.db.services.Webhook.webhookQueue.add({ buildId: build.id });
+      await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id });
     }
   }
 
@@ -828,32 +878,42 @@ export default class BuildService extends BaseService {
 
     if (build?.enableFullYaml) {
       try {
-        const results = await Promise.all(
-          deploys
-            .filter((d) => {
-              return (
-                d.active &&
-                (d.deployable.type === DeployTypes.DOCKER ||
-                  d.deployable.type === DeployTypes.GITHUB ||
-                  d.deployable.type === DeployTypes.HELM)
-              );
-            })
-            .map(async (deploy, index) => {
-              if (deploy === undefined) {
-                logger.debug(
-                  "Somehow deploy deploy is undefined here.... That shouldn't be possible? Build deploy length is %s",
-                  build.deploys.length
-                );
-              }
-              await deploy.$query().patchAndFetch({
-                deployPipelineId: null,
-                deployOutput: null,
-              });
-              const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
-              return result;
-            })
+        const deploysToBuild = deploys.filter((d) => {
+          return (
+            d.active &&
+            (d.deployable.type === DeployTypes.DOCKER ||
+              d.deployable.type === DeployTypes.GITHUB ||
+              d.deployable.type === DeployTypes.HELM)
+          );
+        });
+        logger.debug(
+          `[BUILD ${build.uuid}] Processing ${deploysToBuild.length} deploys for build: ${deploysToBuild
+            .map((d) => d.uuid)
+            .join(', ')}`
         );
-        return _.every(results);
+
+        const results = await Promise.all(
+          deploysToBuild.map(async (deploy, index) => {
+            if (deploy === undefined) {
+              logger.debug(
+                "Somehow deploy deploy is undefined here.... That shouldn't be possible? Build deploy length is %s",
+                build.deploys.length
+              );
+            }
+            await deploy.$query().patchAndFetch({
+              deployPipelineId: null,
+              deployOutput: null,
+            });
+            const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
+            logger.debug(`[BUILD ${build.uuid}] Deploy ${deploy.uuid} buildImage completed with result: ${result}`);
+            return result;
+          })
+        );
+        const finalResult = _.every(results);
+        logger.debug(
+          `[BUILD ${build.uuid}] Build results for each deploy: ${results.join(', ')}, final: ${finalResult}`
+        );
+        return finalResult;
       } catch (error) {
         logger.error(`[${build.uuid}] Uncaught Docker Build Error: ${error}`);
         return false;
@@ -874,6 +934,7 @@ export default class BuildService extends BaseService {
                 );
               }
               const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
+              logger.debug(`[BUILD ${build.uuid}] Deploy ${deploy.uuid} buildImage completed with result: ${result}`);
               if (!result) logger.info(`[BUILD ${build?.uuid}][${deploy.uuid}][buildImages] build image unsuccessful`);
               return result;
             })
@@ -899,70 +960,91 @@ export default class BuildService extends BaseService {
     githubRepositoryId: string;
     namespace: string;
   }): Promise<boolean> {
-    logger.debug(`[BUILD ${build.uuid}] Generating manifests for build`);
-
     if (build?.enableFullYaml) {
       try {
-        const k8sDeploys = [];
-        const helmDeploys = [];
         const buildId = build?.id;
 
         const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+        const serviceAccountName = serviceAccount?.name || 'default';
         // create namespace and annotate the service account
         await k8s.createOrUpdateNamespace({ name: build.namespace, buildUUID: build.uuid, staticEnv: build.isStatic });
-        await k8s.annotateDefaultServiceAccount({
+        await k8s.createOrUpdateServiceAccount({
           namespace: build.namespace,
           role: serviceAccount?.role,
         });
 
-        (
-          await Deploy.query()
-            .where({
-              buildId,
-              ...(githubRepositoryId ? { githubRepositoryId } : {}),
-            })
-            .withGraphFetched({
-              service: {
-                serviceDisks: true,
-              },
-              deployable: true,
-            })
-        ).forEach((d) => {
+        const allDeploys = await Deploy.query()
+          .where({
+            buildId,
+            ...(githubRepositoryId ? { githubRepositoryId } : {}),
+          })
+          .withGraphFetched({
+            service: {
+              serviceDisks: true,
+            },
+            deployable: true,
+          });
+
+        const activeDeploys = allDeploys.filter((d) => d.active);
+
+        // Generate manifests for GitHub/Docker/CLI deploys
+        for (const deploy of activeDeploys) {
+          const deployType = deploy.deployable.type;
           if (
-            d.active &&
-            (d.deployable.type === DeployTypes.GITHUB ||
-              d.deployable.type === DeployTypes.DOCKER ||
-              CLIDeployTypes.has(d.deployable.type) ||
-              HelmDeployTypes.has(d.deployable.type))
+            deployType === DeployTypes.GITHUB ||
+            deployType === DeployTypes.DOCKER ||
+            CLIDeployTypes.has(deployType)
           ) {
-            if (DeployTypes.HELM === d.deployable.type) {
-              helmDeploys.push(d);
-              // Pass keda-proxy as values
-            } else {
-              k8sDeploys.push(d);
+            // Generate individual manifest for this deploy
+            const manifest = k8s.generateDeployManifest({
+              deploy,
+              build,
+              namespace,
+              serviceAccountName,
+            });
+
+            // Store manifest in deploy record
+            if (manifest && manifest.trim().length > 0) {
+              await deploy.$query().patch({ manifest });
             }
           }
-        });
-        logger.debug(`[BUILD ${build.uuid}] Found ${helmDeploys.length} helm deploys`);
-        logger.debug(`[BUILD ${build.uuid}] Found ${k8sDeploys.length} deploys to generate manifests for`);
-        const manifest = k8s.generateManifest({ build, deploys: k8sDeploys, uuid: build.uuid, namespace });
-        if (manifest && manifest.replace('---', '').trim().length > 0) {
-          await build.$query().patch({ manifest });
-          await k8s.applyManifests(build);
-          /* Generate the nginx manifests for this new build */
-          await this.db.services.Ingress.ingressManifestQueue.add({
-            buildId,
-          });
-          logger.info(`[DEPLOY ${build.uuid}] Applied generated manifests to k8s cluster`);
         }
-        if (helmDeploys.length > 0) {
-          const deploymentManager = new DeploymentManager(helmDeploys);
+
+        // Use DeploymentManager for all active deploys (both Helm and GitHub types)
+        if (activeDeploys.length > 0) {
+          // we should ignore Codefresh services here since we dont deploy anything
+          const managedDeploys = activeDeploys.filter((d) => d.deployable.type !== DeployTypes.CODEFRESH);
+          const deploymentManager = new DeploymentManager(managedDeploys);
           await deploymentManager.deploy();
         }
 
-        const isReady = await k8s.waitForPodReady(build);
-        if (isReady) this.updateDeploysImageDetails(build);
-        return isReady;
+        // Queue ingress creation after all deployments
+        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
+          buildId,
+        });
+
+        // Legacy manifest generation for backwards compatibility
+        const githubTypeDeploys = activeDeploys.filter(
+          (d) =>
+            d.deployable.type === DeployTypes.GITHUB ||
+            d.deployable.type === DeployTypes.DOCKER ||
+            CLIDeployTypes.has(d.deployable.type)
+        );
+
+        if (githubTypeDeploys.length > 0) {
+          const legacyManifest = k8s.generateManifest({
+            build,
+            deploys: githubTypeDeploys,
+            uuid: build.uuid,
+            namespace,
+            serviceAccountName,
+          });
+          if (legacyManifest && legacyManifest.replace(/---/g, '').trim().length > 0) {
+            await build.$query().patch({ manifest: legacyManifest });
+          }
+        }
+        await this.updateDeploysImageDetails(build);
+        return true;
       } catch (e) {
         logger.warn(`[BUILD ${build.uuid}] Some problem when deploying services to Kubernetes cluster: ${e}`);
         throw e;
@@ -975,6 +1057,10 @@ export default class BuildService extends BaseService {
             `[BUILD ${build?.uuid}][generateAndApplyManifests][buidIdError] No build ID found for this build!`
           );
         }
+
+        const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+        const serviceAccountName = serviceAccount?.name || 'default';
+
         const deploys = (
           await Deploy.query()
             .where({ buildId })
@@ -990,20 +1076,35 @@ export default class BuildService extends BaseService {
               d.service.type === DeployTypes.DOCKER ||
               CLIDeployTypes.has(d.service.type))
         );
-        logger.debug(`[${build.uuid}]: Found ${deploys.length} deploys to generate manifests for`);
-        const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace });
-        if (manifest && manifest.replace('---', '').trim().length > 0) {
+        const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace, serviceAccountName });
+        if (manifest && manifest.replace(/---/g, '').trim().length > 0) {
           await build.$query().patch({ manifest });
           await k8s.applyManifests(build);
         }
 
         /* Generate the nginx manifests for this new build */
-        await this.db.services.Ingress.ingressManifestQueue.add({
+        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
           buildId,
         });
 
         const isReady = await k8s.waitForPodReady(build);
-        if (isReady) await this.updateDeploysImageDetails(build);
+        if (isReady) {
+          // Mark all deploys as READY after pods are ready
+          const deployService = new DeployService();
+          await Promise.all(
+            deploys.map((deploy) =>
+              deployService.patchAndUpdateActivityFeed(
+                deploy,
+                {
+                  status: DeployStatus.READY,
+                  statusMessage: 'K8s pods are ready',
+                },
+                build.runUUID
+              )
+            )
+          );
+          await this.updateDeploysImageDetails(build);
+        }
 
         return true;
       } catch (e) {
@@ -1042,75 +1143,61 @@ export default class BuildService extends BaseService {
   /**
    * A queue entrypoint for the purpose of performing builds and deploying to K8
    */
-  deleteQueue = this.queueManager.registerQueue(`delete_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  deleteQueue = this.queueManager.registerQueue(QUEUE_NAMES.DELETE_QUEUE, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * A queue entrypoint for the purpose of deleting builds
    */
-  buildQueue = this.queueManager.registerQueue(`build_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  buildQueue = this.queueManager.registerQueue(QUEUE_NAMES.BUILD_QUEUE, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * A queue specifically for the purpose of performing builds and deploying to K8
    */
-  resolveAndDeployBuildQueue = this.queueManager.registerQueue(`resolve_and_deploy-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
+  resolveAndDeployBuildQueue = this.queueManager.registerQueue(QUEUE_NAMES.RESOLVE_AND_DEPLOY, {
+    connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 1,
-      timeout: 3600000,
       removeOnComplete: true,
       removeOnFail: true,
-    },
-    settings: {
-      maxStalledCount: 0,
     },
   });
 
   /**
    * Process the deleion of a build async
-   * @param job the Bull job with the buildId
-   * @param done the Bull callback to invoke when we are done
+   * @param job the BullMQ job with the buildId
    */
-  processDeleteQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-    const buildId = job.data.buildId;
-    const build = await this.db.models.Build.query().findOne({
-      id: buildId,
-    });
-    await this.db.services.BuildService.deleteBuild(build);
+  processDeleteQueue = async (job) => {
+    try {
+      const buildId = job.data.buildId;
+      const build = await this.db.models.Build.query().findOne({
+        id: buildId,
+      });
+      await this.db.services.BuildService.deleteBuild(build);
+    } catch (error) {
+      logger.error(`Error processing delete queue for build ${job.data.buildId}:`, error);
+    }
   };
 
   /**
    * Kicks off the process of actually deploying a build to the kubernetes cluster
-   * @param job the Bull job with the buildID
-   * @param done the Bull callback to invoke when we're done
+   * @param job the BullMQ job with the buildID
    */
-  processBuildQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-
-    // Get the build and check the labels for this build
-
+  processBuildQueue = async (job) => {
+    // No retry behavior - catch errors and log them
     const buildId = job.data.buildId;
     const githubRepositoryId = job?.data?.githubRepositoryId;
     let build;
@@ -1148,15 +1235,11 @@ export default class BuildService extends BaseService {
    * @param job the Bull job with the buildID
    * @param done the Bull callback to invoke when we're done
    */
-  processResolveAndDeployBuildQueue = async (job, done) => {
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-
-    // Get the build and check the labels for this build
-    // The job id is used to create the build id
+  processResolveAndDeployBuildQueue = async (job) => {
     let jobId;
-    let buildId;
+    let buildId: number;
     try {
-      const jobId = job?.data?.buildId;
+      jobId = job?.data?.buildId;
       const githubRepositoryId = job?.data?.githubRepositoryId;
       if (!jobId) throw new Error('jobId is required but undefined');
       const build = await this.db.models.Build.query().findOne({
@@ -1165,15 +1248,18 @@ export default class BuildService extends BaseService {
 
       await build?.$fetchGraph('[pullRequest, environment]');
       await build.pullRequest.$fetchGraph('[repository]');
-      const buildId = build?.id;
+      buildId = build?.id;
       if (!buildId) throw new Error('buildId is required but undefined');
 
+      if (!build.pullRequest.deployOnUpdate) {
+        logger.info(`[BUILD ${build.uuid}] Pull request does not have deployOnUpdate enabled. Skipping build.`);
+        return;
+      }
       // Enqueue a standard resolve build
-      await this.db.services.BuildService.buildQueue.add({ buildId, githubRepositoryId });
+      await this.db.services.BuildService.buildQueue.add('build', { buildId, githubRepositoryId });
     } catch (error) {
       const text = `[BUILD ${buildId}][processResolveAndDeployBuildQueue] error processing buildId with the jobId, ${jobId}`;
       logger.child({ error }).error(text);
-      throw error;
     }
   };
 }

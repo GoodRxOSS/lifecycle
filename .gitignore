@@ -25,3 +25,8 @@ coverage
 dist
 
 helm/environments/**/secrets.yaml
+
+# Claude Code files
+CLAUDE.md
+llm-docs/
+llm-specs/

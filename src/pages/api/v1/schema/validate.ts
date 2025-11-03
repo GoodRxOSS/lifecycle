@@ -111,7 +111,7 @@ const logger = rootLogger.child({
   filename: 'v1/schema/validate',
 });
 
-export default async (req: NextApiRequest, res: NextApiResponse<Response>) => {
+const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<Response>) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
@@ -138,6 +138,8 @@ export default async (req: NextApiRequest, res: NextApiResponse<Response>) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+export default schemaValidateHandler;
 
 const validateContent = async (req: NextApiRequest, res: NextApiResponse<Response>) => {
   const { content } = req.body;

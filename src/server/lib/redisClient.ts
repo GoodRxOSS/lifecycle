@@ -16,7 +16,7 @@
 
 import Redis from 'ioredis';
 import Redlock from 'redlock';
-import { REDIS_URL } from 'shared/config';
+import { REDIS_URL, APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD, APP_REDIS_TLS } from 'shared/config';
 import rootLogger from './logger';
 
 const logger = rootLogger.child({
@@ -29,11 +29,41 @@ export class RedisClient {
   private readonly redis: Redis;
   private readonly subscriber: Redis;
   private readonly redlock: Redlock;
-  private readonly bclients: Redis[] = [];
+  private readonly bullConn: Redis;
 
   private constructor() {
-    this.redis = new Redis(REDIS_URL);
+    if (APP_REDIS_HOST) {
+      const redisConfig: any = {
+        host: APP_REDIS_HOST,
+        port: APP_REDIS_PORT ? parseInt(APP_REDIS_PORT, 10) : 6379,
+      };
+
+      if (APP_REDIS_PASSWORD) {
+        redisConfig.password = APP_REDIS_PASSWORD;
+      }
+
+      if (APP_REDIS_TLS === 'true') {
+        redisConfig.tls = {
+          rejectUnauthorized: false,
+        };
+      }
+
+      this.redis = new Redis(redisConfig);
+    } else if (REDIS_URL) {
+      this.redis = new Redis(REDIS_URL);
+    } else {
+      throw new Error(
+        'Redis configuration not found. Please provide either REDIS_URL or individual APP_REDIS_* environment variables.'
+      );
+    }
+
     this.subscriber = this.redis.duplicate();
+    this.bullConn = this.redis.duplicate();
+    // BullMQ requires maxRetriesPerRequest to be null for blocking operations
+    if (this.bullConn.options) {
+      this.bullConn.options.maxRetriesPerRequest = null;
+    }
+
     this.redlock = new Redlock([this.redis], {
       driftFactor: 0.01,
       retryCount: 120,
@@ -42,6 +72,7 @@ export class RedisClient {
     });
     this.redis.setMaxListeners(50);
     this.subscriber.setMaxListeners(50);
+    this.bullConn.setMaxListeners(50);
   }
 
   public static getInstance(): RedisClient {
@@ -59,38 +90,19 @@ export class RedisClient {
     return this.redlock;
   }
 
-  public getBullCreateClient() {
-    return (type: string): Redis => {
-      switch (type) {
-        case 'client':
-          return this.redis;
-        case 'subscriber':
-          return this.subscriber;
-        case 'bclient': {
-          const bclient = this.redis.duplicate();
-          this.bclients.push(bclient);
-          return bclient;
-        }
-        default: {
-          const client = this.redis.duplicate();
-          this.bclients.push(client);
-          return client;
-        }
-      }
-    };
+  public getConnection(): Redis {
+    return this.bullConn;
   }
 
   public async close(): Promise<void> {
     try {
-      await Promise.all([this.redis.quit(), this.subscriber.quit(), ...this.bclients.map((client) => client.quit())]);
+      await Promise.all([this.redis.quit(), this.subscriber.quit(), this.bullConn.quit()]);
       logger.info(' ✅All Redis connections closed successfully.');
     } catch (error) {
       logger.warn(' ⚠️Error closing Redis connections. Forcing disconnect.', error);
       this.redis.disconnect();
       this.subscriber.disconnect();
-      this.bclients.forEach((client) => client.disconnect());
-    } finally {
-      this.bclients.length = 0;
+      this.bullConn.disconnect();
     }
   }
 }

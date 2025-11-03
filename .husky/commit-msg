@@ -1,0 +1,5 @@
+ #!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Husky will pass the path to the temporary commit‐message file as $1
+npx commitlint --edit "$1"

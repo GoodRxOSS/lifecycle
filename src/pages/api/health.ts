@@ -26,7 +26,6 @@ export default async function healthHandler(req: NextApiRequest, res: NextApiRes
   }
 
   try {
-    // simple pings and queries to make sure we can connect to redis and database
     await RedisClient.getInstance().getRedis().ping();
     await defaultDb.knex.raw('SELECT 1');
     res.status(200).json({ status: 'Healthy' });

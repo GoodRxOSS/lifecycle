@@ -52,6 +52,8 @@ components:
           value: default
         - name: ENVIRONMENT
           value: dev
+        - name: APP_ENV
+          value: dev
         - name: STAGE
           value: stage
         - name: PINO_PRETTY
@@ -60,8 +62,6 @@ components:
           value: debug
         - name: NODE_ENV
           value: development
-        - name: APP_ENV
-          value: staging
         - name: LIFECYCLE_MODE
           value: web
         - name: PORT
@@ -92,14 +92,14 @@ components:
     ingress:
       enabled: false
     deployment:
-      replicaCount: 2
+      replicaCount: 1
       extraEnv:
         - name: JOB_VERSION
           value: default
         - name: ENVIRONMENT
-          value: staging
+          value: dev
         - name: STAGE
-          value: stage
+          value: dev
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
@@ -107,7 +107,7 @@ components:
         - name: NODE_ENV
           value: development
         - name: APP_ENV
-          value: staging
+          value: dev
         - name: AWS_REGION
           value: 'us-west-2'
         - name: AWS_PROFILE
@@ -150,3 +150,68 @@ redis:
 
 rbac:
   create: true
+
+keycloak:
+  enabled: true
+  realm: lifecycle
+  url: localhost
+  appUrl: localhost:5001
+
+  adminUsername: admin
+  adminPassword: admin
+  defaultUserPassword: changeme
+
+  postgresUsername: keycloakdb
+  postgresPassword: keycloakdb
+
+  lifecycleCoreClientSecret: changeme
+
+  # Identity Provider configurations (disabled for local dev, enable as needed)
+  companyIdp:
+    enabled: true
+    clientId: app-broker
+    clientSecret: changeme
+    tokenUrl: http://localhost:8080/realms/company/protocol/openid-connect/token
+    authorizationUrl: http://localhost:8080/realms/company/protocol/openid-connect/auth
+    userInfoUrl: http://localhost:8080/realms/company/protocol/openid-connect/userinfo
+    jwksUrl: http://localhost:8080/realms/company/protocol/openid-connect/certs
+    issuer: http://localhost:8080/realms/company
+
+  githubIdp:
+    enabled: true
+    # clientId and clientSecret will be taken from secrets.githubClientId and secrets.githubClientSecret
+    # clientId
+    # clientSecret
+
+  image:
+    registry: quay.io
+    repository: keycloak/keycloak
+    tag: 26.3.4
+
+  resources:
+    requests:
+      cpu: 400m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+
+  postgresImage:
+    registry: ''
+    repository: library/postgres
+    tag: 16.3-alpine
+
+  postgresResources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  persistent: true
+  volumeSize: 1Gi
+
+  ingress:
+    enabled: false
+    className: nginx
+    tls: false

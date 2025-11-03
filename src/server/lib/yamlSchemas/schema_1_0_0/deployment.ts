@@ -98,7 +98,7 @@ export const deployment = {
     },
     network: {
       type: 'object',
-      additionalProperties: false,
+      additionalProperties: true,
       properties: {
         ipWhitelist: { type: 'array' },
         pathPortMapping: { type: 'object' },
@@ -129,6 +129,16 @@ export const deployment = {
         },
         required: ['name', 'mountPath', 'storageSize'],
       },
+    },
+    node_selector: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Simple key-value pairs for Kubernetes node selector',
+    },
+    node_affinity: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Full Kubernetes nodeAffinity object for advanced node selection',
     },
   },
 };

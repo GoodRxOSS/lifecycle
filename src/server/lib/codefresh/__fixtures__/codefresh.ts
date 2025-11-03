@@ -40,7 +40,6 @@ export const deploy = {
 
 export const checkoutStep = {
   fail_fast: true,
-  git: CF.CHECKOUT.GIT,
   repo,
   revision,
   stage: CF.CHECKOUT.CHECKOUT_STAGE,
@@ -169,6 +168,7 @@ export const generateYamlOptions = {
   deploy,
   ecrDomain,
   ecrRepo: `lfc/app/lfc`,
+  deployCluster: undefined,
 };
 
 export const yamlDefaults = {

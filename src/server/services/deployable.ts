@@ -21,7 +21,7 @@ import Deployable from 'server/models/Deployable';
 import * as YamlService from 'server/models/yaml';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 
-import { Builder, Helm, isHelmService, KedaScaleToZero } from 'server/models/yaml';
+import { Builder, Helm, KedaScaleToZero } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
 
 const logger = rootLogger.child({
@@ -98,6 +98,8 @@ export interface DeployableAttributes {
   deploymentDependsOn?: string[];
   kedaScaleToZero?: KedaScaleToZero;
   builder?: Builder;
+  nodeSelector?: Record<string, string>;
+  nodeAffinity?: Record<string, unknown>;
 }
 
 export default class DeployableService extends BaseService {
@@ -179,6 +181,8 @@ export default class DeployableService extends BaseService {
         dockerBuildPipelineName: service.dockerBuildPipelineName,
         active,
         defaultBranchName: service.branchName,
+        nodeSelector: service.nodeSelector ?? null,
+        nodeAffinity: service.nodeAffinity ?? null,
       };
 
       if (branch != null) {
@@ -290,7 +294,7 @@ export default class DeployableService extends BaseService {
             }
           }
         }
-        const { serviceDefaults, lifecycleDefaults, domainDefaults } =
+        const { serviceDefaults, lifecycleDefaults, domainDefaults, kedaScaleToZero } =
           await GlobalConfigService.getInstance().getAllConfigs();
         //TODO check and throw error here?
         const defaultUUID = lifecycleDefaults.defaultUUID;
@@ -359,6 +363,9 @@ export default class DeployableService extends BaseService {
           defaultUUID: await YamlService.getUUID(service, build),
           serviceDisksYaml: deployment?.serviceDisks ? JSON.stringify(deployment.serviceDisks) : null,
 
+          nodeSelector: deployment?.node_selector ?? null,
+          nodeAffinity: deployment?.node_affinity ?? null,
+
           deployPipelineId: YamlService.getDeployPipelineConfig(service)?.pipelineId ?? null,
 
           deployTrigger: YamlService.getDeployPipelineConfig(service)?.trigger ?? null,
@@ -370,8 +377,8 @@ export default class DeployableService extends BaseService {
           active,
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
-          ...(isHelmService(service) ? { deploymentDependsOn: service.deploymentDependsOn || [] } : {}),
-          kedaScaleToZero: YamlService.getScaleToZeroConfig(service) ?? null,
+          deploymentDependsOn: service.deploymentDependsOn || [],
+          kedaScaleToZero: kedaScaleToZero?.enabled ? YamlService.getScaleToZeroConfig(service) : null,
           builder: YamlService.getBuilder(service) ?? {},
         };
       }

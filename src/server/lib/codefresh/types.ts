@@ -27,6 +27,7 @@ export type ContainerBuildOptions = {
   dockerfilePath: string;
   ecrDomain: string;
   envVars: Record<string, string>;
+  gitOrg?: string;
   initDockerfilePath: string;
   repo: string;
   revision: string;
@@ -36,4 +37,5 @@ export type ContainerBuildOptions = {
   initTag?: string;
   author?: string;
   enabledFeatures?: string[];
+  deployCluster?: string;
 };

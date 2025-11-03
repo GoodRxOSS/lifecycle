@@ -65,6 +65,7 @@ export default class Deploy extends Model {
   buildOutput: string;
   deployOutput: string;
   buildJobName: string;
+  manifest: string;
 
   static tableName = 'deploys';
   static timestamps = true;

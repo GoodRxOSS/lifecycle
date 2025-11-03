@@ -43,7 +43,7 @@ export const getServerSideProps: GetServerSideProps = async () => {
     definition: {
       openapi: '3.0.0',
       info: {
-        title: 'My API',
+        title: 'Lifecycle API',
         version: '1.0.0',
         description: 'API documentation for lifecycle',
       },

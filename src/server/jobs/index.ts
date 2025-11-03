@@ -16,9 +16,10 @@
 
 import { IServices } from 'server/services/types';
 import rootLogger from '../lib/logger';
-import { defaultDb } from 'server/lib/dependencies';
+import { defaultDb, redisClient } from 'server/lib/dependencies';
 import RedisClient from 'server/lib/redisClient';
 import QueueManager from 'server/lib/queueManager';
+import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, QUEUE_NAMES } from 'shared/config';
 
 let isBootstrapped = false;
 
@@ -32,10 +33,25 @@ export default function bootstrapJobs(services: IServices) {
   }
 
   logger.info(`Bootstrapping jobs...... Yes`);
-  services.GithubService.webhookQueue.process(125, services.GithubService.processWebhooks);
-  services.ActivityStream.commentQueue.process(2, services.ActivityStream.processComments);
+  const queueManager = QueueManager.getInstance();
+
+  queueManager.registerWorker(QUEUE_NAMES.WEBHOOK_PROCESSING, services.GithubService.processWebhooks, {
+    connection: redisClient.getConnection(),
+    concurrency: 125,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.COMMENT_QUEUE, services.ActivityStream.processComments, {
+    connection: redisClient.getConnection(),
+    concurrency: 2,
+    limiter: {
+      max: MAX_GITHUB_API_REQUEST,
+      duration: GITHUB_API_REQUEST_INTERVAL,
+    },
+  });
+
   /* Run once per hour */
   services.PullRequest.cleanupClosedPRQueue.add(
+    'cleanup',
     {},
     {
       repeat: {
@@ -43,27 +59,63 @@ export default function bootstrapJobs(services: IServices) {
       },
     }
   );
-  services.PullRequest.cleanupClosedPRQueue.process(services.PullRequest.processCleanupClosedPRs);
+
+  queueManager.registerWorker(QUEUE_NAMES.CLEANUP, services.PullRequest.processCleanupClosedPRs, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
   services.GlobalConfig.setupCacheRefreshJob();
-  services.PullRequest.cleanupClosedPRQueue.add({}, {});
 
-  services.Ingress.ingressManifestQueue.process(1, services.Ingress.createOrUpdateIngressForBuild);
+  queueManager.registerWorker(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, services.GlobalConfig.processCacheRefresh, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
 
-  services.Ingress.ingressCleanupQueue.process(1, services.Ingress.ingressCleanupForBuild);
+  services.PullRequest.cleanupClosedPRQueue.add('cleanup', {}, {});
 
-  services.BuildService.deleteQueue.process(20, services.BuildService.processDeleteQueue);
+  queueManager.registerWorker(QUEUE_NAMES.INGRESS_MANIFEST, services.Ingress.createOrUpdateIngressForBuild, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
 
-  services.Webhook.webhookQueue.process(10, services.Webhook.processWebhookQueue);
+  queueManager.registerWorker(QUEUE_NAMES.INGRESS_CLEANUP, services.Ingress.ingressCleanupForBuild, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
 
-  services.BuildService.resolveAndDeployBuildQueue.process(
-    125,
-    services.BuildService.processResolveAndDeployBuildQueue
-  );
+  queueManager.registerWorker(QUEUE_NAMES.DELETE_QUEUE, services.BuildService.processDeleteQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 20,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.WEBHOOK_QUEUE, services.Webhook.processWebhookQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 10,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.RESOLVE_AND_DEPLOY, services.BuildService.processResolveAndDeployBuildQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 125,
+  });
+
   /**
    * The actual build queue
    */
-  services.BuildService.buildQueue.process(125, services.BuildService.processBuildQueue);
-  services.GithubService.githubDeploymentQueue.process(125, services.GithubService.processGithubDeployment);
+  queueManager.registerWorker(QUEUE_NAMES.BUILD_QUEUE, services.BuildService.processBuildQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 125,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.GITHUB_DEPLOYMENT, services.GithubService.processGithubDeployment, {
+    connection: redisClient.getConnection(),
+    concurrency: 125,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.LABEL, services.LabelService.processLabelQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 10,
+  });
 
   defaultDb.services = services;
 

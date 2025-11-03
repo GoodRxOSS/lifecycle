@@ -17,6 +17,7 @@
 import { kedaScaleToZero } from './keda';
 import { deployment } from './deployment';
 import { docker } from './docker';
+import { webhooks } from './webhooks';
 
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
@@ -62,27 +63,7 @@ const schema_1_0_0 = {
             required: ['name'],
           },
         },
-        webhooks: {
-          type: 'array',
-          minItems: 1,
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              name: { type: 'string' },
-              description: { type: 'string' },
-              state: { type: 'string', format: 'webhookState' },
-              type: { type: 'string', format: 'webhookType' },
-              pipelineId: { type: 'string' },
-              trigger: { type: 'string' },
-              env: {
-                type: 'object',
-                required: ['branch'],
-              },
-            },
-            required: ['state', 'type', 'pipelineId', 'trigger', 'env'],
-          },
-        },
+        webhooks,
       },
     },
     services: {
@@ -117,7 +98,7 @@ const schema_1_0_0 = {
           kedaScaleToZero,
           helm: {
             type: 'object',
-            additionalProperties: false,
+            additionalProperties: true,
             properties: {
               cfStepType: { type: 'string' },
               type: { type: 'string' },
@@ -138,12 +119,12 @@ const schema_1_0_0 = {
                 },
                 required: ['name'],
               },
+              envLens: { type: 'boolean' },
               grpc: { type: 'boolean' },
               disableIngressHost: { type: 'boolean' },
               overrideDefaultIpWhitelist: { type: 'boolean' },
               docker,
             },
-            required: ['repository', 'branchName'],
           },
           codefresh: {
             type: 'object',

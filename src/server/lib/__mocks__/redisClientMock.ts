@@ -16,7 +16,12 @@
 
 jest.mock('ioredis', () => {
   class RedisMock {
-    duplicate = jest.fn(() => new RedisMock());
+    options = {};
+    duplicate = jest.fn(() => {
+      const instance = new RedisMock();
+      instance.options = {};
+      return instance;
+    });
     setMaxListeners = jest.fn();
     quit = jest.fn().mockResolvedValue(undefined);
     connect = jest.fn();
@@ -26,6 +31,7 @@ jest.mock('ioredis', () => {
     hset = jest.fn().mockResolvedValue(1);
     expire = jest.fn().mockResolvedValue(1);
     hmset = jest.fn().mockResolvedValue('OK');
+    disconnect = jest.fn();
   }
   return RedisMock;
 });
@@ -48,6 +54,7 @@ const mockRedisClient = () => {
       super();
       (this as any).redis = new RedisMock();
       (this as any).subscriber = (this as any).redis.duplicate();
+      (this as any).bullConn = (this as any).redis.duplicate();
       (this as any).redlock = {
         lock: jest.fn(),
         unlock: jest.fn(),

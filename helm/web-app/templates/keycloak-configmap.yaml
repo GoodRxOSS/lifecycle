@@ -1,0 +1,703 @@
+{{- /*
+Copyright 2025 GoodRx, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.keycloak.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-keycloak-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: keycloak
+data:
+  lifecycle-realm-config.json: |-
+    {
+      "realm": "lifecycle",
+      "displayName": "Lifecycle",
+      "displayNameHtml": "Lifecycle",
+      "enabled": true,
+      "accessTokenLifespan": 300,
+      "ssoSessionIdleTimeout": 36000,
+      "ssoSessionMaxLifespan": 43200,
+      "users": [
+        {
+          "username": "service-account-lifecycle-ui-backend",
+          "emailVerified": false,
+          "enabled": true,
+          "createdTimestamp": 1758816553655,
+          "totp": false,
+          "serviceAccountClientId": "lifecycle-ui-backend",
+          "disableableCredentialTypes": [],
+          "requiredActions": [],
+          "realmRoles": ["default-roles-lifecycle"],
+          "clientRoles": {
+            "realm-management": ["view-users", "query-users"]
+          },
+          "notBefore": 0,
+          "groups": []
+        }
+      ],
+      "clients": [
+        {
+          "clientId": "broker",
+          "name": "${client_broker}",
+          "surrogateAuthRequired": false,
+          "enabled": true,
+          "alwaysDisplayInConsole": false,
+          "clientAuthenticatorType": "client-secret",
+          "redirectUris": [],
+          "webOrigins": [],
+          "notBefore": 0,
+          "bearerOnly": true,
+          "consentRequired": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "publicClient": false,
+          "frontchannelLogout": false,
+          "protocol": "openid-connect",
+          "attributes": {
+            "realm_client": "true"
+          },
+          "authenticationFlowBindingOverrides": {},
+          "fullScopeAllowed": false,
+          "nodeReRegistrationTimeout": 0,
+          "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "roles",
+            "profile",
+            "basic",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "organization",
+            "microprofile-jwt"
+          ]
+        },
+        {
+          "clientId": "lifecycle-core",
+          "name": "",
+          "description": "",
+          "rootUrl": "",
+          "adminUrl": "",
+          "baseUrl": "",
+          "surrogateAuthRequired": false,
+          "enabled": true,
+          "alwaysDisplayInConsole": false,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "{{ .Values.keycloak.lifecycleCoreClientSecret | default "changeme" }}",
+          "redirectUris": ["/*"],
+          "webOrigins": ["+"],
+          "notBefore": 0,
+          "bearerOnly": false,
+          "consentRequired": false,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "publicClient": false,
+          "frontchannelLogout": true,
+          "protocol": "openid-connect",
+          "attributes": {
+            "client.secret.creation.time": "1758832973",
+            "request.object.signature.alg": "any",
+            "request.object.encryption.alg": "any",
+            "client.introspection.response.allow.jwt.claim.enabled": "false",
+            "standard.token.exchange.enabled": "false",
+            "frontchannel.logout.session.required": "true",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "backchannel.logout.revoke.offline.tokens": "false",
+            "use.refresh.tokens": "true",
+            "realm_client": "false",
+            "oidc.ciba.grant.enabled": "false",
+            "client.use.lightweight.access.token.enabled": "false",
+            "backchannel.logout.session.required": "true",
+            "request.object.required": "not required",
+            "client_credentials.use_refresh_token": "false",
+            "access.token.header.type.rfc9068": "false",
+            "tls.client.certificate.bound.access.tokens": "false",
+            "require.pushed.authorization.requests": "false",
+            "acr.loa.map": "{}",
+            "display.on.consent.screen": "false",
+            "request.object.encryption.enc": "any",
+            "token.response.type.bearer.lower-case": "false"
+          },
+          "authenticationFlowBindingOverrides": {},
+          "fullScopeAllowed": true,
+          "nodeReRegistrationTimeout": -1,
+          "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "roles",
+            "profile",
+            "basic",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "organization",
+            "microprofile-jwt"
+          ]
+        },
+        {
+          "clientId": "lifecycle-ui",
+          "name": "",
+          "description": "",
+          "rootUrl": "",
+          "adminUrl": "",
+          "baseUrl": "",
+          "surrogateAuthRequired": false,
+          "enabled": true,
+          "alwaysDisplayInConsole": false,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "changeme",
+          "redirectUris": ["https://{{ .Values.keycloak.uiUrl }}/*"],
+          "webOrigins": ["+"],
+          "notBefore": 0,
+          "bearerOnly": false,
+          "consentRequired": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "publicClient": false,
+          "frontchannelLogout": true,
+          "protocol": "openid-connect",
+          "attributes": {
+            "realm_client": "false",
+            "oidc.ciba.grant.enabled": "false",
+            "backchannel.logout.session.required": "true",
+            "standard.token.exchange.enabled": "false",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "backchannel.logout.revoke.offline.tokens": "false"
+          },
+          "authenticationFlowBindingOverrides": {},
+          "fullScopeAllowed": true,
+          "nodeReRegistrationTimeout": -1,
+          "protocolMappers": [
+            {
+              "name": "Lifecycle core aud",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.client.audience": "lifecycle-core",
+                "id.token.claim": "false",
+                "lightweight.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "id": "221e16b3-2eac-4250-9c9e-b31fa1b023c4",
+              "name": "Github profile picture",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "user.attribute": "githubProfilePicture",
+                "id.token.claim": "true",
+                "lightweight.claim": "false",
+                "access.token.claim": "true",
+                "claim.name": "github_profile_picture",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "id": "470ba990-7282-4e33-a0f8-b8765462f6c9",
+              "name": "Github username",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "user.attribute": "githubUsername",
+                "id.token.claim": "true",
+                "lightweight.claim": "false",
+                "access.token.claim": "true",
+                "claim.name": "github_username",
+                "jsonType.label": "String"
+              }
+            }
+          ],
+          "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "roles",
+            "profile",
+            "basic",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "organization",
+            "microprofile-jwt"
+          ]
+        },
+        {
+          "clientId": "lifecycle-ui-backend",
+          "name": "",
+          "description": "",
+          "rootUrl": "",
+          "adminUrl": "",
+          "baseUrl": "",
+          "surrogateAuthRequired": false,
+          "enabled": true,
+          "alwaysDisplayInConsole": false,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "changeme",
+          "redirectUris": ["/*"],
+          "webOrigins": ["/*"],
+          "notBefore": 0,
+          "bearerOnly": false,
+          "consentRequired": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": true,
+          "publicClient": false,
+          "frontchannelLogout": true,
+          "protocol": "openid-connect",
+          "attributes": {
+            "realm_client": "false",
+            "oidc.ciba.grant.enabled": "false",
+            "client.secret.creation.time": "1758816553",
+            "backchannel.logout.session.required": "true",
+            "standard.token.exchange.enabled": "false",
+            "frontchannel.logout.session.required": "true",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "display.on.consent.screen": "false",
+            "backchannel.logout.revoke.offline.tokens": "false"
+          },
+          "authenticationFlowBindingOverrides": {},
+          "fullScopeAllowed": true,
+          "nodeReRegistrationTimeout": -1,
+          "defaultClientScopes": [
+            "web-origins",
+            "service_account",
+            "acr",
+            "roles",
+            "profile",
+            "basic",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "organization",
+            "microprofile-jwt"
+          ]
+        }
+      ],
+      "identityProviders": [
+        {
+          "alias": "github",
+          "displayName": "",
+          "internalId": "40d9df17-3fe5-4dc4-a229-d0a8aa0104d9",
+          "providerId": "github",
+          "enabled": true,
+          "updateProfileFirstLoginMode": "on",
+          "trustEmail": false,
+          "storeToken": true,
+          "addReadTokenRoleOnCreate": false,
+          "authenticateByDefault": false,
+          "linkOnly": true,
+          "hideOnLogin": false,
+          "config": {
+            "clientId": "{{ .Values.keycloak.githubIdp.clientId | default .Values.secrets.githubClientId }}",
+            "clientSecret": "{{ .Values.keycloak.githubIdp.clientSecret | default .Values.secrets.githubClientSecret }}",
+            "acceptsPromptNoneForwardFromClient": "false",
+            "disableUserInfo": "false",
+            "syncMode": "LEGACY",
+            "filteredByClaim": "false",
+            "caseSensitiveOriginalUsername": "false"
+          }
+        },
+        {
+          "alias": "company-sso",
+          "displayName": "",
+          "internalId": "5a66993a-a829-4e85-8e47-cff1cdab07b0",
+          "providerId": "oidc",
+          "enabled": true,
+          "updateProfileFirstLoginMode": "on",
+          "trustEmail": true,
+          "storeToken": false,
+          "addReadTokenRoleOnCreate": false,
+          "authenticateByDefault": false,
+          "linkOnly": false,
+          "hideOnLogin": false,
+          "config": {
+            "tokenUrl": "{{ .Values.keycloak.companyIdp.tokenUrl }}",
+            "acceptsPromptNoneForwardFromClient": "false",
+            "jwksUrl": "{{ .Values.keycloak.companyIdp.jwksUrl }}",
+            "isAccessTokenJWT": "false",
+            "filteredByClaim": "false",
+            "backchannelSupported": "false",
+            "caseSensitiveOriginalUsername": "false",
+            "loginHint": "false",
+            "clientAuthMethod": "client_secret_post",
+            "syncMode": "LEGACY",
+            "clientSecret": "changeme-company-realm-broker-secret",
+            "requiresShortStateParameter": "false",
+            "allowedClockSkew": "0",
+            "defaultScope": "openid profile email",
+            "validateSignature": "true",
+            "clientId": "main-broker",
+            "uiLocales": "false",
+            "disableNonce": "false",
+            "useJwksUrl": "true",
+            "sendClientIdOnLogout": "false",
+            "pkceEnabled": "false",
+            "authorizationUrl": "{{ .Values.keycloak.companyIdp.authorizationUrl }}",
+            "disableUserInfo": "false",
+            "sendIdTokenOnLogout": "true",
+            "passMaxAge": "false",
+            "disableTypeClaimCheck": "false"
+          }
+        }
+      ],
+      "identityProviderMappers": [
+        {
+          "id": "99c4f2ee-0ad8-4e02-b69c-3f9146606040",
+          "name": "Github username",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "github-user-attribute-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "userAttribute": "githubUsername",
+            "jsonField": "login"
+          }
+        },
+        {
+          "id": "c733308c-237b-406e-aef5-b4d63560a780",
+          "name": "Github profile picture",
+          "identityProviderAlias": "github",
+          "identityProviderMapper": "github-user-attribute-mapper",
+          "config": {
+            "syncMode": "FORCE",
+            "userAttribute": "githubProfilePicture",
+            "jsonField": "avatar_url"
+          }
+        }
+      ],
+      "components": {
+        "org.keycloak.userprofile.UserProfileProvider": [
+          {
+            "providerId": "declarative-user-profile",
+            "subComponents": {},
+            "config": {
+              "kc.user.profile.config": [
+                "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"annotations\":{},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"githubUsername\",\"displayName\":\"${githubUsername}\",\"validations\":{},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"githubProfilePicture\",\"displayName\":\"${githubProfilePicture}\",\"validations\":{},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
+              ]
+            }
+          }
+        ]
+      },
+      "authenticationFlows": [
+        {
+          "alias": "browser - idp only",
+          "description": "Browser based authentication",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-spnego",
+              "authenticatorFlow": false,
+              "requirement": "DISABLED",
+              "priority": 20,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorConfig": "company-sso",
+              "authenticator": "identity-provider-redirector",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 25,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "ALTERNATIVE",
+              "priority": 26,
+              "autheticatorFlow": true,
+              "flowAlias": "browser - idp only Organization",
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "DISABLED",
+              "priority": 30,
+              "autheticatorFlow": true,
+              "flowAlias": "browser - idp only forms",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "browser - idp only Browser - Conditional 2FA",
+          "description": "Flow to determine if any 2FA is required for the authentication",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-otp-form",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "webauthn-authenticator",
+              "authenticatorFlow": false,
+              "requirement": "DISABLED",
+              "priority": 30,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "auth-recovery-authn-code-form",
+              "authenticatorFlow": false,
+              "requirement": "DISABLED",
+              "priority": 40,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "browser - idp only Browser - Conditional Organization",
+          "description": "Flow to determine if the organization identity-first login is to be used",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticator": "organization",
+              "authenticatorFlow": false,
+              "requirement": "ALTERNATIVE",
+              "priority": 20,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "browser - idp only Organization",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 10,
+              "autheticatorFlow": true,
+              "flowAlias": "browser - idp only Browser - Conditional Organization",
+              "userSetupAllowed": false
+            }
+          ]
+        },
+        {
+          "alias": "browser - idp only forms",
+          "description": "Username, password, otp and other auth forms.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "authenticatorFlow": false,
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "autheticatorFlow": false,
+              "userSetupAllowed": false
+            },
+            {
+              "authenticatorFlow": true,
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "autheticatorFlow": true,
+              "flowAlias": "browser - idp only Browser - Conditional 2FA",
+              "userSetupAllowed": false
+            }
+          ]
+        }
+      ],
+      "authenticatorConfig": [
+        {
+          "alias": "create unique user config",
+          "config": {
+            "require.password.update.after.registration": "false"
+          }
+        },
+        {
+          "alias": "company-sso",
+          "config": {
+            "defaultProvider": "company-sso"
+          }
+        },
+        {
+          "alias": "review profile config",
+          "config": {
+            "update.profile.on.first.login": "missing"
+          }
+        }
+      ],
+      "requiredActions": [
+        {
+          "alias": "CONFIGURE_TOTP",
+          "name": "Configure OTP",
+          "providerId": "CONFIGURE_TOTP",
+          "enabled": false,
+          "defaultAction": false,
+          "priority": 10,
+          "config": {}
+        },
+        {
+          "alias": "UPDATE_PASSWORD",
+          "name": "Update Password",
+          "providerId": "UPDATE_PASSWORD",
+          "enabled": false,
+          "defaultAction": false,
+          "priority": 30,
+          "config": {}
+        },
+        {
+          "alias": "idp_link",
+          "name": "Linking Identity Provider",
+          "providerId": "idp_link",
+          "enabled": true,
+          "defaultAction": false,
+          "priority": 110,
+          "config": {}
+        }
+      ],
+      "browserFlow": "browser - idp only",
+      "keycloakVersion": "26.3.4"
+    }
+  company-realm-config.json: |-
+    {
+      "realm": "company",
+      "enabled": true,
+      "displayName": "Company",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": false,
+      "rememberMe": false,
+      "verifyEmail": false,
+      "sslRequired": "external",
+      "users": [
+        {
+          "username": "lifecycle",
+          "enabled": true,
+          "email": "lifecycle@example.com",
+          "emailVerified": true,
+          "firstName": "Lifecycle",
+          "lastName": "User",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "lifecycle",
+              "temporary": false
+            }
+          ]
+        }
+      ],
+
+      "clients": [
+        {
+          "clientId": "main-broker",
+          "name": "Main Realm Broker Client",
+          "description": "OIDC client used by the main realm to broker logins.",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "secret": "changeme-company-realm-broker-secret",
+          "redirectUris": [
+            "https://{{ .Values.keycloak.url }}/realms/lifecycle/broker/company-sso/endpoint/*"
+          ],
+          "webOrigins": ["+"],
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "authorizationServicesEnabled": false,
+          "rootUrl": "",
+          "baseUrl": "",
+          "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "profile",
+            "roles",
+            "basic",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "organization",
+            "offline_access",
+            "microprofile-jwt"
+          ]
+        }
+      ]
+    }
+{{- end }}

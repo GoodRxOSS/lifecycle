@@ -1,0 +1,111 @@
+# Copyright 2025 GoodRx, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkit-config
+  namespace: lifecycle-app
+data:
+  buildkitd.toml: |
+    debug = true
+
+    # OCI worker settings
+    [worker.oci]
+      platforms = [ "linux/amd64" ]
+      reservedSpace = "60%"
+      maxUsedSpace = "80%"
+      max-parallelism = 25
+
+    # Mark our in-cluster registry as insecure
+    [registry."10.96.188.230:5000"]
+      insecure = true
+      http = true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: setup-scripts
+  namespace: lifecycle-app
+  labels:
+    component: buildkit
+data:
+  setup.sh: |
+    #!/bin/sh
+    echo "Starting buildkit daemon on :1234 with custom config..."
+    exec buildkitd --addr tcp://0.0.0.0:1234 --config=/etc/buildkit/buildkitd.toml
+---
+# BuildKit daemon
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkit
+  namespace: lifecycle-app
+  labels:
+    app: buildkit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: buildkit
+  template:
+    metadata:
+      labels:
+        app: buildkit
+    spec:
+      containers:
+        - name: buildkit
+          image: moby/buildkit:v0.12.0
+          command: ['/bin/sh', '/scripts/setup.sh']
+          env:
+            - name: BUILDKIT_NO_CLIENT_TOKEN
+              value: 'true'
+          ports:
+            - containerPort: 1234
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: buildkit-config
+              mountPath: /etc/buildkit
+              readOnly: true
+            - name: setup-scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: buildkit-data
+              mountPath: /var/lib/buildkit
+      volumes:
+        - name: buildkit-config
+          configMap:
+            name: buildkit-config
+        - name: setup-scripts
+          configMap:
+            name: setup-scripts
+            defaultMode: 0755
+        - name: buildkit-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkit
+  namespace: lifecycle-app
+spec:
+  selector:
+    app: buildkit
+  ports:
+    - name: buildkit
+      port: 1234
+      targetPort: 1234
+      protocol: TCP

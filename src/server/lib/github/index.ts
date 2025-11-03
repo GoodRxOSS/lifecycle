@@ -143,7 +143,7 @@ export function verifyWebhookSignature(req: NextApiRequest) {
   return isValid;
 }
 
-export async function getShaForDeploy(deploy: Deploy, logger = initialLogger) {
+export async function getShaForDeploy(deploy: Deploy) {
   let fullName;
   let branchName;
   try {
@@ -157,7 +157,6 @@ export async function getShaForDeploy(deploy: Deploy, logger = initialLogger) {
     return await getSHAForBranch(branchName, owner, name);
   } catch (error) {
     const msg = 'Unable to retrieve SHA for deploy';
-    logger.child({ error }).warn(`[${deploy.uuid}][GITHUB ${fullName}/${branchName}] ${msg}.`);
     throw new Error(error?.message || msg);
   }
 }

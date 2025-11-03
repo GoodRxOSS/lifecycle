@@ -28,6 +28,7 @@ import { IncomingMessage } from 'http';
 import { APP_ENV, TMP_PATH } from 'shared/config';
 import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
+import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 
 const logger = rootLogger.child({
   filename: 'lib/kubernetes.ts',
@@ -142,29 +143,65 @@ export async function createOrUpdateNamespace({
   }
 }
 
-export async function annotateDefaultServiceAccount({ namespace, role }: { namespace: string; role: string }) {
+export async function createOrUpdateServiceAccount({ namespace, role }: { namespace: string; role: string }) {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = kc.makeApiClient(k8s.CoreV1Api);
 
+  // Get the service account name from global config
+  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+  const serviceAccountName = serviceAccount?.name || 'default';
+
   const serviceAccountExists = async () => {
     try {
-      const saResponse = await client.readNamespacedServiceAccount('default', namespace);
+      const saResponse = await client.readNamespacedServiceAccount(serviceAccountName, namespace);
       return Boolean(saResponse?.body);
     } catch (error) {
       return false;
     }
   };
 
-  // Wait until the default service account exists in the given namespace
-  try {
-    await waitUntil(serviceAccountExists, {
-      timeoutMs: 120000,
-      intervalMs: 2000,
-    });
-  } catch (error) {
-    logger.error(`[NS ${namespace}] Timeout waiting for default service account to exist: ${error}`);
-    throw error;
+  // If it's not the default service account, create it first
+  if (serviceAccountName !== 'default') {
+    const serviceAccountManifest = {
+      apiVersion: 'v1',
+      kind: 'ServiceAccount',
+      metadata: {
+        name: serviceAccountName,
+      },
+    };
+
+    try {
+      // Check if service account already exists
+      if (!(await serviceAccountExists())) {
+        logger.info(`[NS ${namespace}] Creating service account ${serviceAccountName}`);
+        await client.createNamespacedServiceAccount(namespace, serviceAccountManifest);
+        logger.debug(`[NS ${namespace}] Created service account ${serviceAccountName}`);
+      } else {
+        logger.debug(`[NS ${namespace}] Service account ${serviceAccountName} already exists`);
+      }
+    } catch (err) {
+      logger.error(`[NS ${namespace}] Error creating service account ${serviceAccountName}:`, {
+        error: err,
+        statusCode: err?.response?.statusCode,
+        statusMessage: err?.response?.statusMessage,
+        body: err?.response?.body,
+        serviceAccountName,
+        namespace,
+      });
+      throw err;
+    }
+  } else {
+    // Wait until the default service account exists in the given namespace
+    try {
+      await waitUntil(serviceAccountExists, {
+        timeoutMs: 120000,
+        intervalMs: 2000,
+      });
+    } catch (error) {
+      logger.error(`[NS ${namespace}] Timeout waiting for ${serviceAccountName} service account to exist: ${error}`);
+      throw error;
+    }
   }
 
   // patch the service account with the role
@@ -178,7 +215,7 @@ export async function annotateDefaultServiceAccount({ namespace, role }: { names
 
   try {
     await client.patchNamespacedServiceAccount(
-      'default', // service account name
+      serviceAccountName, // service account name
       namespace, // namespace
       patch, // patch payload
       undefined, // pretty
@@ -188,9 +225,18 @@ export async function annotateDefaultServiceAccount({ namespace, role }: { names
       undefined, // force
       { headers: { 'Content-Type': 'application/merge-patch+json' } } // patch options
     );
-    logger.debug(`[NS ${namespace}] Annotated default service account in namespace ${namespace}`);
+    logger.debug(`[NS ${namespace}] Annotated ${serviceAccountName} service account in namespace ${namespace}`);
+
+    // Set up RBAC for the service account
+    await setupServiceAccountWithRBAC({
+      namespace,
+      serviceAccountName,
+      awsRoleArn: role,
+      permissions: 'deploy', // Give full permissions for deployment
+    });
+    logger.info(`[NS ${namespace}] Set up RBAC for ${serviceAccountName} service account`);
   } catch (err) {
-    logger.error(`[NS ${namespace}] Error annotating service account: ${err}`);
+    logger.error(`[NS ${namespace}] Error setting up service account ${serviceAccountName}: ${err}`);
     throw err;
   }
 }
@@ -200,6 +246,16 @@ export async function annotateDefaultServiceAccount({ namespace, role }: { names
  * @param build
  */
 export async function applyManifests(build: Build): Promise<k8s.KubernetesObject[]> {
+  // Check if this is a legacy deployment (has build.manifest)
+  if (!build.manifest || build.manifest.trim().length === 0) {
+    // New deployments are handled by DeploymentManager
+    logger.info(`[Build ${build.uuid}] No build manifest found, using new deployment pattern via DeploymentManager`);
+    return [];
+  }
+
+  // Legacy deployment path - apply manifest directly
+  logger.info(`[Build ${build.uuid}] Using legacy deployment pattern with build.manifest`);
+
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = k8s.KubernetesObjectApi.makeApiClient(kc);
@@ -436,6 +492,9 @@ export async function deleteNamespace(name: string) {
   if (!name.startsWith('env-')) return;
 
   try {
+    // Native helm now uses namespace-scoped RBAC (Role/RoleBinding) which gets deleted with the namespace
+    // No need for manual cleanup of cluster-level resources
+
     // adding a grace-period to make sure resources and finalizers are gone before we delete the namespace
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
     logger.info(`[DELETE ${name}] Deleted namespace`);
@@ -457,11 +516,13 @@ export function generateManifest({
   deploys,
   uuid,
   namespace,
+  serviceAccountName,
 }: {
   build: Build;
   deploys: Deploy[];
   uuid: string;
   namespace: string;
+  serviceAccountName: string;
 }) {
   // External Service only deployment
 
@@ -481,7 +542,14 @@ export function generateManifest({
   // General Deployment
 
   const disks = generatePersistentDisks(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, build.enableFullYaml, namespace);
+  const builds = generateDeployManifests(
+    build,
+    kubernetesDeploys,
+    uuid,
+    build.enableFullYaml,
+    namespace,
+    serviceAccountName
+  );
   const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
   const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
@@ -573,9 +641,17 @@ export function generatePersistentDisks(
 /**
  * Generates an affinity block based on the capacity type definition
  * @param capacityType can either be ON_DEMAND or SPOT
+ * @param isStatic whether this is a static environment
+ * @param customNodeAffinity optional custom node affinity from schema (overrides default)
  * @returns an affinity block using either requirements or preferences
  */
-function generateAffinity(capacityType: string, isStatic: boolean) {
+function generateAffinity(capacityType: string, isStatic: boolean, customNodeAffinity?: Record<string, unknown>) {
+  // If custom node affinity is provided, use it instead of default
+  if (customNodeAffinity) {
+    return { nodeAffinity: customNodeAffinity };
+  }
+
+  // Existing logic for capacity-type based affinity
   if (capacityType === 'SPOT') {
     return {
       nodeAffinity: {
@@ -634,7 +710,8 @@ export function generateDeployManifests(
   deploys: Deploy[],
   buildUUID: string,
   enableFullYaml: boolean,
-  namespace: string
+  namespace: string,
+  serviceAccountName: string
 ) {
   return deploys
     .filter((deploy) => {
@@ -647,7 +724,13 @@ export function generateDeployManifests(
         ? deploy.deployable.capacityType
         : deploy?.service.capacityType;
       const isStatic = build?.isStatic ?? false;
-      const affinity = generateAffinity(capacityType, isStatic);
+
+      // Extract custom node affinity from schema
+      const customNodeAffinity = enableFullYaml ? deploy.deployable.nodeAffinity : deploy?.service.nodeAffinity;
+      const affinity = generateAffinity(capacityType, isStatic, customNodeAffinity);
+      // Extract node selector from schema
+      const nodeSelector = enableFullYaml ? deploy.deployable.nodeSelector : deploy?.service.nodeSelector;
+
       const { uuid: name, service, deployable } = deploy;
       const ports = [];
 
@@ -1047,9 +1130,12 @@ export function generateDeployManifests(
               },
               spec: {
                 affinity,
+                ...(nodeSelector && { nodeSelector }),
                 securityContext: {
                   fsGroup: 2000,
                 },
+                serviceAccount: serviceAccountName,
+                serviceAccountName,
                 containers,
                 initContainers,
                 volumes,
@@ -1514,4 +1600,361 @@ export function getCurrentNamespaceFromFile(): string {
     logger.error('Error getting current namespace from file:', err);
     return 'default';
   }
+}
+
+export function generateDeployManifest({
+  deploy,
+  build,
+  namespace,
+  serviceAccountName,
+}: {
+  deploy: Deploy;
+  build: Build;
+  namespace: string;
+  serviceAccountName: string;
+}): string {
+  const manifests: string[] = [];
+  const enableFullYaml = build.enableFullYaml;
+
+  // ExternalName service for CLI deploys
+  // return the ExternalName service if we have a cname
+  if (CLIDeployTypes.has(deploy.deployable?.type)) {
+    const externalHost = deploy.cname;
+    if (externalHost) {
+      return yaml.dump({
+        apiVersion: 'v1',
+        kind: 'Service',
+        metadata: {
+          namespace,
+          name: deploy.uuid,
+          labels: {
+            name: build.uuid,
+            lc_uuid: build.uuid,
+            deploy_uuid: deploy.uuid,
+          },
+        },
+        spec: {
+          type: 'ExternalName',
+          externalName: externalHost,
+        },
+      });
+    } else {
+      logger.info(`[DEPLOY ${deploy.uuid}] No manifest generated for deploy`);
+      return '';
+    }
+  }
+
+  // Reuse existing PVC generation logic
+  const pvcManifests = generatePersistentDisks([deploy], build.uuid, enableFullYaml, namespace);
+  if (pvcManifests) manifests.push(pvcManifests);
+
+  // Generate deployment with custom node affinity
+  const capacityType =
+    build.capacityType || (enableFullYaml ? deploy.deployable?.capacityType : deploy.service?.capacityType);
+
+  // Extract custom node affinity from schema
+  const customNodeAffinity = enableFullYaml ? deploy.deployable?.nodeAffinity : deploy.service?.nodeAffinity;
+
+  const affinity = generateAffinity(capacityType, build?.isStatic ?? false, customNodeAffinity);
+
+  const deploymentManifest = generateSingleDeploymentManifest({
+    deploy,
+    build,
+    name: deploy.uuid,
+    namespace,
+    serviceAccountName,
+    affinity,
+    enableFullYaml,
+  });
+  manifests.push(deploymentManifest);
+
+  // Reuse existing service generation logic
+  const serviceManifests = generateNodePortManifests([deploy], build.uuid, enableFullYaml, namespace);
+  if (serviceManifests) manifests.push(serviceManifests);
+
+  const lbManifests = generateLoadBalancerManifests([deploy], build.uuid, enableFullYaml, namespace);
+  if (lbManifests) manifests.push(lbManifests);
+
+  const grpcManifests = generateGRPCMappings([deploy], build.uuid, enableFullYaml, namespace);
+  if (grpcManifests) manifests.push(grpcManifests);
+
+  return manifests.filter((m) => m).join('---\n');
+}
+
+function generateSingleDeploymentManifest({
+  deploy,
+  build,
+  name,
+  namespace,
+  serviceAccountName,
+  affinity,
+  enableFullYaml,
+}: {
+  deploy: Deploy;
+  build: Build;
+  name: string;
+  namespace: string;
+  serviceAccountName: string;
+  affinity: any;
+  enableFullYaml: boolean;
+}): string {
+  const serviceName = enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+  const serviceMemory = enableFullYaml ? deploy.deployable?.memoryLimit : deploy.service?.memoryLimit;
+  const serviceCPU = enableFullYaml ? deploy.deployable?.cpuLimit : deploy.service?.cpuLimit;
+  const servicePort = enableFullYaml ? deploy.deployable?.port : deploy.service?.port;
+  const replicaCount = deploy.replicaCount ?? 1;
+
+  // Extract node selector from schema
+  const nodeSelector = enableFullYaml ? deploy.deployable?.nodeSelector : deploy.service?.nodeSelector;
+
+  const envToUse = deploy.env || {};
+  const containers = [];
+  const volumes: VOLUME[] = [];
+  const volumeMounts = [];
+
+  // Handle init container if present
+  if (deploy.initDockerImage) {
+    const initEnvObj = flattenObject(build.commentInitEnv);
+    const initEnvArray = Object.entries(initEnvObj).map(([key, value]) => ({
+      name: key,
+      value: String(value),
+    }));
+
+    const initContainer = {
+      name: `init-${serviceName || 'container'}`,
+      image: deploy.initDockerImage,
+      imagePullPolicy: 'Always',
+      env: initEnvArray,
+    };
+    containers.push(initContainer);
+  }
+
+  // Handle main container
+  const mainEnvObj = flattenObject({ ...build.commentRuntimeEnv, ...envToUse });
+  const mainEnvArray = Object.entries(mainEnvObj).map(([key, value]) => ({
+    name: key,
+    value: String(value),
+  }));
+
+  const mainContainer: any = {
+    name: serviceName || 'main',
+    image: deploy.dockerImage,
+    imagePullPolicy: 'Always',
+    env: mainEnvArray,
+  };
+
+  // Only add resources if they are defined
+  if (serviceCPU || serviceMemory) {
+    mainContainer.resources = {
+      limits: {},
+      requests: {},
+    };
+
+    if (serviceCPU) {
+      mainContainer.resources.limits.cpu = serviceCPU;
+      mainContainer.resources.requests.cpu = serviceCPU;
+    }
+
+    if (serviceMemory) {
+      mainContainer.resources.limits.memory = serviceMemory;
+      mainContainer.resources.requests.memory = serviceMemory;
+    }
+  }
+
+  // Add ports if defined
+  if (servicePort) {
+    mainContainer.ports = [];
+    for (const port of servicePort.split(',')) {
+      mainContainer.ports.push({
+        containerPort: Number(port),
+      });
+    }
+  }
+
+  // Handle volumes
+  if (enableFullYaml && deploy.deployable?.serviceDisksYaml) {
+    const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
+    serviceDisks.forEach((disk) => {
+      if (disk.medium === MEDIUM_TYPE.MEMORY) {
+        volumes.push({
+          name: disk.name,
+          emptyDir: {},
+        });
+      } else {
+        volumes.push({
+          name: disk.name,
+          persistentVolumeClaim: {
+            claimName: `${name}-${disk.name}-claim`,
+          },
+        });
+      }
+      volumeMounts.push({
+        name: disk.name,
+        mountPath: disk.mountPath,
+      });
+    });
+  } else if (!enableFullYaml && deploy.service?.serviceDisks) {
+    deploy.service.serviceDisks.forEach((disk) => {
+      if (disk.medium === MEDIUM_TYPE.MEMORY) {
+        volumes.push({
+          name: disk.name,
+          emptyDir: {},
+        });
+      } else {
+        volumes.push({
+          name: disk.name,
+          persistentVolumeClaim: {
+            claimName: `${name}-${disk.name}-claim`,
+          },
+        });
+      }
+      volumeMounts.push({
+        name: disk.name,
+        mountPath: disk.mountPath,
+      });
+    });
+  }
+
+  if (volumeMounts.length > 0) {
+    mainContainer.volumeMounts = volumeMounts;
+  }
+
+  // Add probes
+  if (enableFullYaml) {
+    if (deploy.deployable?.livenessProbe) {
+      mainContainer.livenessProbe = JSON.parse(deploy.deployable.livenessProbe);
+    }
+    if (deploy.deployable?.readinessProbe) {
+      mainContainer.readinessProbe = JSON.parse(deploy.deployable.readinessProbe);
+    }
+  } else {
+    if (deploy.service?.livenessProbe) {
+      mainContainer.livenessProbe = JSON.parse(deploy.service.livenessProbe);
+    }
+    if (deploy.service?.readinessProbe) {
+      mainContainer.readinessProbe = JSON.parse(deploy.service.readinessProbe);
+    }
+  }
+
+  containers.push(mainContainer);
+
+  const deploymentSpec: any = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      namespace,
+      name,
+      labels: {
+        name,
+        lc_uuid: build.uuid,
+        deploy_uuid: deploy.uuid,
+      },
+    },
+    spec: {
+      replicas: replicaCount,
+      selector: {
+        matchLabels: {
+          name,
+        },
+      },
+      template: {
+        metadata: {
+          labels: {
+            name,
+            lc_uuid: build.uuid,
+            deploy_uuid: deploy.uuid,
+          },
+        },
+        spec: {
+          serviceAccountName,
+          affinity,
+          ...(nodeSelector && { nodeSelector }),
+          containers,
+        },
+      },
+    },
+  };
+
+  if (volumes.length > 0) {
+    deploymentSpec.spec.template.spec.volumes = volumes;
+  }
+
+  return yaml.dump(deploymentSpec, { lineWidth: -1 });
+}
+
+export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
+  const { uuid, build } = deploy;
+  const { namespace } = build;
+  const deployableName = deploy.deployable?.name || deploy.service?.name || 'unknown';
+
+  let retries = 0;
+  logger.info(`[DEPLOY ${uuid}] Waiting for pods service=${deployableName} namespace=${namespace}`);
+
+  // Wait up to 5 minutes for pods to be created
+  while (retries < 60) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    // Filter out job pods - we only want deployment/statefulset pods
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+
+    if (pods.length > 0) {
+      break;
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  if (retries >= 60) {
+    logger.warn(`[DEPLOY ${uuid}] No pods found within 5 minutes service=${deployableName}`);
+    return false;
+  }
+
+  retries = 0;
+
+  // Wait up to 15 minutes for pods to be ready
+  while (retries < 180) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    // Filter out job pods - we only want deployment/statefulset pods
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+
+    if (pods.length === 0) {
+      logger.warn(`[DEPLOY ${uuid}] No deployment pods found service=${deployableName}`);
+      return false;
+    }
+
+    const allReady = pods.every((pod) => {
+      const conditions = pod.status?.conditions || [];
+      const readyCondition = conditions.find((c) => c.type === 'Ready');
+      return readyCondition?.status === 'True';
+    });
+
+    if (allReady) {
+      logger.info(`[DEPLOY ${uuid}] Pods ready service=${deployableName} count=${pods.length}`);
+      return true;
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  logger.warn(`[DEPLOY ${uuid}] Pods not ready within 15 minutes service=${deployableName}`);
+  return false;
 }

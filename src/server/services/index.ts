@@ -28,6 +28,7 @@ import LCService from 'server/services/service';
 import Deployable from 'server/services/deployable';
 import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
+import LabelService from 'server/services/label';
 import { IServices } from 'server/services/types';
 
 export default function createAndBindServices(): IServices {
@@ -46,5 +47,6 @@ export default function createAndBindServices(): IServices {
     Deployable: new Deployable(),
     BotUser: new BotUser(),
     GlobalConfig: GlobalConfig.getInstance(),
+    LabelService: new LabelService(),
   };
 }

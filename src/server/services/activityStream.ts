@@ -18,62 +18,85 @@ import BaseService from './_service';
 import rootLogger from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
-import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, JOB_VERSION, APP_HOST } from 'shared/config';
-import * as k8s from 'server/lib/kubernetes';
+import { APP_HOST, QUEUE_NAMES } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
+import OverrideService from './override';
 import {
   BuildStatus,
   DeployStatus,
   CommentParser,
-  Labels,
   DeployTypes,
   CLIDeployTypes,
   PullRequestStatus,
 } from 'shared/constants';
-import { flattenObject, enableKillSwitch, isStaging } from 'server/lib/utils';
+import {
+  flattenObject,
+  enableKillSwitch,
+  isStaging,
+  hasStatusCommentLabel,
+  hasDeployLabel,
+  getDeployLabel,
+  getDisabledLabel,
+  getStatusCommentLabel,
+  isDefaultStatusCommentsEnabled,
+  isControlCommentsEnabled,
+} from 'server/lib/utils';
 import Fastly from 'server/lib/fastly';
 import { nanoid } from 'nanoid';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
+import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import { shouldUseNativeHelm } from 'server/lib/nativeHelm';
 
 const logger = rootLogger.child({
   filename: 'services/activityStream.ts',
 });
 
-const TO_DEPLOY_THIS_ENV = `To deploy this environment, just add a \`${Labels.DEPLOY}\` label. Add a \`${Labels.DISABLED}\` to do the opposite. ↗️\n\n`;
+const createDeployMessage = async () => {
+  const deployLabel = await getDeployLabel();
+  const disabledLabel = await getDisabledLabel();
+  return `To deploy this environment, just add a \`${deployLabel}\` label. Add a \`${disabledLabel}\` to do the opposite. ↗️\n\n`;
+};
 const COMMENT_EDIT_DESCRIPTION = `You can use the section below to redeploy and update the dev environment for this pull request.\n\n\n`;
 const GIT_SERVICE_URL = 'https://github.com';
 
 export default class ActivityStream extends BaseService {
   fastly = new Fastly(this.redis);
-  commentQueue = this.queueManager.registerQueue(`comment_queue-${JOB_VERSION}`, {
-    createClient: redisClient.getBullCreateClient(),
-    limiter: {
-      max: MAX_GITHUB_API_REQUEST,
-      duration: GITHUB_API_REQUEST_INTERVAL,
+  commentQueue = this.queueManager.registerQueue(QUEUE_NAMES.COMMENT_QUEUE, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
     },
   });
 
-  processComments = async (job, done) => {
-    const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
-      id: job.data,
-    });
-    await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
-    const { build, repository } = pullRequest;
-    done(); // Immediately mark the job as done so we don't run the risk of having a retry
-    if (!build) return;
-    await this.db.services.ActivityStream.updatePullRequestActivityStream(
-      build,
-      build.deploys,
-      pullRequest,
-      repository,
-      true,
-      true,
-      null,
-      false
-    );
+  processComments = async (job) => {
+    try {
+      const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
+        id: job.data,
+      });
+      await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
+      const { build, repository } = pullRequest;
+      if (!build) {
+        logger.warn(`[BUILD] Build id not found for pull request with id: ${job.data}`);
+        return;
+      }
+      await this.db.services.ActivityStream.updatePullRequestActivityStream(
+        build,
+        build.deploys,
+        pullRequest,
+        repository,
+        true,
+        true,
+        null,
+        false
+      );
+    } catch (error) {
+      logger.error(`Error processing comment for PR ${job.data}:`, error);
+    }
   };
 
   /**
@@ -112,7 +135,10 @@ export default class ActivityStream extends BaseService {
       if (isRedeployRequested) {
         // if redeploy from comment, add to build queue and return
         logger.info(`[BUILD ${buildUuid}] Redeploy triggered from comment edit`);
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add({ buildId, runUUID: runUuid });
+        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+          buildId,
+          runUUID: runUuid,
+        });
         return;
       }
 
@@ -179,12 +205,13 @@ export default class ActivityStream extends BaseService {
 
     // handle build uuid updates here
     if (vanityUrl && vanityUrl !== build.uuid) {
-      await this.handleVanityUrlChange(build, deploys, vanityUrl);
+      const override = new OverrideService();
+      await override.updateBuildUuid(build, vanityUrl);
     }
 
     // if pull request should be built and deployed again, add it to build queue
     if (pullRequest.deployOnUpdate) {
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add({
+      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build.id,
         runUUID: runUuid,
       });
@@ -264,42 +291,6 @@ export default class ActivityStream extends BaseService {
       const dependents = deploys.filter((d) => d.service.dependsOnServiceId === service.id);
       await Promise.all(dependents.map((d) => d.$query().patch({ active })));
     }
-  }
-
-  /**
-   * vanity url update is basically overriding the uuid with a custom string
-   * @param build - The Build object to update.
-   * @param deploys - The list of Deploy objects associated with the build.
-   * @param vanityUrl - The new vanity URL (custom UUID) to assign.
-   */
-  private async handleVanityUrlChange(build: Build, deploys: Deploy[], vanityUrl: string) {
-    logger.info(`[BUILD ${build.uuid}] Build UUID updated to '${vanityUrl}'`);
-    // delete the old namespace for cleanup
-    // dont await, if failed will cleanup later
-    k8s.deleteNamespace(build.namespace);
-
-    await build.$query().patch({
-      uuid: vanityUrl,
-      namespace: `env-${vanityUrl}`,
-    });
-
-    await this.db.models.Deployable.query().where('buildId', build.id).patch({ buildUUID: vanityUrl });
-
-    // update all deploys
-    // this will not work for database configured services
-    await Promise.all(
-      deploys.map(async (d) => {
-        const newUuid = `${d.deployable.name}-${vanityUrl}`;
-        await d.$query().patch({
-          uuid: newUuid,
-          internalHostname: newUuid,
-          publicUrl: build.enableFullYaml
-            ? this.db.services.Deploy.hostForDeployableDeploy(d, d.deployable)
-            : this.db.services.Deploy.hostForServiceDeploy(d, d.service),
-        });
-      })
-    );
-    logger.info(`[BUILD ${build.uuid}] Patched build and deploys for UUID update`);
   }
 
   private async updateMissionControlComment(
@@ -399,17 +390,13 @@ export default class ActivityStream extends BaseService {
     const isFullYaml = build?.enableFullYaml;
     const fullName = pullRequest?.fullName;
     const branchName = pullRequest?.branchName;
-    const prefix = `[BUILD ${uuid}][updatePullRequestActivityStream]`;
+    const prefix = `[BUILD ${uuid}]`;
     const suffix = `for ${fullName}/${branchName}`;
     const isStatic = build?.isStatic ?? false;
-    const enabledFeatures = build?.enabledFeatures || [];
     const labels = pullRequest?.labels || [];
-    const hasUseDeprecatedStatusComment = labels?.includes(Labels.ENABLE_LIFECYCLE_STATUS_COMMENTS);
-    const hasGithubStatusCommentEnabled = enabledFeatures.includes('hasGithubStatusComment');
-    const isDeployed = build?.status === BuildStatus.DEPLOYED;
-    const hasPurgeFastlyServiceCachLabel = labels?.includes(Labels.PURGE_FASTLY_SERVICE_CACHE);
-    const isPurgingFastlyServiceCache = hasPurgeFastlyServiceCachLabel && isDeployed;
-    const isShowingStatusComment = isStatic || hasUseDeprecatedStatusComment || hasGithubStatusCommentEnabled;
+    const hasStatusComment = await hasStatusCommentLabel(labels);
+    const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled();
+    const isShowingStatusComment = isStatic || hasStatusComment || isDefaultStatusEnabled;
     if (!buildId) {
       logger.error(`${prefix}[buidIdError] No build ID found ${suffix}`);
       throw new Error('No build ID found for this build!');
@@ -420,8 +407,8 @@ export default class ActivityStream extends BaseService {
     try {
       lock = await this.redlock.lock(resource, 9000);
       if (queue && !error) {
-        await this.commentQueue.add(pullRequest.id, {
-          jobId: pullRequest.id,
+        await this.commentQueue.add('comment', pullRequest.id, {
+          jobId: `pr-${pullRequest.id}`,
           removeOnComplete: true,
           removeOnFail: true,
         });
@@ -430,12 +417,19 @@ export default class ActivityStream extends BaseService {
 
       if (updateStatus || updateMissionControl) {
         await this.manageDeployments(build, deploys);
-        await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
-          logger
-            .child({ error })
-            .warn(`${prefix} (Full YAML: ${isFullYaml}) Unable to update ${queued} mission control comment ${suffix}`);
-        });
-        if (isPurgingFastlyServiceCache) await this.purgeFastlyServiceCache(uuid);
+
+        const isControlEnabled = await isControlCommentsEnabled();
+        if (isControlEnabled) {
+          await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
+            logger
+              .child({ error })
+              .warn(
+                `${prefix} (Full YAML: ${isFullYaml}) Unable to update ${queued} mission control comment ${suffix}`
+              );
+          });
+        } else {
+          logger.info(`${prefix} Mission control comments are disabled by configuration`);
+        }
       }
 
       if (updateStatus && isShowingStatusComment) {
@@ -446,11 +440,7 @@ export default class ActivityStream extends BaseService {
         });
       }
     } catch (error) {
-      if (error?.name !== 'LockError') {
-        logger.child({ error }).error(`${prefix} Failed to update the activity feed ${suffix}`);
-      } else {
-        logger.child({ error }).debug(`${prefix}[redlock] redlock issue ${suffix}`);
-      }
+      logger.error(`${prefix} Failed to update the activity feed ${suffix}: ${error}`);
     } finally {
       if (lock) {
         try {
@@ -475,7 +465,8 @@ export default class ActivityStream extends BaseService {
    */
   private async editCommentForBuild(build: Build, deploys: Deploy[]) {
     let message = ``;
-    const enableLifecycleStatusComments = `Add \`${Labels.ENABLE_LIFECYCLE_STATUS_COMMENTS}\``;
+    const statusCommentLabel = await getStatusCommentLabel();
+    const enableLifecycleStatusComments = `Add \`${statusCommentLabel}\``;
     message += `## ✏️ Environment Overrides\n`;
     message += '<details>\n';
     message += '<summary>Usage</summary>\n\n';
@@ -643,7 +634,7 @@ export default class ActivityStream extends BaseService {
       ].includes(buildStatus as BuildStatus);
       const isDeployed = buildStatus === BuildStatus.DEPLOYED;
       let deployStatus;
-      const hasDeployLabel = labels?.includes(Labels.DEPLOY);
+      const hasDeployLabelPresent = await hasDeployLabel(labels);
       const tags = { uuid, repositoryName, branchName, env: 'prd', service: 'lifecycle-job', statsEvent: 'deployment' };
       const eventDetails = {
         title: 'Deployment Finished',
@@ -696,8 +687,8 @@ export default class ActivityStream extends BaseService {
         metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
       }
       message = `### 💻✨ Your environment ${deployStatus}.\n`;
-      if (!hasDeployLabel && !isBot && isPending && isOpen) {
-        message += TO_DEPLOY_THIS_ENV;
+      if (!hasDeployLabelPresent && !isBot && isPending && isOpen) {
+        message += await createDeployMessage();
       }
 
       message += await this.editCommentForBuild(build, deploys).catch((error) => {
@@ -745,27 +736,53 @@ export default class ActivityStream extends BaseService {
       case DeployStatus.BUILDING:
         return `🏗️ BUILDING`;
       case DeployStatus.BUILT:
-        return `✅ BUILT`;
+        return `👍 BUILT`;
       case DeployStatus.ERROR:
         return `⚠️ ERROR`;
       case DeployStatus.CLONING:
         return `⬇️ CLONING`;
+      case DeployStatus.READY:
+        return `✅ READY`;
+      case DeployStatus.DEPLOYING:
+        return `🚀 DEPLOYING`;
+      case DeployStatus.DEPLOY_FAILED:
+        return `⚠️ FAILED`;
+      case DeployStatus.QUEUED:
+        return `⏳ QUEUED`;
+      case DeployStatus.WAITING:
+        return `⏳ WAITING`;
+      case DeployStatus.BUILD_FAILED:
+        return `❌ BUILD FAILED`;
       default:
         return deploy.status;
     }
   }
 
-  private getCLIStatus(deploy: Deploy) {
-    switch (deploy.status) {
-      case DeployStatus.BUILDING:
-        return `🚀 DEPLOYING`;
-      case DeployStatus.BUILT:
-        return `✅ DEPLOYED`;
-      case DeployStatus.ERROR:
-        return `⚠️ ERROR`;
-      default:
-        return deploy.status;
+  private async hasAnyServiceWithDeployLogs(deploys: Deploy[]): Promise<boolean> {
+    for (const deploy of deploys) {
+      if ((await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)) {
+        return true;
+      }
     }
+    return false;
+  }
+
+  private async isNativeHelmDeployment(deploy: Deploy): Promise<boolean> {
+    return deploy.deployable?.type === DeployTypes.HELM && (await shouldUseNativeHelm(deploy));
+  }
+
+  private isNativeBuildDeployment(deploy: Deploy): boolean {
+    if (!deploy.deployable) return false;
+    return (
+      [DeployTypes.GITHUB, DeployTypes.HELM].includes(deploy.deployable.type) &&
+      ['buildkit', 'kaniko'].includes(deploy.deployable.builder?.engine)
+    );
+  }
+
+  private isGitHubKubernetesDeployment(deploy: Deploy): boolean {
+    if (!deploy.deployable) return false;
+    const deployType = deploy.deployable.type;
+    return deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType);
   }
 
   /**
@@ -790,9 +807,11 @@ export default class ActivityStream extends BaseService {
       message += '## ⏳ Pending\n';
       message += `Lifecycle Environment either has been torn down or does not exist.`;
       if (isBot) {
-        message += `\n\n**This PR is created by a bot user, add ${Labels.DEPLOY} to build environment**`;
+        const deployLabel = await getDeployLabel();
+        message += `\n\n**This PR is created by a bot user, add ${deployLabel} to build environment**`;
       } else {
-        message += `\n\n*Note: If ${Labels.DISABLED} label present, remove to build environment*`;
+        const disabledLabel = await getDisabledLabel();
+        message += `\n\n*Note: If ${disabledLabel} label present, remove to build environment*`;
       }
     } else if (isBuilding) {
       message += '## 🏗️ Building\n';
@@ -816,14 +835,21 @@ export default class ActivityStream extends BaseService {
       });
 
       if (pullRequest.deployOnUpdate === false) {
-        message += TO_DEPLOY_THIS_ENV;
+        message += await createDeployMessage();
       } else {
         message += `\nWe'll deploy your code once we've finished this build step.`;
       }
     } else if (isAutoDeployingBuild || isDeploying) {
       message += '## 🚀 Deploying\n';
       message += `We're deploying your code. Please stand by....\n\n`;
-      message += `Here's where you can find your services after they're deployed:\n`;
+      message += '## Build Status\n';
+      message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+        logger
+          .child({ build, deploys, error })
+          .error(`[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`);
+        return '';
+      });
+      message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((e) => {
         logger.error(
           `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate environment comment block: ${e}`
@@ -845,16 +871,19 @@ export default class ActivityStream extends BaseService {
         );
         return '';
       });
-      message += TO_DEPLOY_THIS_ENV;
+      message += await createDeployMessage();
     } else if (pullRequest.deployOnUpdate) {
       message = '';
       if (build.status === BuildStatus.ERROR) {
         message += `## ⚠️ Deployed with Error\n`;
         message += `There was a problem deploying your code. Some services may have not rolled out successfully. Here are the URLs for your services:\n\n`;
-        message += await this.buildStatusBlock(build, deploys, this.isBuildableDeployType).catch((e) => {
-          logger.error(
-            `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status: ${e}`
-          );
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          logger
+            .child({ build, deploys, error })
+            .error(
+              `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`
+            );
           return '';
         });
         message += await this.environmentBlock(build).catch((e) => {
@@ -874,7 +903,16 @@ export default class ActivityStream extends BaseService {
         message += `Lifecycle configuration file is found but there is a problem with the file.\n\n`;
       } else if (build.status === BuildStatus.DEPLOYED) {
         message += '## ✅ Deployed\n';
-        message += `We've deployed your code. Here's where you can find your services:\n`;
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          logger
+            .child({ build, deploys, error })
+            .error(
+              `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate build status`
+            );
+          return '';
+        });
+        message += `\nWe've deployed your code. Here's where you can find your services:\n`;
         message += await this.environmentBlock(build).catch((e) => {
           logger.error(
             `[BUILD ${build.uuid}] (Full YAML Support: ${build.enableFullYaml}) Unable to generate environment comment block: ${e}`
@@ -901,24 +939,6 @@ export default class ActivityStream extends BaseService {
     return message;
   }
 
-  private isBuildableDeployType(deploy: Deploy, fullYamlSupport: boolean, orgChart: string): boolean {
-    let result = false;
-
-    const serviceType: DeployTypes = fullYamlSupport ? deploy.deployable.type : deploy.service.type;
-
-    if (
-      (serviceType === DeployTypes.DOCKER ||
-        serviceType === DeployTypes.GITHUB ||
-        orgChart === deploy.deployable?.helm?.chart?.name ||
-        serviceType === DeployTypes.CODEFRESH) &&
-      deploy.active
-    ) {
-      result = true;
-    }
-
-    return result;
-  }
-
   private async buildStatusBlock(
     build: Build,
     deploys: Deploy[],
@@ -926,8 +946,23 @@ export default class ActivityStream extends BaseService {
     isSelectedDeployType: (deploy: Deploy, fullYamlSupport: boolean, orgChart: string) => boolean
   ): Promise<string> {
     let message = '';
-    message += '| Service | Branch | Status | Build Pipeline |\n';
-    message += '|---|---|---|---|\n';
+
+    // Check if any service should show deploy logs column
+    const hasDeployLogsColumn = await this.hasAnyServiceWithDeployLogs(deploys);
+
+    // Add table headers
+    message += '| Service | Branch | Status | Build Pipeline |';
+    if (hasDeployLogsColumn) {
+      message += ' Deploy Logs |';
+    }
+    message += '\n';
+
+    // Add separator row
+    message += '|---|---|---|---|';
+    if (hasDeployLogsColumn) {
+      message += '---|';
+    }
+    message += '\n';
 
     await build?.$fetchGraph('[deploys.[service, deployable]]');
     deploys = build.deploys;
@@ -937,7 +972,8 @@ export default class ActivityStream extends BaseService {
       deploys = deploys.sort((a, b) => a.id - b.id);
     }
 
-    deploys.forEach((deploy) => {
+    // Convert forEach to for...of to handle async/await properly
+    for (const deploy of deploys) {
       const serviceName: string = build.enableFullYaml ? deploy.deployable.name : deploy.service.name;
       const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
       const serviceNameWithUrl = deploy.deployable.repositoryId
@@ -946,32 +982,72 @@ export default class ActivityStream extends BaseService {
 
       if (isSelectedDeployType == null || isSelectedDeployType(deploy, build.enableFullYaml, orgChartName)) {
         if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
-          // Keep existing buildLogs if available, otherwise use our link if buildJobName exists
-          const buildLogsColumn = deploy.buildLogs
-            ? deploy.buildLogs
-            : deploy.buildJobName
-            ? `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${serviceName}/buildLogs)`
-            : '';
-          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
+          // Show Build Logs link if:
+          // 1. It's a Codefresh build and buildLogs URL exists, OR
+          // 2. It's a Native Build V2 deployment
+          let buildLogsColumn = '';
+          if (deploy.buildLogs) {
+            // Keep existing Codefresh build logs URL
+            buildLogsColumn = deploy.buildLogs;
+          } else if (this.isNativeBuildDeployment(deploy)) {
+            // Always show Native Build logs link - we query Kubernetes directly
+            const actualServiceName = deploy.deployable?.name || serviceName;
+            buildLogsColumn = `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${actualServiceName}/buildLogs)`;
+          }
+
+          let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
             deploy
-          )}_ | ${buildLogsColumn} |\n`;
+          )}_ | ${buildLogsColumn} |`;
+
+          if (hasDeployLogsColumn) {
+            const deployLogsColumn =
+              (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                    deploy.deployable?.name || serviceName
+                  }/deployLogs)`
+                : '';
+            row += ` ${deployLogsColumn} |`;
+          }
+
+          message += row + '\n';
         } else if (CLIDeployTypes.has(serviceType) && deploy.active) {
           if (serviceType === DeployTypes.CODEFRESH) {
-            // Keep existing buildLogs if available, otherwise use our link if buildJobName exists
-            const buildLogsColumn = deploy.buildLogs
-              ? deploy.buildLogs
-              : deploy.buildJobName
-              ? `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${serviceName}/buildLogs)`
-              : '';
-            message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getCLIStatus(
+            // For Codefresh, just keep the existing buildLogs URL if available
+            const buildLogsColumn = deploy.buildLogs || '';
+
+            let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
               deploy
-            )}_ | ${buildLogsColumn} |\n`;
+            )}_ | ${buildLogsColumn} |`;
+
+            if (hasDeployLogsColumn) {
+              const deployLogsColumn =
+                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                      deploy.deployable?.name || serviceName
+                    }/deployLogs)`
+                  : '';
+              row += ` ${deployLogsColumn} |`;
+            }
+
+            message += row + '\n';
           } else {
-            message += `| ${serviceNameWithUrl} || _${this.getCLIStatus(deploy)}_ ||\n`;
+            let row = `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ ||`;
+
+            if (hasDeployLogsColumn) {
+              const deployLogsColumn =
+                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
+                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
+                      deploy.deployable?.name || serviceName
+                    }/deployLogs)`
+                  : '';
+              row += ` ${deployLogsColumn} |`;
+            }
+
+            message += row + '\n';
           }
         }
       }
-    });
+    }
 
     return message;
   }
@@ -1011,16 +1087,16 @@ export default class ActivityStream extends BaseService {
 
     await build?.$fetchGraph('[deploys.[service, deployable]]');
 
-    const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
     let { deploys } = build;
     if (deploys.length > 1) {
       deploys = deploys.sort((a, b) => a.id - b.id);
     }
     for (const deploy of deploys) {
       const { service, deployable } = deploy;
-      const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
+      const chartType = await determineChartType(deploy);
+      const isPublicChart = chartType === ChartType.PUBLIC;
 
-      const servicePublic: boolean = build.enableFullYaml ? deployable.public || isOrgHelmChart : service.public;
+      const servicePublic: boolean = build.enableFullYaml ? deployable.public || !isPublicChart : service.public;
       const serviceName: string = build.enableFullYaml ? deployable.name : service.name;
       const serviceType: DeployTypes = build.enableFullYaml ? deployable.type : service.type;
       const serviceHostPortMapping: Record<string, any> = build.enableFullYaml
@@ -1036,7 +1112,7 @@ export default class ActivityStream extends BaseService {
         (serviceType === DeployTypes.DOCKER ||
           serviceType === DeployTypes.GITHUB ||
           serviceType === DeployTypes.CODEFRESH ||
-          isOrgHelmChart)
+          !isPublicChart)
       ) {
         if (serviceHostPortMapping && Object.keys(serviceHostPortMapping).length > 0) {
           Object.keys(serviceHostPortMapping).forEach((key) => {
@@ -1120,7 +1196,7 @@ export default class ActivityStream extends BaseService {
             return;
           }
           await this.db.services.GithubService.githubDeploymentQueue
-            .add({ deployId, action: 'create' }, { delay: 10000, jobId: deployId })
+            .add('deployment', { deployId, action: 'create' }, { delay: 10000, jobId: `deploy-${deployId}` })
             .catch((error) =>
               logger.child({ error }).warn(`[BUILD ${uuid}][manageDeployments] error with ${deployId}`)
             );

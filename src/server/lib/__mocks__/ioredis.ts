@@ -20,12 +20,20 @@ class Redis {
   hset: jest.Mock;
   expire: jest.Mock;
   hgetall: jest.Mock;
+  duplicate: jest.Mock;
+  setMaxListeners: jest.Mock;
+  quit: jest.Mock;
+  disconnect: jest.Mock;
   constructor() {
     this.hget = jest.fn().mockResolvedValue(null);
     this.hmget = jest.fn().mockResolvedValue([]);
     this.hset = jest.fn().mockResolvedValue(null);
     this.expire = jest.fn().mockResolvedValue(null);
     this.hgetall = jest.fn().mockResolvedValue({});
+    this.duplicate = jest.fn().mockReturnValue(this);
+    this.setMaxListeners = jest.fn();
+    this.quit = jest.fn().mockResolvedValue(undefined);
+    this.disconnect = jest.fn();
   }
 }
 

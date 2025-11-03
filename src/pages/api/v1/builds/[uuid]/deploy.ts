@@ -107,7 +107,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     const buildId = build.id;
     const runUUID = nanoid();
-    await buildService.resolveAndDeployBuildQueue.add({
+    await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
       buildId,
       runUUID,
     });

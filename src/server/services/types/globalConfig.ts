@@ -18,6 +18,8 @@ import { Helm, KedaScaleToZero } from 'server/models/yaml';
 
 export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
+  helmDefaults: HelmDefaults;
+  buildDefaults?: BuildDefaults;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -25,7 +27,7 @@ export type GlobalConfig = {
   publicChart: PublicChart;
   lifecycleIgnores: LifecycleIgnores;
   deletePendingHelmReleaseStep: DeletePendingHelmReleaseStep;
-  kedaScaleToZero: KedaScaleToZero;
+  kedaScaleToZero: KedaScaleToZero & { enabled: boolean };
   serviceDefaults: Record<string, any>;
   domainDefaults: DomainDefaults;
   orgChart: OrgChart;
@@ -34,6 +36,7 @@ export type GlobalConfig = {
   serviceAccount: RoleSettings;
   features: Record<string, boolean>;
   app_setup: AppSetup;
+  labels: LabelsConfig;
 };
 
 export type AppSetup = {
@@ -42,10 +45,12 @@ export type AppSetup = {
   restarted: boolean;
   url: string;
   state: string;
+  org?: string;
 };
 
 export type RoleSettings = {
   role: string;
+  name?: string;
 };
 
 export type DatabaseSettings = {
@@ -66,6 +71,8 @@ export type DatabaseSettings = {
 export type DomainDefaults = {
   http: string;
   grpc: string;
+  altHttp?: string[];
+  altGrpc?: string[];
 };
 
 export type LifecycleIgnores = {
@@ -86,6 +93,7 @@ export type LifecycleDefaults = {
   deployNamespace: string;
   deployCluster: string;
   helmDeployPipeline: string;
+  ingressClassName?: string;
 };
 
 export type PublicChart = {
@@ -99,4 +107,44 @@ export type OrgChart = {
 export type DeletePendingHelmReleaseStep = {
   delete: boolean;
   static_delete?: boolean;
+};
+
+export type HelmDefaults = {
+  nativeHelm?: NativeHelmConfig;
+};
+
+export type NativeHelmConfig = {
+  enabled: boolean;
+  defaultHelmVersion?: string;
+  jobTimeout?: number;
+  serviceAccount?: string;
+  defaultArgs?: string;
+};
+
+export type BuildDefaults = {
+  jobTimeout?: number;
+  serviceAccount?: string;
+  cacheRegistry?: string;
+  resources?: {
+    buildkit?: ResourceRequirements;
+    kaniko?: ResourceRequirements;
+  };
+  buildkit?: {
+    endpoint?: string;
+    healthCheckTimeout?: number;
+    insecure?: boolean;
+  };
+};
+
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+};
+
+export type LabelsConfig = {
+  deploy: string[];
+  disabled: string[];
+  statusComments: string[];
+  defaultStatusComments: boolean;
+  defaultControlComments: boolean;
 };
