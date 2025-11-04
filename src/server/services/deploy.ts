@@ -384,6 +384,7 @@ export default class DeployService extends BaseService {
     try {
       // For now, we're just going to shell out and run the deploy
       await deploy.reload();
+      await deploy.$fetchGraph('[build, deployable]');
 
       /**
        * For now, only run the CLI deploy step one time.
