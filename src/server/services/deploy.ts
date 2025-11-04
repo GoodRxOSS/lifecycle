@@ -319,7 +319,7 @@ export default class DeployService extends BaseService {
    * Helper function to check if an Aurora database already exists in AWS
    * @param buildUuid The build UUID to search for
    * @param serviceName The service name to search for
-   * @returns The database endpoint address if found, null otherwise
+   * @returns The database cluster endpoint address if found (or instance endpoint if not clustered), null otherwise
    */
   private async findExistingAuroraDatabase(buildUuid: string, serviceName: string): Promise<string | null> {
     try {
@@ -341,21 +341,36 @@ export default class DeployService extends BaseService {
         })
         .promise();
 
-      if (results.ResourceTagMappingList && results.ResourceTagMappingList.length > 0) {
-        const dbArn = results.ResourceTagMappingList[0].ResourceARN;
-        const params = {
-          Filters: [
-            {
-              Name: 'db-instance-id' /* required */,
-              Values: [dbArn],
-            },
-          ],
-        };
-        const instances = await rds.describeDBInstances(params, null).promise();
+      const instanceArn = results.ResourceTagMappingList?.find((mapping) =>
+        mapping.ResourceARN?.includes(':db:')
+      )?.ResourceARN;
 
-        if (instances.DBInstances.length === 1) {
-          const database = instances.DBInstances[0];
-          return database.Endpoint?.Address || null;
+      if (instanceArn) {
+        const instanceIdentifier = instanceArn.split(':').pop();
+        if (instanceIdentifier) {
+          const instances = await rds
+            .describeDBInstances({
+              DBInstanceIdentifier: instanceIdentifier,
+            })
+            .promise();
+          const database = instances.DBInstances?.[0];
+          if (database) {
+            let databaseAddress = database.Endpoint?.Address;
+            // If this instance is part of a cluster, use the cluster endpoint instead
+            // for better resilience during instance failures and replacements
+            if (database.DBClusterIdentifier) {
+              const clusters = await rds
+                .describeDBClusters({
+                  DBClusterIdentifier: database.DBClusterIdentifier,
+                })
+                .promise();
+              const clusterEndpoint = clusters.DBClusters?.[0]?.Endpoint;
+              if (clusterEndpoint) {
+                databaseAddress = clusterEndpoint;
+              }
+            }
+            return databaseAddress || null;
+          }
         }
       }
       return null;
