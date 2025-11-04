@@ -433,7 +433,7 @@ export default class DeployService extends BaseService {
       logger.info(`[DEPLOY ${deploy?.uuid}] Restored Aurora cluster for ${deploy?.uuid}`);
       return true;
     } catch (e) {
-      logger.info(`[DEPLOY ${deploy?.uuid}] Aurora cluster restore for ${deploy?.uuid} failed with error: ${e}`);
+      logger.error(`[DEPLOY ${deploy?.uuid}] Aurora cluster restore for ${deploy?.uuid} failed with error: ${e}`);
       await deploy.$query().patch({
         status: DeployStatus.ERROR,
       });
