@@ -384,6 +384,7 @@ export default class DeployService extends BaseService {
     try {
       // For now, we're just going to shell out and run the deploy
       await deploy.reload();
+      await deploy.$fetchGraph('[build, deployable]');
 
       /**
        * For now, only run the CLI deploy step one time.
@@ -432,7 +433,7 @@ export default class DeployService extends BaseService {
       logger.info(`[DEPLOY ${deploy?.uuid}] Restored Aurora cluster for ${deploy?.uuid}`);
       return true;
     } catch (e) {
-      logger.info(`[DEPLOY ${deploy?.uuid}] Aurora cluster restore for ${deploy?.uuid} failed with error: ${e}`);
+      logger.error(`[DEPLOY ${deploy?.uuid}] Aurora cluster restore for ${deploy?.uuid} failed with error: ${e}`);
       await deploy.$query().patch({
         status: DeployStatus.ERROR,
       });
