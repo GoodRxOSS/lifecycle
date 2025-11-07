@@ -20,6 +20,7 @@ import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_
 import { mergeKeyValueArrays, getResourceType } from 'shared/utils';
 import { merge } from 'lodash';
 import { renderTemplate, generateTolerationsCustomValues, generateNodeSelector } from 'server/lib/helm/utils';
+import { staticEnvTolerations } from 'server/lib/helm/constants';
 import {
   createServiceAccountUsingExistingFunction,
   setupDeployServiceAccountInNamespace,
@@ -730,10 +731,7 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
         `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=eks.amazonaws.com/capacityType`,
         `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In`,
         `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND`,
-        `${resourceType}.tolerations[0].key=static_env`,
-        `${resourceType}.tolerations[0].operator=Equal`,
-        `${resourceType}.tolerations[0].value=yes`,
-        `${resourceType}.tolerations[0].effect=NoSchedule`
+        ...generateTolerationsCustomValues(`${resourceType}.tolerations`, staticEnvTolerations)
       );
     }
   } else if (chartType === ChartType.PUBLIC) {
@@ -758,7 +756,6 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     if (build?.isStatic) {
       const { tolerations, nodeSelector } = configs[chartName] || {};
       if (tolerations) {
-        const staticEnvTolerations = [{ key: 'static_env', operator: 'Equal', value: 'yes', effect: 'NoSchedule' }];
         customValues = customValues.concat(generateTolerationsCustomValues(tolerations, staticEnvTolerations));
       }
       if (nodeSelector) {

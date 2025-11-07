@@ -29,6 +29,7 @@ import { APP_ENV, TMP_PATH } from 'shared/config';
 import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
 import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
+import { staticEnvTolerations } from './helm/constants';
 
 const logger = rootLogger.child({
   filename: 'lib/kubernetes.ts',
@@ -1140,14 +1141,7 @@ export function generateDeployManifests(
                 initContainers,
                 volumes,
                 ...(build?.isStatic && {
-                  tolerations: [
-                    {
-                      key: 'static_env',
-                      operator: 'Equal',
-                      value: 'yes',
-                      effect: 'NoSchedule',
-                    },
-                  ],
+                  tolerations: staticEnvTolerations,
                 }),
                 enableServiceLinks: false,
               },
@@ -1870,6 +1864,9 @@ function generateSingleDeploymentManifest({
           affinity,
           ...(nodeSelector && { nodeSelector }),
           containers,
+          ...(build?.isStatic && {
+            tolerations: staticEnvTolerations,
+          }),
         },
       },
     },

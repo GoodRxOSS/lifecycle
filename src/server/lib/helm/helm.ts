@@ -131,16 +131,11 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
       `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND`,
       `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].key=app-long`,
       `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].operator=In`,
-      `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].values[0]=lifecycle-static-env`
+      `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].values[0]=${STATIC_ENV_NODE_LABEL}`
     );
 
     // add toleration for static envs
-    customValues.push(
-      `${resourceType}.tolerations[0].key=static_env`,
-      `${resourceType}.tolerations[0].operator=Equal`,
-      `${resourceType}.tolerations[0].value=yes`,
-      `${resourceType}.tolerations[0].effect=NoSchedule`
-    );
+    customValues.push(...generateTolerationsCustomValues(`${resourceType}.tolerations`, staticEnvTolerations));
   }
   let version = constructImageVersion(deploy.dockerImage);
   customValues.push(`${resourceType}.appImage=${deploy.dockerImage}`, `version=${version}`);
