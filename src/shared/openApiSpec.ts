@@ -106,9 +106,42 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             uuid: { type: 'string', example: 'white-poetry-596195' },
             status: { $ref: '#/components/schemas/BuildStatus' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
             pullRequest: { $ref: '#/components/schemas/PullRequest' },
+            deploys: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Deploy' },
+            },
           },
-          required: ['id', 'uuid', 'status', 'namespace', 'pullRequest'],
+          required: ['id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'pullRequest', 'deploys'],
+        },
+
+        /**
+         * @description The Deployable associated with a Deploy.
+         */
+        Deployable: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', example: 'web' },
+          },
+          required: ['name'],
+        },
+
+        /**
+         * @description A Deploy associated with a Build.
+         */
+        Deploy: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            uuid: { type: 'string', example: 'deploy-uuid' },
+            status: { type: 'string', example: 'active' },
+            active: { type: 'boolean', example: true },
+            deployableId: { type: 'integer' },
+            deployable: { $ref: '#/components/schemas/Deployable' },
+          },
+          required: ['id', 'uuid', 'status', 'active', 'deployableId', 'deployable'],
         },
 
         /**
@@ -122,8 +155,9 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             fullName: { type: 'string', example: 'goodrx/lifecycle' },
             githubLogin: { type: 'string', example: 'lifecycle-bot' },
             pullRequestNumber: { type: 'integer', example: 42 },
+            branchName: { type: 'string', example: 'feature/new-feature' },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber'],
+          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName'],
         },
 
         /**
@@ -139,6 +173,22 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                   type: 'array',
                   items: { $ref: '#/components/schemas/Build' },
                 },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for the GET /builds/{uuid} endpoint.
+         */
+        GetBuildByUUIDSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/Build' },
               },
               required: ['data'],
             },
