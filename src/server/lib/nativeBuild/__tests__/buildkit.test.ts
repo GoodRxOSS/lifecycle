@@ -155,7 +155,10 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    expect(fullCommand).toContain('ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo:cache');
+    // Check cache uses local distribution registry with service name to avoid collisions
+    expect(fullCommand).toContain(
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service:cache'
+    );
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');
