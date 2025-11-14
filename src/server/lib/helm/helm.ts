@@ -135,12 +135,7 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
     );
 
     // add toleration for static envs
-    customValues.push(
-      `${resourceType}.tolerations[0].key=static_env`,
-      `${resourceType}.tolerations[0].operator=Equal`,
-      `${resourceType}.tolerations[0].value=yes`,
-      `${resourceType}.tolerations[0].effect=NoSchedule`
-    );
+    customValues.push(...generateTolerationsCustomValues(`${resourceType}.tolerations`, staticEnvTolerations));
   }
   let version = constructImageVersion(deploy.dockerImage);
   customValues.push(`${resourceType}.appImage=${deploy.dockerImage}`, `version=${version}`);
