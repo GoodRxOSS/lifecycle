@@ -133,6 +133,17 @@ describe('buildkitBuild', () => {
   });
 
   it('uses custom buildkit configuration from global config', async () => {
+    const configWithCache = {
+      ...mockGlobalConfig,
+      buildDefaults: {
+        ...mockGlobalConfig.buildDefaults,
+        cacheRegistry: 'lifecycle-distribution.lifecycle-app.svc.cluster.local',
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(configWithCache),
+    });
+
     await buildkitBuild(mockDeploy, mockOptions);
 
     const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
@@ -144,8 +155,7 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    // Check cache uses ECR repo cache when custom buildkit endpoint is configured
-    expect(fullCommand).toContain('ref=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:cache');
+    expect(fullCommand).toContain('ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo:cache');
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');

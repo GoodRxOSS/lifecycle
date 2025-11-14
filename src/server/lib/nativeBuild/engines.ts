@@ -235,10 +235,7 @@ export async function buildWithEngine(
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
   const resources = options.resources || buildDefaults.resources?.[engineName] || DEFAULT_BUILD_RESOURCES[engineName];
 
-  let cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
-  if (engineName === 'buildkit' && buildDefaults.buildkit?.endpoint) {
-    cacheRegistry = options.ecrDomain;
-  }
+  const cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
 
   const serviceName = deploy.deployable!.name;
   const shortRepoName = options.repo.split('/')[1] || options.repo;
