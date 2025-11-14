@@ -172,6 +172,18 @@ buildctl ${buildctlArgs.join(' \\\n  ')}
   },
 };
 
+/**
+ * Appends service name to cache reference for non-ECR registries to avoid cache collisions
+ * @param cacheRef - Cache reference (e.g., 'registry/repo:cache' or 'registry/repo/cache')
+ * @param serviceName - Service name to append (e.g., 'psp-web')
+ * @returns Modified cache reference with service name (e.g., 'registry/repo/psp-web:cache')
+ */
+function appendServiceNameToCacheRef(cacheRef: string, serviceName: string): string {
+  // Insert service name before the cache suffix (supports :cache and /cache)
+  const suffix = cacheRef.includes(':cache') ? ':cache' : '/cache';
+  return cacheRef.replace(suffix, `/${serviceName}${suffix}`);
+}
+
 function createBuildContainer(
   name: string,
   engine: BuildEngine,
@@ -235,10 +247,7 @@ export async function buildWithEngine(
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
   const resources = options.resources || buildDefaults.resources?.[engineName] || DEFAULT_BUILD_RESOURCES[engineName];
 
-  let cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
-  if (engineName === 'buildkit' && buildDefaults.buildkit?.endpoint) {
-    cacheRegistry = options.ecrDomain;
-  }
+  const cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
 
   const serviceName = deploy.deployable!.name;
   const shortRepoName = options.repo.split('/')[1] || options.repo;
@@ -312,7 +321,12 @@ export async function buildWithEngine(
   }
 
   const containers = [];
-  const cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
+  let cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
+
+  // For non-ECR registries (like local distribution), append service name to avoid cache collisions
+  if (cacheRegistry && !cacheRegistry.includes('ecr') && !cacheRef.includes(`/${serviceName}`)) {
+    cacheRef = appendServiceNameToCacheRef(cacheRef, serviceName);
+  }
 
   const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;
   containers.push(
