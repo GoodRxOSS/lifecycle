@@ -126,7 +126,7 @@ export default class BuildService extends BaseService {
     const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
 
     const baseQuery = this.db.models.Build.query()
-      .select('id', 'uuid', 'status', 'namespace')
+      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt')
       .whereNotIn('status', exclude)
       .modify((qb) => {
         if (filterByAuthor) {
@@ -152,15 +152,39 @@ export default class BuildService extends BaseService {
           });
         }
       })
-      .withGraphFetched('pullRequest')
-      .modifyGraph('pullRequest', (builder) => {
-        builder.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber');
+      .withGraphFetched('[pullRequest, deploys.[deployable]]')
+      .modifyGraph('pullRequest', (b) => {
+        b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName');
+      })
+      .modifyGraph('deploys', (b) => {
+        b.select('id', 'uuid', 'status', 'active', 'deployableId');
+      })
+      .modifyGraph('deploys.deployable', (b) => {
+        b.select('name');
       })
       .orderBy('updatedAt', 'desc');
 
     const { data, metadata: paginationMetadata } = await paginate<Build>(baseQuery, pagination);
 
     return { data, paginationMetadata };
+  }
+
+  async getBuildByUUID(uuid: string): Promise<Build | null> {
+    const build = await this.db.models.Build.query()
+      .findOne({ uuid })
+      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt')
+      .withGraphFetched('[pullRequest, deploys.[deployable]]')
+      .modifyGraph('pullRequest', (b) => {
+        b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName');
+      })
+      .modifyGraph('deploys', (b) => {
+        b.select('id', 'uuid', 'status', 'active', 'deployableId');
+      })
+      .modifyGraph('deploys.deployable', (b) => {
+        b.select('name');
+      });
+
+    return build;
   }
 
   /**
