@@ -1702,39 +1702,186 @@ function generateSingleDeploymentManifest({
   const nodeSelector = enableFullYaml ? deploy.deployable?.nodeSelector : deploy.service?.nodeSelector;
 
   const envToUse = deploy.env || {};
-  const containers = [];
-  const volumes: VOLUME[] = [];
-  const volumeMounts = [];
+  const containers: Array<Record<string, any>> = [];
+  const initContainers: Array<Record<string, any>> = [];
+
+  const volumes: VOLUME[] = [
+    {
+      emptyDir: {},
+      name: 'config-volume',
+    },
+  ];
+  const volumeMounts: Array<{ name: string; mountPath: string }> = [];
+
+  const datadogLabels = {
+    'tags.datadoghq.com/env': `lifecycle-${build.uuid}`,
+    'tags.datadoghq.com/service': serviceName || name,
+    'tags.datadoghq.com/version': build.uuid,
+  };
 
   // Handle init container if present
   if (deploy.initDockerImage) {
-    const initEnvObj = flattenObject(build.commentInitEnv);
-    const initEnvArray = Object.entries(initEnvObj).map(([key, value]) => ({
+    const initEnvObj = _.merge(
+      { __NAMESPACE__: 'lifecycle' },
+      deploy.initEnv || {},
+      flattenObject(build.commentInitEnv)
+    );
+
+    const initEnvArray: Array<Record<string, any>> = Object.entries(initEnvObj)
+      .filter(([, value]) => !_.isObject(value))
+      .map(([key, value]) => ({
+        name: key,
+        value: String(value),
+      }));
+
+    initEnvArray.push(
+      {
+        name: 'POD_IP',
+        valueFrom: {
+          fieldRef: {
+            fieldPath: 'status.podIP',
+          },
+        },
+      },
+      {
+        name: 'DD_AGENT_HOST',
+        valueFrom: {
+          fieldRef: {
+            fieldPath: 'status.hostIP',
+          },
+        },
+      }
+    );
+
+    const initContainer: Record<string, any> = {
+      name: `init-${serviceName || 'container'}`,
+      image: deploy.initDockerImage,
+      imagePullPolicy: 'IfNotPresent',
+      env: initEnvArray,
+      volumeMounts: [
+        {
+          mountPath: '/config',
+          name: 'config-volume',
+        },
+      ],
+    };
+
+    if (serviceCPU || serviceMemory) {
+      initContainer.resources = {
+        limits: {},
+        requests: {},
+      };
+      if (serviceCPU) {
+        initContainer.resources.limits.cpu = serviceCPU;
+        initContainer.resources.requests.cpu = serviceCPU;
+      }
+      if (serviceMemory) {
+        initContainer.resources.limits.memory = serviceMemory;
+        initContainer.resources.requests.memory = serviceMemory;
+      }
+    }
+
+    if (servicePort) {
+      initContainer.ports = [];
+      for (const port of servicePort.split(',')) {
+        initContainer.ports.push({
+          name: `port-${port}`,
+          containerPort: Number(port),
+        });
+      }
+    }
+
+    if (enableFullYaml) {
+      if (deploy.deployable?.initCommand) {
+        initContainer.command = [deploy.deployable.initCommand];
+      }
+      if (deploy.deployable?.initArguments) {
+        initContainer.args = deploy.deployable.initArguments.split('%%SPLIT%%');
+      }
+    }
+
+    initContainers.push(initContainer);
+  }
+
+  // Handle main container
+  const mainEnvObj = _.merge({ __NAMESPACE__: 'lifecycle' }, envToUse, flattenObject(build.commentRuntimeEnv));
+  const mainEnvArray: Array<Record<string, any>> = Object.entries(mainEnvObj)
+    .filter(([, value]) => !_.isObject(value))
+    .map(([key, value]) => ({
       name: key,
       value: String(value),
     }));
 
-    const initContainer = {
-      name: `init-${serviceName || 'container'}`,
-      image: deploy.initDockerImage,
-      imagePullPolicy: 'Always',
-      env: initEnvArray,
-    };
-    containers.push(initContainer);
-  }
+  // Add Kubernetes field references for pod metadata
+  mainEnvArray.push(
+    {
+      name: 'POD_IP',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: 'status.podIP',
+        },
+      },
+    },
+    {
+      name: 'DD_AGENT_HOST',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: 'status.hostIP',
+        },
+      },
+    }
+  );
 
-  // Handle main container
-  const mainEnvObj = flattenObject({ ...build.commentRuntimeEnv, ...envToUse });
-  const mainEnvArray = Object.entries(mainEnvObj).map(([key, value]) => ({
-    name: key,
-    value: String(value),
-  }));
+  // Add Datadog env vars from labels (only if not already set)
+  const existingEnvKeys = new Set(mainEnvArray.map((e) => e.name));
+  if (!existingEnvKeys.has('DD_ENV')) {
+    mainEnvArray.push({
+      name: 'DD_ENV',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/env']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('DD_SERVICE')) {
+    mainEnvArray.push({
+      name: 'DD_SERVICE',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/service']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('DD_VERSION')) {
+    mainEnvArray.push({
+      name: 'DD_VERSION',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/version']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('LC_UUID')) {
+    mainEnvArray.push({
+      name: 'LC_UUID',
+      value: build.uuid,
+    });
+  }
 
   const mainContainer: any = {
     name: serviceName || 'main',
     image: deploy.dockerImage,
-    imagePullPolicy: 'Always',
+    imagePullPolicy: 'IfNotPresent',
     env: mainEnvArray,
+    volumeMounts: [
+      {
+        mountPath: '/config',
+        name: 'config-volume',
+      },
+    ],
   };
 
   // Only add resources if they are defined
@@ -1760,12 +1907,15 @@ function generateSingleDeploymentManifest({
     mainContainer.ports = [];
     for (const port of servicePort.split(',')) {
       mainContainer.ports.push({
+        name: `port-${port}`,
         containerPort: Number(port),
       });
     }
   }
 
-  // Handle volumes
+  // Handle additional volumes (service disks)
+  let hasPersistentVolumeClaims = false;
+
   if (enableFullYaml && deploy.deployable?.serviceDisksYaml) {
     const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
     serviceDisks.forEach((disk) => {
@@ -1775,6 +1925,8 @@ function generateSingleDeploymentManifest({
           emptyDir: {},
         });
       } else {
+        // EBS or other persistent disk - requires Recreate strategy
+        hasPersistentVolumeClaims = true;
         volumes.push({
           name: disk.name,
           persistentVolumeClaim: {
@@ -1795,6 +1947,8 @@ function generateSingleDeploymentManifest({
           emptyDir: {},
         });
       } else {
+        // EBS or other persistent disk - requires Recreate strategy
+        hasPersistentVolumeClaims = true;
         volumes.push({
           name: disk.name,
           persistentVolumeClaim: {
@@ -1809,8 +1963,9 @@ function generateSingleDeploymentManifest({
     });
   }
 
+  // Add additional volume mounts to main container
   if (volumeMounts.length > 0) {
-    mainContainer.volumeMounts = volumeMounts;
+    mainContainer.volumeMounts = [...mainContainer.volumeMounts, ...volumeMounts];
   }
 
   // Add probes
@@ -1830,6 +1985,16 @@ function generateSingleDeploymentManifest({
     }
   }
 
+  // Add command/args if specified
+  if (enableFullYaml) {
+    if (deploy.deployable?.command) {
+      mainContainer.command = [deploy.deployable.command];
+    }
+    if (deploy.deployable?.arguments) {
+      mainContainer.args = deploy.deployable.arguments.split('%%SPLIT%%');
+    }
+  }
+
   containers.push(mainContainer);
 
   const deploymentSpec: any = {
@@ -1838,43 +2003,59 @@ function generateSingleDeploymentManifest({
     metadata: {
       namespace,
       name,
+      annotations: {
+        'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+      },
       labels: {
         name,
         lc_uuid: build.uuid,
         deploy_uuid: deploy.uuid,
+        dd_name: `lifecycle-${build.uuid}`,
+        ...datadogLabels,
       },
     },
     spec: {
       replicas: replicaCount,
+      revisionHistoryLimit: 5,
       selector: {
         matchLabels: {
           name,
         },
       },
+      // Use Recreate strategy for deployments with PVCs (EBS volumes can only attach to one pod)
+      // Use RollingUpdate for all other deployments
+      strategy: hasPersistentVolumeClaims ? { type: 'Recreate' } : { rollingUpdate: { maxUnavailable: '0%' } },
       template: {
         metadata: {
+          annotations: {
+            'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+          },
           labels: {
             name,
             lc_uuid: build.uuid,
             deploy_uuid: deploy.uuid,
+            dd_name: `lifecycle-${build.uuid}`,
+            ...datadogLabels,
           },
         },
         spec: {
           serviceAccountName,
           affinity,
           ...(nodeSelector && { nodeSelector }),
+          securityContext: {
+            fsGroup: 2000,
+          },
+          ...(initContainers.length > 0 && { initContainers }),
           containers,
+          volumes,
           ...(build?.isStatic && {
             tolerations: staticEnvTolerations,
           }),
+          enableServiceLinks: false,
         },
       },
     },
   };
-
-  if (volumes.length > 0) {
-    deploymentSpec.spec.template.spec.volumes = volumes;
-  }
 
   return yaml.dump(deploymentSpec, { lineWidth: -1 });
 }
