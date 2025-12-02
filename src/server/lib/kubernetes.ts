@@ -1914,6 +1914,8 @@ function generateSingleDeploymentManifest({
   }
 
   // Handle additional volumes (service disks)
+  let hasPersistentVolumeClaims = false;
+
   if (enableFullYaml && deploy.deployable?.serviceDisksYaml) {
     const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
     serviceDisks.forEach((disk) => {
@@ -1923,6 +1925,8 @@ function generateSingleDeploymentManifest({
           emptyDir: {},
         });
       } else {
+        // EBS or other persistent disk - requires Recreate strategy
+        hasPersistentVolumeClaims = true;
         volumes.push({
           name: disk.name,
           persistentVolumeClaim: {
@@ -1943,6 +1947,8 @@ function generateSingleDeploymentManifest({
           emptyDir: {},
         });
       } else {
+        // EBS or other persistent disk - requires Recreate strategy
+        hasPersistentVolumeClaims = true;
         volumes.push({
           name: disk.name,
           persistentVolumeClaim: {
@@ -2016,11 +2022,9 @@ function generateSingleDeploymentManifest({
           name,
         },
       },
-      strategy: {
-        rollingUpdate: {
-          maxUnavailable: '0%',
-        },
-      },
+      // Use Recreate strategy for deployments with PVCs (EBS volumes can only attach to one pod)
+      // Use RollingUpdate for all other deployments
+      strategy: hasPersistentVolumeClaims ? { type: 'Recreate' } : { rollingUpdate: { maxUnavailable: '0%' } },
       template: {
         metadata: {
           annotations: {
