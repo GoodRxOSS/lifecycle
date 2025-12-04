@@ -80,6 +80,14 @@ export default class WebhookService extends BaseService {
    * @param build the build for which we want to run webhooks against
    */
   async runWebhooksForBuild(build: Build): Promise<void> {
+    // Check feature flag - if disabled, skip all webhooks
+    // Only skips if explicitly set to false. If undefined/missing, webhooks execute (default behavior)
+    const { features } = await this.db.services.GlobalConfig.getAllConfigs();
+    if (features?.webhooks === false) {
+      logger.debug(`[BUILD ${build.uuid}] Webhooks feature flag is disabled. Skipping webhook execution.`);
+      return;
+    }
+
     switch (build.status) {
       case BuildStatus.DEPLOYED:
       case BuildStatus.ERROR:
