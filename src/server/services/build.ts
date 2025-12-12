@@ -31,8 +31,8 @@ import _ from 'lodash';
 import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
 import rootLogger from 'server/lib/logger';
-import { ParsingError } from 'server/lib/yamlConfigParser';
-import { ValidationError } from 'server/lib/yamlConfigValidator';
+import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
+import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 
 import Fastly from 'server/lib/fastly';
 import { constructBuildLinks, determineIfFastlyIsUsed, insertBuildLink } from 'shared/utils';
@@ -43,6 +43,7 @@ import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
+import { getYamlFileContentFromBranch } from 'server/lib/github';
 
 const logger = rootLogger.child({
   filename: 'services/build.ts',
@@ -172,10 +173,10 @@ export default class BuildService extends BaseService {
   async getBuildByUUID(uuid: string): Promise<Build | null> {
     const build = await this.db.models.Build.query()
       .findOne({ uuid })
-      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt')
+      .select('id', 'uuid', 'status', 'namespace', 'manifest', 'sha', 'createdAt', 'updatedAt')
       .withGraphFetched('[pullRequest, deploys.[deployable]]')
       .modifyGraph('pullRequest', (b) => {
-        b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName');
+        b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
       })
       .modifyGraph('deploys', (b) => {
         b.select('id', 'uuid', 'status', 'active', 'deployableId');
@@ -185,6 +186,14 @@ export default class BuildService extends BaseService {
       });
 
     return build;
+  }
+
+  async validateLifecycleSchema(repo: string, branch: string): Promise<{ valid: boolean }> {
+    const content = (await getYamlFileContentFromBranch(repo, branch)) as string;
+    const parser = new YamlConfigParser();
+    const config = parser.parseYamlConfigFromString(content);
+    const isValid = new YamlConfigValidator().validate(config?.version, config);
+    return { valid: isValid };
   }
 
   /**

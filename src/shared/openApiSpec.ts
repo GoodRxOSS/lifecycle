@@ -103,6 +103,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             id: { type: 'integer' },
+            sha: { type: 'string', example: 'a1b2c3d4e5f6g7h8i9j0' },
+            manifest: { type: 'string', example: 'version: 1.0.0\nservices:\n  web:\n    image: myapp:web\n' },
             uuid: { type: 'string', example: 'white-poetry-596195' },
             status: { $ref: '#/components/schemas/BuildStatus' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
@@ -114,7 +116,18 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { $ref: '#/components/schemas/Deploy' },
             },
           },
-          required: ['id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'pullRequest', 'deploys'],
+          required: [
+            'id',
+            'uuid',
+            'status',
+            'namespace',
+            'manifest',
+            'sha',
+            'createdAt',
+            'updatedAt',
+            'pullRequest',
+            'deploys',
+          ],
         },
 
         /**
@@ -155,9 +168,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             fullName: { type: 'string', example: 'goodrx/lifecycle' },
             githubLogin: { type: 'string', example: 'lifecycle-bot' },
             pullRequestNumber: { type: 'integer', example: 42 },
+            status: { type: 'string', example: 'open' },
             branchName: { type: 'string', example: 'feature/new-feature' },
+            labels: {
+              type: 'array',
+              items: { type: 'string', example: 'lifecycle-deploy!' },
+            },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName'],
+          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels'],
         },
 
         /**
@@ -189,6 +207,28 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/Build' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for the GET /schema/validate endpoint.
+         */
+        ValidateLifecycleSchemaSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    valid: { type: 'boolean' },
+                  },
+                  required: ['valid'],
+                },
               },
               required: ['data'],
             },
