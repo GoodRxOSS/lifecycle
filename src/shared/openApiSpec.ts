@@ -115,6 +115,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'array',
               items: { $ref: '#/components/schemas/Deploy' },
             },
+            dependencyGraph: { type: 'object' },
           },
           required: [
             'id',

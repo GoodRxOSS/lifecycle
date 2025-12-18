@@ -173,7 +173,7 @@ export default class BuildService extends BaseService {
   async getBuildByUUID(uuid: string): Promise<Build | null> {
     const build = await this.db.models.Build.query()
       .findOne({ uuid })
-      .select('id', 'uuid', 'status', 'namespace', 'manifest', 'sha', 'createdAt', 'updatedAt')
+      .select('id', 'uuid', 'status', 'namespace', 'manifest', 'sha', 'createdAt', 'updatedAt', 'dependencyGraph')
       .withGraphFetched('[pullRequest, deploys.[deployable]]')
       .modifyGraph('pullRequest', (b) => {
         b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
