@@ -1,5 +1,5 @@
 import { OAS3Options } from 'swagger-jsdoc';
-import { BuildStatus } from './constants';
+import { BuildStatus, DeployStatus } from './constants';
 
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
@@ -143,6 +143,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description Enum for deploy statuses.
+         */
+        DeployStatus: {
+          type: 'string',
+          enum: Object.values(DeployStatus),
+        },
+
+        /**
          * @description A Deploy associated with a Build.
          */
         Deploy: {
@@ -150,8 +158,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             id: { type: 'integer' },
             uuid: { type: 'string', example: 'deploy-uuid' },
-            status: { type: 'string', example: 'active' },
+            status: { $ref: '#/components/schemas/DeployStatus' },
             active: { type: 'boolean', example: true },
+            branchName: { type: 'string', example: 'main' },
+            publicUrl: { type: 'string', example: 'http://myapp.example.com' },
             deployableId: { type: 'integer' },
             deployable: { $ref: '#/components/schemas/Deployable' },
           },

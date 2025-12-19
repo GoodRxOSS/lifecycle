@@ -179,7 +179,7 @@ export default class BuildService extends BaseService {
         b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
       })
       .modifyGraph('deploys', (b) => {
-        b.select('id', 'uuid', 'status', 'active', 'deployableId');
+        b.select('id', 'uuid', 'status', 'active', 'deployableId', 'branchName', 'publicUrl');
       })
       .modifyGraph('deploys.deployable', (b) => {
         b.select('name');
