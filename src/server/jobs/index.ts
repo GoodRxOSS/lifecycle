@@ -72,6 +72,14 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 1,
   });
 
+  /* Setup TTL cleanup job */
+  services.TTLCleanupService.setupTTLCleanupJob();
+
+  queueManager.registerWorker(QUEUE_NAMES.TTL_CLEANUP, services.TTLCleanupService.processTTLCleanupQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
   services.PullRequest.cleanupClosedPRQueue.add('cleanup', {}, {});
 
   queueManager.registerWorker(QUEUE_NAMES.INGRESS_MANIFEST, services.Ingress.createOrUpdateIngressForBuild, {
