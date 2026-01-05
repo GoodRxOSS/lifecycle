@@ -29,6 +29,7 @@ import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
 import GithubService from 'server/services/github';
 import LabelService from 'server/services/label';
+import TTLCleanupService from 'server/services/ttlCleanup';
 
 export interface IServices {
   BuildService: BuildService;
@@ -46,6 +47,7 @@ export interface IServices {
   BotUser: BotUser;
   GlobalConfig: GlobalConfig;
   LabelService: LabelService;
+  TTLCleanupService: TTLCleanupService;
 }
 
 export * from 'server/services/types/github';
