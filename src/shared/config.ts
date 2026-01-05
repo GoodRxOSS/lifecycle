@@ -107,6 +107,8 @@ export const QUEUE_NAMES = {
   WEBHOOK_PROCESSING: `webhook_processing_${JOB_VERSION}`,
   COMMENT_QUEUE: `comment_queue_${JOB_VERSION}`,
   CLEANUP: `cleanup_${JOB_VERSION}`,
+  // NOTE: No version suffix - singleton queue shared across app instances
+  TTL_CLEANUP: 'ttl_cleanup',
   GLOBAL_CONFIG_CACHE_REFRESH: 'global_config_cache_refresh',
   GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github_client_token_cache_refresh',
   INGRESS_MANIFEST: `ingress_manifest_${JOB_VERSION}`,
