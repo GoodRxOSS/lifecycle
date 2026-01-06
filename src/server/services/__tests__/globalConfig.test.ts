@@ -116,6 +116,7 @@ describe('GlobalConfigService', () => {
       expect(result).toEqual({
         deploy: ['lifecycle-deploy!'],
         disabled: ['lifecycle-disabled!'],
+        keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
         defaultStatusComments: true,
         defaultControlComments: true,
@@ -133,6 +134,7 @@ describe('GlobalConfigService', () => {
       expect(result).toEqual({
         deploy: ['lifecycle-deploy!'],
         disabled: ['lifecycle-disabled!'],
+        keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
         defaultStatusComments: true,
         defaultControlComments: true,

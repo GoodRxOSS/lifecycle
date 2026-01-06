@@ -37,6 +37,7 @@ export type GlobalConfig = {
   features: Record<string, boolean>;
   app_setup: AppSetup;
   labels: LabelsConfig;
+  ttl_cleanup?: TTLCleanupConfig;
 };
 
 export type AppSetup = {
@@ -144,7 +145,17 @@ export type ResourceRequirements = {
 export type LabelsConfig = {
   deploy: string[];
   disabled: string[];
+  keep: string[];
   statusComments: string[];
   defaultStatusComments: boolean;
   defaultControlComments: boolean;
+};
+
+export type TTLCleanupConfig = {
+  enabled: boolean;
+  dryRun: boolean;
+  inactivityDays: number;
+  checkIntervalMinutes: number;
+  commentTemplate?: string;
+  excludedRepositories: string[];
 };

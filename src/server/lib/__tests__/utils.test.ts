@@ -45,6 +45,7 @@ jest.mock('server/services/globalConfig', () => {
       getLabels: jest.fn().mockResolvedValue({
         deploy: ['lifecycle-deploy!', 'custom-deploy!'],
         disabled: ['lifecycle-disabled!', 'no-deploy!'],
+        keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!', 'show-status!'],
         defaultStatusComments: true,
         defaultControlComments: true,
@@ -355,6 +356,7 @@ describe('hasDeployLabel', () => {
     const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
     mockService.getLabels.mockResolvedValueOnce({
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
     } as any);
@@ -367,6 +369,7 @@ describe('hasDeployLabel', () => {
     mockService.getLabels.mockResolvedValueOnce({
       deploy: [],
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
       defaultControlComments: true,
@@ -433,6 +436,7 @@ describe('getDeployLabel', () => {
     const mockService = GlobalConfigService.getInstance() as jest.Mocked<GlobalConfigService>;
     mockService.getLabels.mockResolvedValueOnce({
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
     } as any);
@@ -445,6 +449,7 @@ describe('getDeployLabel', () => {
     mockService.getLabels.mockResolvedValueOnce({
       deploy: [],
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
       defaultControlComments: true,
@@ -494,6 +499,7 @@ describe('isDefaultStatusCommentsEnabled', () => {
     mockService.getLabels.mockResolvedValueOnce({
       deploy: ['lifecycle-deploy!'],
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
     } as any);
     const result = await isDefaultStatusCommentsEnabled();
@@ -519,6 +525,7 @@ describe('isControlCommentsEnabled', () => {
     mockService.getLabels.mockResolvedValueOnce({
       deploy: ['lifecycle-deploy!'],
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
     } as any);
@@ -532,6 +539,7 @@ describe('isControlCommentsEnabled', () => {
     mockService.getLabels.mockResolvedValueOnce({
       deploy: ['lifecycle-deploy!'],
       disabled: ['lifecycle-disabled!'],
+      keep: ['lifecycle-keep!'],
       statusComments: ['lifecycle-status-comments!'],
       defaultStatusComments: true,
       defaultControlComments: false,

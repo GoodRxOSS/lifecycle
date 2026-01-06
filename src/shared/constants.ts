@@ -110,6 +110,10 @@ export enum GithubPullRequestActions {
   SYNCHRONIZE = 'synchronize',
 }
 
+// TTL Cleanup defaults
+export const DEFAULT_TTL_INACTIVITY_DAYS = 14;
+export const DEFAULT_TTL_CHECK_INTERVAL_MINUTES = 240; // 4 hours
+
 export enum CommentParser {
   HEADER = `----EDIT BELOW THIS LINE----`,
   FOOTER = `----EDIT ABOVE THIS LINE----`,
@@ -118,6 +122,7 @@ export enum CommentParser {
 export enum FallbackLabels {
   DEPLOY = 'lifecycle-deploy!',
   DISABLED = 'lifecycle-disabled!',
+  KEEP = 'lifecycle-keep!',
   DEPLOY_STG = 'lifecycle-stg-deploy!',
   STATUS_COMMENTS = 'lifecycle-status-comments!',
 }

@@ -113,6 +113,32 @@ export async function getPullRequestByRepositoryFullName(
   }
 }
 
+/**
+ * Fetches current labels from GitHub API for a pull request
+ * Used by TTL cleanup to avoid stale label data from database
+ */
+export async function getPullRequestLabels({
+  installationId,
+  pullRequestNumber,
+  fullName,
+}: {
+  installationId: number;
+  pullRequestNumber: number;
+  fullName: string;
+}): Promise<string[]> {
+  try {
+    const client = await createOctokitClient({
+      installationId,
+      caller: 'getPullRequestLabels',
+    });
+    const response = await client.request(`GET /repos/${fullName}/issues/${pullRequestNumber}`);
+    return response.data.labels.map((label: any) => label.name);
+  } catch (error) {
+    initialLogger.error(`[GITHUB ${fullName}/${pullRequestNumber}] Unable to fetch labels: ${error}`);
+    throw error;
+  }
+}
+
 export async function createDeploy({ owner, name, branch, installationId, logger = initialLogger }: RepoOptions) {
   try {
     const octokit = await createOctokitClient({ installationId, caller: 'createDeploy' });

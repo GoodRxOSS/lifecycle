@@ -258,6 +258,15 @@ export const getDisabledLabel = async (): Promise<string> => {
 };
 
 /**
+ * Get the first keep label from configuration for user-facing messages
+ * @returns Promise<string> First keep label from config
+ */
+export const getKeepLabel = async (): Promise<string> => {
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  return labelsConfig?.keep?.[0] || FallbackLabels.KEEP;
+};
+
+/**
  * Get the first status comment label from configuration for user-facing messages
  * @returns Promise<string> First status comment label from config
  */

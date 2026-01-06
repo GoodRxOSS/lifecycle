@@ -18,7 +18,7 @@ import rootLogger from './logger';
 import yaml from 'js-yaml';
 import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
-import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE } from 'shared/constants';
+import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
 import { shellPromise } from './shell';
 import { flattenObject, waitUntil } from 'server/lib/utils';
 import { ServiceDiskConfig } from 'server/models/yaml';
@@ -57,42 +57,156 @@ async function namespaceExists(client: k8s.CoreV1Api, name: string): Promise<boo
 }
 
 /**
+ * Gets TTL configuration from global config with fallback to defaults
+ */
+async function getTTLConfig(buildUUID: string): Promise<{ daysToExpire: number }> {
+  let daysToExpire = DEFAULT_TTL_INACTIVITY_DAYS;
+  try {
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    daysToExpire = globalConfig.ttl_cleanup?.inactivityDays ?? DEFAULT_TTL_INACTIVITY_DAYS;
+  } catch (error) {
+    logger.warn(
+      `[NS ${buildUUID}] Failed to get TTL config, using default ${DEFAULT_TTL_INACTIVITY_DAYS} days: ${error}`
+    );
+  }
+  return { daysToExpire };
+}
+
+/**
+ * Generates TTL-related labels for namespace creation
+ */
+async function generateTTLLabels({
+  uuid,
+  staticEnv,
+  ttl,
+  buildUUID,
+}: {
+  uuid: string;
+  staticEnv: boolean;
+  ttl: boolean;
+  buildUUID: string;
+}): Promise<{ labels: Record<string, string>; logMessage: string }> {
+  const baseLabels = { 'lfc/uuid': uuid };
+
+  // Static or TTL disabled - only set enable flag
+  if (staticEnv || !ttl) {
+    const reason = staticEnv ? 'static env' : 'lifecycle-keep! label present';
+    return {
+      labels: {
+        ...baseLabels,
+        'lfc/ttl-enable': 'false',
+      },
+      logMessage: `with TTL disabled (${reason})`,
+    };
+  }
+
+  // TTL enabled - set enable flag + expiration timestamps
+  const { daysToExpire } = await getTTLConfig(buildUUID);
+  const timeToExpire = Date.now() + daysToExpire * 24 * 60 * 60 * 1000;
+
+  return {
+    labels: {
+      ...baseLabels,
+      'lfc/ttl-enable': 'true',
+      'lfc/ttl-createdAtUnix': Date.now().toString(),
+      'lfc/ttl-createdAt': new Date().toISOString().split('T')[0],
+      'lfc/ttl-expireAtUnix': timeToExpire.toString(),
+      'lfc/ttl-expireAt': new Date(timeToExpire).toISOString().split('T')[0],
+    },
+    logMessage: `with TTL enabled (${daysToExpire} day expiration)`,
+  };
+}
+
+/**
+ * Generates patch operations for updating TTL labels on existing namespace
+ */
+async function generateTTLPatch({
+  ttl,
+  buildUUID,
+}: {
+  ttl: boolean;
+  buildUUID: string;
+}): Promise<{ patch: any[]; logMessage: string }> {
+  // TTL disabled - only update enable flag
+  if (!ttl) {
+    return {
+      patch: [
+        {
+          op: 'add',
+          path: '/metadata/labels/lfc~1ttl-enable',
+          value: 'false',
+        },
+      ],
+      logMessage: 'to disable TTL (lifecycle-keep! present)',
+    };
+  }
+
+  // TTL enabled - update enable flag + all expiration timestamps
+  const { daysToExpire } = await getTTLConfig(buildUUID);
+  const timeToExpire = Date.now() + daysToExpire * 24 * 60 * 60 * 1000;
+
+  return {
+    patch: [
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-enable',
+        value: 'true',
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-createdAtUnix',
+        value: Date.now().toString(),
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-createdAt',
+        value: new Date().toISOString().split('T')[0],
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-expireAtUnix',
+        value: timeToExpire.toString(),
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-expireAt',
+        value: new Date(timeToExpire).toISOString().split('T')[0],
+      },
+    ],
+    logMessage: `with new TTL expiration (${daysToExpire} days)`,
+  };
+}
+
+/**
  *
  */
 export async function createOrUpdateNamespace({
   name,
   buildUUID,
   staticEnv,
+  ttl = true,
 }: {
   name: string;
   buildUUID: string;
   staticEnv: boolean;
+  ttl?: boolean;
 }) {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = kc.makeApiClient(k8s.CoreV1Api);
 
-  const daysToExpire = 4;
-  let labels: Record<string, string> = {};
-  const timeToExpire = Date.now() + daysToExpire * 24 * 60 * 60 * 1000;
-  const lc_uuid = name.replace('env-', '');
+  const uuid = name.replace('env-', '');
 
-  if (!staticEnv) {
-    labels = {
-      lc_uuid,
-      'lfc/ttl-enable': 'true',
-      'lfc/ttl-createdAtUnix': Date.now().toString(),
-      'lfc/ttl-createdAt': new Date().toISOString().split('T')[0],
-      'lfc/ttl-expireAtUnix': timeToExpire.toString(),
-      'lfc/ttl-expireAt': new Date(timeToExpire).toISOString().split('T')[0],
-    };
-  } else {
-    labels = {
-      lc_uuid,
-      ttl_enable: 'false',
-    };
-  }
-  logger.info(`[NS ${buildUUID}] Creating namespace ${name} with ttl_enable: ${labels.ttl_enable}`);
+  // Generate TTL labels using helper function
+  const { labels, logMessage } = await generateTTLLabels({
+    uuid,
+    staticEnv,
+    ttl,
+    buildUUID,
+  });
+
+  logger.info(`[NS ${buildUUID}] Creating/updating namespace ${name} ${logMessage}`);
+
   const namespace = {
     apiVersion: 'v1',
     kind: 'Namespace',
@@ -101,45 +215,31 @@ export async function createOrUpdateNamespace({
       labels,
     },
   };
+
   if (await namespaceExists(client, name)) {
+    // Only update TTL labels if not static env
     if (!staticEnv) {
-      const patch = [
-        {
-          op: 'add',
-          path: '/metadata/labels/lfc~1ttl-createdAtUnix',
-          value: Date.now().toString(),
-        },
-        {
-          op: 'add',
-          path: '/metadata/labels/lfc~1ttl-createdAt',
-          value: new Date().toISOString().split('T')[0],
-        },
-        {
-          op: 'add',
-          path: '/metadata/labels/lfc~1ttl-expireAtUnix',
-          value: timeToExpire.toString(),
-        },
-        {
-          op: 'add',
-          path: '/metadata/labels/lfc~1ttl-expireAt',
-          value: new Date(timeToExpire).toISOString().split('T')[0],
-        },
-      ];
+      const { patch, logMessage: patchMessage } = await generateTTLPatch({
+        ttl,
+        buildUUID,
+      });
+
       await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
         headers: { 'Content-Type': 'application/json-patch+json' },
       });
-      logger.info(`[NS ${buildUUID}] The namespace has been successfully updated`);
+      logger.info(`[NS ${buildUUID}] Updated namespace ${patchMessage}`);
       return;
     } else {
-      logger.info(`[NS ${buildUUID}] The namespace already exists and is static env, skipping update labels`);
+      logger.info(`[NS ${buildUUID}] Namespace exists and is static env, skipping update`);
       return;
     }
   }
+
   try {
     await client.createNamespace(namespace);
-    logger.debug(`[NS ${name}] Namespace created `);
+    logger.debug(`[NS ${name}] Namespace created`);
   } catch (err) {
-    logger.error(`[NS ${name}]Error creating namespace: ${err}`);
+    logger.error(`[NS ${name}] Error creating namespace: ${err}`);
     throw err;
   }
 }

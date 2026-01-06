@@ -125,6 +125,7 @@ export default class GlobalConfigService extends BaseService {
       return {
         deploy: ['lifecycle-deploy!'],
         disabled: ['lifecycle-disabled!'],
+        keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
         defaultStatusComments: true,
         defaultControlComments: true,
