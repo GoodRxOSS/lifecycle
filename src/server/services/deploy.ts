@@ -386,15 +386,25 @@ export default class DeployService extends BaseService {
       await deploy.reload();
       await deploy.$fetchGraph('[build, deployable]');
 
+      if (!deploy.deployable) {
+        logger.error(`[DEPLOY ${deploy?.uuid}] Missing deployable for Aurora restore`);
+        return false;
+      }
+
       /**
        * For now, only run the CLI deploy step one time.
+       * Check for both BUILT and READY status because:
+       * - deployAurora sets status to BUILT after successful creation
+       * - DeploymentManager.deployManifests then changes it to READY after Kubernetes manifest deployment
+       * Both statuses indicate the Aurora database already exists and should not be recreated
        */
-      if (deploy.status === DeployStatus.BUILT) {
-        logger.info(`[DEPLOY ${deploy?.uuid}] Aurora restore already built`);
+      if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
+        logger.info(`[DEPLOY ${deploy?.uuid}] Aurora restore already built (status: ${deploy.status})`);
         return true;
       }
 
       // Check if database already exists in AWS before attempting to create
+      // This handles both: status is BUILT/READY but cname missing, OR first-time deploy
       const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
       if (existingDbEndpoint) {
         logger.info(
