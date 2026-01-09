@@ -26,6 +26,10 @@ export const authMiddleware: Middleware = async (request, next) => {
     return next(request);
   }
 
+  if (process.env.ENABLE_AUTH !== 'true') {
+    return next(request);
+  }
+
   const authResult = await verifyAuth(request);
 
   if (!authResult.success) {
