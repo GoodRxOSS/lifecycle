@@ -28,7 +28,7 @@ interface Metadata {
 
 type SuccessStatusCode = 200 | 201;
 
-type ErrorStatusCode = 400 | 401 | 404 | 500;
+type ErrorStatusCode = 400 | 401 | 404 | 500 | 502;
 
 interface SuccessResponse<T> {
   request_id: string;
