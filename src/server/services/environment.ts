@@ -14,13 +14,9 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import Environment from 'server/models/Environment';
 import Service from './_service';
-
-const logger = rootLogger.child({
-  filename: 'services/repository.ts',
-});
 
 export default class EnvironmentService extends Service {
   /**
@@ -48,9 +44,7 @@ export default class EnvironmentService extends Service {
           autoDeploy,
         }));
     } catch (error) {
-      logger.fatal(
-        `[Environment ${envName}] [UUID ${uuid != null ?? '???'}] Unable to find or create environment: ${error}`
-      );
+      getLogger({ environment: envName, uuid, error }).fatal('Unable to find or create environment');
       throw error;
     }
 

@@ -18,12 +18,7 @@ import PQueue from 'p-queue';
 import { constructOctokitClient, constructClientRequestData } from 'server/lib/github/utils';
 import { CreateOctokitClientOptions } from 'server/lib/github/types';
 import GlobalConfigService from 'server/services/globalConfig';
-import rootLogger from 'server/lib/logger';
 import { Metrics } from 'server/lib/metrics';
-
-const initialLogger = rootLogger.child({
-  filename: 'lib/github/client.ts',
-});
 
 const queue = new PQueue({
   concurrency: 100,
@@ -32,12 +27,7 @@ const queue = new PQueue({
   carryoverConcurrencyCount: true,
 });
 
-export const createOctokitClient = async ({
-  accessToken,
-  // eslint-disable-next-line no-unused-vars
-  logger = initialLogger,
-  caller = '',
-}: CreateOctokitClientOptions = {}) => {
+export const createOctokitClient = async ({ accessToken, caller = '' }: CreateOctokitClientOptions = {}) => {
   let token: string | undefined = await GlobalConfigService.getInstance().getGithubClientToken();
   if (!token) token = accessToken;
   const octokit = constructOctokitClient({ token });

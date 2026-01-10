@@ -15,7 +15,7 @@
  */
 
 import { shellPromise } from '../shell';
-import logger from '../logger';
+import { getLogger } from '../logger/index';
 
 export interface JobStatus {
   logs: string;
@@ -70,7 +70,7 @@ export class JobMonitor {
         status,
       };
     } catch (error) {
-      logger.error(`Error monitoring job ${this.jobName}: ${error.message}`);
+      getLogger().error(`Error monitoring job ${this.jobName}: ${error.message}`);
       return {
         logs: logs || `Job monitoring failed: ${error.message}`,
         success: false,
@@ -146,12 +146,12 @@ export class JobMonitor {
             );
             logs += `\n=== Init Container Logs (${initName}) ===\n${initLogs}\n`;
           } catch (err: any) {
-            logger.debug(`Could not get logs for init container ${initName}: ${err.message || 'Unknown error'}`);
+            getLogger().debug(`Could not get logs for init container ${initName}: ${err.message || 'Unknown error'}`);
           }
         }
       }
     } catch (error: any) {
-      logger.debug(`No init containers found for pod ${podName}: ${error.message || 'Unknown error'}`);
+      getLogger().debug(`No init containers found for pod ${podName}: ${error.message || 'Unknown error'}`);
     }
 
     return logs;
@@ -175,7 +175,7 @@ export class JobMonitor {
           if (!allContainersReady) {
             const waiting = statuses.find((s: any) => s.state.waiting);
             if (waiting && waiting.state.waiting.reason) {
-              logger.info(
+              getLogger().info(
                 `Container ${waiting.name} is waiting: ${waiting.state.waiting.reason} - ${
                   waiting.state.waiting.message || 'no message'
                 }`
@@ -209,7 +209,7 @@ export class JobMonitor {
         containerNames = containerNames.filter((name) => containerFilters.includes(name));
       }
     } catch (error) {
-      logger.warn(`Could not get container names: ${error}`);
+      getLogger().warn(`Could not get container names: ${error}`);
     }
 
     for (const containerName of containerNames) {
@@ -223,7 +223,7 @@ export class JobMonitor {
           logs += `\n=== Container Logs (${containerName}) ===\n${containerLog}\n`;
         }
       } catch (error: any) {
-        logger.warn(`Error getting logs from container ${containerName}: ${error.message}`);
+        getLogger().warn(`Error getting logs from container ${containerName}: ${error.message}`);
         logs += `\n=== Container Logs (${containerName}) ===\nError retrieving logs: ${error.message}\n`;
       }
     }
@@ -252,7 +252,9 @@ export class JobMonitor {
           await this.sleep(JobMonitor.POLL_INTERVAL);
         }
       } catch (error: any) {
-        logger.debug(`Job status check failed for ${this.jobName}, will retry: ${error.message || 'Unknown error'}`);
+        getLogger().debug(
+          `Job status check failed for ${this.jobName}, will retry: ${error.message || 'Unknown error'}`
+        );
         await this.sleep(JobMonitor.POLL_INTERVAL);
       }
     }
@@ -276,7 +278,7 @@ export class JobMonitor {
         );
 
         if (failedStatus.trim() === 'True') {
-          logger.error(`Job ${this.jobName} failed`);
+          getLogger().error(`Job ${this.jobName} failed`);
 
           // Check if job was superseded
           try {
@@ -286,12 +288,12 @@ export class JobMonitor {
             );
 
             if (annotations === 'superseded-by-retry') {
-              logger.info(`${logPrefix || ''} Job ${this.jobName} superseded by newer deployment`);
+              getLogger().info(`${logPrefix || ''} Job ${this.jobName} superseded by newer deployment`);
               success = true;
               status = 'superseded';
             }
           } catch (annotationError: any) {
-            logger.debug(
+            getLogger().debug(
               `Could not check supersession annotation for job ${this.jobName}: ${
                 annotationError.message || 'Unknown error'
               }`
@@ -302,7 +304,7 @@ export class JobMonitor {
         status = 'succeeded';
       }
     } catch (error) {
-      logger.error(`Failed to check job status for ${this.jobName}:`, error);
+      getLogger().error(`Failed to check job status for ${this.jobName}:`, error);
     }
 
     return { success, status };

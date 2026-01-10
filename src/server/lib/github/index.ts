@@ -19,7 +19,7 @@ import crypto from 'crypto';
 import { NextApiRequest } from 'next';
 import { GITHUB_WEBHOOK_SECRET } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { createOctokitClient } from 'server/lib/github/client';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 import { LIFECYCLE_FILE_NAME_REGEX } from 'server/lib/github/constants';
@@ -27,10 +27,6 @@ import { RepoOptions, PullRequestCommentOptions, CheckIfCommentExistsOptions } f
 import { getRefForBranchName } from 'server/lib/github/utils';
 import { Deploy } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
-
-export const initialLogger = rootLogger.child({
-  filename: 'lib/github/index.ts',
-});
 
 export async function createOrUpdatePullRequestComment({
   installationId,
@@ -51,7 +47,11 @@ export async function createOrUpdatePullRequestComment({
     });
   } catch (error) {
     const msg = 'Unable to create or update pull request comment';
-    initialLogger.child({ error }).error(`[GITHUB ${fullName}/${pullRequestNumber}] ${msg} - original error: ${error}`);
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+    }).error(msg);
     throw new Error(error?.message || msg);
   }
 }
@@ -74,41 +74,40 @@ export async function updatePullRequestLabels({
       data: { labels },
     });
   } catch (error) {
-    initialLogger
-      .child({ error })
-      .error(
-        `[GITHUB ${fullName}/${pullRequestNumber}] Unable to update pull request with '${labels.toString()}': ${error}`
-      );
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+      labels: labels.toString(),
+    }).error('Unable to update pull request labels');
     throw error;
   }
 }
 
-export async function getPullRequest(
-  owner: string,
-  name: string,
-  pullRequestNumber: number,
-  _installationId: number,
-  logger = initialLogger
-) {
+export async function getPullRequest(owner: string, name: string, pullRequestNumber: number, _installationId: number) {
   try {
     return await cacheRequest(`GET /repos/${owner}/${name}/pulls/${pullRequestNumber}`);
   } catch (error) {
     const msg = 'Unable to retrieve pull request';
-    logger.error(`[GITHUB ${owner}/${name}/pulls/${pullRequestNumber}] ${msg}: ${error}`);
+    getLogger({
+      error,
+      repo: `${owner}/${name}`,
+      pr: pullRequestNumber,
+    }).error(msg);
     throw new Error(error?.message || msg);
   }
 }
 
-export async function getPullRequestByRepositoryFullName(
-  fullName: string,
-  pullRequestNumber: number,
-  logger = initialLogger
-) {
+export async function getPullRequestByRepositoryFullName(fullName: string, pullRequestNumber: number) {
   try {
     return await cacheRequest(`GET /repos/${fullName}/pulls/${pullRequestNumber}`);
   } catch (error) {
     const msg = 'Unable to retrieve pull request';
-    logger.error(`[GITHUB ${fullName}/pulls/${pullRequestNumber}] ${msg}: ${error}`);
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+    }).error(msg);
     throw new Error(error?.message || msg);
   }
 }
@@ -134,12 +133,16 @@ export async function getPullRequestLabels({
     const response = await client.request(`GET /repos/${fullName}/issues/${pullRequestNumber}`);
     return response.data.labels.map((label: any) => label.name);
   } catch (error) {
-    initialLogger.error(`[GITHUB ${fullName}/${pullRequestNumber}] Unable to fetch labels: ${error}`);
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+    }).error('Unable to fetch labels');
     throw error;
   }
 }
 
-export async function createDeploy({ owner, name, branch, installationId, logger = initialLogger }: RepoOptions) {
+export async function createDeploy({ owner, name, branch, installationId }: RepoOptions) {
   try {
     const octokit = await createOctokitClient({ installationId, caller: 'createDeploy' });
     return await octokit.request(`POST /repos/${owner}/${name}/builds`, {
@@ -150,7 +153,11 @@ export async function createDeploy({ owner, name, branch, installationId, logger
     });
   } catch (error) {
     const msg = 'Unable to create deploy';
-    logger.child({ error }).error(`[GITHUB ${owner}/${name}/${branch}] ${msg}`);
+    getLogger({
+      error,
+      repo: `${owner}/${name}`,
+      branch,
+    }).error(msg);
     throw new Error(error?.message || msg);
   }
 }
@@ -187,24 +194,22 @@ export async function getShaForDeploy(deploy: Deploy) {
   }
 }
 
-export async function getSHAForBranch(
-  branchName: string,
-  owner: string,
-  name: string,
-  logger = initialLogger
-): Promise<string> {
+export async function getSHAForBranch(branchName: string, owner: string, name: string): Promise<string> {
   try {
     const ref = await getRefForBranchName(owner, name, branchName);
     return ref?.data?.object?.sha;
   } catch (error) {
     const msg = 'Unable to retrieve SHA from branch';
-    logger.child({ error }).warn(`[GITHUB ${owner}/${name}/${branchName}] ${msg}`);
+    getLogger({
+      error,
+      repo: `${owner}/${name}`,
+      branch: branchName,
+    }).warn(msg);
     throw new Error(error?.message || msg);
   }
 }
 
-export async function getYamlFileContent({ fullName, branch = '', sha = '', isJSON = false, logger = initialLogger }) {
-  const text = `[${fullName}:${branch}][getYamlFileContent]`;
+export async function getYamlFileContent({ fullName, branch = '', sha = '', isJSON = false }) {
   try {
     const identifier = sha?.length > 0 ? sha : branch;
     const treeResp = await cacheRequest(`GET /repos/${fullName}/git/trees/${identifier}`);
@@ -238,18 +243,13 @@ export async function getYamlFileContent({ fullName, branch = '', sha = '', isJS
 
     return configData;
   } catch (error) {
-    const msg = 'warning: no lifecycle yaml found or parsed';
-    logger.child({ error }).warn(`${text}${msg}`);
+    const msg = 'No lifecycle yaml found or parsed';
+    getLogger({ error, repo: fullName, branch }).warn(msg);
     throw new ConfigFileNotFound(error?.message || msg);
   }
 }
 
-export async function getYamlFileContentFromPullRequest(
-  fullName: string,
-  pullRequestNumber: number,
-  logger = initialLogger
-) {
-  const [owner, repo] = fullName.split('/');
+export async function getYamlFileContentFromPullRequest(fullName: string, pullRequestNumber: number) {
   try {
     const pullRequestResp = await getPullRequestByRepositoryFullName(fullName, pullRequestNumber);
     const branch = pullRequestResp?.data?.head?.ref;
@@ -259,23 +259,29 @@ export async function getYamlFileContentFromPullRequest(
     return config;
   } catch (error) {
     const msg = 'Unable to retrieve YAML file content from pull request';
-    logger.child({ error }).warn(`[GITHUB ${owner}/${repo}/pulls/${pullRequestNumber}] ${msg}`);
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+    }).warn(msg);
     throw new ConfigFileNotFound(error?.message || msg);
   }
 }
 
 export async function getYamlFileContentFromBranch(
   fullName: string,
-  branchName: string,
-  logger = initialLogger
+  branchName: string
 ): Promise<string | LifecycleYamlConfigOptions> {
-  const [owner, repo] = fullName.split('/');
   try {
     const config = await getYamlFileContent({ fullName, branch: branchName });
     return config;
   } catch (error) {
     const msg = 'Unable to retrieve YAML file content from branch';
-    logger.child({ error }).warn(`[GITHUB ${owner}/${repo}/${branchName}] ${msg}`);
+    getLogger({
+      error,
+      repo: fullName,
+      branch: branchName,
+    }).warn(msg);
     throw new ConfigFileNotFound(error?.message || msg);
   }
 }
@@ -284,7 +290,6 @@ export async function checkIfCommentExists({
   fullName,
   pullRequestNumber,
   commentIdentifier,
-  logger = initialLogger,
 }: CheckIfCommentExistsOptions) {
   try {
     const resp = await cacheRequest(`GET /repos/${fullName}/issues/${pullRequestNumber}/comments`);
@@ -292,8 +297,11 @@ export async function checkIfCommentExists({
     const isExistingComment = comments.find(({ body }) => body?.includes(commentIdentifier)) || false;
     return isExistingComment;
   } catch (error) {
-    const msg = 'Unable check for coments';
-    logger.child({ error }).error(`[GITHUB ${fullName}][checkIfCommentExists] ${msg}`);
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+    }).error('Unable to check for comments');
     return false;
   }
 }

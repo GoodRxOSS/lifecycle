@@ -14,13 +14,9 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { Repository } from 'server/models';
 import BaseService from './_service';
-
-const logger = rootLogger.child({
-  filename: 'services/repository.ts',
-});
 
 export default class RepositoryService extends BaseService {
   /**
@@ -59,7 +55,7 @@ export default class RepositoryService extends BaseService {
           defaultEnvId,
         }));
     } catch (error) {
-      logger.error(error);
+      getLogger({ githubRepositoryId, error }).error('Failed to find or create repository');
       throw error;
     }
 
@@ -86,7 +82,7 @@ export default class RepositoryService extends BaseService {
         ownerId,
       });
     } catch (error) {
-      logger.error(error);
+      getLogger({ githubRepositoryId, error }).error('Failed to find repository');
       throw error;
     }
 

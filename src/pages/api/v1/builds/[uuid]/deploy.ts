@@ -15,14 +15,10 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
 import { Build } from 'server/models';
 import { nanoid } from 'nanoid';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/deploy.ts',
-});
 
 /**
  * @openapi
@@ -88,36 +84,48 @@ const logger = rootLogger.child({
  */
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: `${req.method} is not allowed` });
-  }
+  const correlationId = `api-redeploy-${Date.now()}-${nanoid(8)}`;
 
-  const { uuid } = req.query;
-
-  try {
-    const buildService = new BuildService();
-    const build: Build = await buildService.db.models.Build.query()
-      .findOne({ uuid })
-      .withGraphFetched('deploys.deployable');
-
-    if (!build) {
-      logger.info(`Build with UUID ${uuid} not found`);
-      return res.status(404).json({ error: `Build not found for ${uuid}` });
+  return withLogContext({ correlationId }, async () => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    const buildId = build.id;
-    const runUUID = nanoid();
-    await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
-      buildId,
-      runUUID,
-    });
+    const { uuid } = req.query;
 
-    return res.status(200).json({
-      status: 'success',
-      message: `Redeploy for build ${uuid} has been queued`,
-    });
-  } catch (error) {
-    logger.error(`Unable to proceed with redeploy for build ${uuid}. Error: \n ${error}`);
-    return res.status(500).json({ error: `Unable to proceed with redeploy for build ${uuid}.` });
-  }
+    try {
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Redeploy requested for build ${uuid}`);
+
+      const buildService = new BuildService();
+      const build: Build = await buildService.db.models.Build.query()
+        .findOne({ uuid })
+        .withGraphFetched('deploys.deployable');
+
+      if (!build) {
+        getLogger({ buildUuid: uuid as string }).debug('Build not found');
+        return res.status(404).json({ error: `Build not found for ${uuid}` });
+      }
+
+      const buildId = build.id;
+      const runUUID = nanoid();
+      await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+        buildId,
+        runUUID,
+        correlationId,
+      });
+
+      getLogger({ stage: LogStage.BUILD_QUEUED, buildUuid: build.uuid }).info(`Redeploy queued for build ${uuid}`);
+
+      return res.status(200).json({
+        status: 'success',
+        message: `Redeploy for build ${uuid} has been queued`,
+      });
+    } catch (error) {
+      getLogger({ stage: LogStage.BUILD_FAILED }).error(
+        { error: error instanceof Error ? error.message : String(error) },
+        `Unable to proceed with redeploy for build ${uuid}`
+      );
+      return res.status(500).json({ error: `Unable to proceed with redeploy for build ${uuid}.` });
+    }
+  });
 };

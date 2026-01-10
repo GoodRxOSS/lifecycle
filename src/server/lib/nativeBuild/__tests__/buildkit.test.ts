@@ -59,6 +59,7 @@ jest.mock('../../logger', () => {
   return {
     __esModule: true,
     default: mockLogger,
+    getLogger: jest.fn(() => mockLogger),
   };
 });
 

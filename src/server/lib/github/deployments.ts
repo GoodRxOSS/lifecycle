@@ -18,11 +18,7 @@ import { Deploy } from 'server/models';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 import { getPullRequest } from 'server/lib/github/index';
 import { DeployStatus } from 'shared/constants';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({
-  filename: 'github/deployments.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 const githubDeploymentStatuses = {
   deployed: 'success',
@@ -43,12 +39,9 @@ function lifecycleToGithubStatus(status: string) {
 }
 
 export async function createOrUpdateGithubDeployment(deploy: Deploy) {
-  const uuid = deploy.uuid;
-  const text = `[DEPLOY ${uuid}][createOrUpdateGithubDeployment]`;
-  const suffix = 'creating or updating github deployment';
-  logger.debug(`${text} ${suffix}`);
+  getLogger().debug('Creating or updating github deployment');
   try {
-    logger.child({ deploy }).info(`${text}[deploymentStatus] deploy status`);
+    getLogger().info('Deploy status update');
     await deploy.$fetchGraph('build.pullRequest.repository');
     const githubDeploymentId = deploy?.githubDeploymentId;
     const build = deploy?.build;
@@ -63,9 +56,6 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
     if (hasDeployment) {
       const deploymentResp = await getDeployment(deploy);
       const deploymentSha = deploymentResp?.data?.sha;
-      /**
-       * @note If the last commit is different than the deploy sha, delete the deployment, time for a new deployment
-       **/
       if (lastCommit !== deploymentSha) {
         await deleteGithubDeploymentAndEnvironment(deploy);
       } else {
@@ -74,14 +64,11 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
       }
     }
     await createGithubDeployment(deploy, lastCommit);
-    /**
-     * @note this captures a redeployed deployment; sometimes it happens immediately
-     */
     if (build?.status === 'deployed') {
       await updateDeploymentStatus(deploy, githubDeploymentId);
     }
   } catch (error) {
-    logger.child({ error }).error(`${text} error ${suffix}`);
+    getLogger({ error }).error('Error creating or updating github deployment');
     throw error;
   }
 }
@@ -95,7 +82,6 @@ export async function deleteGithubDeploymentAndEnvironment(deploy: Deploy) {
 
 export async function createGithubDeployment(deploy: Deploy, ref: string) {
   const environment = deploy.uuid;
-  const text = `[DEPLOY ${environment}][createGithubDeployment]`;
   const pullRequest = deploy?.build?.pullRequest;
   const repository = pullRequest?.repository;
   const fullName = repository?.fullName;
@@ -115,13 +101,16 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
     await deploy.$query().patch({ githubDeploymentId });
     return resp;
   } catch (error) {
-    logger.child({ error }).error(`${text} Error creating github deployment`);
+    getLogger({
+      error,
+      repo: fullName,
+    }).error('Error creating github deployment');
     throw error;
   }
 }
 
 export async function deleteGithubDeployment(deploy: Deploy) {
-  logger.debug(`[DEPLOY ${deploy.uuid}] Deleting github deployment for deploy ${deploy.uuid}`);
+  getLogger().debug('Deleting github deployment');
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
   const resp = await cacheRequest(
     `DELETE /repos/${deploy.build.pullRequest.repository.fullName}/deployments/${deploy.githubDeploymentId}`
@@ -133,13 +122,12 @@ export async function deleteGithubDeployment(deploy: Deploy) {
 }
 
 export async function deleteGithubEnvironment(deploy: Deploy) {
-  logger.debug(`[DEPLOY ${deploy.uuid}] Deleting github environment for deploy ${deploy.uuid}`);
+  getLogger().debug('Deleting github environment');
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
   const repository = deploy.build.pullRequest.repository;
   try {
     await cacheRequest(`DELETE /repos/${repository.fullName}/environments/${deploy.uuid}`);
   } catch (e) {
-    // If the environment doesn't exist, we don't care
     if (e.status !== 404) {
       throw e;
     }
@@ -147,7 +135,7 @@ export async function deleteGithubEnvironment(deploy: Deploy) {
 }
 
 export async function updateDeploymentStatus(deploy: Deploy, deploymentId: number) {
-  logger.debug(`[DEPLOY ${deploy.uuid}] Updating github deployment status for deploy ${deploy.uuid}`);
+  getLogger().debug('Updating github deployment status');
   const repository = deploy.build.pullRequest.repository;
   let buildStatus = determineStatus(deploy);
   const resp = await cacheRequest(`POST /repos/${repository.fullName}/deployments/${deploymentId}/statuses`, {

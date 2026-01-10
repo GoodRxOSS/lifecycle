@@ -16,7 +16,7 @@
 
 import { V1Job } from '@kubernetes/client-node';
 import { shellPromise } from '../shell';
-import logger from '../logger';
+import { getLogger } from '../logger/index';
 import * as k8s from '@kubernetes/client-node';
 import GlobalConfigService from '../../services/globalConfig';
 import { createBuildJob } from '../kubernetes/jobFactory';
@@ -30,10 +30,10 @@ export async function ensureNamespaceExists(namespace: string): Promise<void> {
 
   try {
     await coreV1Api.readNamespace(namespace);
-    logger.info(`Namespace ${namespace} already exists`);
+    getLogger().debug('Namespace: exists');
   } catch (error) {
     if (error?.response?.statusCode === 404) {
-      logger.info(`Creating namespace ${namespace}`);
+      getLogger().debug('Namespace: creating');
       await coreV1Api.createNamespace({
         metadata: {
           name: namespace,

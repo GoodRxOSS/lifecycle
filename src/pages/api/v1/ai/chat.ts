@@ -20,9 +20,7 @@ import AIAgentContextService from 'server/services/ai/context/gatherer';
 import AIAgentConversationService from 'server/services/ai/conversation/storage';
 import AIAgentService from 'server/services/aiAgent';
 import GlobalConfigService from 'server/services/globalConfig';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ filename: 'api/v2/debug/chat' });
+import { getLogger } from 'server/lib/logger/index';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -56,8 +54,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    const logger = rootLogger.child({ filename: 'api/v2/debug/chat', buildUuid });
-
     const aiAgentContextService = new AIAgentContextService(defaultDb, defaultRedis);
     const conversationService = new AIAgentConversationService(defaultDb, defaultRedis);
     const llmService = new AIAgentService(defaultDb, defaultRedis);
@@ -69,7 +65,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await llmService.initialize();
       }
     } catch (error) {
-      logger.error({ error }, 'Failed to initialize LLM service');
+      getLogger({ buildUuid }).error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to initialize LLM service'
+      );
       res.write(
         `data: ${JSON.stringify({
           error: error.message,
@@ -90,7 +89,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       context = await aiAgentContextService.gatherFullContext(buildUuid);
     } catch (error) {
-      logger.error({ error, buildUuid }, 'Failed to gather context');
+      getLogger({ buildUuid }).error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to gather context'
+      );
       res.write(
         `data: ${JSON.stringify({
           error: `Build not found: ${error.message}`,
@@ -105,7 +107,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     let totalInvestigationTimeMs = 0;
     try {
       const mode = await llmService.classifyUserIntent(message, conversationHistory);
-      logger.info(`Classified user intent as: ${mode}`);
+      getLogger({ buildUuid }).info(`Classified user intent as: ${mode}`);
 
       const result = await llmService.processQueryStream(
         message,
@@ -168,9 +170,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             }
           }
         } catch (e) {
-          // If JSON parsing/validation fails, log error and send plain text fallback
-          logger.error(
-            { error: e, responseLength: aiResponse.length },
+          getLogger({ buildUuid }).error(
+            { error: e instanceof Error ? e.message : String(e), responseLength: aiResponse.length },
             'JSON validation failed for investigation response'
           );
           // Convert to plain text message
@@ -186,7 +187,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     } catch (error: any) {
-      logger.error({ error, errorMessage: error?.message, errorStack: error?.stack }, 'LLM query failed');
+      getLogger({ buildUuid }).error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'LLM query failed'
+      );
 
       // Check if it's a rate limit error
       if (
@@ -231,8 +235,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.write(`data: ${JSON.stringify({ type: 'complete', totalInvestigationTimeMs })}\n\n`);
     res.end();
   } catch (error: any) {
-    logger.error(
-      { error, errorMessage: error?.message, errorStack: error?.stack },
+    getLogger().error(
+      { error: error instanceof Error ? error.message : String(error) },
       'Unexpected error in AI agent chat'
     );
     res.write(`data: ${JSON.stringify({ error: error?.message || 'Internal error' })}\n\n`);

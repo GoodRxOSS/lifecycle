@@ -20,11 +20,10 @@ import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
 import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
-import rootLogger from 'server/lib/logger';
+import { getLogger, updateLogContext } from 'server/lib/logger/index';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { waitForDeployPodReady } from '../kubernetes';
 
-const logger = rootLogger.child({ filename: 'lib/deploymentManager/deploymentManager.ts' });
 const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
 
 export class DeploymentManager {
@@ -78,7 +77,6 @@ export class DeploymentManager {
       level++;
     }
 
-    // Log final deployment order in a single line
     const orderSummary = Array.from({ length: this.deploymentLevels.size }, (_, i) => {
       const services =
         this.deploymentLevels
@@ -88,7 +86,7 @@ export class DeploymentManager {
       return `L${i}=[${services}]`;
     }).join(' ');
 
-    logger.info(`DeploymentManager: Deployment order calculated levels=${this.deploymentLevels.size} ${orderSummary}`);
+    getLogger().info(`Deploy: ${this.deploymentLevels.size} levels ${orderSummary}`);
   }
 
   private removeInvalidDependencies(): void {
@@ -102,8 +100,6 @@ export class DeploymentManager {
   }
 
   public async deploy(): Promise<void> {
-    const buildUuid = this.deploys.values().next().value?.build?.uuid || 'unknown';
-
     for (const value of this.deploys.values()) {
       await value.$query().patch({ status: DeployStatus.QUEUED });
     }
@@ -116,9 +112,7 @@ export class DeploymentManager {
 
         const helmServices = helmDeploys.map((d) => d.deployable.name).join(',');
         const k8sServices = githubDeploys.map((d) => d.deployable.name).join(',');
-        logger.info(
-          `DeploymentManager: Deploying level=${level} buildUuid=${buildUuid} helm=[${helmServices}] k8s=[${k8sServices}]`
-        );
+        getLogger().info(`Deploy: level ${level} helm=[${helmServices}] k8s=[${k8sServices}]`);
 
         await Promise.all([
           helmDeploys.length > 0 ? deployHelm(helmDeploys) : Promise.resolve(),
@@ -140,6 +134,7 @@ export class DeploymentManager {
   }
 
   private async deployManifests(deploy: Deploy): Promise<void> {
+    updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name });
     const jobId = generateJobId();
     const deployService = new DeployService();
     const runUUID = deploy.runUUID || nanoid();

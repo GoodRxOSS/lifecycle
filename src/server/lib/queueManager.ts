@@ -16,11 +16,7 @@
 
 import { Queue, Worker, QueueOptions, WorkerOptions, Processor } from 'bullmq';
 import { Redis } from 'ioredis';
-import rootLogger from './logger';
-
-const logger = rootLogger.child({
-  filename: 'lib/queueManager.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 interface RegisteredQueue {
   queue: Queue;
@@ -52,7 +48,7 @@ export default class QueueManager {
       return existing.queue;
     }
 
-    logger.debug(`Registering queue ${queueName}`);
+    getLogger().debug(`Registering queue: queueName=${queueName}`);
 
     const queue = new Queue(queueName, {
       connection: options.connection.duplicate ? options.connection.duplicate() : options.connection,
@@ -76,7 +72,7 @@ export default class QueueManager {
       };
     }
   ): Worker {
-    logger.debug(`Registering worker for queue ${queueName}`);
+    getLogger().debug(`Registering worker: queueName=${queueName}`);
 
     const workerConnection = options.connection.duplicate ? options.connection.duplicate() : options.connection;
     // ensure maxRetriesPerRequest is null for workers
@@ -109,23 +105,23 @@ export default class QueueManager {
   public async emptyAndCloseAllQueues(): Promise<void> {
     for (const { queue, worker } of this.registeredQueues) {
       if (worker) {
-        logger.debug(`Closing worker for queue: ${worker.name}`);
+        getLogger().debug(`Closing worker: queueName=${worker.name}`);
         try {
           await worker.close();
         } catch (error) {
-          logger.warn(`⚠️ Error closing worker for queue ${worker.name}:`, error.message);
+          getLogger().warn({ error: error.message }, `Error closing worker: queueName=${worker.name}`);
         }
       }
 
       if (queue) {
-        logger.debug(`Closing queue: ${queue.name}`);
+        getLogger().debug(`Closing queue: queueName=${queue.name}`);
         try {
           await queue.close();
         } catch (error) {
-          logger.warn(`⚠️ Error closing queue ${queue.name}:`, error.message);
+          getLogger().warn({ error: error.message }, `Error closing queue: queueName=${queue.name}`);
         }
       }
     }
-    logger.info('✅ All queues have been closed successfully.');
+    getLogger().info('All queues closed successfully');
   }
 }

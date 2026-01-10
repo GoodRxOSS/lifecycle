@@ -66,6 +66,8 @@ components:
           value: web
         - name: PORT
           value: '80'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
       ports:
         - name: http
           containerPort: 80
@@ -122,6 +124,8 @@ components:
           value: '10000'
         - name: LIFECYCLE_UI_HOSTHAME_WITH_SCHEME
           value: 'http://localhost:8000'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
       ports:
         - name: http
           containerPort: 80

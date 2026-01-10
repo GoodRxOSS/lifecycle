@@ -131,16 +131,13 @@
  *                   example: Failed to communicate with Kubernetes.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import unifiedLogStreamHandler from '../logs/[jobName]';
 
-const logger = rootLogger.child({
-  filename: __filename,
-});
-
 const deployLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
-  logger.info(
-    `method=${req.method} jobName=${req.query.jobName} message="Deploy logs endpoint called, delegating to unified handler"`
+  const { uuid, jobName } = req.query;
+  getLogger({ buildUuid: uuid as string }).info(
+    `method=${req.method} jobName=${jobName} Deploy logs endpoint called, delegating to unified handler`
   );
 
   req.query.type = 'deploy';

@@ -45,6 +45,7 @@ describe('GlobalConfigService', () => {
 
   beforeEach(() => {
     service = GlobalConfigService.getInstance();
+    service.clearMemoryCache();
   });
 
   describe('getAllConfigs', () => {

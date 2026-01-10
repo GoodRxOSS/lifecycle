@@ -16,15 +16,11 @@
 
 /* eslint-disable no-case-declarations */
 import _ from 'lodash';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import Build from '../Build';
 import { DomainDefaults, NativeHelmConfig } from 'server/services/types/globalConfig';
-
-const logger = rootLogger.child({
-  filename: 'models/yaml/YamlService.ts',
-});
 
 export interface Service001 {
   readonly github: {
@@ -507,13 +503,14 @@ export async function getHelmConfigFromYaml(service: Service): Promise<Helm> {
   if (DeployTypes.HELM === getDeployType(service)) {
     const helmService = (service as unknown as HelmService).helm;
 
-    // First check for chart-specific configuration
     if (!globalConfig[helmService?.chart?.name]) {
       if (globalConfig?.publicChart?.block)
         throw new Error(
           `Unspported Chart: helmChart with name: ${helmService?.chart?.name} is not currently supported`
         );
-      logger.warn(`[helmChart with name: ${helmService?.chart?.name} is not currently supported, proceed with caution`);
+      getLogger({ chartName: helmService?.chart?.name }).warn(
+        'Helm chart not currently supported, proceed with caution'
+      );
     }
 
     // Merge in priority order:
@@ -579,13 +576,7 @@ export function getRepositoryName(service: Service): string {
         break;
     }
   } catch (error) {
-    logger.error(
-      `There was a problem getting the repository name for service name: ${JSON.stringify(
-        service,
-        null,
-        2
-      )} \n ${error}`
-    );
+    getLogger({ serviceName: service?.name }).error({ error }, 'Failed to get repository name for service');
     throw error;
   }
 

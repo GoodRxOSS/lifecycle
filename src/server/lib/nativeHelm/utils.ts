@@ -26,13 +26,9 @@ import {
   setupDeployServiceAccountInNamespace,
 } from 'server/lib/kubernetes/rbac';
 import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { shellPromise } from 'server/lib/shell';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
-
-const logger = rootLogger.child({
-  filename: 'lib/nativeHelm/utils.ts',
-});
 
 export interface HelmReleaseState {
   status: 'deployed' | 'pending-install' | 'pending-upgrade' | 'pending-rollback' | 'failed' | 'unknown';
@@ -54,7 +50,7 @@ export async function getHelmReleaseStatus(releaseName: string, namespace: strin
     if (error.message?.includes('release: not found')) {
       return null;
     }
-    logger.warn(`[HELM] Failed to get status for release ${releaseName}: ${error.message}`);
+    getLogger().warn({ error }, `Failed to get status for release: releaseName=${releaseName}`);
     return null;
   }
 }
@@ -67,14 +63,14 @@ export async function isReleaseBlocked(releaseState: HelmReleaseState | null): P
 }
 
 export async function uninstallHelmRelease(releaseName: string, namespace: string): Promise<void> {
-  logger.info(`[HELM] Uninstalling release ${releaseName} in namespace ${namespace}`);
+  getLogger().debug(`Helm: uninstalling release namespace=${namespace}`);
 
   try {
     await shellPromise(`helm uninstall ${releaseName} -n ${namespace} --wait --timeout 5m`);
-    logger.info(`[HELM] Successfully uninstalled release ${releaseName}`);
+    getLogger().debug('Helm: release uninstalled');
   } catch (error) {
     if (error.message?.includes('release: not found')) {
-      logger.info(`[HELM] Release ${releaseName} not found, nothing to uninstall`);
+      getLogger().debug('Helm: release not found, skipping uninstall');
       return;
     }
     throw error;
@@ -82,7 +78,8 @@ export async function uninstallHelmRelease(releaseName: string, namespace: strin
 }
 
 export async function killHelmJobsAndPods(releaseName: string, namespace: string): Promise<void> {
-  logger.info(`[HELM ${releaseName}] Checking for existing helm jobs`);
+  const log = getLogger();
+  log.debug('Helm: checking existing jobs');
 
   try {
     const existingJobs = await shellPromise(
@@ -91,7 +88,7 @@ export async function killHelmJobsAndPods(releaseName: string, namespace: string
     const jobsData = JSON.parse(existingJobs);
 
     if (jobsData.items && jobsData.items.length > 0) {
-      logger.warn(`[HELM ${releaseName}] Found ${jobsData.items.length} existing job(s), terminating`);
+      log.warn(`Found ${jobsData.items.length} existing job(s), terminating`);
 
       for (const job of jobsData.items) {
         const jobName = job.metadata.name;
@@ -104,7 +101,7 @@ export async function killHelmJobsAndPods(releaseName: string, namespace: string
               `--overwrite`
           );
         } catch (annotateError) {
-          logger.warn(`[HELM ${releaseName}] Failed to annotate job ${jobName}: ${annotateError.message}`);
+          log.warn({ error: annotateError }, `Failed to annotate job: jobName=${jobName}`);
         }
 
         const podsOutput = await shellPromise(`kubectl get pods -n ${namespace} -l job-name=${jobName} -o json`);
@@ -116,7 +113,7 @@ export async function killHelmJobsAndPods(releaseName: string, namespace: string
             try {
               await shellPromise(`kubectl delete pod ${podName} -n ${namespace} --force --grace-period=0`);
             } catch (podError) {
-              logger.warn(`[HELM ${releaseName}] Failed to delete pod ${podName}: ${podError.message}`);
+              log.warn({ error: podError }, `Failed to delete pod: podName=${podName}`);
             }
           }
         }
@@ -124,17 +121,18 @@ export async function killHelmJobsAndPods(releaseName: string, namespace: string
         try {
           await shellPromise(`kubectl delete job ${jobName} -n ${namespace} --force --grace-period=0`);
         } catch (jobError) {
-          logger.warn(`[HELM ${releaseName}] Failed to delete job ${jobName}: ${jobError.message}`);
+          log.warn({ error: jobError }, `Failed to delete job: jobName=${jobName}`);
         }
       }
     }
   } catch (error) {
-    logger.warn(`[HELM ${releaseName}] Error checking for existing jobs: ${error.message}`);
+    log.warn({ error }, 'Error checking for existing jobs');
   }
 }
 
 export async function resolveHelmReleaseConflicts(releaseName: string, namespace: string): Promise<void> {
-  logger.info(`[HELM ${releaseName}] Resolving release conflicts`);
+  const log = getLogger();
+  log.debug('Helm: resolving conflicts');
 
   await killHelmJobsAndPods(releaseName, namespace);
 
@@ -147,7 +145,7 @@ export async function resolveHelmReleaseConflicts(releaseName: string, namespace
   }
 
   if (await isReleaseBlocked(releaseState)) {
-    logger.warn(`[HELM ${releaseName}] Release blocked (${releaseState.status}), uninstalling`);
+    log.warn(`Release blocked: status=${releaseState.status}, uninstalling`);
 
     await uninstallHelmRelease(releaseName, namespace);
 
@@ -177,7 +175,7 @@ export async function checkIfJobWasSuperseded(jobName: string, namespace: string
 
     return annotations === 'superseded-by-retry';
   } catch (error) {
-    logger.debug(`Could not check job supersession status for ${jobName}: ${error.message}`);
+    getLogger().debug({ error }, `Could not check job supersession status: jobName=${jobName}`);
     return false;
   }
 }
@@ -442,7 +440,7 @@ export async function setupServiceAccountInNamespace(
 ): Promise<void> {
   await createServiceAccountUsingExistingFunction(namespace, serviceAccountName, role);
   await setupDeployServiceAccountInNamespace(namespace, serviceAccountName, role);
-  logger.info(`[RBAC] Setup complete for '${serviceAccountName}' in ${namespace}`);
+  getLogger().debug(`RBAC: configured serviceAccount=${serviceAccountName} namespace=${namespace}`);
 }
 
 export async function createNamespacedRoleAndBinding(namespace: string, serviceAccountName: string): Promise<void> {
@@ -499,8 +497,10 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
     },
   };
 
+  const log = getLogger();
+
   try {
-    logger.info(`[NS ${namespace}] Creating Role and RoleBinding for: ${serviceAccountName}`);
+    log.debug(`RBAC: creating role and binding namespace=${namespace} serviceAccount=${serviceAccountName}`);
 
     try {
       await rbacApi.readNamespacedRole(roleName, namespace);
@@ -528,24 +528,24 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       await rbacApi.readNamespacedRole(roleName, namespace);
       await rbacApi.readNamespacedRoleBinding(roleBindingName, namespace);
     } catch (verifyError) {
-      logger.error(`[NS ${namespace}] Failed to verify RBAC resources:`, verifyError.message);
+      log.error({ error: verifyError }, `Failed to verify RBAC resources: namespace=${namespace}`);
     }
   } catch (error) {
-    logger.warn(error);
-    logger.error(`[NS ${namespace}] Error creating namespace-scoped RBAC:`, {
-      error,
-      statusCode: error?.response?.statusCode,
-      statusMessage: error?.response?.statusMessage,
-      body: error?.response?.body,
-      serviceAccountName,
-      namespace,
-      roleName,
-      roleBindingName,
-    });
-
-    logger.warn(
-      `[NS ${namespace}] ⚠️ RBAC setup failed, helm deployment may have permission issues. Consider updating lifecycle-app service account permissions to allow Role/RoleBinding creation.`
+    log.warn({ error }, `Error creating namespace-scoped RBAC: namespace=${namespace}`);
+    log.error(
+      {
+        error,
+        statusCode: error?.response?.statusCode,
+        statusMessage: error?.response?.statusMessage,
+        serviceAccountName,
+        namespace,
+        roleName,
+        roleBindingName,
+      },
+      `RBAC creation failed: namespace=${namespace}`
     );
+
+    log.warn(`RBAC setup failed, helm deployment may have permission issues: namespace=${namespace}`);
   }
 }
 

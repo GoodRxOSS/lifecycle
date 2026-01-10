@@ -22,12 +22,8 @@ import { createWebhookJob, WebhookJobConfig } from 'server/lib/kubernetes/webhoo
 import { shellPromise } from 'server/lib/shell';
 import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { nanoid } from 'nanoid';
-
-const logger = rootLogger.child({
-  filename: 'lib/webhook/index.ts',
-});
 
 const MANIFEST_PATH = process.env.MANIFEST_PATH || '/tmp/lifecycle/manifests';
 
@@ -102,12 +98,9 @@ export async function executeCommandWebhook(
 
 async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Promise<WebhookExecutionResult> {
   const executionId = nanoid();
-  logger.info(`[WEBHOOK ${build.uuid}] Starting ${jobConfig.webhookType} webhook: ${jobConfig.webhookName}`, {
-    buildUuid: build.uuid,
-    webhookName: jobConfig.webhookName,
-    webhookType: jobConfig.webhookType,
-    executionId,
-  });
+  getLogger().info(
+    `Starting ${jobConfig.webhookType} webhook: webhookName=${jobConfig.webhookName} executionId=${executionId}`
+  );
 
   try {
     const job = createWebhookJob(jobConfig);
@@ -121,12 +114,9 @@ async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Pro
 
     const jobResult = await waitForJobAndGetLogs(job.metadata.name, jobConfig.namespace, `[WEBHOOK ${build.uuid}]`);
 
-    logger.info(`[WEBHOOK ${build.uuid}] Webhook execution completed`, {
-      buildUuid: build.uuid,
-      webhookName: jobConfig.webhookName,
-      success: jobResult.success,
-      status: jobResult.status,
-    });
+    getLogger().info(
+      `Webhook execution completed: webhookName=${jobConfig.webhookName} success=${jobResult.success} status=${jobResult.status}`
+    );
 
     return {
       success: jobResult.success,
@@ -136,19 +126,16 @@ async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Pro
       metadata: {},
     };
   } catch (error) {
-    logger.error(`[WEBHOOK ${build.uuid}] Webhook execution failed`, {
-      buildUuid: build.uuid,
-      webhookName: jobConfig.webhookName,
-      error: error.message,
-    });
+    getLogger().error({ error }, `Webhook execution failed: webhookName=${jobConfig.webhookName}`);
 
+    const errorMessage = error instanceof Error ? error.message : String(error);
     return {
       success: false,
       jobName: '',
-      logs: error.message,
+      logs: errorMessage,
       status: 'failed',
       metadata: {
-        error: error.message,
+        error: errorMessage,
       },
     };
   }

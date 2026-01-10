@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger/index';
 import BaseService from './_service';
 import { Build, PullRequest } from 'server/models';
 import * as YamlService from 'server/models/yaml';
@@ -27,10 +27,6 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { validateWebhook } from 'server/lib/webhook/webhookValidator';
 import { executeDockerWebhook, executeCommandWebhook } from 'server/lib/webhook';
-
-const logger = rootLogger.child({
-  filename: 'services/webhook.ts',
-});
 
 export class WebhookError extends LifecycleError {
   constructor(msg: string, uuid: string = null, service: string = null) {
@@ -66,10 +62,12 @@ export default class WebhookService extends BaseService {
       if (yamlConfig?.environment?.webhooks != null) {
         webhooks = yamlConfig.environment.webhooks;
         await build.$query().patch({ webhooksYaml: JSON.stringify(webhooks) });
-        logger.child({ webhooks }).info(`[BUILD ${build.uuid}] Updated build with webhooks from config`);
+        getLogger({ buildUuid: build.uuid }).info(
+          `Updated build with webhooks from config: webhooks=${JSON.stringify(webhooks)}`
+        );
       } else {
         await build.$query().patch({ webhooksYaml: null });
-        logger.info(`[BUILD ${build.uuid}] No webhooks found in config`);
+        getLogger({ buildUuid: build.uuid }).info('No webhooks found in config');
       }
     }
     return webhooks;
@@ -84,7 +82,7 @@ export default class WebhookService extends BaseService {
     // Only skips if explicitly set to false. If undefined/missing, webhooks execute (default behavior)
     const { features } = await this.db.services.GlobalConfig.getAllConfigs();
     if (features?.webhooks === false) {
-      logger.debug(`[BUILD ${build.uuid}] Webhooks feature flag is disabled. Skipping webhook execution.`);
+      getLogger({ buildUuid: build.uuid }).debug('Webhooks feature flag is disabled, skipping webhook execution');
       return;
     }
 
@@ -94,14 +92,14 @@ export default class WebhookService extends BaseService {
       case BuildStatus.TORN_DOWN:
         break;
       default:
-        logger.debug(`[BUILD ${build.uuid}] Skipping Lifecycle Webhooks execution for status: ${build.status}`);
+        getLogger({ buildUuid: build.uuid }).debug(`Skipping Lifecycle Webhooks execution for status: ${build.status}`);
         return;
     }
 
     // if build is not full yaml and no webhooks defined in YAML config, we should not run webhooks (no more db webhook support)
     if (!build.enableFullYaml && build.webhooksYaml == null) {
-      logger.debug(
-        `[BUILD ${build.uuid}] Skipping Lifecycle Webhooks(non yaml config build) execution for status: ${build.status}`
+      getLogger({ buildUuid: build.uuid }).debug(
+        `Skipping Lifecycle Webhooks (non yaml config build) execution for status: ${build.status}`
       );
       return;
     }
@@ -114,12 +112,12 @@ export default class WebhookService extends BaseService {
     const configFileWebhooks: YamlService.Webhook[] = webhooks.filter((webhook) => webhook.state === build.status);
     // if no webhooks defined in YAML config, we should not run webhooks
     if (configFileWebhooks != null && configFileWebhooks.length < 1) {
-      logger.info(`[BUILD ${build.uuid}] No webhooks found to be triggered for build status: ${build.status}`);
+      getLogger({ buildUuid: build.uuid }).info(`No webhooks found to be triggered for build status: ${build.status}`);
       return;
     }
-    logger.info(`[BUILD ${build.uuid}] Triggering for build status: ${build.status}`);
+    getLogger({ buildUuid: build.uuid }).info(`Triggering webhooks for build status: ${build.status}`);
     for (const webhook of configFileWebhooks) {
-      logger.info(`[BUILD ${build.uuid}] Running webhook: ${webhook.name}`);
+      getLogger({ buildUuid: build.uuid }).info(`Running webhook: ${webhook.name}`);
       await this.runYamlConfigFileWebhookForBuild(webhook, build);
     }
   }
@@ -146,9 +144,9 @@ export default class WebhookService extends BaseService {
       switch (webhook.type) {
         case 'codefresh': {
           const buildId: string = await this.db.services.Codefresh.triggerYamlConfigWebhookPipeline(webhook, data);
-          logger
-            .child({ url: `https://g.codefresh.io/build/${buildId}` })
-            .info(`[BUILD ${build.uuid}] Webhook (${webhook.name}) triggered: ${buildId}`);
+          getLogger({ buildUuid: build.uuid }).info(
+            `Webhook (${webhook.name}) triggered: buildId=${buildId} url=https://g.codefresh.io/build/${buildId}`
+          );
           metadata = {
             link: `https://g.codefresh.io/build/${buildId}`,
           };
@@ -176,11 +174,13 @@ export default class WebhookService extends BaseService {
             metadata: { status: 'starting' },
             status: 'executing',
           });
-          logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) invoked`);
+          getLogger({ buildUuid: build.uuid }).info(`Docker webhook (${webhook.name}) invoked`);
 
           // Execute webhook (this waits for completion)
           const result = await executeDockerWebhook(webhook, build, data);
-          logger.info(`[BUILD ${build.uuid}] Docker webhook (${webhook.name}) executed: ${result.jobName}`);
+          getLogger({ buildUuid: build.uuid }).info(
+            `Docker webhook (${webhook.name}) executed: jobName=${result.jobName}`
+          );
 
           // Update the invocation record with final status
           await invocation.$query().patch({
@@ -206,11 +206,13 @@ export default class WebhookService extends BaseService {
             metadata: { status: 'starting' },
             status: 'executing',
           });
-          logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) invoked`);
+          getLogger({ buildUuid: build.uuid }).info(`Command webhook (${webhook.name}) invoked`);
 
           // Execute webhook (this waits for completion)
           const result = await executeCommandWebhook(webhook, build, data);
-          logger.info(`[BUILD ${build.uuid}] Command webhook (${webhook.name}) executed: ${result.jobName}`);
+          getLogger({ buildUuid: build.uuid }).info(
+            `Command webhook (${webhook.name}) executed: jobName=${result.jobName}`
+          );
 
           // Update the invocation record with final status
           await invocation.$query().patch({
@@ -228,9 +230,9 @@ export default class WebhookService extends BaseService {
           throw new Error(`Unsupported webhook type: ${webhook.type}`);
       }
 
-      logger.debug(`[BUILD ${build.uuid}] Webhook history added for runUUID: ${build.runUUID}`);
+      getLogger({ buildUuid: build.uuid }).debug(`Webhook history added for runUUID: ${build.runUUID}`);
     } catch (error) {
-      logger.error(`[BUILD ${build.uuid}] Error invoking webhook: ${error}`);
+      getLogger({ buildUuid: build.uuid }).error({ error }, 'Error invoking webhook');
 
       // Still create a failed invocation record
       await this.db.models.WebhookInvocations.create({
@@ -259,14 +261,23 @@ export default class WebhookService extends BaseService {
   });
 
   processWebhookQueue = async (job) => {
-    const buildId = job.data.buildId;
-    const build = await this.db.models.Build.query().findOne({
-      id: buildId,
+    const { buildId, sender, correlationId, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      const build = await this.db.models.Build.query().findOne({
+        id: buildId,
+      });
+
+      if (build?.uuid) {
+        updateLogContext({ buildUuid: build.uuid });
+      }
+
+      try {
+        await this.db.services.Webhook.runWebhooksForBuild(build);
+        getLogger({ stage: LogStage.WEBHOOK_COMPLETE }).info('Webhooks invoked');
+      } catch (e) {
+        getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error({ error: e }, 'Failed to invoke the webhook');
+      }
     });
-    try {
-      await this.db.services.Webhook.runWebhooksForBuild(build);
-    } catch (e) {
-      logger.error(`[BUILD ${build.uuid}] Failed to invoke the webhook: ${e}`);
-    }
   };
 }

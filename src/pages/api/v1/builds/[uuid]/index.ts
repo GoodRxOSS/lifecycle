@@ -16,14 +16,10 @@
 
 import { nanoid } from 'nanoid';
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
 import { Build } from 'server/models';
 import BuildService from 'server/services/build';
 import OverrideService from 'server/services/override';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/index.ts',
-});
 
 async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
   const { uuid } = req.query;
@@ -52,23 +48,26 @@ async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
       );
 
     if (!build) {
-      logger.info(`Build with UUID ${uuid} not found`);
+      getLogger({ buildUuid: uuid as string }).debug('Build not found');
       return res.status(404).json({ error: 'Build not found' });
     }
 
     return res.status(200).json(build);
   } catch (error) {
-    logger.error(`Error fetching build ${uuid}:`, error);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Error fetching build'
+    );
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }
 
-async function updateBuild(req: NextApiRequest, res: NextApiResponse) {
+async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlationId: string) {
   const { uuid } = req.query;
   const { uuid: newUuid } = req.body;
 
   if (!newUuid || typeof newUuid !== 'string') {
-    logger.info(`[${uuid}] Missing or invalid uuid in request body`);
+    getLogger({ buildUuid: uuid as string }).debug('Missing or invalid uuid in request body');
     return res.status(400).json({ error: 'uuid is required' });
   }
 
@@ -78,27 +77,29 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse) {
     const build: Build = await override.db.models.Build.query().findOne({ uuid }).withGraphFetched('pullRequest');
 
     if (!build) {
-      logger.info(`[${uuid}] Build not found, cannot patch uuid.`);
+      getLogger({ buildUuid: uuid as string }).debug('Build not found, cannot patch uuid');
       return res.status(404).json({ error: 'Build not found' });
     }
 
     if (newUuid === build.uuid) {
-      logger.info(`[${uuid}] Attempted to update UUID to same value: ${newUuid}`);
+      getLogger({ buildUuid: uuid as string }).debug(`Attempted to update UUID to same value: newUuid=${newUuid}`);
       return res.status(400).json({ error: 'UUID must be different' });
     }
 
     const validation = await override.validateUuid(newUuid);
     if (!validation.valid) {
-      logger.info(`[${uuid}] UUID validation failed on attempt to change: ${validation.error}`);
+      getLogger({ buildUuid: uuid as string }).debug(`UUID validation failed: error=${validation.error}`);
       return res.status(400).json({ error: validation.error });
     }
 
     const result = await override.updateBuildUuid(build, newUuid);
 
     if (build.pullRequest?.deployOnUpdate) {
+      getLogger({ stage: LogStage.BUILD_QUEUED, buildUuid: build.uuid }).info(`Triggering redeploy after UUID update`);
       await new BuildService().resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build.id,
         runUUID: nanoid(),
+        correlationId,
       });
     }
 
@@ -108,7 +109,10 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse) {
       },
     });
   } catch (error) {
-    logger.error({ error }, `[${uuid}] Error updating UUID to ${newUuid}: ${error}`);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      `Error updating UUID to newUuid=${newUuid}`
+    );
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }
@@ -346,11 +350,17 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     return res.status(400).json({ error: 'Invalid UUID' });
   }
 
+  // Only PATCH needs correlationId for queue operations
+  if (req.method === 'PATCH') {
+    const correlationId = `api-build-update-${Date.now()}-${nanoid(8)}`;
+    return withLogContext({ correlationId }, async () => {
+      return updateBuild(req, res, correlationId);
+    });
+  }
+
   switch (req.method) {
     case 'GET':
       return retrieveBuild(req, res);
-    case 'PATCH':
-      return updateBuild(req, res);
     default:
       return res.status(405).json({ error: `${req.method} is not allowed` });
   }

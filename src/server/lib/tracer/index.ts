@@ -51,10 +51,16 @@ export class Tracer {
         this.updateTags(tags);
       } else {
         this.tags = { name, ...tags };
-        const span = tracer.startSpan(name, { tags: this.tags });
-        tracer.scope().activate(span, () => {
-          span.finish();
-        });
+        if (typeof tracer?.startSpan === 'function') {
+          const span = tracer.startSpan(name, { tags: this.tags });
+          if (typeof tracer?.scope === 'function') {
+            tracer.scope().activate(span, () => {
+              span.finish();
+            });
+          } else {
+            span.finish();
+          }
+        }
         this.isInitialized = true;
       }
       return this;
@@ -65,16 +71,19 @@ export class Tracer {
   }
 
   public wrap(name, fn, tags: TracerTags = {}): Function {
+    if (typeof tracer?.wrap !== 'function') return fn;
     const updatedTags = { ...this.tags, ...tags };
     return tracer.wrap(name, updatedTags, fn);
   }
 
   public trace(name: string, fn, tags: TracerTags = {}): Function {
+    if (typeof tracer?.trace !== 'function') return fn;
     const updatedTags = { ...this.tags, ...tags };
     return tracer.trace(name, updatedTags, fn);
   }
 
-  public startSpan(name: string, tags: TracerTags = {}): Span {
+  public startSpan(name: string, tags: TracerTags = {}): Span | undefined {
+    if (typeof tracer?.startSpan !== 'function') return undefined;
     const updatedTags = { ...this.tags, ...tags };
     return tracer.startSpan(name, { tags: updatedTags });
   }
@@ -88,8 +97,7 @@ export class Tracer {
       const originalMethod = descriptor?.value;
       const profiler = Tracer.getInstance();
       descriptor.value = function (...args: any[]) {
-        if (!profiler.isInitialized) {
-          logger.error(`[Tracer][Trace] Tracer not initialized`);
+        if (!profiler.isInitialized || typeof tracer?.trace !== 'function') {
           return originalMethod.apply(this, args);
         }
         const spanOptions = { tags: { ...profiler.tags, decorator: 'Trace' } };
@@ -97,7 +105,9 @@ export class Tracer {
           try {
             return originalMethod.apply(this, args);
           } catch (error) {
-            tracer.scope().active()?.setTag('error', true);
+            if (typeof tracer?.scope === 'function') {
+              tracer.scope().active()?.setTag('error', true);
+            }
             logger
               .child({ target, descriptor, error })
               .error(`[Tracer][Trace] error decorating ${propertyKey.toString()}`);

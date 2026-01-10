@@ -15,7 +15,7 @@
  */
 
 import * as FastlyInstance from 'fastly/dist/index.js';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { Redis } from 'ioredis';
 import { FASTLY_TOKEN } from 'shared/config';
 import GlobalConfigService from 'server/services/globalConfig';
@@ -23,10 +23,6 @@ import GlobalConfigService from 'server/services/globalConfig';
 FastlyInstance.ApiClient.instance.authenticate(FASTLY_TOKEN);
 const fastlyService = new FastlyInstance.ServiceApi();
 const fastlyPurge = new FastlyInstance.PurgeApi();
-
-const logger = rootLogger.child({
-  filename: 'lib/fastly.ts',
-});
 
 class Fastly {
   redis: Redis;
@@ -68,7 +64,6 @@ class Fastly {
     const serviceName = `${fastlyServiceType}-${uuid}`;
     const FASTLY_URL = await this.getFastlyUrl();
     const name = `${serviceName}.${FASTLY_URL}`;
-    const text = `[BUILD ${uuid}][fastly][refresh][serviceName ${name}]`;
     try {
       if (!name) throw new Error('Service name is missing');
       const service = await fastlyService.searchService({ name });
@@ -84,7 +79,7 @@ class Fastly {
       this.redis.expire(cacheKey, 86400);
       return id;
     } catch (error) {
-      logger.child({ error }).warn(`${text} There is an issue to retrieve Fastly service id from Fastly`);
+      getLogger().warn({ error }, `Fastly lookup failed: serviceName=${name}`);
     }
   }
 
@@ -108,16 +103,11 @@ class Fastly {
    * @param serviceId Fastly Service ID
    */
   async purgeAllServiceCache(serviceId: string, uuid: string, fastlyServiceType: string) {
-    const text = `[BUILD ${uuid}][fastly][purgeAllServiceCache]`;
     try {
       if (!serviceId) throw new Error('Service ID is missing');
       await fastlyPurge.purgeAll({ service_id: serviceId });
     } catch (error) {
-      logger
-        .child({ error })
-        .info(
-          `${text}[serviceid ${serviceId}] has an error with the ${fastlyServiceType} service with ${serviceId} service id`
-        );
+      getLogger().info({ error }, `Fastly cache purge failed: serviceId=${serviceId} serviceType=${fastlyServiceType}`);
     }
   }
 

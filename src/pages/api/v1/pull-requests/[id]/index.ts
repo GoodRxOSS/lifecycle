@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import PullRequestService from 'server/services/pullRequest';
-
-const logger = rootLogger.child({
-  filename: 'api/v1/pull-requests/[id].ts',
-});
 
 /**
  * @openapi
@@ -142,13 +138,16 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       );
 
     if (!pullRequest) {
-      logger.info(`Pull request with ID ${parsedId} not found`);
+      getLogger().debug(`Pull request not found: id=${parsedId}`);
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
     return res.status(200).json(pullRequest);
   } catch (error) {
-    logger.error(`Error fetching pull request ${parsedId}:`, error);
+    getLogger().error(
+      { error: error instanceof Error ? error.message : String(error) },
+      `Failed to fetch pull request: id=${parsedId}`
+    );
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

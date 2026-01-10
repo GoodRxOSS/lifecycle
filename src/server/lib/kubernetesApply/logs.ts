@@ -16,9 +16,7 @@
 
 import * as k8s from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ filename: 'lib/kubernetesApply/logs.ts' });
+import { getLogger } from 'server/lib/logger/index';
 
 /**
  * Fetches logs from a Kubernetes apply job for a deploy
@@ -105,14 +103,14 @@ export async function getKubernetesApplyLogs(deploy: Deploy, tail?: number): Pro
           allLogs.push(`=== Logs from pod ${podName} ===\n${podLogs.body}`);
         }
       } catch (podError) {
-        logger.error(`Failed to fetch logs from pod ${podName}: ${podError}`);
+        getLogger({ error: podError }).error(`Failed to fetch logs from pod: podName=${podName}`);
         allLogs.push(`=== Error fetching logs from pod ${podName} ===\n${(podError as Error).message || podError}`);
       }
     }
 
     return allLogs.join('\n\n') || 'No logs available';
   } catch (error) {
-    logger.error(`Failed to fetch logs for deploy ${deploy.uuid}: ${error}`);
+    getLogger({ error }).error('Failed to fetch logs');
     return `Failed to fetch logs: ${(error as Error).message || error}`;
   }
 }
@@ -245,7 +243,7 @@ export async function streamKubernetesApplyLogs(
           onClose();
         }
       } catch (error) {
-        logger.error(`Error polling logs for deploy ${deploy.uuid}: ${error}`);
+        getLogger({ error }).error('Error polling logs');
         if ((error as any).response?.statusCode === 404) {
           // Pod was deleted, stop polling
           isActive = false;
@@ -263,7 +261,7 @@ export async function streamKubernetesApplyLogs(
       clearInterval(pollInterval);
     };
   } catch (error) {
-    logger.error(`Failed to start log stream for deploy ${deploy.uuid}: ${error}`);
+    getLogger({ error }).error('Failed to start log stream');
     onError(error as Error);
     onClose();
     return () => {};

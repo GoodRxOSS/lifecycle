@@ -15,13 +15,9 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import BuildService from 'server/services/build';
 import PullRequestService from 'server/services/pullRequest';
-
-const logger = rootLogger.child({
-  filename: 'pull-requests/[id]/builds.ts',
-});
 
 /**
  * @openapi
@@ -133,7 +129,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     const pullRequest = await pullRequestService.db.models.PullRequest.query().findById(parsedId).select('id');
 
     if (!pullRequest) {
-      logger.info(`Pull request with ID ${parsedId} not found`);
+      getLogger().debug(`Pull request not found: id=${parsedId}`);
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
@@ -159,7 +155,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(builds);
   } catch (error) {
-    logger.error(`Error fetching builds for pull request ${parsedId}:`, error);
+    getLogger().error(
+      { error: error instanceof Error ? error.message : String(error) },
+      `Failed to fetch builds for pull request: id=${parsedId}`
+    );
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

@@ -49,22 +49,6 @@ export default function bootstrapJobs(services: IServices) {
     },
   });
 
-  /* Run once per hour */
-  services.PullRequest.cleanupClosedPRQueue.add(
-    'cleanup',
-    {},
-    {
-      repeat: {
-        every: 60000 * 60, // Once an hour
-      },
-    }
-  );
-
-  queueManager.registerWorker(QUEUE_NAMES.CLEANUP, services.PullRequest.processCleanupClosedPRs, {
-    connection: redisClient.getConnection(),
-    concurrency: 1,
-  });
-
   services.GlobalConfig.setupCacheRefreshJob();
 
   queueManager.registerWorker(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, services.GlobalConfig.processCacheRefresh, {
@@ -79,8 +63,6 @@ export default function bootstrapJobs(services: IServices) {
     connection: redisClient.getConnection(),
     concurrency: 1,
   });
-
-  services.PullRequest.cleanupClosedPRQueue.add('cleanup', {}, {});
 
   queueManager.registerWorker(QUEUE_NAMES.INGRESS_MANIFEST, services.Ingress.createOrUpdateIngressForBuild, {
     connection: redisClient.getConnection(),

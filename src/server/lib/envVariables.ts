@@ -27,14 +27,9 @@ import {
   NO_DEFAULT_ENV_UUID,
 } from 'shared/constants';
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { LifecycleError } from './errors';
 import GlobalConfigService from 'server/services/globalConfig';
-
-// eslint-disable-next-line no-unused-vars
-const logger = rootLogger.child({
-  filename: 'lib/envVariables.ts',
-});
 
 const ALLOWED_PROPERTIES = [
   'branchName',
@@ -379,9 +374,7 @@ export abstract class EnvironmentVariables {
           /_publicUrl$/,
           `-${globalConfig.lifecycleDefaults.defaultPublicUrl}`
         );
-        logger.debug(
-          `[BUILD ${data['buildUUID']}] The publicUrl for ${serviceToUpdate} has been defaulted to ${defaultedPublicUrl} using the global_config table`
-        );
+        getLogger().debug(`publicUrl for ${serviceToUpdate} defaulted to ${defaultedPublicUrl} using global_config`);
         template = template.replace(fullMatch, defaultedPublicUrl);
       }
     }

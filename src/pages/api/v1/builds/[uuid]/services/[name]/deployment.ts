@@ -15,14 +15,10 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 const kc = new k8s.KubeConfig();
 kc.loadFromDefault();
@@ -47,12 +43,12 @@ async function getHelmDeploymentDetails(namespace: string, deployUuid: string): 
 
   try {
     const secretName = `sh.helm.release.v1.${deployUuid}.v1`;
-    logger.debug(`Checking for Helm secret: ${secretName} in namespace ${namespace}`);
+    getLogger({}).debug(`Checking for Helm secret: secretName=${secretName} namespace=${namespace}`);
 
     const secret = await coreV1Api.readNamespacedSecret(secretName, namespace);
 
     if (!secret.body.data?.release) {
-      logger.debug(`Helm secret ${secretName} found but no release data`);
+      getLogger({}).debug(`Helm secret found but no release data: secretName=${secretName}`);
       return null;
     }
 
@@ -78,8 +74,8 @@ async function getHelmDeploymentDetails(namespace: string, deployUuid: string): 
       try {
         release = JSON.parse(releaseData.toString());
       } catch (parseError: any) {
-        logger.warn(
-          `Failed to parse Helm release data for ${deployUuid}: decompress_error=${decompressError.message} parse_error=${parseError.message}`
+        getLogger({}).warn(
+          `Failed to parse Helm release data: deployUuid=${deployUuid} decompress_error=${decompressError.message} parse_error=${parseError.message}`
         );
         return null;
       }
@@ -247,16 +243,16 @@ async function getGitHubDeploymentDetails(
  *                   type: string
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
+  const { uuid, name } = req.query;
+
   if (req.method !== 'GET') {
-    logger.warn({ method: req.method }, 'Method not allowed');
+    getLogger({ buildUuid: uuid as string }).warn(`Method not allowed: method=${req.method}`);
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
 
-  const { uuid, name } = req.query;
-
   if (typeof uuid !== 'string' || typeof name !== 'string') {
-    logger.warn({ uuid, name }, 'Missing or invalid query parameters');
+    getLogger({ buildUuid: uuid as string }).warn(`Missing or invalid query parameters: uuid=${uuid} name=${name}`);
     return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
 
@@ -265,24 +261,29 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   try {
     const namespace = `env-${uuid}`;
 
-    logger.info(`Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`);
+    getLogger({ buildUuid: uuid }).debug(
+      `Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`
+    );
 
     const helmDetails = await getHelmDeploymentDetails(namespace, deployUuid);
     if (helmDetails) {
-      logger.info(`Found Helm deployment details for ${deployUuid}`);
+      getLogger({ buildUuid: uuid }).debug(`Found Helm deployment details: deployUuid=${deployUuid}`);
       return res.status(200).json(helmDetails);
     }
 
     const githubDetails = await getGitHubDeploymentDetails(namespace, deployUuid);
     if (githubDetails) {
-      logger.info(`Found GitHub-type deployment details for ${deployUuid}`);
+      getLogger({ buildUuid: uuid }).debug(`Found GitHub-type deployment details: deployUuid=${deployUuid}`);
       return res.status(200).json(githubDetails);
     }
 
-    logger.warn(`No deployment details found for ${deployUuid}`);
+    getLogger({ buildUuid: uuid }).warn(`No deployment details found: deployUuid=${deployUuid}`);
     return res.status(404).json({ error: 'Deployment not found' });
   } catch (error) {
-    logger.error({ err: error }, `Error getting deployment details for ${deployUuid}`);
+    getLogger({ buildUuid: uuid }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      `Error getting deployment details: deployUuid=${deployUuid}`
+    );
 
     if (error instanceof HttpError) {
       if (error.response?.statusCode === 404) {

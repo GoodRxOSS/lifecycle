@@ -24,11 +24,7 @@ import {
 } from 'server/models/config/utils';
 import { LifecycleConfig, Service } from 'server/models/config/types';
 
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({
-  filename: 'models/config/index.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 export const isGithubServiceDockerConfig = (obj) => isInObj(obj, 'dockerfilePath');
 export const isDockerServiceConfig = (obj) => isInObj(obj, 'dockerImage');
@@ -127,7 +123,10 @@ export const fetchLifecycleConfig = async (repositoryName: string, branchName: s
     const config = await fetchLifecycleConfigByRepository(repository, branchName);
     return config;
   } catch (err) {
-    logger.error(`Unable to fetch configuration from ${repositoryName}/${branchName}: ${err}`);
+    getLogger().error(
+      { error: err instanceof Error ? err.message : String(err) },
+      `Failed to fetch config: repository=${repositoryName} branch=${branchName}`
+    );
   }
 };
 

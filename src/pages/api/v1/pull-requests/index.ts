@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import PullRequestService from 'server/services/pullRequest';
-
-const logger = rootLogger.child({
-  filename: 'api/v1/pull-requests/index.ts',
-});
 
 /**
  * @openapi
@@ -275,7 +271,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    logger.error('Error fetching pull requests:', error);
+    getLogger().error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Failed to fetch pull requests'
+    );
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

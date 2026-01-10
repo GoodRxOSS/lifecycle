@@ -17,10 +17,8 @@
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import GlobalConfigService from 'server/services/globalConfig';
-
-const logger = rootLogger.child({ filename: 'lib/kubernetesApply/applyManifest.ts' });
 
 export interface KubernetesApplyJobConfig {
   deploy: Deploy;
@@ -40,7 +38,7 @@ export async function createKubernetesApplyJob({
   const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
-  logger.info(`Creating Kubernetes apply job ${jobName} for deploy ${deploy.uuid} service=${serviceName}`);
+  getLogger().info(`Creating Kubernetes apply job: jobName=${jobName} service=${serviceName}`);
 
   const configMapName = `${jobName}-manifest`;
   await createManifestConfigMap(deploy, configMapName, namespace);
@@ -134,7 +132,7 @@ export async function createKubernetesApplyJob({
   };
 
   const createdJob = await batchApi.createNamespacedJob(namespace, job);
-  logger.info(`Created Kubernetes apply job ${jobName} for deploy ${deploy.uuid}: jobId=${jobId}`);
+  getLogger().info(`Created Kubernetes apply job: jobName=${jobName} jobId=${jobId}`);
 
   return createdJob.body;
 }
@@ -168,8 +166,8 @@ async function createManifestConfigMap(deploy: Deploy, configMapName: string, na
     await coreApi.createNamespacedConfigMap(namespace, configMap);
   } catch (error) {
     if (error instanceof HttpError) {
-      logger.error(
-        `Failed to create ConfigMap ${configMapName}: statusCode=${error.statusCode} body=${JSON.stringify(error.body)}`
+      getLogger({ error }).error(
+        `Failed to create ConfigMap: configMapName=${configMapName} statusCode=${error.statusCode}`
       );
     }
     throw error;
@@ -220,7 +218,7 @@ export async function monitorKubernetesJob(
       await new Promise((resolve) => setTimeout(resolve, 5000));
       attempts++;
     } catch (error) {
-      logger.error(`Error monitoring job ${jobName}: ${error}`);
+      getLogger().error({ error }, `Error monitoring job: jobName=${jobName}`);
       throw error;
     }
   }

@@ -1,5 +1,5 @@
 import * as k8s from '@kubernetes/client-node';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 
 export interface DeploymentJobInfo {
   jobName: string;
@@ -13,10 +13,6 @@ export interface DeploymentJobInfo {
   podName?: string;
   deploymentType: 'helm' | 'github';
 }
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 export async function getDeploymentJobs(serviceName: string, namespace: string): Promise<DeploymentJobInfo[]> {
   const kc = new k8s.KubeConfig();
@@ -111,7 +107,7 @@ export async function getDeploymentJobs(serviceName: string, namespace: string):
             }
           }
         } catch (podError) {
-          logger.warn(`Failed to get pods for job ${jobName}:`, podError);
+          getLogger().warn({ error: podError }, `K8s: failed to get pods jobName=${jobName}`);
         }
       }
 
@@ -137,7 +133,7 @@ export async function getDeploymentJobs(serviceName: string, namespace: string):
 
     return deploymentJobs;
   } catch (error) {
-    logger.error(`Error listing deployment jobs for service ${serviceName}:`, error);
+    getLogger().error({ error }, `K8s: failed to list deployment jobs service=${serviceName}`);
     throw error;
   }
 }

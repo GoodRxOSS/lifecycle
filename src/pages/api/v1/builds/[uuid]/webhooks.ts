@@ -15,14 +15,11 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { nanoid } from 'nanoid';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
 import WebhookService from 'server/services/webhook';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/webhooks.ts',
-});
 
 /**
  * @openapi
@@ -209,46 +206,62 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(405).json({ error: `${req.method} is not allowed.` });
     }
   } catch (error) {
-    logger.error(`Error handling ${req.method} request for ${uuid}:`, error);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      `Error handling ${req.method} request`
+    );
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
 
 async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
   const { uuid } = req.query;
-  try {
-    const githubService = new GithubService();
-    const build: Build = await githubService.db.models.Build.query().findOne({
-      uuid,
-    });
+  const correlationId = `api-webhook-invoke-${Date.now()}-${nanoid(8)}`;
 
-    const buildId = build.id;
-
-    if (!build) {
-      logger.info(`[API ${uuid}] Build not found`);
-      return res.status(404).json({ error: `Build not found for ${uuid}` });
-    }
-
-    if (!build.webhooksYaml) {
-      logger.info(`[API ${uuid}] No webhooks found for build`);
-      return res.status(204).json({
-        status: 'no_content',
-        message: `No webhooks found for build ${uuid}.`,
+  return withLogContext({ correlationId }, async () => {
+    try {
+      const githubService = new GithubService();
+      const build: Build = await githubService.db.models.Build.query().findOne({
+        uuid,
       });
-    }
 
-    const webhookService = new WebhookService();
-    await webhookService.webhookQueue.add('webhook', {
-      buildId,
-    });
-    return res.status(200).json({
-      status: 'success',
-      message: `Webhook for build ${uuid} has been queued`,
-    });
-  } catch (error) {
-    logger.error(`Unable to proceed with webook for build ${uuid}. Error: \n ${error}`);
-    return res.status(500).json({ error: `Unable to proceed with triggering webhook for build ${uuid}.` });
-  }
+      const buildId = build.id;
+
+      if (!build) {
+        getLogger({ buildUuid: uuid as string }).debug('Build not found');
+        return res.status(404).json({ error: `Build not found for ${uuid}` });
+      }
+
+      if (!build.webhooksYaml) {
+        getLogger({ buildUuid: uuid as string }).debug('No webhooks found for build');
+        return res.status(204).json({
+          status: 'no_content',
+          message: `No webhooks found for build ${uuid}.`,
+        });
+      }
+
+      const webhookService = new WebhookService();
+      await webhookService.webhookQueue.add('webhook', {
+        buildId,
+        correlationId,
+      });
+
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING, buildUuid: uuid as string }).info(
+        'Webhook invocation queued via API'
+      );
+
+      return res.status(200).json({
+        status: 'success',
+        message: `Webhook for build ${uuid} has been queued`,
+      });
+    } catch (error) {
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error(
+        { error: error instanceof Error ? error.message : String(error) },
+        `Unable to proceed with webhook for build ${uuid}`
+      );
+      return res.status(500).json({ error: `Unable to proceed with triggering webhook for build ${uuid}.` });
+    }
+  });
 }
 
 async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
@@ -284,7 +297,10 @@ async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
       },
     });
   } catch (error) {
-    logger.error(`Failed to retrieve webhooks for builds ${uuid}. Error: \n ${error}`);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Failed to retrieve webhooks'
+    );
     return res.status(500).json({ error: `Unable to retrieve webhooks for build ${uuid}.` });
   }
 }

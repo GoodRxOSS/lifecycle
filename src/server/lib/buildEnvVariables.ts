@@ -17,14 +17,9 @@
 import { EnvironmentVariables } from 'server/lib/envVariables';
 import { Build, Deploy } from 'server/models';
 import { DeployTypes, FeatureFlags } from 'shared/constants';
-import rootLogger from 'server/lib/logger';
-import { LifecycleError } from './errors';
+import { getLogger } from 'server/lib/logger/index';
 import { ValidationError } from './yamlConfigValidator';
 import * as YamlService from 'server/models/yaml';
-
-const logger = rootLogger.child({
-  filename: 'lib/buildEnvVariables.ts',
-});
 
 export class BuildEnvironmentVariables extends EnvironmentVariables {
   /**
@@ -64,8 +59,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             error.uuid = deploy.uuid;
             throw error;
           } else {
-            logger.warn(error instanceof LifecycleError ? error.getMessage() : `${error}`);
-            logger.warn(`[${deploy.uuid}]: Failback using database Environment Variables`);
+            getLogger().warn({ error }, 'Fallback using database Environment Variables');
           }
         }
       }
@@ -112,8 +106,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             error.uuid = deploy.uuid;
             throw error;
           } else {
-            logger.warn(error instanceof LifecycleError ? error.getMessage() : `${error}`);
-            logger.warn(`[${deploy.uuid}]: Failback using database Init Environment Variables`);
+            getLogger().warn({ error }, 'Fallback using database Init Environment Variables');
           }
         }
       }
@@ -132,12 +125,16 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
    * 2. Interpolate env from deploy parent service (via db or yaml definition for specific branch)
    * 3. Save to deploy
    * @param build Build model from associated PR
+   * @param githubRepositoryId Optional filter to only resolve env for deploys from a specific repo
    * @returns Map of env variables
    */
-  public async resolve(build: Build): Promise<Record<string, any>> {
+  public async resolve(build: Build, githubRepositoryId?: number): Promise<Record<string, any>> {
     if (build != null) {
       await build?.$fetchGraph('[services, deploys.[service.[repository], deployable]]');
-      const deploys = build?.deploys;
+      const allDeploys = build?.deploys;
+      const deploys = githubRepositoryId
+        ? allDeploys.filter((d) => d.githubRepositoryId === githubRepositoryId)
+        : allDeploys;
       const availableEnv = this.cleanup(await this.availableEnvironmentVariablesForBuild(build));
 
       const useDeafulttUUID =
@@ -158,7 +155,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             ),
           })
           .catch((error) => {
-            logger.error(`[DEPLOY ${deploy.uuid}] Problem when preparing env variable: ${error}`);
+            getLogger().error({ error }, 'Problem when preparing env variable');
           });
 
         if (deploy.deployable?.initDockerfilePath || deploy.service?.initDockerfilePath) {
@@ -177,7 +174,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
               ),
             })
             .catch((error) => {
-              logger.error(`[DEPLOY ${deploy.uuid}] Problem when preparing init env variable: ${error}`);
+              getLogger().error({ error }, 'Problem when preparing init env variable');
             });
         }
       });

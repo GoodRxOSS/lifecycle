@@ -15,13 +15,9 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { HttpError } from '@kubernetes/client-node';
 import { BuildJobInfo, getNativeBuildJobs } from 'server/lib/kubernetes/getNativeBuildJobs';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 interface BuildLogsListResponse {
   builds: BuildJobInfo[];
@@ -146,16 +142,17 @@ interface BuildLogsListResponse {
  */
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
+  const { uuid, name } = req.query;
+  const logger = getLogger({ buildUuid: uuid as string });
+
   if (req.method !== 'GET') {
-    logger.warn({ method: req.method }, 'Method not allowed');
+    logger.warn(`API: method not allowed method=${req.method}`);
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
 
-  const { uuid, name } = req.query;
-
   if (typeof uuid !== 'string' || typeof name !== 'string') {
-    logger.warn({ uuid, name }, 'Missing or invalid query parameters');
+    logger.warn(`API: invalid parameters uuid=${uuid} name=${name}`);
     return res.status(400).json({ error: 'Missing or invalid uuid or name parameters' });
   }
 
@@ -170,7 +167,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    logger.error({ err: error }, `Error getting build logs for service ${name} in environment ${uuid}.`);
+    logger.error({ error }, `API: build logs fetch failed service=${name}`);
 
     if (error instanceof HttpError) {
       if (error.response?.statusCode === 404) {

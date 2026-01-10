@@ -159,43 +159,34 @@
  *                   example: Failed to communicate with Kubernetes.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { LogStreamingService } from 'server/services/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
 
-const logger = rootLogger.child({
-  filename: __filename,
-});
-
 const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
+  const { uuid, name, jobName, type } = req.query;
+  const logger = getLogger({ buildUuid: uuid as string });
+
   if (req.method !== 'GET') {
-    logger.warn(`method=${req.method} message="Method not allowed"`);
+    logger.warn(`API: method not allowed method=${req.method}`);
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
 
-  const { uuid, name, jobName, type } = req.query;
-
-  // 1. Request Validation
   const isWebhookRequest = type === 'webhook';
 
   if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
-    logger.warn(
-      `uuid=${uuid} name=${name} jobName=${jobName} type=${type} message="Missing or invalid query parameters"`
-    );
+    logger.warn(`API: invalid parameters uuid=${uuid} name=${name} jobName=${jobName} type=${type}`);
     return res.status(400).json({ error: 'Missing or invalid parameters' });
   }
 
   if (type && (typeof type !== 'string' || !['build', 'deploy', 'webhook'].includes(type))) {
-    logger.warn(`type=${type} message="Invalid type parameter"`);
+    logger.warn(`API: invalid type parameter type=${type}`);
     return res.status(400).json({ error: 'Invalid type parameter. Must be "build", "deploy", or "webhook"' });
   }
 
   try {
-    // 2. Call the Service
     const logService = new LogStreamingService();
-
-    // We cast name and type to strings/undefined safely here because of validation above
 
     const response = await logService.getLogStreamInfo(
       uuid,
@@ -206,11 +197,8 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
 
     return res.status(200).json(response);
   } catch (error: any) {
-    logger.error(
-      `jobName=${jobName} uuid=${uuid} name=${name} error="${error}" message="Error getting log streaming info"`
-    );
+    logger.error({ error }, `API: log stream info fetch failed jobName=${jobName} service=${name}`);
 
-    // 3. Error Mapping
     if (error.message === 'Build not found') {
       return res.status(404).json({ error: 'Build not found' });
     }

@@ -16,13 +16,9 @@
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { generateGraph } from 'server/lib/dependencyGraph';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { Build } from 'server/models';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/graph.ts',
-});
 
 /**
  * @openapi
@@ -111,7 +107,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       dependencyGraph: build.dependencyGraph,
     });
   } catch (error) {
-    logger.error(`Eorror fetching dependency graph for ${uuid}: ${error}`);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Error fetching dependency graph'
+    );
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };

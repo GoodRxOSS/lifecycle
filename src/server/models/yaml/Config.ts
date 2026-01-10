@@ -21,11 +21,7 @@ import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValid
 import Repository from '../Repository';
 import { Environment } from './YamlEnvironment';
 import { Service, Service001 } from './YamlService';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({
-  filename: 'models/yaml/Config.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 export interface LifecycleConfig {
   readonly version: string;
@@ -70,7 +66,10 @@ export async function fetchLifecycleConfigByRepository(
     try {
       config = await new YamlConfigParser().parseYamlConfigFromBranch(repository.fullName, branchName);
     } catch (error) {
-      logger.warn(`Unable to fetch configuration from ${repository.fullName}/${branchName}: ${error}`);
+      getLogger({ repository: repository.fullName, branch: branchName }).warn(
+        { error },
+        'Unable to fetch configuration'
+      );
 
       if (error instanceof EmptyFileError) {
         config = null;
@@ -80,12 +79,12 @@ export async function fetchLifecycleConfigByRepository(
     }
 
     if (config != null) {
-      // The YAML config file could be syntax correctly but the schema could be wrong.
       try {
         new YamlConfigValidator().validate(config.version, config);
       } catch (error) {
-        logger.error(
-          `YAML Config validation failed for ${repository.fullName}/${branchName} using version=${config.version}: ${error}`
+        getLogger({ repository: repository.fullName, branch: branchName, version: config.version }).error(
+          { error },
+          'YAML config validation failed'
         );
         throw new ValidationError(error);
       }
@@ -110,9 +109,7 @@ export function getDeployingServicesByName(config: LifecycleConfig, serviceName:
       }
     }
   } catch (error) {
-    logger
-      .child({ error })
-      .error(`There was a problem getting the service by its name while searching for ${serviceName} service`);
+    getLogger({ serviceName }).error({ error }, 'Failed to get service by name');
     throw error;
   }
 
@@ -132,9 +129,7 @@ export async function resolveRepository(repositoryFullName: string): Promise<Rep
       const repositories: Repository[] = await Repository.query()
         .where(raw('LOWER(??)', [key]), '=', `${repositoryFullName.toLowerCase()}`)
         .catch((error) => {
-          logger.error(
-            `Unable to find ${repositoryFullName} from Lifecycle Database. Note that repository name is case sensitive: ${error}`
-          );
+          getLogger({ repository: repositoryFullName }).error({ error }, 'Unable to find repository in database');
           return null;
         });
 
@@ -143,9 +138,7 @@ export async function resolveRepository(repositoryFullName: string): Promise<Rep
       }
     }
   } catch (error) {
-    logger.error(
-      `There was a problem resolving the repository from the repository name: ${repositoryFullName} \n Error: ${error}`
-    );
+    getLogger({ repository: repositoryFullName }).error({ error }, 'Failed to resolve repository');
     throw error;
   }
 

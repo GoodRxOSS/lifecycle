@@ -31,9 +31,26 @@ const transport = {
   },
 };
 
+const serializers = {
+  error: (value: unknown): string => {
+    if (value instanceof Error) {
+      return value.message;
+    }
+    if (typeof value === 'object' && value !== null) {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return '[Unserializable Object]';
+      }
+    }
+    return String(value);
+  },
+};
+
 let rootLogger = pino({
   level,
   enabled,
+  serializers,
   ...(pinoPretty ? transport : {}),
 });
 

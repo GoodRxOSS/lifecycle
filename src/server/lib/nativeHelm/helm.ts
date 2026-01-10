@@ -18,7 +18,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withSpan, updateLogContext } from 'server/lib/logger/index';
 import { shellPromise } from 'server/lib/shell';
 import { randomAlphanumeric } from 'server/lib/random';
 import { nanoid } from 'nanoid';
@@ -52,10 +52,6 @@ import {
 } from 'server/lib/nativeBuild/utils';
 import { createHelmJob as createHelmJobFromFactory } from 'server/lib/kubernetes/jobFactory';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
-
-const logger = rootLogger.child({
-  filename: 'lib/nativeHelm/helm.ts',
-});
 
 export interface JobResult {
   completed: boolean;
@@ -250,9 +246,9 @@ export async function shouldUseNativeHelm(deploy: Deploy): Promise<boolean> {
 }
 
 export async function deployNativeHelm(deploy: Deploy): Promise<void> {
-  logger.info(`[HELM ${deploy.uuid}] Starting native helm deployment`);
-
   const { deployable, build } = deploy;
+
+  getLogger().info('Helm: deploying (native)');
 
   if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
     await applyHttpScaleObjectManifestYaml(deploy, build.namespace);
@@ -279,7 +275,12 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
       await patchIngress(deploy.uuid, ingressBannerSnippet(deploy), build.namespace);
     }
   } catch (error) {
-    logger.warn(`[DEPLOY ${deploy.uuid}] Unable to patch ingress: ${error}`);
+    getLogger().warn(
+      {
+        error,
+      },
+      'Unable to patch ingress'
+    );
   }
 
   if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
@@ -310,7 +311,7 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
   const deployPipelineId = getCodefreshPipelineIdFromOutput(output);
 
   const statusMessage = 'Starting deployment via Helm';
-  logger.info(`[DEPLOY ${deploy.uuid}] Deploying via codefresh build: ${deployPipelineId}`);
+  getLogger().info(`Helm: deploying (Codefresh) pipelineId=${deployPipelineId}`);
 
   await deployService.patchAndUpdateActivityFeed(
     deploy,
@@ -330,7 +331,12 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
       await patchIngress(deploy.uuid, ingressBannerSnippet(deploy), build.namespace);
     }
   } catch (error) {
-    logger.warn(`[DEPLOY ${deploy.uuid}] Unable to patch ingress: ${error}`);
+    getLogger().warn(
+      {
+        error,
+      },
+      'Unable to patch ingress'
+    );
   }
 
   if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
@@ -345,61 +351,68 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
 }
 
 export async function deployHelm(deploys: Deploy[]): Promise<void> {
-  logger.info(`[DEPLOY ${deploys.map((d) => d.uuid).join(', ')}] Deploying with helm`);
-
   if (deploys?.length === 0) return;
+
+  getLogger().info(`Helm: deploying services=${deploys.map((d) => d.deployable?.name || d.uuid).join(',')}`);
 
   await Promise.all(
     deploys.map(async (deploy) => {
-      const startTime = Date.now();
-      const runUUID = deploy.runUUID ?? nanoid();
-      const deployService = new DeployService();
+      return withSpan(
+        'lifecycle.helm.deploy',
+        async () => {
+          updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name });
+          const startTime = Date.now();
+          const runUUID = deploy.runUUID ?? nanoid();
+          const deployService = new DeployService();
 
-      try {
-        const useNative = await shouldUseNativeHelm(deploy);
-        const method = useNative ? 'Native Helm' : 'Codefresh Helm';
+          try {
+            const useNative = await shouldUseNativeHelm(deploy);
+            const method = useNative ? 'Native Helm' : 'Codefresh Helm';
 
-        logger.info(`[DEPLOY ${deploy.uuid}] Using ${method} deployment`);
+            getLogger().debug(`Using ${method}`);
 
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.DEPLOYING,
-            statusMessage: `Deploying via ${method}`,
-          },
-          runUUID
-        );
+            await deployService.patchAndUpdateActivityFeed(
+              deploy,
+              {
+                status: DeployStatus.DEPLOYING,
+                statusMessage: `Deploying via ${method}`,
+              },
+              runUUID
+            );
 
-        if (useNative) {
-          await deployNativeHelm(deploy);
-        } else {
-          await deployCodefreshHelm(deploy, deployService, runUUID);
-        }
+            if (useNative) {
+              await deployNativeHelm(deploy);
+            } else {
+              await deployCodefreshHelm(deploy, deployService, runUUID);
+            }
 
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.READY,
-            statusMessage: `Successfully deployed via ${method}`,
-          },
-          runUUID
-        );
+            await deployService.patchAndUpdateActivityFeed(
+              deploy,
+              {
+                status: DeployStatus.READY,
+                statusMessage: `Successfully deployed via ${method}`,
+              },
+              runUUID
+            );
 
-        await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
-      } catch (error) {
-        await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, error.message);
+            await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
+          } catch (error) {
+            await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, error.message);
 
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.DEPLOY_FAILED,
-            statusMessage: `Helm deployment failed: ${error.message}`,
-          },
-          runUUID
-        );
+            await deployService.patchAndUpdateActivityFeed(
+              deploy,
+              {
+                status: DeployStatus.DEPLOY_FAILED,
+                statusMessage: `Helm deployment failed: ${error.message}`,
+              },
+              runUUID
+            );
 
-        throw error;
-      }
+            throw error;
+          }
+        },
+        { resource: deploy.uuid, tags: { 'deploy.uuid': deploy.uuid } }
+      );
     })
   );
 }

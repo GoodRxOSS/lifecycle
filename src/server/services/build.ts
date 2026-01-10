@@ -30,7 +30,7 @@ import BaseService from './_service';
 import _ from 'lodash';
 import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, extractContextForQueue, LogStage, updateLogContext } from 'server/lib/logger/index';
 import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 
@@ -44,10 +44,6 @@ import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
-
-const logger = rootLogger.child({
-  filename: 'services/build.ts',
-});
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -85,14 +81,14 @@ export default class BuildService extends BaseService {
             // Enqueue a deletion job
             const buildId = build?.id;
             if (!buildId) {
-              logger.error(`[BUILD ${build?.uuid}][cleanupBuilds][buidIdError] No build ID found for this build!`);
+              getLogger().error('No build ID found for cleanup');
             }
-            logger.info(`[BUILD ${build?.uuid}] Queuing build for deletion`);
-            await this.db.services.BuildService.deleteQueue.add('delete', { buildId });
+            getLogger().info('Queuing build for deletion');
+            await this.db.services.BuildService.deleteQueue.add('delete', { buildId, ...extractContextForQueue() });
           }
         }
       } catch (e) {
-        logger.error(`[BUILD ${build.uuid}] Can't cleanup build: ${e}`);
+        getLogger().error({ error: e }, 'Cleanup build failed');
       }
     }
   }
@@ -256,7 +252,7 @@ export default class BuildService extends BaseService {
                 (deploy.service.type === DeployTypes.DOCKER || deploy.service.type === DeployTypes.GITHUB)
             )
             .map((deploy) => {
-              logger.debug(`${deploy.uuid}: active = ${deploy.active}`);
+              getLogger().debug(`Deploy active status: deployUuid=${deploy.uuid} active=${deploy.active}`);
               return this.ingressConfigurationForDeploy(deploy);
             })
         )
@@ -385,7 +381,7 @@ export default class BuildService extends BaseService {
     const environments = await this.getEnvironmentsToBuild(environmentId, repositoryId);
 
     if (!environments.length) {
-      logger.debug('No matching environments');
+      getLogger().debug('No matching environments');
       return;
     }
 
@@ -404,7 +400,7 @@ export default class BuildService extends BaseService {
       });
       await Promise.all(promises);
     } catch (err) {
-      logger.fatal(`Failed to create and deploy build due to fatal error: ${err}`);
+      getLogger().fatal({ error: err }, 'Failed to create and deploy build');
     }
   }
 
@@ -417,17 +413,15 @@ export default class BuildService extends BaseService {
       await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest);
     } catch (error) {
       if (error instanceof ParsingError) {
-        logger.error(`[BUILD ${build.uuid}] Invalid Lifecycle Config File: ${error}`);
+        getLogger().error({ error }, 'Invalid Lifecycle Config File (parsing error)');
 
         throw error;
       } else if (error instanceof ValidationError) {
-        logger.error(`[BUILD ${build.uuid}] Invalid Lifecycle Config File: ${error}`);
+        getLogger().error({ error }, 'Invalid Lifecycle Config File (validation error)');
 
         throw error;
       } else {
-        // Temporary warps around the new implementation so it won't F up production if i did something stupid.
-        // This code has no use in production yet but will start collecting data to validate if implementation works or not.
-        logger.warn(`[BUILD ${build.uuid}] No worry. Nothing is bombed. Can ignore this error: ${error}`);
+        getLogger().warn({ error }, 'Non-critical error during YAML config import');
       }
     }
   }
@@ -439,6 +433,10 @@ export default class BuildService extends BaseService {
   ) {
     try {
       const build = await this.findOrCreateBuild(environment, options, lifecycleConfig);
+
+      if (build?.uuid) {
+        updateLogContext({ buildUuid: build.uuid });
+      }
 
       // After a build is susccessfully created or retrieved,
       // we need to create or update the deployables to be used for build and deploy.
@@ -459,8 +457,8 @@ export default class BuildService extends BaseService {
           }
 
           if (options.repositoryId && options.repositoryBranchName) {
-            logger.debug(
-              `[BUILD ${build.uuid}] Setting up default build services for repositoryID:${options.repositoryId} branch:${options.repositoryBranchName}`
+            getLogger().debug(
+              `Setting up default build services: repositoryId=${options.repositoryId} branch=${options.repositoryBranchName}`
             );
 
             await this.setupDefaultBuildServiceOverrides(
@@ -492,7 +490,7 @@ export default class BuildService extends BaseService {
         throw new Error('Missing build or deployment options from environment.');
       }
     } catch (error) {
-      logger.fatal(`Failed to create build and deploys due to fatal error: ${error}`);
+      getLogger().fatal({ error }, 'Failed to create build and deploys');
     }
   }
 
@@ -508,6 +506,10 @@ export default class BuildService extends BaseService {
     const runUUID = nanoid();
     /* We now own the build for as long as we see this UUID */
     const uuid = build?.uuid;
+
+    if (uuid) {
+      updateLogContext({ buildUuid: uuid });
+    }
     const pullRequest = build?.pullRequest;
     const fullName = pullRequest?.fullName;
     const branchName = pullRequest?.branchName;
@@ -522,10 +524,10 @@ export default class BuildService extends BaseService {
       if (!latestCommit) {
         latestCommit = await github.getSHAForBranch(branchName, owner, name);
       }
-      const deploys = await this.db.services.Deploy.findOrCreateDeploys(environment, build);
+      const deploys = await this.db.services.Deploy.findOrCreateDeploys(environment, build, githubRepositoryId);
       build?.$setRelated('deploys', deploys);
       await build?.$fetchGraph('pullRequest');
-      await new BuildEnvironmentVariables(this.db).resolve(build);
+      await new BuildEnvironmentVariables(this.db).resolve(build, githubRepositoryId);
       await this.markConfigurationsAsBuilt(build);
       await this.updateStatusAndComment(build, BuildStatus.BUILDING, runUUID, true, true);
       const pullRequest = build?.pullRequest;
@@ -537,8 +539,7 @@ export default class BuildService extends BaseService {
           dependencyGraph,
         });
       } catch (error) {
-        // do nothing
-        logger.warn(`Unable to generate dependecy graph for ${build.uuid}`, error);
+        getLogger().warn({ error }, 'Unable to generate dependency graph');
       }
 
       // Build Docker Images & Deploy CLI Based Infra At the Same Time
@@ -546,7 +547,7 @@ export default class BuildService extends BaseService {
         this.buildImages(build, githubRepositoryId),
         this.deployCLIServices(build, githubRepositoryId),
       ]);
-      logger.debug(`[BUILD ${uuid}] Build results: buildImages=${results[0]}, deployCLIServices=${results[1]}`);
+      getLogger().debug(`Build results: buildImages=${results[0]} deployCLIServices=${results[1]}`);
       const success = _.every(results);
       /* Verify that all deploys are successfully built that are active */
       if (success) {
@@ -567,15 +568,13 @@ export default class BuildService extends BaseService {
           }
         }
       } else {
-        // If it's in an error state, then update the build to an error state,
-        // update the activity feed, and return.
-        logger.warn(
-          `[BUILD ${uuid}][resolveAndDeployBuild] Build is in an errored state. Not commencing with rollout for ${fullName}/${branchName}:${latestCommit}`
+        getLogger().warn(
+          `Build in errored state, not commencing rollout: fullName=${fullName} branchName=${branchName} latestCommit=${latestCommit}`
         );
         await this.updateStatusAndComment(build, BuildStatus.ERROR, runUUID, true, true);
       }
     } catch (error) {
-      logger.child({ error }).error(`[BUILD ${uuid}][resolveAndDeployBuild][ERROR]  Failed to deploy build: ${error}`);
+      getLogger().error({ error }, 'Failed to deploy build');
       await this.updateStatusAndComment(build, BuildStatus.ERROR, runUUID, true, true, error);
     }
 
@@ -620,7 +619,7 @@ export default class BuildService extends BaseService {
         githubDeployments,
         namespace: `env-${uuid}`,
       }));
-    logger.info(`[BUILD ${build.uuid}] Created build for pull request branch: ${options.repositoryBranchName}`);
+    getLogger().info(`Created build for pull request: branch=${options.repositoryBranchName}`);
     return build;
   }
 
@@ -661,13 +660,11 @@ export default class BuildService extends BaseService {
   ): Promise<BuildServiceOverride> {
     const buildId = build?.id;
     if (!buildId) {
-      logger.error(`[BUILD ${build?.uuid}][createBuildServiceOverride][buidIdError] No build ID found for this build!`);
+      getLogger().error('No build ID found for createBuildServiceOverride');
     }
     const serviceId = service?.id;
     if (!serviceId) {
-      logger.error(
-        `[BUILD ${build?.uuid}][createBuildServiceOverride][serviceIdError] No service ID found for this service!`
-      );
+      getLogger().error('No service ID found for createBuildServiceOverride');
     }
     const buildServiceOverride =
       (await this.db.models.BuildServiceOverride.findOne({
@@ -689,13 +686,17 @@ export default class BuildService extends BaseService {
         await build.reload();
         await build?.$fetchGraph('[services, deploys.[service, build]]');
 
-        logger.debug(`[DELETE ${build?.uuid}] Triggering cleanup`);
+        if (build?.uuid) {
+          updateLogContext({ buildUuid: build.uuid });
+        }
+
+        getLogger().debug('Triggering cleanup');
 
         await this.updateStatusAndComment(build, BuildStatus.TEARING_DOWN, build.runUUID, true, true).catch((error) => {
-          logger.warn(`[BUILD: ${build.uuid}] Failed to update status to ${BuildStatus.TEARING_DOWN}: ${error}`);
+          getLogger().warn({ error }, `Failed to update status to ${BuildStatus.TEARING_DOWN}`);
         });
         await Promise.all([k8s.deleteBuild(build), cli.deleteBuild(build), uninstallHelmReleases(build)]).catch(
-          (error) => logger.child({ build, error }).error(`[DELETE ${build?.uuid}] Failed to cleanup build`)
+          (error) => getLogger().error({ error }, 'Failed to cleanup build')
         );
 
         await Promise.all(
@@ -705,6 +706,7 @@ export default class BuildService extends BaseService {
               await this.db.services.GithubService.githubDeploymentQueue.add('deployment', {
                 deployId: deploy.id,
                 action: 'delete',
+                ...extractContextForQueue(),
               });
           })
         );
@@ -712,15 +714,14 @@ export default class BuildService extends BaseService {
         await k8s.deleteNamespace(build.namespace);
         await this.db.services.Ingress.ingressCleanupQueue.add('cleanup', {
           buildId: build.id,
+          ...extractContextForQueue(),
         });
-        logger.info(`[DELETE ${build?.uuid}] Deleted build`);
+        getLogger().info('Deleted build');
         await this.updateStatusAndComment(build, BuildStatus.TORN_DOWN, build.runUUID, true, true).catch((error) => {
-          logger.warn(`[BUILD: ${build.uuid}] Failed to update status to ${BuildStatus.TORN_DOWN}: ${error}`);
+          getLogger().warn({ error }, `Failed to update status to ${BuildStatus.TORN_DOWN}`);
         });
       } catch (e) {
-        logger.error(
-          `[DELETE ${build.uuid}] Error deleting build: ${e instanceof LifecycleError ? e.getMessage() : e}`
-        );
+        getLogger().error({ error: e instanceof LifecycleError ? e.getMessage() : e }, 'Error deleting build');
       }
     }
   }
@@ -766,7 +767,7 @@ export default class BuildService extends BaseService {
               dashboardLinks = insertBuildLink(dashboardLinks, 'Fastly Dashboard', fastlyDashboardUrl.href);
             }
           } catch (err) {
-            logger.error(`[BUILD ${build.uuid}] Unable to get Fastly dashboard URL: ${err}`);
+            getLogger().error({ error: err }, 'Unable to get Fastly dashboard URL');
           }
         }
         await build.$query().patch({ dashboardLinks });
@@ -780,15 +781,13 @@ export default class BuildService extends BaseService {
           updateStatus,
           error
         ).catch((e) => {
-          logger.error(`[BUILD ${build.uuid}] Unable to update pull request activity stream: ${e}`);
+          getLogger().error({ error: e }, 'Unable to update pull request activity stream');
         });
       }
     } finally {
-      // Even S**T happen, we still try to fire the LC webhooks no matter what
-      // Pull webhooks for this environment, and run them
-      logger.debug(`[BUILD ${build.uuid}] Build status changed to ${build.status}.`);
+      getLogger().debug(`Build status changed: status=${build.status}`);
 
-      await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id });
+      await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id, ...extractContextForQueue() });
     }
   }
 
@@ -813,9 +812,9 @@ export default class BuildService extends BaseService {
         await deploy.$query().patch({ status: DeployStatus.BUILT });
       }
       const configUUIDs = configDeploys.map((deploy) => deploy?.uuid).join(',');
-      logger.info(`[BUILD ${build.uuid}] Updated configuration type deploy ${configUUIDs} as built`);
+      getLogger().info(`Config deploys marked built: ${configUUIDs}`);
     } catch (error) {
-      logger.error(`[BUILD ${build.uuid}] Failed to update configuration type deploy as built: ${error}`);
+      getLogger().error({ error }, 'Failed to update configuration type deploy as built');
     }
   }
 
@@ -828,7 +827,7 @@ export default class BuildService extends BaseService {
     });
     const buildId = build?.id;
     if (!buildId) {
-      logger.error(`[BUILD ${build?.uuid}][deployCLIServices][buidIdError] No build ID found for this build!`);
+      getLogger().error('No build ID found for deployCLIServices');
     }
     const deploys = await Deploy.query()
       .where({ buildId, ...(githubRepositoryId ? { githubRepositoryId } : {}) })
@@ -842,17 +841,14 @@ export default class BuildService extends BaseService {
               .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
               .map(async (deploy) => {
                 if (!deploy) {
-                  logger.debug(
-                    `[BUILD ${build?.uuid}][deployCLIServices] This deploy is undefined. Deploys: %j`,
-                    deploys
-                  );
+                  getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
                   return false;
                 }
                 try {
                   const result = await this.db.services.Deploy.deployCLI(deploy);
                   return result;
                 } catch (err) {
-                  logger.error(`[BUILD ${build?.uuid}][DEPLOY ${deploy?.uuid}][deployCLIServices] Error: ${err}`);
+                  getLogger().error({ error: err }, `CLI deploy failed: deployUuid=${deploy?.uuid}`);
                   return false;
                 }
               })
@@ -865,25 +861,21 @@ export default class BuildService extends BaseService {
               .filter((d) => d.active && CLIDeployTypes.has(d.service.type))
               .map(async (deploy) => {
                 if (deploy === undefined) {
-                  logger.debug(
-                    "Somehow deploy is undefined here.... That shouldn't be possible? Build deploy length is %s",
-                    deploys.length
-                  );
+                  getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
                 }
                 const result = await this.db.services.Deploy.deployCLI(deploy).catch((error) => {
-                  logger.error(`[${build.uuid} Build Failure: CLI Failed => ${error}`);
+                  getLogger().error({ error }, 'CLI deploy failed');
                   return false;
                 });
 
-                if (!result)
-                  logger.info(`[BUILD ${build?.uuid}][${deploy.uuid}][deployCLIServices] CLI deploy unsuccessful`);
+                if (!result) getLogger().info(`CLI deploy unsuccessful: deployUuid=${deploy.uuid}`);
                 return result;
               })
           )
         );
       }
     } catch (error) {
-      logger.error(`[${build.uuid} Build Failure: CLI Failed => ${error}`);
+      getLogger().error({ error }, 'CLI build failed');
       return false;
     }
   }
@@ -896,7 +888,7 @@ export default class BuildService extends BaseService {
   async buildImages(build: Build, githubRepositoryId = null): Promise<boolean> {
     const buildId = build?.id;
     if (!buildId) {
-      logger.error(`[BUILD ${build?.uuid}][buildImages][buidIdError] No build ID found for this build!`);
+      getLogger().error('No build ID found for buildImages');
     }
 
     const deploys = await Deploy.query()
@@ -919,36 +911,31 @@ export default class BuildService extends BaseService {
               d.deployable.type === DeployTypes.HELM)
           );
         });
-        logger.debug(
-          `[BUILD ${build.uuid}] Processing ${deploysToBuild.length} deploys for build: ${deploysToBuild
+        getLogger().debug(
+          `Processing deploys for build: count=${deploysToBuild.length} deployUuids=${deploysToBuild
             .map((d) => d.uuid)
-            .join(', ')}`
+            .join(',')}`
         );
 
         const results = await Promise.all(
           deploysToBuild.map(async (deploy, index) => {
             if (deploy === undefined) {
-              logger.debug(
-                "Somehow deploy deploy is undefined here.... That shouldn't be possible? Build deploy length is %s",
-                build.deploys.length
-              );
+              getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
             }
             await deploy.$query().patchAndFetch({
               deployPipelineId: null,
               deployOutput: null,
             });
             const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
-            logger.debug(`[BUILD ${build.uuid}] Deploy ${deploy.uuid} buildImage completed with result: ${result}`);
+            getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
             return result;
           })
         );
         const finalResult = _.every(results);
-        logger.debug(
-          `[BUILD ${build.uuid}] Build results for each deploy: ${results.join(', ')}, final: ${finalResult}`
-        );
+        getLogger().debug(`Build results: results=${results.join(',')} final=${finalResult}`);
         return finalResult;
       } catch (error) {
-        logger.error(`[${build.uuid}] Uncaught Docker Build Error: ${error}`);
+        getLogger().error({ error }, 'Uncaught Docker Build Error');
         return false;
       }
     } else {
@@ -956,25 +943,24 @@ export default class BuildService extends BaseService {
         const results = await Promise.all(
           deploys
             .filter((d) => {
-              logger.debug(`[${d.uuid}] Check for service type for docker builds: %j`, d.service);
+              getLogger().debug(
+                `Check service type for docker builds: deployUuid=${d.uuid} serviceType=${d.service?.type}`
+              );
               return d.active && (d.service.type === DeployTypes.DOCKER || d.service.type === DeployTypes.GITHUB);
             })
             .map(async (deploy, index) => {
               if (deploy === undefined) {
-                logger.debug(
-                  "Somehow deploy deploy is undefined here.... That shouldn't be possible? Build deploy length is %s",
-                  build.deploys.length
-                );
+                getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
               }
               const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
-              logger.debug(`[BUILD ${build.uuid}] Deploy ${deploy.uuid} buildImage completed with result: ${result}`);
-              if (!result) logger.info(`[BUILD ${build?.uuid}][${deploy.uuid}][buildImages] build image unsuccessful`);
+              getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
+              if (!result) getLogger().info(`Build image unsuccessful: deployUuid=${deploy.uuid}`);
               return result;
             })
         );
         return _.every(results);
       } catch (error) {
-        logger.error(`[${build.uuid}] Uncaught Docker Build Error: ${error}`);
+        getLogger().error({ error }, 'Uncaught Docker Build Error');
         return false;
       }
     }
@@ -1056,6 +1042,7 @@ export default class BuildService extends BaseService {
         // Queue ingress creation after all deployments
         await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
           buildId,
+          ...extractContextForQueue(),
         });
 
         // Legacy manifest generation for backwards compatibility
@@ -1078,19 +1065,17 @@ export default class BuildService extends BaseService {
             await build.$query().patch({ manifest: legacyManifest });
           }
         }
-        await this.updateDeploysImageDetails(build);
+        await this.updateDeploysImageDetails(build, githubRepositoryId);
         return true;
       } catch (e) {
-        logger.warn(`[BUILD ${build.uuid}] Some problem when deploying services to Kubernetes cluster: ${e}`);
+        getLogger().warn({ error: e }, 'Problem deploying services to Kubernetes cluster');
         throw e;
       }
     } else {
       try {
         const buildId = build?.id;
         if (!buildId) {
-          logger.error(
-            `[BUILD ${build?.uuid}][generateAndApplyManifests][buidIdError] No build ID found for this build!`
-          );
+          getLogger().error('No build ID found for generateAndApplyManifests');
         }
 
         const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
@@ -1120,6 +1105,7 @@ export default class BuildService extends BaseService {
         /* Generate the nginx manifests for this new build */
         await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
           buildId,
+          ...extractContextForQueue(),
         });
 
         const isReady = await k8s.waitForPodReady(build);
@@ -1138,12 +1124,12 @@ export default class BuildService extends BaseService {
               )
             )
           );
-          await this.updateDeploysImageDetails(build);
+          await this.updateDeploysImageDetails(build, githubRepositoryId);
         }
 
         return true;
       } catch (e) {
-        logger.warn(`[BUILD ${build.uuid}] Some problem when deploying services to Kubernetes cluster: ${e}`);
+        getLogger().warn({ error: e }, 'Problem deploying services to Kubernetes cluster');
         return false;
       }
     }
@@ -1167,12 +1153,15 @@ export default class BuildService extends BaseService {
     return environments;
   }
 
-  private async updateDeploysImageDetails(build: Build) {
+  private async updateDeploysImageDetails(build: Build, githubRepositoryId?: number) {
     await build?.$fetchGraph('deploys');
+    const deploys = githubRepositoryId
+      ? build.deploys.filter((d) => d.githubRepositoryId === githubRepositoryId)
+      : build.deploys;
     await Promise.all(
-      build.deploys.map((deploy) => deploy.$query().patch({ isRunningLatest: true, runningImage: deploy?.dockerImage }))
+      deploys.map((deploy) => deploy.$query().patch({ isRunningLatest: true, runningImage: deploy?.dockerImage }))
     );
-    logger.debug(`[BUILD ${build.uuid}] Updated deploys with running image and latest status`);
+    getLogger().debug('Updated deploys with running image and latest status');
   }
 
   /**
@@ -1216,15 +1205,28 @@ export default class BuildService extends BaseService {
    * @param job the BullMQ job with the buildId
    */
   processDeleteQueue = async (job) => {
-    try {
-      const buildId = job.data.buildId;
-      const build = await this.db.models.Build.query().findOne({
-        id: buildId,
-      });
-      await this.db.services.BuildService.deleteBuild(build);
-    } catch (error) {
-      logger.error(`Error processing delete queue for build ${job.data.buildId}:`, error);
-    }
+    const { buildId, buildUuid, sender, correlationId, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
+      try {
+        const build = await this.db.models.Build.query().findOne({
+          id: buildId,
+        });
+
+        if (build?.uuid) {
+          updateLogContext({ buildUuid: build.uuid });
+        }
+
+        getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Deleting build');
+        await this.db.services.BuildService.deleteBuild(build);
+        getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Build deleted');
+      } catch (error) {
+        getLogger({ stage: LogStage.CLEANUP_FAILED }).error(
+          { error },
+          `Error processing delete queue for build ${buildId}`
+        );
+      }
+    });
   };
 
   /**
@@ -1232,36 +1234,43 @@ export default class BuildService extends BaseService {
    * @param job the BullMQ job with the buildID
    */
   processBuildQueue = async (job) => {
-    // No retry behavior - catch errors and log them
-    const buildId = job.data.buildId;
-    const githubRepositoryId = job?.data?.githubRepositoryId;
-    let build;
-    try {
-      build = await this.db.models.Build.query().findOne({
-        id: buildId,
-      });
+    const { buildId, githubRepositoryId, sender, correlationId, _ddTraceContext } = job.data;
 
-      await build?.$fetchGraph('[pullRequest, environment]');
-      await build.pullRequest.$fetchGraph('[repository]');
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      let build;
+      try {
+        build = await this.db.models.Build.query().findOne({
+          id: buildId,
+        });
 
-      await this.importYamlConfigFile(build?.environment, build);
-      const deploys = await this.db.services.Deploy.findOrCreateDeploys(build?.environment, build);
+        if (build?.uuid) {
+          updateLogContext({ buildUuid: build.uuid });
+        }
 
-      build.$setRelated('deploys', deploys);
-      await build?.$fetchGraph('deploys.[service, deployable]');
+        getLogger({ stage: LogStage.BUILD_STARTING }).info('Build started');
 
-      await this.db.services.BuildService.resolveAndDeployBuild(
-        build,
-        build?.pullRequest?.deployOnUpdate,
-        githubRepositoryId
-      );
-    } catch (error) {
-      if (error instanceof ParsingError || error instanceof ValidationError) {
-        this.updateStatusAndComment(build, BuildStatus.CONFIG_ERROR, build?.runUUID, true, true, error);
-      } else {
-        logger.fatal(`[BUILD ${build?.uuid}] Uncaught exception: ${error}`);
+        await build?.$fetchGraph('[pullRequest, environment]');
+        await build.pullRequest.$fetchGraph('[repository]');
+
+        if (!githubRepositoryId) {
+          await this.importYamlConfigFile(build?.environment, build);
+        }
+
+        await this.db.services.BuildService.resolveAndDeployBuild(
+          build,
+          build?.pullRequest?.deployOnUpdate,
+          githubRepositoryId
+        );
+
+        getLogger({ stage: LogStage.BUILD_COMPLETE }).info('Build completed');
+      } catch (error) {
+        if (error instanceof ParsingError || error instanceof ValidationError) {
+          this.updateStatusAndComment(build, BuildStatus.CONFIG_ERROR, build?.runUUID, true, true, error);
+        } else {
+          getLogger({ stage: LogStage.BUILD_FAILED }).fatal({ error }, `Uncaught exception`);
+        }
       }
-    }
+    });
   };
 
   /**
@@ -1271,30 +1280,44 @@ export default class BuildService extends BaseService {
    * @param done the Bull callback to invoke when we're done
    */
   processResolveAndDeployBuildQueue = async (job) => {
-    let jobId;
-    let buildId: number;
-    try {
-      jobId = job?.data?.buildId;
-      const githubRepositoryId = job?.data?.githubRepositoryId;
-      if (!jobId) throw new Error('jobId is required but undefined');
-      const build = await this.db.models.Build.query().findOne({
-        id: jobId,
-      });
+    const { sender, correlationId, _ddTraceContext } = job.data;
 
-      await build?.$fetchGraph('[pullRequest, environment]');
-      await build.pullRequest.$fetchGraph('[repository]');
-      buildId = build?.id;
-      if (!buildId) throw new Error('buildId is required but undefined');
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      let jobId;
+      let buildId: number;
+      try {
+        jobId = job?.data?.buildId;
+        const githubRepositoryId = job?.data?.githubRepositoryId;
+        if (!jobId) throw new Error('jobId is required but undefined');
+        const build = await this.db.models.Build.query().findOne({
+          id: jobId,
+        });
 
-      if (!build.pullRequest.deployOnUpdate) {
-        logger.info(`[BUILD ${build.uuid}] Pull request does not have deployOnUpdate enabled. Skipping build.`);
-        return;
+        await build?.$fetchGraph('[pullRequest, environment]');
+        await build.pullRequest.$fetchGraph('[repository]');
+        buildId = build?.id;
+        if (!buildId) throw new Error('buildId is required but undefined');
+
+        if (build?.uuid) {
+          updateLogContext({ buildUuid: build.uuid });
+        }
+
+        getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build queued');
+
+        if (!build.pullRequest.deployOnUpdate) {
+          getLogger().info('Skipping: deployOnUpdate disabled');
+          return;
+        }
+        // Enqueue a standard resolve build
+        await this.db.services.BuildService.buildQueue.add('build', {
+          buildId,
+          githubRepositoryId,
+          ...extractContextForQueue(),
+        });
+      } catch (error) {
+        const text = `[BUILD ${buildId}][processResolveAndDeployBuildQueue] error processing buildId with the jobId, ${jobId}`;
+        getLogger().error({ error }, text);
       }
-      // Enqueue a standard resolve build
-      await this.db.services.BuildService.buildQueue.add('build', { buildId, githubRepositoryId });
-    } catch (error) {
-      const text = `[BUILD ${buildId}][processResolveAndDeployBuildQueue] error processing buildId with the jobId, ${jobId}`;
-      logger.child({ error }).error(text);
-    }
+    });
   };
 }

@@ -15,15 +15,11 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { Build } from 'server/models';
 
 import { BuildStatus, DeployStatus } from 'shared/constants';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/torndown.ts',
-});
 
 /**
  * @openapi
@@ -101,7 +97,7 @@ const logger = rootLogger.child({
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'PATCH') {
-    logger.info({ method: req.method }, `[${req.method}] Method not allowed`);
+    getLogger({}).debug(`Method not allowed: method=${req.method}`);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
 
@@ -109,7 +105,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
   try {
     if (!uuid) {
-      logger.info(`[${uuid}] The uuid is required`);
+      getLogger({}).debug('The uuid is required');
       return res.status(500).json({ error: 'The uuid is required' });
     }
     const buildService = new BuildService();
@@ -121,7 +117,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       .withGraphFetched('[deploys]');
 
     if (build.isStatic || !build) {
-      logger.info(`[${uuid}] The build doesn't exist or is static environment`);
+      getLogger({ buildUuid: uuid as string }).debug('Build does not exist or is static environment');
       return res.status(404).json({ error: `The build doesn't exist or is static environment` });
     }
 
@@ -145,7 +141,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       namespacesUpdated: updatedDeploys,
     });
   } catch (error) {
-    logger.error({ error }, `[${uuid}] Error in cleanup API in`);
+    getLogger({ buildUuid: uuid as string }).error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Error in cleanup API'
+    );
     return res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };

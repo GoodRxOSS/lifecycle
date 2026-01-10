@@ -16,7 +16,7 @@
 
 import { Deploy } from '../../models';
 import { shellPromise } from '../shell';
-import logger from '../logger';
+import { getLogger } from '../logger/index';
 import GlobalConfigService from '../../services/globalConfig';
 import {
   waitForJobAndGetLogs,
@@ -256,11 +256,7 @@ export async function buildWithEngine(
   const jobName = `${options.deployUuid}-build-${jobId}-${shortSha}`.substring(0, 63);
   const contextPath = `/workspace/repo-${shortRepoName}`;
 
-  logger.info(
-    `[${engine.name}] Building image(s) for ${options.deployUuid}: dockerfilePath=${
-      options.dockerfilePath
-    }, initDockerfilePath=${options.initDockerfilePath || 'none'}, repo=${options.repo}`
-  );
+  getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath}`);
 
   const githubToken = await getGitHubToken();
   const gitUsername = 'x-access-token';
@@ -360,7 +356,7 @@ export async function buildWithEngine(
         options.ecrDomain
       )
     );
-    logger.info(`[${engine.name}] Job ${jobName} will build both main and init images in parallel`);
+    getLogger().debug('Build: including init image');
   }
 
   await deploy.$fetchGraph('build');
@@ -394,16 +390,16 @@ export async function buildWithEngine(
   });
 
   const jobYaml = yaml.dump(job, { quotingType: '"', forceQuotes: true });
-  const applyResult = await shellPromise(`cat <<'EOF' | kubectl apply -f -
+  await shellPromise(`cat <<'EOF' | kubectl apply -f -
 ${jobYaml}
 EOF`);
-  logger.info(`Created ${engineName} job ${jobName} in namespace ${options.namespace}`, { applyResult });
+  getLogger().debug(`Job: created ${jobName}`);
 
   try {
     const { logs, success } = await waitForJobAndGetLogs(jobName, options.namespace, jobTimeout);
     return { success, logs, jobName };
   } catch (error) {
-    logger.error(`Error getting logs for ${engineName} job ${jobName}`, { error });
+    getLogger().error(`Job: log retrieval failed job=${jobName} error=${error.message}`);
 
     try {
       const jobStatus = await shellPromise(
@@ -412,11 +408,11 @@ EOF`);
       const jobSucceeded = jobStatus.trim() === 'True';
 
       if (jobSucceeded) {
-        logger.info(`Job ${jobName} completed successfully despite log retrieval error`);
+        getLogger().debug(`Job: completed (logs unavailable) job=${jobName}`);
         return { success: true, logs: 'Log retrieval failed but job completed successfully', jobName };
       }
     } catch (statusError) {
-      logger.error(`Failed to check job status for ${jobName}`, { statusError });
+      getLogger().error(`Job: status check failed job=${jobName} error=${statusError.message}`);
     }
 
     return { success: false, logs: `Build failed: ${error.message}`, jobName };

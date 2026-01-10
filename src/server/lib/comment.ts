@@ -14,13 +14,9 @@
  * limitations under the License.
  */
 
-import rootLogger from './logger';
+import { getLogger } from './logger/index';
 import { CommentParser } from 'shared/constants';
 import { compact, flatten, set } from 'lodash';
-
-const logger = rootLogger.child({
-  filename: 'lib/comment.ts',
-});
 
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{
@@ -75,7 +71,7 @@ export class CommentHelper {
     });
     const obj = {};
     envLines.forEach((line) => {
-      logger.debug('Parsing line: %s', line);
+      getLogger().debug(`Parsing environment override line=${line}`);
       const match = line.match(/ENV:([^:]*):(.*)/m);
       const key = match[1];
       const value = match[2];
