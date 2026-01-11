@@ -17,7 +17,7 @@
 import BaseService from './_service';
 import { Environment, Build, Service, Deploy, Deployable } from 'server/models';
 import * as codefresh from 'server/lib/codefresh';
-import { getLogger, updateLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import hash from 'object-hash';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 import * as cli from 'server/lib/cli';
@@ -370,187 +370,178 @@ export default class DeployService extends BaseService {
   }
 
   async deployAurora(deploy: Deploy): Promise<boolean> {
-    updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name });
-    try {
-      // For now, we're just going to shell out and run the deploy
-      await deploy.reload();
-      await deploy.$fetchGraph('[build, deployable]');
-      updateLogContext({ serviceName: deploy.deployable?.name });
+    return withLogContext(
+      { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+      async () => {
+        try {
+          await deploy.reload();
+          await deploy.$fetchGraph('[build, deployable]');
 
-      if (!deploy.deployable) {
-        getLogger().error('Missing deployable for Aurora restore');
-        return false;
+          if (!deploy.deployable) {
+            getLogger().error('Missing deployable for Aurora restore');
+            return false;
+          }
+
+          if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
+            getLogger().info(`Aurora: already built, skipping`);
+            return true;
+          }
+
+          const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+          if (existingDbEndpoint) {
+            getLogger().info(`Aurora: exists, skipping`);
+            await deploy.$query().patch({
+              cname: existingDbEndpoint,
+              status: DeployStatus.BUILT,
+            });
+            return true;
+          }
+
+          const uuid = nanoid();
+          await deploy.$query().patch({
+            status: DeployStatus.BUILDING,
+            buildLogs: uuid,
+            runUUID: nanoid(),
+          });
+          getLogger().info('Aurora: restoring');
+          await cli.cliDeploy(deploy);
+
+          const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+          if (dbEndpoint) {
+            await deploy.$query().patch({
+              cname: dbEndpoint,
+            });
+          }
+
+          await deploy.reload();
+          if (deploy.buildLogs === uuid) {
+            await deploy.$query().patch({
+              status: DeployStatus.BUILT,
+            });
+          }
+          getLogger().info('Aurora: restored');
+          return true;
+        } catch (e) {
+          getLogger().error({ error: e }, 'Aurora cluster restore failed');
+          await deploy.$query().patch({
+            status: DeployStatus.ERROR,
+          });
+          return false;
+        }
       }
-
-      /**
-       * For now, only run the CLI deploy step one time.
-       * Check for both BUILT and READY status because:
-       * - deployAurora sets status to BUILT after successful creation
-       * - DeploymentManager.deployManifests then changes it to READY after Kubernetes manifest deployment
-       * Both statuses indicate the Aurora database already exists and should not be recreated
-       */
-      if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
-        getLogger().info(`Aurora: already built, skipping`);
-        return true;
-      }
-
-      // Check if database already exists in AWS before attempting to create
-      // This handles both: status is BUILT/READY but cname missing, OR first-time deploy
-      const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
-      if (existingDbEndpoint) {
-        getLogger().info(`Aurora: exists, skipping`);
-        await deploy.$query().patch({
-          cname: existingDbEndpoint,
-          status: DeployStatus.BUILT,
-        });
-        return true;
-      }
-
-      const uuid = nanoid();
-      await deploy.$query().patch({
-        status: DeployStatus.BUILDING,
-        buildLogs: uuid,
-        runUUID: nanoid(),
-      });
-      getLogger().info('Aurora: restoring');
-      await cli.cliDeploy(deploy);
-
-      // After creation, find the database endpoint
-      const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
-      if (dbEndpoint) {
-        await deploy.$query().patch({
-          cname: dbEndpoint,
-        });
-      }
-
-      await deploy.reload();
-      if (deploy.buildLogs === uuid) {
-        await deploy.$query().patch({
-          status: DeployStatus.BUILT,
-        });
-      }
-      getLogger().info('Aurora: restored');
-      return true;
-    } catch (e) {
-      getLogger().error({ error: e }, 'Aurora cluster restore failed');
-      await deploy.$query().patch({
-        status: DeployStatus.ERROR,
-      });
-      return false;
-    }
+    );
   }
 
   async deployCodefresh(deploy: Deploy): Promise<boolean> {
-    updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name });
-    let result: boolean = false;
+    return withLogContext(
+      { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+      async () => {
+        let result: boolean = false;
 
-    // We'll use either a tag specified in the UI when creating a manual build
-    // or the default tag specified on the service
-    const runUUID = nanoid();
-    await deploy.$query().patch({
-      runUUID,
-    });
+        const runUUID = nanoid();
+        await deploy.$query().patch({
+          runUUID,
+        });
 
-    // For now, we're just going to shell out and run the deploy
-    await deploy.reload();
-    await deploy.$fetchGraph('[service.[repository], deployable.[repository], build]');
-    const { build, service, deployable } = deploy;
-    updateLogContext({ serviceName: deployable?.name || service?.name });
-    const { repository } = build.enableFullYaml ? deployable : service;
-    const repo = repository?.fullName;
-    const [owner, name] = repo?.split('/') || [];
-    const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name).catch((error) => {
-      getLogger().warn({ error, owner, name, branch: deploy.branchName }, 'Failed to retrieve commit SHA from github');
-    });
-
-    if (!fullSha) {
-      getLogger().warn({ owner, name, branch: deploy.branchName }, 'Commit SHA cannot be falsy');
-
-      result = false;
-    } else {
-      const shortSha = fullSha.substring(0, 7);
-      const envSha = hash(merge(deploy.env || {}, build.commentRuntimeEnv));
-      const buildSha = `${shortSha}-${envSha}`;
-
-      // If the SHA's are the same, nothing need to do and considered as done.
-      if (deploy?.sha === buildSha) {
-        // Make sure we're in a clean state
-        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT, sha: buildSha }, runUUID).catch(
-          (error) => {
-            getLogger().warn({ error }, 'Failed to update activity feed');
-          }
-        );
-        getLogger().info('Codefresh: no changes, marked built');
-        result = true;
-      } else {
-        let buildLogs: string;
-        let codefreshBuildId: string;
-        try {
-          await deploy.$query().patch({
-            buildLogs: null,
-            buildPipelineId: null,
-            buildOutput: null,
-            deployPipelineId: null,
-            deployOutput: null,
-          });
-
-          codefreshBuildId = await cli.codefreshDeploy(deploy, build, service, deployable).catch((error) => {
-            getLogger().error({ error }, 'Failed to receive codefresh build id');
-            return null;
-          });
-          getLogger().info('Codefresh: build triggered');
-          if (codefreshBuildId != null) {
-            buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
-
-            await this.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                buildLogs,
-                status: DeployStatus.BUILDING,
-                buildPipelineId: codefreshBuildId,
-                statusMessage: 'CI build triggered...',
-              },
-              runUUID
-            ).catch((error) => {
-              getLogger().warn({ error }, 'Failed to update activity feed');
-            });
-            getLogger().info(`Codefresh: waiting for build url=${buildLogs}`);
-            await cli.waitForCodefresh(codefreshBuildId);
-            const buildOutput = await getLogs(codefreshBuildId);
-            getLogger().info('Codefresh: build completed');
-            await this.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                status: DeployStatus.BUILT,
-                sha: buildSha,
-                buildOutput,
-                statusMessage: 'CI build completed',
-              },
-              runUUID
-            ).catch((error) => {
-              getLogger().warn({ error }, 'Failed to update activity feed');
-            });
-            result = true;
-          }
-        } catch (error) {
-          // Error'd while waiting for the pipeline to finish. This is usually due to an actual
-          // pipeline failure or a pipeline getting terminated.
-          getLogger().error({ error, url: buildLogs }, 'Codefresh build failed');
-          await this.patchAndUpdateActivityFeed(
-            deploy,
-            {
-              status: DeployStatus.ERROR,
-              sha: buildSha,
-              statusMessage: 'CI build failed',
-            },
-            runUUID
+        await deploy.reload();
+        await deploy.$fetchGraph('[service.[repository], deployable.[repository], build]');
+        const { build, service, deployable } = deploy;
+        const { repository } = build.enableFullYaml ? deployable : service;
+        const repo = repository?.fullName;
+        const [owner, name] = repo?.split('/') || [];
+        const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name).catch((error) => {
+          getLogger().warn(
+            { error, owner, name, branch: deploy.branchName },
+            'Failed to retrieve commit SHA from github'
           );
-          result = false;
-        }
-      }
-    }
+        });
 
-    return result;
+        if (!fullSha) {
+          getLogger().warn({ owner, name, branch: deploy.branchName }, 'Commit SHA cannot be falsy');
+
+          result = false;
+        } else {
+          const shortSha = fullSha.substring(0, 7);
+          const envSha = hash(merge(deploy.env || {}, build.commentRuntimeEnv));
+          const buildSha = `${shortSha}-${envSha}`;
+
+          if (deploy?.sha === buildSha) {
+            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT, sha: buildSha }, runUUID).catch(
+              (error) => {
+                getLogger().warn({ error }, 'Failed to update activity feed');
+              }
+            );
+            getLogger().info('Codefresh: no changes, marked built');
+            result = true;
+          } else {
+            let buildLogs: string;
+            let codefreshBuildId: string;
+            try {
+              await deploy.$query().patch({
+                buildLogs: null,
+                buildPipelineId: null,
+                buildOutput: null,
+                deployPipelineId: null,
+                deployOutput: null,
+              });
+
+              codefreshBuildId = await cli.codefreshDeploy(deploy, build, service, deployable).catch((error) => {
+                getLogger().error({ error }, 'Failed to receive codefresh build id');
+                return null;
+              });
+              getLogger().info('Codefresh: build triggered');
+              if (codefreshBuildId != null) {
+                buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
+
+                await this.patchAndUpdateActivityFeed(
+                  deploy,
+                  {
+                    buildLogs,
+                    status: DeployStatus.BUILDING,
+                    buildPipelineId: codefreshBuildId,
+                    statusMessage: 'CI build triggered...',
+                  },
+                  runUUID
+                ).catch((error) => {
+                  getLogger().warn({ error }, 'Failed to update activity feed');
+                });
+                getLogger().info(`Codefresh: waiting for build url=${buildLogs}`);
+                await cli.waitForCodefresh(codefreshBuildId);
+                const buildOutput = await getLogs(codefreshBuildId);
+                getLogger().info('Codefresh: build completed');
+                await this.patchAndUpdateActivityFeed(
+                  deploy,
+                  {
+                    status: DeployStatus.BUILT,
+                    sha: buildSha,
+                    buildOutput,
+                    statusMessage: 'CI build completed',
+                  },
+                  runUUID
+                ).catch((error) => {
+                  getLogger().warn({ error }, 'Failed to update activity feed');
+                });
+                result = true;
+              }
+            } catch (error) {
+              getLogger().error({ error, url: buildLogs }, 'Codefresh build failed');
+              await this.patchAndUpdateActivityFeed(
+                deploy,
+                {
+                  status: DeployStatus.ERROR,
+                  sha: buildSha,
+                  statusMessage: 'CI build failed',
+                },
+                runUUID
+              );
+              result = false;
+            }
+          }
+        }
+
+        return result;
+      }
+    );
   }
 
   async deployCLI(deploy: Deploy): Promise<boolean> {
@@ -574,227 +565,231 @@ export default class DeployService extends BaseService {
    * @param deploy the deploy to build an image for
    */
   async buildImage(deploy: Deploy, enableFullYaml: boolean, index: number): Promise<boolean> {
-    updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name });
-    try {
-      // We'll use either a tag specified in the UI when creating a manual build
-      // or the default tag specified on the service
-      const runUUID = deploy.runUUID ?? nanoid();
-      await deploy.$query().patch({
-        runUUID,
-      });
+    return withLogContext(
+      { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+      async () => {
+        try {
+          const runUUID = deploy.runUUID ?? nanoid();
+          await deploy.$query().patch({
+            runUUID,
+          });
 
-      await deploy.$fetchGraph('[service, build.[environment], deployable]');
-      const { service, build, deployable } = deploy;
-      updateLogContext({ serviceName: deployable?.name || service?.name });
-      const uuid = build?.uuid;
+          await deploy.$fetchGraph('[service, build.[environment], deployable]');
+          const { service, build, deployable } = deploy;
+          const uuid = build?.uuid;
 
-      if (!enableFullYaml) {
-        await service.$fetchGraph('repository');
-        let config: YamlService.LifecycleConfig;
-        const isClassicModeOnly = build?.environment?.classicModeOnly ?? false;
-        if (!isClassicModeOnly) {
-          config = await YamlService.fetchLifecycleConfigByRepository(service.repository, deploy.branchName);
-        }
-
-        // Docker types are already built - next
-        if (service.type === DeployTypes.DOCKER) {
-          await this.patchAndUpdateActivityFeed(
-            deploy,
-            {
-              status: DeployStatus.BUILT,
-              dockerImage: `${service.dockerImage}:${deploy.tag}`,
-            },
-            runUUID
-          );
-          return true;
-        } else if (service.type === DeployTypes.GITHUB) {
-          if (deploy.branchName === null) {
-            // This means we're using an external host, rather than building from source.
-            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.READY }, runUUID);
-          } else {
-            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.CLONING }, runUUID);
-
-            await build?.$fetchGraph('pullRequest.[repository]');
-            const pullRequest = build?.pullRequest;
-            const author = pullRequest?.githubLogin;
-            const enabledFeatures = build?.enabledFeatures || [];
-            const repository = service?.repository;
-            const repo = repository?.fullName;
-            const [owner, name] = repo?.split('/') || [];
-            const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
-
-            let repositoryName: string = service.repository.fullName;
-            let branchName: string = deploy.branchName;
-            let dockerfilePath: string = service.dockerfilePath || './Dockerfile';
-            let initDockerfilePath: string = service.initDockerfilePath;
-
-            let githubService: YamlService.GithubService;
-            // TODO This should be updated!
-            if (config != null && config.version === '0.0.3-alpha-1') {
-              const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(config, service.name);
-              if (yamlService != null) {
-                githubService = yamlService as YamlService.GithubService;
-
-                repositoryName = githubService.github.repository;
-                branchName = githubService.github.branchName;
-                dockerfilePath = githubService.github.docker.app.dockerfilePath;
-
-                if (githubService.github.docker.init != null) {
-                  initDockerfilePath = githubService.github.docker.init.dockerfilePath;
-                }
-              }
+          if (!enableFullYaml) {
+            await service.$fetchGraph('repository');
+            let config: YamlService.LifecycleConfig;
+            const isClassicModeOnly = build?.environment?.classicModeOnly ?? false;
+            if (!isClassicModeOnly) {
+              config = await YamlService.fetchLifecycleConfigByRepository(service.repository, deploy.branchName);
             }
 
-            // Verify we actually have a SHA from github before proceeding
-            if (!fullSha) {
-              // We were unable to retrieve this branch/repo combo
-              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-              return false;
-            }
-
-            const shortSha = fullSha.substring(0, 7);
-
-            getLogger().debug({ serviceName: service.name, branchName: deploy.branchName }, 'Building docker image');
-            await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILDING, sha: fullSha }, runUUID);
-            /**
-             * @note { svc: index } ensures the hash for each image is unique per service
-             */
-            const envVariables = merge(deploy.env || {}, deploy.build.commentRuntimeEnv, { svc: index });
-            const envVarsHash = hash(envVariables);
-            const buildPipelineName = deployable?.dockerBuildPipelineName;
-            const tag = generateDeployTag({ sha: shortSha, envVarsHash });
-            const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
-            let ecrRepo = deployable?.ecr;
-
-            const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
-            const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
-
-            const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
-            ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
-
-            const tagsExist =
-              (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
-              (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
-
-            getLogger().debug({ tagsExist }, 'Tags exist check');
-            const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
-            if (!ecrDomain || !registry) {
-              getLogger().error({ lifecycleDefaults }, 'Missing ECR config to build image');
-              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-              return false;
-            }
-            if (!tagsExist) {
-              await deploy.$query().patchAndFetch({
-                buildOutput: null,
-                buildLogs: null,
-                buildPipelineId: null,
-              });
-
-              const codefreshBuildId = await codefresh.buildImage({
-                ecrRepo,
-                envVars: envVariables,
-                dockerfilePath,
-                gitOrg,
-                tag,
-                revision: fullSha,
-                repo: repositoryName,
-                branch: branchName,
-                initDockerfilePath,
-                cacheFrom: deploy.dockerImage,
-                afterBuildPipelineId: service.afterBuildPipelineId,
-                detatchAfterBuildPipeline: service.detatchAfterBuildPipeline,
-                runtimeName: service.runtimeName,
-                buildPipelineName,
-                deploy,
-                uuid,
-                initTag,
-                author,
-                enabledFeatures,
-                ecrDomain,
-                deployCluster: lifecycleDefaults.deployCluster,
-              });
-              const buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
-              await this.patchAndUpdateActivityFeed(deploy, { buildLogs }, runUUID);
-              const buildSuccess = await codefresh.waitForImage(codefreshBuildId);
-              if (buildSuccess) {
-                await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-                return true;
-              } else {
-                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-                return false;
-              }
-            } else {
-              await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
-              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT }, runUUID);
-              return true;
-            }
-          }
-        } else {
-          getLogger().debug({ type: service.type }, 'Build type not recognized');
-          return false;
-        }
-        return true;
-      } else {
-        switch (deployable.type) {
-          case DeployTypes.GITHUB:
-            return this.buildImageForHelmAndGithub(deploy, runUUID);
-          case DeployTypes.DOCKER:
-            await this.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                status: DeployStatus.BUILT,
-                dockerImage: `${deployable.dockerImage}:${deploy.tag}`,
-              },
-              runUUID
-            );
-            getLogger().info('Image: public, marked built');
-            return true;
-          case DeployTypes.HELM: {
-            try {
-              const chartType = await determineChartType(deploy);
-
-              if (chartType !== ChartType.PUBLIC) {
-                return this.buildImageForHelmAndGithub(deploy, runUUID);
-              }
-
-              let fullSha = null;
-
-              await deploy.$fetchGraph('deployable.repository');
-              if (deploy.deployable?.repository) {
-                try {
-                  fullSha = await github.getShaForDeploy(deploy);
-                } catch (shaError) {
-                  getLogger().debug(
-                    { error: shaError },
-                    'Could not get SHA for PUBLIC helm chart, continuing without it'
-                  );
-                }
-              }
-
+            // Docker types are already built - next
+            if (service.type === DeployTypes.DOCKER) {
               await this.patchAndUpdateActivityFeed(
                 deploy,
                 {
                   status: DeployStatus.BUILT,
-                  statusMessage: 'Helm chart does not need to be built',
-                  ...(fullSha && { sha: fullSha }),
+                  dockerImage: `${service.dockerImage}:${deploy.tag}`,
                 },
                 runUUID
               );
               return true;
-            } catch (error) {
-              getLogger().warn({ error }, 'Error processing Helm deployment');
+            } else if (service.type === DeployTypes.GITHUB) {
+              if (deploy.branchName === null) {
+                // This means we're using an external host, rather than building from source.
+                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.READY }, runUUID);
+              } else {
+                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.CLONING }, runUUID);
+
+                await build?.$fetchGraph('pullRequest.[repository]');
+                const pullRequest = build?.pullRequest;
+                const author = pullRequest?.githubLogin;
+                const enabledFeatures = build?.enabledFeatures || [];
+                const repository = service?.repository;
+                const repo = repository?.fullName;
+                const [owner, name] = repo?.split('/') || [];
+                const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
+
+                let repositoryName: string = service.repository.fullName;
+                let branchName: string = deploy.branchName;
+                let dockerfilePath: string = service.dockerfilePath || './Dockerfile';
+                let initDockerfilePath: string = service.initDockerfilePath;
+
+                let githubService: YamlService.GithubService;
+                // TODO This should be updated!
+                if (config != null && config.version === '0.0.3-alpha-1') {
+                  const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(config, service.name);
+                  if (yamlService != null) {
+                    githubService = yamlService as YamlService.GithubService;
+
+                    repositoryName = githubService.github.repository;
+                    branchName = githubService.github.branchName;
+                    dockerfilePath = githubService.github.docker.app.dockerfilePath;
+
+                    if (githubService.github.docker.init != null) {
+                      initDockerfilePath = githubService.github.docker.init.dockerfilePath;
+                    }
+                  }
+                }
+
+                // Verify we actually have a SHA from github before proceeding
+                if (!fullSha) {
+                  // We were unable to retrieve this branch/repo combo
+                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
+                  return false;
+                }
+
+                const shortSha = fullSha.substring(0, 7);
+
+                getLogger().debug(
+                  { serviceName: service.name, branchName: deploy.branchName },
+                  'Building docker image'
+                );
+                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILDING, sha: fullSha }, runUUID);
+                /**
+                 * @note { svc: index } ensures the hash for each image is unique per service
+                 */
+                const envVariables = merge(deploy.env || {}, deploy.build.commentRuntimeEnv, { svc: index });
+                const envVarsHash = hash(envVariables);
+                const buildPipelineName = deployable?.dockerBuildPipelineName;
+                const tag = generateDeployTag({ sha: shortSha, envVarsHash });
+                const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
+                let ecrRepo = deployable?.ecr;
+
+                const { lifecycleDefaults, app_setup } = await GlobalConfigService.getInstance().getAllConfigs();
+                const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
+
+                const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
+                ecrRepo = constructEcrRepoPath(deployable?.ecr, serviceName, ecrDomain);
+
+                const tagsExist =
+                  (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
+                  (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
+
+                getLogger().debug({ tagsExist }, 'Tags exist check');
+                const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
+                if (!ecrDomain || !registry) {
+                  getLogger().error({ lifecycleDefaults }, 'Missing ECR config to build image');
+                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
+                  return false;
+                }
+                if (!tagsExist) {
+                  await deploy.$query().patchAndFetch({
+                    buildOutput: null,
+                    buildLogs: null,
+                    buildPipelineId: null,
+                  });
+
+                  const codefreshBuildId = await codefresh.buildImage({
+                    ecrRepo,
+                    envVars: envVariables,
+                    dockerfilePath,
+                    gitOrg,
+                    tag,
+                    revision: fullSha,
+                    repo: repositoryName,
+                    branch: branchName,
+                    initDockerfilePath,
+                    cacheFrom: deploy.dockerImage,
+                    afterBuildPipelineId: service.afterBuildPipelineId,
+                    detatchAfterBuildPipeline: service.detatchAfterBuildPipeline,
+                    runtimeName: service.runtimeName,
+                    buildPipelineName,
+                    deploy,
+                    uuid,
+                    initTag,
+                    author,
+                    enabledFeatures,
+                    ecrDomain,
+                    deployCluster: lifecycleDefaults.deployCluster,
+                  });
+                  const buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
+                  await this.patchAndUpdateActivityFeed(deploy, { buildLogs }, runUUID);
+                  const buildSuccess = await codefresh.waitForImage(codefreshBuildId);
+                  if (buildSuccess) {
+                    await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+                    return true;
+                  } else {
+                    await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+                    return false;
+                  }
+                } else {
+                  await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT }, runUUID);
+                  return true;
+                }
+              }
+            } else {
+              getLogger().debug({ type: service.type }, 'Build type not recognized');
               return false;
             }
+            return true;
+          } else {
+            switch (deployable.type) {
+              case DeployTypes.GITHUB:
+                return this.buildImageForHelmAndGithub(deploy, runUUID);
+              case DeployTypes.DOCKER:
+                await this.patchAndUpdateActivityFeed(
+                  deploy,
+                  {
+                    status: DeployStatus.BUILT,
+                    dockerImage: `${deployable.dockerImage}:${deploy.tag}`,
+                  },
+                  runUUID
+                );
+                getLogger().info('Image: public, marked built');
+                return true;
+              case DeployTypes.HELM: {
+                try {
+                  const chartType = await determineChartType(deploy);
+
+                  if (chartType !== ChartType.PUBLIC) {
+                    return this.buildImageForHelmAndGithub(deploy, runUUID);
+                  }
+
+                  let fullSha = null;
+
+                  await deploy.$fetchGraph('deployable.repository');
+                  if (deploy.deployable?.repository) {
+                    try {
+                      fullSha = await github.getShaForDeploy(deploy);
+                    } catch (shaError) {
+                      getLogger().debug(
+                        { error: shaError },
+                        'Could not get SHA for PUBLIC helm chart, continuing without it'
+                      );
+                    }
+                  }
+
+                  await this.patchAndUpdateActivityFeed(
+                    deploy,
+                    {
+                      status: DeployStatus.BUILT,
+                      statusMessage: 'Helm chart does not need to be built',
+                      ...(fullSha && { sha: fullSha }),
+                    },
+                    runUUID
+                  );
+                  return true;
+                } catch (error) {
+                  getLogger().warn({ error }, 'Error processing Helm deployment');
+                  return false;
+                }
+              }
+              default:
+                getLogger().debug({ type: deployable.type }, 'Build type not recognized');
+                return false;
+            }
           }
-          default:
-            getLogger().debug({ type: deployable.type }, 'Build type not recognized');
-            return false;
+        } catch (e) {
+          getLogger().error({ error: e }, 'Uncaught error building docker image');
+          return false;
         }
       }
-    } catch (e) {
-      getLogger().error({ error: e }, 'Uncaught error building docker image');
-      return false;
-    }
+    );
   }
 
   public async patchAndUpdateActivityFeed(

@@ -18,7 +18,7 @@ import { merge } from 'lodash';
 import { Build, Deploy, Service, Deployable } from 'server/models';
 import { CLIDeployTypes, DeployTypes } from 'shared/constants';
 import { shellPromise } from './shell';
-import { getLogger } from './logger/index';
+import { getLogger, withLogContext } from './logger/index';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DatabaseSettings } from 'server/services/types/globalConfig';
 
@@ -36,7 +36,10 @@ export async function deployBuild(build: Build) {
         return CLIDeployTypes.has(serviceType);
       })
       .map(async (deploy) => {
-        return await cliDeploy(deploy);
+        return withLogContext(
+          { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+          async () => cliDeploy(deploy)
+        );
       })
   );
 }
@@ -184,9 +187,14 @@ export async function deleteBuild(build: Build) {
           return CLIDeployTypes.has(serviceType) && d.active;
         })
         .map(async (deploy) => {
-          const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
-          getLogger({ buildUuid }).info('Deleting CLI deploy');
-          return serviceType === DeployTypes.CODEFRESH ? codefreshDestroy(deploy) : deleteDeploy(deploy);
+          return withLogContext(
+            { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+            async () => {
+              const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
+              getLogger().info('Deleting CLI deploy');
+              return serviceType === DeployTypes.CODEFRESH ? codefreshDestroy(deploy) : deleteDeploy(deploy);
+            }
+          );
         })
     );
     getLogger({ buildUuid }).info('Deleted CLI resources');

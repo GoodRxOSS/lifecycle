@@ -18,7 +18,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
-import { getLogger, withSpan, updateLogContext } from 'server/lib/logger/index';
+import { getLogger, withSpan, withLogContext } from 'server/lib/logger/index';
 import { shellPromise } from 'server/lib/shell';
 import { randomAlphanumeric } from 'server/lib/random';
 import { nanoid } from 'nanoid';
@@ -357,62 +357,63 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
 
   await Promise.all(
     deploys.map(async (deploy) => {
-      return withSpan(
-        'lifecycle.helm.deploy',
-        async () => {
-          updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name });
-          const startTime = Date.now();
-          const runUUID = deploy.runUUID ?? nanoid();
-          const deployService = new DeployService();
+      return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
+        return withSpan(
+          'lifecycle.helm.deploy',
+          async () => {
+            const startTime = Date.now();
+            const runUUID = deploy.runUUID ?? nanoid();
+            const deployService = new DeployService();
 
-          try {
-            const useNative = await shouldUseNativeHelm(deploy);
-            const method = useNative ? 'Native Helm' : 'Codefresh Helm';
+            try {
+              const useNative = await shouldUseNativeHelm(deploy);
+              const method = useNative ? 'Native Helm' : 'Codefresh Helm';
 
-            getLogger().debug(`Using ${method}`);
+              getLogger().debug(`Using ${method}`);
 
-            await deployService.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                status: DeployStatus.DEPLOYING,
-                statusMessage: `Deploying via ${method}`,
-              },
-              runUUID
-            );
+              await deployService.patchAndUpdateActivityFeed(
+                deploy,
+                {
+                  status: DeployStatus.DEPLOYING,
+                  statusMessage: `Deploying via ${method}`,
+                },
+                runUUID
+              );
 
-            if (useNative) {
-              await deployNativeHelm(deploy);
-            } else {
-              await deployCodefreshHelm(deploy, deployService, runUUID);
+              if (useNative) {
+                await deployNativeHelm(deploy);
+              } else {
+                await deployCodefreshHelm(deploy, deployService, runUUID);
+              }
+
+              await deployService.patchAndUpdateActivityFeed(
+                deploy,
+                {
+                  status: DeployStatus.READY,
+                  statusMessage: `Successfully deployed via ${method}`,
+                },
+                runUUID
+              );
+
+              await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
+            } catch (error) {
+              await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, error.message);
+
+              await deployService.patchAndUpdateActivityFeed(
+                deploy,
+                {
+                  status: DeployStatus.DEPLOY_FAILED,
+                  statusMessage: `Helm deployment failed: ${error.message}`,
+                },
+                runUUID
+              );
+
+              throw error;
             }
-
-            await deployService.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                status: DeployStatus.READY,
-                statusMessage: `Successfully deployed via ${method}`,
-              },
-              runUUID
-            );
-
-            await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
-          } catch (error) {
-            await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, error.message);
-
-            await deployService.patchAndUpdateActivityFeed(
-              deploy,
-              {
-                status: DeployStatus.DEPLOY_FAILED,
-                statusMessage: `Helm deployment failed: ${error.message}`,
-              },
-              runUUID
-            );
-
-            throw error;
-          }
-        },
-        { resource: deploy.uuid, tags: { 'deploy.uuid': deploy.uuid } }
-      );
+          },
+          { resource: deploy.uuid, tags: { 'deploy.uuid': deploy.uuid } }
+        );
+      });
     })
   );
 }

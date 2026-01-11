@@ -1145,29 +1145,34 @@ export default class ActivityStream extends BaseService {
     try {
       await Promise.all(
         deploys.map(async (deploy) => {
-          const deployId = deploy?.id;
-          const service = deploy?.service;
-          const deployable = deploy?.deployable;
-          const isActive = deploy?.active;
-          const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
-          const isPublic = isFullYaml ? deployable.public || isOrgHelmChart : service.public;
-          const serviceType = isFullYaml ? deployable?.type : service?.type;
-          const isActiveAndPublic = isActive && isPublic;
-          const isDeploymentType = [DeployTypes.DOCKER, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(
-            serviceType
+          return withLogContext(
+            { deployUuid: deploy?.uuid, serviceName: deploy?.deployable?.name || deploy?.service?.name },
+            async () => {
+              const deployId = deploy?.id;
+              const service = deploy?.service;
+              const deployable = deploy?.deployable;
+              const isActive = deploy?.active;
+              const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
+              const isPublic = isFullYaml ? deployable.public || isOrgHelmChart : service.public;
+              const serviceType = isFullYaml ? deployable?.type : service?.type;
+              const isActiveAndPublic = isActive && isPublic;
+              const isDeploymentType = [DeployTypes.DOCKER, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(
+                serviceType
+              );
+              const isDeployment = isActiveAndPublic && isDeploymentType;
+              if (!isDeployment) {
+                getLogger().debug(`Skipping deployment ${deploy?.name}`);
+                return;
+              }
+              await this.db.services.GithubService.githubDeploymentQueue
+                .add(
+                  'deployment',
+                  { deployId, action: 'create', ...extractContextForQueue() },
+                  { delay: 10000, jobId: `deploy-${deployId}` }
+                )
+                .catch((error) => getLogger().warn({ error }, `manageDeployments error with deployId=${deployId}`));
+            }
           );
-          const isDeployment = isActiveAndPublic && isDeploymentType;
-          if (!isDeployment) {
-            getLogger().debug(`Skipping deployment ${deploy?.name}`);
-            return;
-          }
-          await this.db.services.GithubService.githubDeploymentQueue
-            .add(
-              'deployment',
-              { deployId, action: 'create', ...extractContextForQueue() },
-              { delay: 10000, jobId: `deploy-${deployId}` }
-            )
-            .catch((error) => getLogger().warn({ error }, `manageDeployments error with deployId=${deployId}`));
         })
       );
     } catch (error) {

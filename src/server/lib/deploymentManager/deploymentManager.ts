@@ -20,7 +20,7 @@ import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
 import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
-import { getLogger, updateLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { waitForDeployPodReady } from '../kubernetes';
 
@@ -134,77 +134,78 @@ export class DeploymentManager {
   }
 
   private async deployManifests(deploy: Deploy): Promise<void> {
-    updateLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name });
-    const jobId = generateJobId();
-    const deployService = new DeployService();
-    const runUUID = deploy.runUUID || nanoid();
+    return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
+      const jobId = generateJobId();
+      const deployService = new DeployService();
+      const runUUID = deploy.runUUID || nanoid();
 
-    try {
-      await deployService.patchAndUpdateActivityFeed(
-        deploy,
-        {
-          status: DeployStatus.DEPLOYING,
-          statusMessage: 'Creating Kubernetes apply job',
-        },
-        runUUID
-      );
-
-      await deploy.$fetchGraph('[build, deployable, service]');
-
-      if (!deploy.manifest) {
-        throw new Error(`Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`);
-      }
-
-      await ensureServiceAccountForJob(deploy.build.namespace, 'deploy');
-
-      await createKubernetesApplyJob({
-        deploy,
-        namespace: deploy.build.namespace,
-        jobId,
-      });
-
-      const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
-      const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`;
-      const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
-
-      if (!result.success) {
-        throw new Error(result.message);
-      }
-      // Wait for the actual application pods to be ready
-      await deployService.patchAndUpdateActivityFeed(
-        deploy,
-        {
-          status: DeployStatus.DEPLOYING,
-          statusMessage: 'Waiting for pods to be ready',
-        },
-        runUUID
-      );
-
-      const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
-      const isReady = cliDeploy ? true : await waitForDeployPodReady(deploy);
-
-      if (isReady) {
+      try {
         await deployService.patchAndUpdateActivityFeed(
           deploy,
           {
-            status: DeployStatus.READY,
-            statusMessage: cliDeploy ? 'CLI Deploy completed' : 'Kubernetes pods are ready',
+            status: DeployStatus.DEPLOYING,
+            statusMessage: 'Creating Kubernetes apply job',
           },
           runUUID
         );
-      } else {
-        throw new Error('Pods failed to become ready within timeout');
+
+        await deploy.$fetchGraph('[build, deployable, service]');
+
+        if (!deploy.manifest) {
+          throw new Error(`Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`);
+        }
+
+        await ensureServiceAccountForJob(deploy.build.namespace, 'deploy');
+
+        await createKubernetesApplyJob({
+          deploy,
+          namespace: deploy.build.namespace,
+          jobId,
+        });
+
+        const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
+        const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`;
+        const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
+
+        if (!result.success) {
+          throw new Error(result.message);
+        }
+
+        await deployService.patchAndUpdateActivityFeed(
+          deploy,
+          {
+            status: DeployStatus.DEPLOYING,
+            statusMessage: 'Waiting for pods to be ready',
+          },
+          runUUID
+        );
+
+        const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
+        const isReady = cliDeploy ? true : await waitForDeployPodReady(deploy);
+
+        if (isReady) {
+          await deployService.patchAndUpdateActivityFeed(
+            deploy,
+            {
+              status: DeployStatus.READY,
+              statusMessage: cliDeploy ? 'CLI Deploy completed' : 'Kubernetes pods are ready',
+            },
+            runUUID
+          );
+        } else {
+          throw new Error('Pods failed to become ready within timeout');
+        }
+      } catch (error) {
+        await deployService.patchAndUpdateActivityFeed(
+          deploy,
+          {
+            status: DeployStatus.DEPLOY_FAILED,
+            statusMessage: `Kubernetes apply failed: ${error.message}`,
+          },
+          runUUID
+        );
+        throw error;
       }
-    } catch (error) {
-      await deployService.patchAndUpdateActivityFeed(
-        deploy,
-        {
-          status: DeployStatus.DEPLOY_FAILED,
-          statusMessage: `Kubernetes apply failed: ${error.message}`,
-        },
-        runUUID
-      );
-      throw error;
-    }
+    });
   }
 }

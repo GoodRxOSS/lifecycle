@@ -15,7 +15,7 @@
  */
 
 import { Deploy } from '../../models';
-import { getLogger, withSpan, updateLogContext } from '../logger/index';
+import { getLogger, withSpan, withLogContext } from '../logger/index';
 import { ensureNamespaceExists } from './utils';
 import { buildWithEngine, NativeBuildOptions } from './engines';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
@@ -29,51 +29,51 @@ export interface NativeBuildResult {
 }
 
 export async function buildWithNative(deploy: Deploy, options: NativeBuildOptions): Promise<NativeBuildResult> {
-  return withSpan(
-    'lifecycle.build.image',
-    async () => {
-      updateLogContext({ deployUuid: options.deployUuid, serviceName: deploy.deployable?.name });
-      const startTime = Date.now();
-      getLogger().info('Build: starting (native)');
+  return withLogContext({ deployUuid: options.deployUuid, serviceName: deploy.deployable?.name }, async () => {
+    return withSpan(
+      'lifecycle.build.image',
+      async () => {
+        const startTime = Date.now();
+        getLogger().info('Build: starting (native)');
 
-      try {
-        await ensureNamespaceExists(options.namespace);
+        try {
+          await ensureNamespaceExists(options.namespace);
 
-        const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
+          const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
 
-        const buildOptions = {
-          ...options,
-          serviceAccount: serviceAccountName,
-        };
+          const buildOptions = {
+            ...options,
+            serviceAccount: serviceAccountName,
+          };
 
-        await deploy.$fetchGraph('[deployable]');
-        updateLogContext({ serviceName: deploy.deployable?.name });
-        const builderEngine = deploy.deployable?.builder?.engine;
+          await deploy.$fetchGraph('[deployable]');
+          const builderEngine = deploy.deployable?.builder?.engine;
 
-        let result: NativeBuildResult;
+          let result: NativeBuildResult;
 
-        if (builderEngine === 'buildkit' || builderEngine === 'kaniko') {
-          getLogger().debug(`Build: using ${builderEngine} engine`);
-          result = await buildWithEngine(deploy, buildOptions, builderEngine);
-        } else {
-          throw new Error(`Unsupported builder engine: ${builderEngine}`);
+          if (builderEngine === 'buildkit' || builderEngine === 'kaniko') {
+            getLogger().debug(`Build: using ${builderEngine} engine`);
+            result = await buildWithEngine(deploy, buildOptions, builderEngine);
+          } else {
+            throw new Error(`Unsupported builder engine: ${builderEngine}`);
+          }
+
+          const duration = Date.now() - startTime;
+          getLogger().info(`Build: completed success=${result.success} duration=${duration}ms`);
+
+          return result;
+        } catch (error) {
+          const duration = Date.now() - startTime;
+          getLogger().error(`Build: failed error=${error.message} duration=${duration}ms`);
+
+          return {
+            success: false,
+            logs: `Build error: ${error.message}`,
+            jobName: '',
+          };
         }
-
-        const duration = Date.now() - startTime;
-        getLogger().info(`Build: completed success=${result.success} duration=${duration}ms`);
-
-        return result;
-      } catch (error) {
-        const duration = Date.now() - startTime;
-        getLogger().error(`Build: failed error=${error.message} duration=${duration}ms`);
-
-        return {
-          success: false,
-          logs: `Build error: ${error.message}`,
-          jobName: '',
-        };
-      }
-    },
-    { resource: options.deployUuid }
-  );
+      },
+      { resource: options.deployUuid }
+    );
+  });
 }
