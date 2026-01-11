@@ -120,6 +120,9 @@ export default class WebhookService extends BaseService {
       getLogger({ buildUuid: build.uuid }).info(`Running webhook: ${webhook.name}`);
       await this.runYamlConfigFileWebhookForBuild(webhook, build);
     }
+    getLogger({ stage: LogStage.WEBHOOK_COMPLETE, buildUuid: build.uuid }).info(
+      `Webhooks completed: count=${configFileWebhooks.length} status=${build.status}`
+    );
   }
 
   /**
@@ -274,7 +277,6 @@ export default class WebhookService extends BaseService {
 
       try {
         await this.db.services.Webhook.runWebhooksForBuild(build);
-        getLogger({ stage: LogStage.WEBHOOK_COMPLETE }).info('Webhooks invoked');
       } catch (e) {
         getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error({ error: e }, 'Failed to invoke the webhook');
       }
