@@ -159,7 +159,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       });
     } catch (error) {
       getLogger({ stage: LogStage.BUILD_FAILED }).error(
-        { error: error instanceof Error ? error.message : String(error) },
+        { error },
         `Unable to proceed with redeploy for services ${name} in build ${uuid}`
       );
       return res.status(500).json({ error: `Unable to proceed with redeploy for services ${name} in build ${uuid}.` });

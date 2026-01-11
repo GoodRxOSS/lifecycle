@@ -53,10 +53,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       getLogger({ stage: LogStage.WEBHOOK_QUEUED }).info('Webhook queued for processing');
       res.status(200).end();
     } catch (error) {
-      getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Webhook failure'
-      );
+      getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).error({ error }, 'Webhook failure');
       res.status(500).end();
     }
   });

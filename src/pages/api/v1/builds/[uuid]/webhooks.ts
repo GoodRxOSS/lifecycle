@@ -206,10 +206,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(405).json({ error: `${req.method} is not allowed.` });
     }
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `Error handling ${req.method} request`
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, `Error handling ${req.method} request`);
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
@@ -256,7 +253,7 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
       });
     } catch (error) {
       getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error(
-        { error: error instanceof Error ? error.message : String(error) },
+        { error },
         `Unable to proceed with webhook for build ${uuid}`
       );
       return res.status(500).json({ error: `Unable to proceed with triggering webhook for build ${uuid}.` });
@@ -297,10 +294,7 @@ async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
       },
     });
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Failed to retrieve webhooks'
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, 'Failed to retrieve webhooks');
     return res.status(500).json({ error: `Unable to retrieve webhooks for build ${uuid}.` });
   }
 }

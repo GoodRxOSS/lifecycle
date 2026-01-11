@@ -144,10 +144,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(pullRequest);
   } catch (error) {
-    getLogger().error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `Failed to fetch pull request: id=${parsedId}`
-    );
+    getLogger().error({ error }, `Failed to fetch pull request: id=${parsedId}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

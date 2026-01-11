@@ -56,10 +56,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(200).json({ models });
   } catch (error: any) {
-    getLogger().error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Failed to fetch available models'
-    );
+    getLogger().error({ error }, 'Failed to fetch available models');
     return res.status(500).json({ error: 'Failed to fetch available models' });
   }
 }

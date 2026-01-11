@@ -141,10 +141,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       namespacesUpdated: updatedDeploys,
     });
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Error in cleanup API'
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, 'Error in cleanup API');
     return res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };

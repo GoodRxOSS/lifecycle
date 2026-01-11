@@ -204,7 +204,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    getLogger({ error: error instanceof Error ? error.message : String(error) }).error('Failed to fetch builds');
+    getLogger({ error }).error('Failed to fetch builds');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

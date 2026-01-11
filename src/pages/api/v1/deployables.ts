@@ -159,9 +159,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(deployables);
   } catch (error) {
-    getLogger({ error: error instanceof Error ? error.message : String(error) }).error(
-      `Failed to fetch deployables: buildId=${parsedBuildId}`
-    );
+    getLogger({ error }).error(`Failed to fetch deployables: buildId=${parsedBuildId}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

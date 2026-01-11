@@ -107,10 +107,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       dependencyGraph: build.dependencyGraph,
     });
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Error fetching dependency graph'
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, 'Error fetching dependency graph');
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };

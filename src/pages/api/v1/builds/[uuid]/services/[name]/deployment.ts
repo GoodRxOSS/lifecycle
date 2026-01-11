@@ -280,10 +280,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     getLogger({ buildUuid: uuid }).warn(`No deployment details found: deployUuid=${deployUuid}`);
     return res.status(404).json({ error: 'Deployment not found' });
   } catch (error) {
-    getLogger({ buildUuid: uuid }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `Error getting deployment details: deployUuid=${deployUuid}`
-    );
+    getLogger({ buildUuid: uuid }).error({ error }, `Error getting deployment details: deployUuid=${deployUuid}`);
 
     if (error instanceof HttpError) {
       if (error.response?.statusCode === 404) {

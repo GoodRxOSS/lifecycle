@@ -65,10 +65,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await llmService.initialize();
       }
     } catch (error) {
-      getLogger({ buildUuid }).error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to initialize LLM service'
-      );
+      getLogger({ buildUuid }).error({ error }, 'Failed to initialize LLM service');
       res.write(
         `data: ${JSON.stringify({
           error: error.message,
@@ -89,10 +86,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       context = await aiAgentContextService.gatherFullContext(buildUuid);
     } catch (error) {
-      getLogger({ buildUuid }).error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Failed to gather context'
-      );
+      getLogger({ buildUuid }).error({ error }, 'Failed to gather context');
       res.write(
         `data: ${JSON.stringify({
           error: `Build not found: ${error.message}`,
@@ -187,10 +181,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     } catch (error: any) {
-      getLogger({ buildUuid }).error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'LLM query failed'
-      );
+      getLogger({ buildUuid }).error({ error }, 'LLM query failed');
 
       // Check if it's a rate limit error
       if (
@@ -235,10 +226,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.write(`data: ${JSON.stringify({ type: 'complete', totalInvestigationTimeMs })}\n\n`);
     res.end();
   } catch (error: any) {
-    getLogger().error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Unexpected error in AI agent chat'
-    );
+    getLogger().error({ error }, 'Unexpected error in AI agent chat');
     res.write(`data: ${JSON.stringify({ error: error?.message || 'Internal error' })}\n\n`);
     res.end();
   }

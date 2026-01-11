@@ -216,10 +216,7 @@ async function getJobEvents(jobName: string, namespace: string, buildUuid: strin
 
     return events;
   } catch (error) {
-    getLogger({ buildUuid }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `jobName=${jobName} Error fetching events`
-    );
+    getLogger({ buildUuid }).error({ error }, `jobName=${jobName} Error fetching events`);
     throw error;
   }
 }
@@ -250,10 +247,7 @@ const eventsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    logger.error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `jobName=${jobName} Error getting events`
-    );
+    logger.error({ error }, `jobName=${jobName} Error getting events`);
 
     if (error instanceof HttpError) {
       if (error.response?.statusCode === 404) {

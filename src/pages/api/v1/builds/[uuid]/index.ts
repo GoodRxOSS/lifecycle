@@ -54,10 +54,7 @@ async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json(build);
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      'Error fetching build'
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, 'Error fetching build');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }
@@ -109,10 +106,7 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
       },
     });
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error(
-      { error: error instanceof Error ? error.message : String(error) },
-      `Error updating UUID to newUuid=${newUuid}`
-    );
+    getLogger({ buildUuid: uuid as string }).error({ error }, `Error updating UUID to newUuid=${newUuid}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }
