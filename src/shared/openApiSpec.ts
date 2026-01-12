@@ -84,9 +84,168 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         // Resource-Specific Schemas
         // ===================================================================
 
-        // =================================================================
-        // Build Schemas
-        // =================================================================
+        /**
+         * @description Log streaming information for a build job.
+         */
+        LogStreamResponse: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['Active', 'Complete', 'Failed', 'NotFound', 'Pending'] },
+            streamingRequired: { type: 'boolean' },
+            podName: { type: 'string', nullable: true },
+            websocket: { $ref: '#/components/schemas/WebSocketInfo' },
+            containers: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  state: { type: 'string' },
+                },
+                required: ['name', 'state'],
+              },
+            },
+            message: { type: 'string' },
+            error: { type: 'string' },
+          },
+          required: ['status', 'streamingRequired', 'podName', 'websocket', 'containers', 'message', 'error'],
+        },
+
+        /**
+         * @description WebSocket connection information for log streaming.
+         */
+        WebSocketInfo: {
+          type: 'object',
+          properties: {
+            endpoint: { type: 'string', example: '/api/logs/stream' },
+            parameters: {
+              type: 'object',
+              properties: {
+                podName: { type: 'string' },
+                namespace: { type: 'string' },
+                follow: { type: 'boolean' },
+                timestamps: { type: 'boolean' },
+                container: { type: 'string' },
+              },
+              required: ['podName', 'namespace', 'follow', 'timestamps'],
+            },
+          },
+          required: ['endpoint', 'parameters'],
+        },
+
+        /**
+         * @description Log streaming information for a build job.
+         */
+        LogStreamSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/LogStreamResponse' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description Enum for build engines used by native builds.
+         */
+        NativeBuildEngine: {
+          type: 'string',
+          enum: ['buildkit', 'kaniko', 'unknown'],
+        },
+
+        /**
+         * @description Enum for native build job statuses.
+         * Keep in sync with what your API actually returns.
+         */
+        NativeBuildJobStatus: {
+          type: 'string',
+          enum: ['Active', 'Complete', 'Failed', 'Pending'],
+        },
+
+        /**
+         * @description A single native build job record for a service within a build.
+         */
+        NativeBuildJobInfo: {
+          type: 'object',
+          properties: {
+            jobName: {
+              type: 'string',
+              description: 'Kubernetes job name',
+              example: 'build-api-abc123-1234567890',
+            },
+            buildUuid: {
+              type: 'string',
+              description: 'Deploy/build UUID',
+              example: 'api-abc123',
+            },
+            sha: {
+              type: 'string',
+              description: 'Git commit SHA',
+              example: 'a1b2c3d4e5f6',
+            },
+            status: {
+              $ref: '#/components/schemas/NativeBuildJobStatus',
+            },
+            startedAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'When the job started',
+            },
+            completedAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'When the job completed',
+            },
+            duration: {
+              type: 'number',
+              description: 'Build duration in seconds',
+            },
+            engine: {
+              $ref: '#/components/schemas/NativeBuildEngine',
+            },
+            podName: {
+              type: 'string',
+              description: 'Kubernetes pod name associated with the build job',
+              example: 'build-api-abc123-1234567890-pod',
+            },
+            error: {
+              type: 'string',
+              description: 'Error message if the build job failed',
+              example: 'Job failed due to ...',
+            },
+          },
+          required: ['jobName', 'buildUuid', 'sha', 'status', 'engine'],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/services/{name}/build-jobs
+         */
+        GetBuildLogsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    builds: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/NativeBuildJobInfo' },
+                    },
+                  },
+                  required: ['builds'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
 
         /**
          * @description Enum for build statuses.

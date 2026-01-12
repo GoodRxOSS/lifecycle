@@ -160,67 +160,12 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import rootLogger from 'server/lib/logger';
-import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
-import BuildService from 'server/services/build';
+import { LogStreamingService } from 'server/services/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
 
 const logger = rootLogger.child({
   filename: __filename,
 });
-
-interface LogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending';
-  streamingRequired: boolean;
-  podName?: string | null;
-  websocket?: {
-    endpoint: string;
-    parameters: {
-      podName: string;
-      namespace: string;
-      follow: boolean;
-      timestamps: boolean;
-      container?: string;
-    };
-  };
-  containers?: Array<{
-    name: string;
-    state: string;
-  }>;
-  message?: string;
-  error?: string;
-}
-
-type LogType = 'build' | 'deploy' | 'webhook';
-
-function detectLogType(jobName: string): LogType {
-  if (jobName.includes('-buildkit-') || jobName.includes('-kaniko-')) {
-    return 'build';
-  }
-  if (jobName.includes('-helm-')) {
-    return 'deploy';
-  }
-  if (jobName.includes('webhook') || jobName.includes('wh-')) {
-    return 'webhook';
-  }
-  return 'build';
-}
-
-function mapPodStatusToUnified(podStatus: string): LogStreamResponse['status'] {
-  switch (podStatus) {
-    case 'Running':
-      return 'Active';
-    case 'Succeeded':
-      return 'Complete';
-    case 'Failed':
-      return 'Failed';
-    case 'Pending':
-      return 'Pending';
-    case 'NotFound':
-      return 'NotFound';
-    default:
-      return 'Pending';
-  }
-}
 
 const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
@@ -231,7 +176,7 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
 
   const { uuid, name, jobName, type } = req.query;
 
-  // For webhook jobs, name can be undefined
+  // 1. Request Validation
   const isWebhookRequest = type === 'webhook';
 
   if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
@@ -247,94 +192,30 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
   }
 
   try {
-    const buildService = new BuildService();
-    const build = await buildService.db.models.Build.query().findOne({ uuid });
+    // 2. Call the Service
+    const logService = new LogStreamingService();
 
-    if (!build) {
-      return res.status(404).json({ error: 'Build not found' });
-    }
+    // We cast name and type to strings/undefined safely here because of validation above
 
-    const namespace = `env-${uuid}`;
-    const logType: LogType = (type as LogType) || detectLogType(jobName);
-
-    logger.info(`uuid=${uuid} name=${name} jobName=${jobName} logType=${logType} message="Processing log request"`);
-
-    const podInfo = await getK8sJobStatusAndPod(jobName, namespace);
-
-    if (!podInfo || podInfo.status === 'NotFound') {
-      const response: LogStreamResponse = {
-        status: 'NotFound',
-        streamingRequired: false,
-        message: podInfo?.message || 'Job not found',
-      };
-
-      if (logType === 'deploy') {
-        response.error = podInfo?.message || 'Job not found';
-        delete response.message;
-      }
-
-      return res.status(200).json(response);
-    }
-
-    const unifiedStatus = mapPodStatusToUnified(podInfo.status);
-    const streamingRequired =
-      unifiedStatus === 'Active' ||
-      unifiedStatus === 'Pending' ||
-      unifiedStatus === 'Complete' ||
-      unifiedStatus === 'Failed';
-
-    const response: LogStreamResponse = {
-      status: unifiedStatus,
-      streamingRequired,
-      podName: podInfo.podName,
-    };
-
-    if (podInfo.podName) {
-      response.websocket = {
-        endpoint: '/api/logs/stream',
-        parameters: {
-          podName: podInfo.podName,
-          namespace: namespace,
-          follow: unifiedStatus === 'Active' || unifiedStatus === 'Pending',
-          timestamps: true,
-        },
-      };
-    }
-
-    if (podInfo.containers && podInfo.containers.length > 0) {
-      response.containers = podInfo.containers.map((c) => ({
-        name: c.name,
-        state: c.state,
-      }));
-    }
-
-    if (unifiedStatus === 'Complete') {
-      response.message = `Job pod ${podInfo.podName} has status: Completed. Streaming not active.`;
-    } else if (unifiedStatus === 'Failed') {
-      response.message = podInfo.message || `Job pod ${podInfo.podName} has status: Failed. Streaming not active.`;
-      if (logType === 'deploy' && podInfo.message) {
-        response.error = podInfo.message;
-      }
-    } else if (!podInfo.podName && (unifiedStatus === 'Active' || unifiedStatus === 'Pending')) {
-      const errorMsg = 'Pod not found for job';
-      if (logType === 'deploy') {
-        response.error = errorMsg;
-      } else {
-        response.message = errorMsg;
-      }
-    }
+    const response = await logService.getLogStreamInfo(
+      uuid,
+      jobName,
+      name as string | undefined,
+      type as string | undefined
+    );
 
     return res.status(200).json(response);
-  } catch (error) {
+  } catch (error: any) {
     logger.error(
       `jobName=${jobName} uuid=${uuid} name=${name} error="${error}" message="Error getting log streaming info"`
     );
 
-    if (
-      error instanceof HttpError ||
-      (error as any).message?.includes('Kubernetes') ||
-      (error as any).statusCode === 502
-    ) {
+    // 3. Error Mapping
+    if (error.message === 'Build not found') {
+      return res.status(404).json({ error: 'Build not found' });
+    }
+
+    if (error instanceof HttpError || error.message?.includes('Kubernetes') || error.statusCode === 502) {
       return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
     }
 
