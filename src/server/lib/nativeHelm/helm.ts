@@ -248,7 +248,7 @@ export async function shouldUseNativeHelm(deploy: Deploy): Promise<boolean> {
 export async function deployNativeHelm(deploy: Deploy): Promise<void> {
   const { deployable, build } = deploy;
 
-  getLogger().info('Helm: deploying (native)');
+  getLogger().info('Helm: deploying method=native');
 
   if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
     await applyHttpScaleObjectManifestYaml(deploy, build.namespace);
@@ -311,7 +311,7 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
   const deployPipelineId = getCodefreshPipelineIdFromOutput(output);
 
   const statusMessage = 'Starting deployment via Helm';
-  getLogger().info(`Helm: deploying (Codefresh) pipelineId=${deployPipelineId}`);
+  getLogger().info(`Helm: deploying method=codefresh`);
 
   await deployService.patchAndUpdateActivityFeed(
     deploy,

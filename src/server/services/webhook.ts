@@ -117,8 +117,10 @@ export default class WebhookService extends BaseService {
     }
     getLogger({ buildUuid: build.uuid }).info(`Triggering webhooks for build status: ${build.status}`);
     for (const webhook of configFileWebhooks) {
-      getLogger({ buildUuid: build.uuid }).info(`Running webhook: ${webhook.name}`);
-      await this.runYamlConfigFileWebhookForBuild(webhook, build);
+      await withLogContext({ webhookName: webhook.name, webhookType: webhook.type }, async () => {
+        getLogger().info(`Webhook: running name=${webhook.name}`);
+        await this.runYamlConfigFileWebhookForBuild(webhook, build);
+      });
     }
     getLogger({ stage: LogStage.WEBHOOK_COMPLETE, buildUuid: build.uuid }).info(
       `Webhooks completed: count=${configFileWebhooks.length} status=${build.status}`
@@ -147,9 +149,7 @@ export default class WebhookService extends BaseService {
       switch (webhook.type) {
         case 'codefresh': {
           const buildId: string = await this.db.services.Codefresh.triggerYamlConfigWebhookPipeline(webhook, data);
-          getLogger({ buildUuid: build.uuid }).info(
-            `Webhook (${webhook.name}) triggered: buildId=${buildId} url=https://g.codefresh.io/build/${buildId}`
-          );
+          getLogger().info(`Webhook: triggered buildId=${buildId} url=https://g.codefresh.io/build/${buildId}`);
           metadata = {
             link: `https://g.codefresh.io/build/${buildId}`,
           };
@@ -177,13 +177,11 @@ export default class WebhookService extends BaseService {
             metadata: { status: 'starting' },
             status: 'executing',
           });
-          getLogger({ buildUuid: build.uuid }).info(`Docker webhook (${webhook.name}) invoked`);
+          getLogger().info(`Webhook: invoking`);
 
           // Execute webhook (this waits for completion)
           const result = await executeDockerWebhook(webhook, build, data);
-          getLogger({ buildUuid: build.uuid }).info(
-            `Docker webhook (${webhook.name}) executed: jobName=${result.jobName}`
-          );
+          getLogger().info(`Webhook: executed jobName=${result.jobName}`);
 
           // Update the invocation record with final status
           await invocation.$query().patch({
@@ -209,13 +207,11 @@ export default class WebhookService extends BaseService {
             metadata: { status: 'starting' },
             status: 'executing',
           });
-          getLogger({ buildUuid: build.uuid }).info(`Command webhook (${webhook.name}) invoked`);
+          getLogger().info(`Webhook: invoking`);
 
           // Execute webhook (this waits for completion)
           const result = await executeCommandWebhook(webhook, build, data);
-          getLogger({ buildUuid: build.uuid }).info(
-            `Command webhook (${webhook.name}) executed: jobName=${result.jobName}`
-          );
+          getLogger().info(`Webhook: executed jobName=${result.jobName}`);
 
           // Update the invocation record with final status
           await invocation.$query().patch({
@@ -233,9 +229,9 @@ export default class WebhookService extends BaseService {
           throw new Error(`Unsupported webhook type: ${webhook.type}`);
       }
 
-      getLogger({ buildUuid: build.uuid }).debug(`Webhook history added for runUUID: ${build.runUUID}`);
+      getLogger().debug(`Webhook: history added runUUID=${build.runUUID}`);
     } catch (error) {
-      getLogger({ buildUuid: build.uuid }).error({ error }, 'Error invoking webhook');
+      getLogger({ error }).error('Webhook: invocation failed');
 
       // Still create a failed invocation record
       await this.db.models.WebhookInvocations.create({
