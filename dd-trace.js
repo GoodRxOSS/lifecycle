@@ -16,7 +16,13 @@
 
 'use strict';
 
-const tracer = require('dd-trace').init();
+const tracer = require('dd-trace').init({
+  serviceMapping: {
+    redis: 'lifecycle-redis',
+    ioredis: 'lifecycle-redis',
+    pg: 'lifecycle-postgres',
+  },
+});
 
 const blocklist = [/^\/api\/health/, /^\/api\/jobs/, /^\/_next\/static/, /^\/_next\/webpack-hmr/];
 
@@ -35,11 +41,3 @@ tracer.use('next', {
 
 tracer.use('net', false);
 tracer.use('dns', false);
-
-tracer.use('ioredis', {
-  service: 'lifecycle-redis',
-});
-
-tracer.use('pg', {
-  service: 'lifecycle-postgres',
-});
