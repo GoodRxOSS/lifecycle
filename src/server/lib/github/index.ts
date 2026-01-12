@@ -239,7 +239,7 @@ export async function getYamlFileContent({ fullName, branch = '', sha = '', isJS
     return configData;
   } catch (error) {
     getLogger({ error, repo: fullName, branch }).warn('GitHub: yaml fetch failed');
-    throw new ConfigFileNotFound(error?.message || 'No lifecycle yaml found or parsed');
+    throw new ConfigFileNotFound('Config file not found');
   }
 }
 
@@ -257,7 +257,7 @@ export async function getYamlFileContentFromPullRequest(fullName: string, pullRe
       repo: fullName,
       pr: pullRequestNumber,
     }).warn('GitHub: yaml fetch failed');
-    throw new ConfigFileNotFound(error?.message || 'Unable to retrieve YAML file content from pull request');
+    throw new ConfigFileNotFound('Config file not found');
   }
 }
 
@@ -274,7 +274,7 @@ export async function getYamlFileContentFromBranch(
       repo: fullName,
       branch: branchName,
     }).warn('GitHub: yaml fetch failed');
-    throw new ConfigFileNotFound(error?.message || 'Unable to retrieve YAML file content from branch');
+    throw new ConfigFileNotFound('Config file not found');
   }
 }
 

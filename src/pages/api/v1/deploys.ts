@@ -66,10 +66,6 @@ import BuildService from 'server/services/build';
  *                     type: string
  *                   env:
  *                     type: object
- *                   buildLogs:
- *                     type: string
- *                   containerLogs:
- *                     type: string
  *                   serviceId:
  *                     type: integer
  *                   buildId:
@@ -104,8 +100,6 @@ import BuildService from 'server/services/build';
  *                     type: string
  *                   replicaCount:
  *                     type: integer
- *                   yamlConfig:
- *                     type: object
  *                   deployableId:
  *                     type: integer
  *                   isRunningLatest:
@@ -113,8 +107,6 @@ import BuildService from 'server/services/build';
  *                   runningImage:
  *                     type: string
  *                   deployPipelineId:
- *                     type: string
- *                   buildOutput:
  *                     type: string
  *                   buildJobName:
  *                     type: string
@@ -194,8 +186,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       'internalHostname',
       'publicUrl',
       'env',
-      'buildLogs',
-      'containerLogs',
       'serviceId',
       'buildId',
       'createdAt',
@@ -211,12 +201,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       'cname',
       'runUUID',
       'replicaCount',
-      'yamlConfig',
       'deployableId',
       'isRunningLatest',
       'runningImage',
       'deployPipelineId',
-      'buildOutput',
       'buildJobName'
     );
 

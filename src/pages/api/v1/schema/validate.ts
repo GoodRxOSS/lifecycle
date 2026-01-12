@@ -102,7 +102,7 @@ type ErrorResponse = {
 type Response = ValidationResponse | ErrorResponse;
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { getYamlFileContentFromBranch } from 'server/lib/github';
+import { getYamlFileContentFromBranch, ConfigFileNotFound } from 'server/lib/github';
 import { getLogger } from 'server/lib/logger/index';
 import { YamlConfigParser, ParsingError } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator, ValidationError } from 'server/lib/yamlConfigValidator';
@@ -129,6 +129,9 @@ const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<R
     if (error instanceof ParsingError || error instanceof ValidationError) {
       const errors = error.message.split('\n');
       return res.status(400).json({ valid: false, error: errors });
+    }
+    if (error instanceof ConfigFileNotFound) {
+      return res.status(404).json({ valid: false, error: ['Config file not found'] });
     }
     getLogger().error({ error }, 'Schema: YAML validation failed');
     return res.status(500).json({ error: 'Internal server error' });

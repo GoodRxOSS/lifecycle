@@ -68,14 +68,11 @@ export async function cacheRequest(
         return cacheRequest(endpoint, requestData, { cache, ignoreCache: true });
       }
     } else if (error?.status === 404) {
-      const msg = 'The requested resource was not found. Maybe the branch was deleted?';
       getLogger().info(`GitHub: cache request not found endpoint=${endpoint}`);
-      throw new Error(error?.message || msg);
+      throw new Error('Resource not found');
     } else {
-      const msg = 'cache request request error';
-      const message = error?.message || msg;
-      getLogger().error(`GitHub: cache request error endpoint=${endpoint} error=${message}`);
-      throw new Error(message);
+      getLogger().error({ error }, `GitHub: cache request failed endpoint=${endpoint}`);
+      throw new Error('GitHub API request failed');
     }
   }
 }
