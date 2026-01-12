@@ -15,6 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
+import tracer from 'dd-trace';
 import * as github from 'server/lib/github';
 import { LIFECYCLE_MODE } from 'shared/index';
 import { stringify } from 'flatted';
@@ -39,6 +40,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     const isBot = sender?.includes('[bot]') === true;
     if (event === 'issue_comment' && isBot) {
+      tracer.scope().active()?.setTag('manual.drop', true);
       getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).debug('Skipped: bot-triggered issue_comment');
       res.status(200).end();
       return;
