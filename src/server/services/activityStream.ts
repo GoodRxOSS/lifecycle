@@ -126,56 +126,58 @@ export default class ActivityStream extends BaseService {
    * @param body
    */
   async updateBuildsAndDeploysFromCommentEdit(pullRequest: PullRequest, commentBody: string) {
-    let shouldUpdateStatus = true;
-
     await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
     const { build, repository } = pullRequest;
     const { deploys, id: buildId } = build;
     const buildUuid = build?.uuid;
-    const runUuid = nanoid();
 
-    const REDEPLOY_FLAG = '#REDEPLOY';
-    const REDEPLOY_CHECKBOX = '[x] Redeploy Environment';
-    const PURGE_FASTLY_CHECKBOX = '[x] Purge Fastly Service Cache';
+    return withLogContext({ buildUuid }, async () => {
+      let shouldUpdateStatus = true;
+      const runUuid = nanoid();
 
-    const isRedeployRequested = [REDEPLOY_FLAG, REDEPLOY_CHECKBOX].some((flag) => commentBody.includes(flag));
-    const isFastlyPurgeRequested = commentBody.includes(PURGE_FASTLY_CHECKBOX);
+      const REDEPLOY_FLAG = '#REDEPLOY';
+      const REDEPLOY_CHECKBOX = '[x] Redeploy Environment';
+      const PURGE_FASTLY_CHECKBOX = '[x] Purge Fastly Service Cache';
 
-    try {
-      if (isRedeployRequested) {
-        getLogger().info('Deploy: redeploy reason=commentEdit');
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
-          buildId,
-          runUUID: runUuid,
-          ...extractContextForQueue(),
+      const isRedeployRequested = [REDEPLOY_FLAG, REDEPLOY_CHECKBOX].some((flag) => commentBody.includes(flag));
+      const isFastlyPurgeRequested = commentBody.includes(PURGE_FASTLY_CHECKBOX);
+
+      try {
+        if (isRedeployRequested) {
+          getLogger().info('Deploy: redeploy reason=commentEdit');
+          await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+            buildId,
+            runUUID: runUuid,
+            ...extractContextForQueue(),
+          });
+          return;
+        }
+
+        if (isFastlyPurgeRequested) {
+          // if fastly purge is requested from comment, we do not have to update the status
+          await this.purgeFastlyServiceCache(buildUuid);
+          shouldUpdateStatus = false;
+          return;
+        }
+
+        // handle all environment/service overrides
+        await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid });
+      } finally {
+        // after everything update the pr comment
+        await this.updatePullRequestActivityStream(
+          build,
+          deploys,
+          pullRequest,
+          repository,
+          true,
+          shouldUpdateStatus,
+          null,
+          true
+        ).catch((error) => {
+          getLogger().warn({ error }, 'ActivityFeed: comment edit update failed');
         });
-        return;
       }
-
-      if (isFastlyPurgeRequested) {
-        // if fastly purge is requested from comment, we do not have to update the status
-        await this.purgeFastlyServiceCache(buildUuid);
-        shouldUpdateStatus = false;
-        return;
-      }
-
-      // handle all environment/service overrides
-      await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid });
-    } finally {
-      // after everything update the pr comment
-      await this.updatePullRequestActivityStream(
-        build,
-        deploys,
-        pullRequest,
-        repository,
-        true,
-        shouldUpdateStatus,
-        null,
-        true
-      ).catch((error) => {
-        getLogger().warn({ error }, 'ActivityFeed: comment edit update failed');
-      });
-    }
+    });
   }
 
   private async applyCommentOverrides({
@@ -1176,27 +1178,29 @@ export default class ActivityStream extends BaseService {
   }
 
   private async purgeFastlyServiceCache(uuid: string) {
-    try {
-      const computeShieldServiceId = await this.fastly.getFastlyServiceId(uuid, 'compute-shield');
-      getLogger().debug(`Fastly computeShieldServiceId=${computeShieldServiceId}`);
-      if (computeShieldServiceId) {
-        await this.fastly.purgeAllServiceCache(computeShieldServiceId, uuid, 'fastly');
-      }
+    return withLogContext({ buildUuid: uuid }, async () => {
+      try {
+        const computeShieldServiceId = await this.fastly.getFastlyServiceId(uuid, 'compute-shield');
+        getLogger().debug(`Fastly computeShieldServiceId=${computeShieldServiceId}`);
+        if (computeShieldServiceId) {
+          await this.fastly.purgeAllServiceCache(computeShieldServiceId, uuid, 'fastly');
+        }
 
-      const optimizelyServiceId = await this.fastly.getFastlyServiceId(uuid, 'optimizely');
-      getLogger().debug(`Fastly optimizelyServiceId=${optimizelyServiceId}`);
-      if (optimizelyServiceId) {
-        await this.fastly.purgeAllServiceCache(optimizelyServiceId, uuid, 'optimizely');
-      }
+        const optimizelyServiceId = await this.fastly.getFastlyServiceId(uuid, 'optimizely');
+        getLogger().debug(`Fastly optimizelyServiceId=${optimizelyServiceId}`);
+        if (optimizelyServiceId) {
+          await this.fastly.purgeAllServiceCache(optimizelyServiceId, uuid, 'optimizely');
+        }
 
-      const fastlyServiceId = await this.fastly.getFastlyServiceId(uuid, 'fastly');
-      getLogger().debug(`Fastly fastlyServiceId=${fastlyServiceId}`);
-      if (fastlyServiceId) {
-        await this.fastly.purgeAllServiceCache(fastlyServiceId, uuid, 'fastly');
+        const fastlyServiceId = await this.fastly.getFastlyServiceId(uuid, 'fastly');
+        getLogger().debug(`Fastly fastlyServiceId=${fastlyServiceId}`);
+        if (fastlyServiceId) {
+          await this.fastly.purgeAllServiceCache(fastlyServiceId, uuid, 'fastly');
+        }
+        getLogger().info(`Fastly: purged serviceId=${fastlyServiceId}`);
+      } catch (error) {
+        getLogger().error({ error }, 'Fastly: cache purge failed');
       }
-      getLogger().info(`Fastly: purged serviceId=${fastlyServiceId}`);
-    } catch (error) {
-      getLogger().error({ error }, 'Fastly: cache purge failed');
-    }
+    });
   }
 }

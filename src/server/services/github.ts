@@ -181,8 +181,12 @@ export default class GithubService extends Service {
 
       if (!pullRequest || isBot) return;
       await pullRequest.$fetchGraph('[build, repository]');
-      getLogger().info(`PR: edited by=${commentCreatorUsername}`);
-      await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
+      const buildUuid = pullRequest.build?.uuid;
+
+      return withLogContext({ buildUuid }, async () => {
+        getLogger().info(`PR: edited by=${commentCreatorUsername}`);
+        await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
+      });
     } catch (error) {
       getLogger().error({ error }, `GitHub: issue comment handling failed`);
     }

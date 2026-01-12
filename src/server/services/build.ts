@@ -743,52 +743,54 @@ export default class BuildService extends BaseService {
     updateStatus: boolean,
     error: Error = null
   ) {
-    try {
-      await build.reload();
-      await build?.$fetchGraph('[deploys.[service, deployable], pullRequest.[repository]]');
+    return withLogContext({ buildUuid: build.uuid }, async () => {
+      try {
+        await build.reload();
+        await build?.$fetchGraph('[deploys.[service, deployable], pullRequest.[repository]]');
 
-      const { deploys, pullRequest } = build;
-      const { repository } = pullRequest;
+        const { deploys, pullRequest } = build;
+        const { repository } = pullRequest;
 
-      if (build.runUUID !== runUUID) {
-        return;
-      } else {
-        await build.$query().patch({
-          status,
-        });
+        if (build.runUUID !== runUUID) {
+          return;
+        } else {
+          await build.$query().patch({
+            status,
+          });
 
-        // add dashboard links to build database
-        let dashboardLinks = constructBuildLinks(build.uuid);
-        const hasFastly = determineIfFastlyIsUsed(deploys);
-        if (hasFastly) {
-          try {
-            const fastlyDashboardUrl = await this.fastly.getServiceDashboardUrl(build.uuid, 'fastly');
-            if (fastlyDashboardUrl) {
-              dashboardLinks = insertBuildLink(dashboardLinks, 'Fastly Dashboard', fastlyDashboardUrl.href);
+          // add dashboard links to build database
+          let dashboardLinks = constructBuildLinks(build.uuid);
+          const hasFastly = determineIfFastlyIsUsed(deploys);
+          if (hasFastly) {
+            try {
+              const fastlyDashboardUrl = await this.fastly.getServiceDashboardUrl(build.uuid, 'fastly');
+              if (fastlyDashboardUrl) {
+                dashboardLinks = insertBuildLink(dashboardLinks, 'Fastly Dashboard', fastlyDashboardUrl.href);
+              }
+            } catch (err) {
+              getLogger().error({ error: err }, 'Fastly: dashboard URL fetch failed');
             }
-          } catch (err) {
-            getLogger().error({ error: err }, 'Fastly: dashboard URL fetch failed');
           }
+          await build.$query().patch({ dashboardLinks });
+
+          await this.db.services.ActivityStream.updatePullRequestActivityStream(
+            build,
+            deploys,
+            pullRequest,
+            repository,
+            updateMissionControl,
+            updateStatus,
+            error
+          ).catch((e) => {
+            getLogger().error({ error: e }, 'ActivityStream: update failed');
+          });
         }
-        await build.$query().patch({ dashboardLinks });
+      } finally {
+        getLogger().debug(`Build status changed: status=${build.status}`);
 
-        await this.db.services.ActivityStream.updatePullRequestActivityStream(
-          build,
-          deploys,
-          pullRequest,
-          repository,
-          updateMissionControl,
-          updateStatus,
-          error
-        ).catch((e) => {
-          getLogger().error({ error: e }, 'ActivityStream: update failed');
-        });
+        await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id, ...extractContextForQueue() });
       }
-    } finally {
-      getLogger().debug(`Build status changed: status=${build.status}`);
-
-      await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id, ...extractContextForQueue() });
-    }
+    });
   }
 
   async markConfigurationsAsBuilt(build: Build) {
