@@ -99,7 +99,7 @@ export async function executeCommandWebhook(
 async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Promise<WebhookExecutionResult> {
   const executionId = nanoid();
   getLogger().info(
-    `Starting ${jobConfig.webhookType} webhook: webhookName=${jobConfig.webhookName} executionId=${executionId}`
+    `Webhook: starting type=${jobConfig.webhookType} name=${jobConfig.webhookName} executionId=${executionId}`
   );
 
   try {
@@ -115,7 +115,7 @@ async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Pro
     const jobResult = await waitForJobAndGetLogs(job.metadata.name, jobConfig.namespace, `[WEBHOOK ${build.uuid}]`);
 
     getLogger().info(
-      `Webhook execution completed: webhookName=${jobConfig.webhookName} success=${jobResult.success} status=${jobResult.status}`
+      `Webhook: completed name=${jobConfig.webhookName} success=${jobResult.success} status=${jobResult.status}`
     );
 
     return {

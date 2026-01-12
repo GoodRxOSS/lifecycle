@@ -216,7 +216,7 @@ export default class GlobalConfigService extends BaseService {
 
     return withLogContext({ correlationId: correlationId || `cache-refresh-${Date.now()}` }, async () => {
       try {
-        getLogger({ stage: LogStage.CONFIG_REFRESH }).info('Refreshing GlobalConfig and Github cache');
+        getLogger({ stage: LogStage.CONFIG_REFRESH }).info('Config: refreshing type=global_config,github_token');
         await this.getAllConfigs(true);
         await this.getGithubClientToken(true);
         getLogger({ stage: LogStage.CONFIG_REFRESH }).debug('GlobalConfig and Github cache refreshed successfully');
@@ -236,7 +236,7 @@ export default class GlobalConfigService extends BaseService {
   async setConfig(key: string, value: any): Promise<void> {
     try {
       await this.db.knex('global_config').insert({ key, config: value }).onConflict('key').merge();
-      getLogger().info(`Set global config value: key=${key}`);
+      getLogger().info(`Config: set key=${key}`);
     } catch (err: any) {
       getLogger().error({ error: err }, `Error setting global config value: key=${key}`);
       throw err;

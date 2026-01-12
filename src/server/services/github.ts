@@ -56,7 +56,7 @@ export default class GithubService extends Service {
       labels,
     },
   }: PullRequestEvent) {
-    getLogger({}).info(`PR: ${action} ${fullName}/${branch}`);
+    getLogger({}).info(`PR: ${action} repo=${fullName} branch=${branch}`);
     const isOpened = [GithubPullRequestActions.OPENED, GithubPullRequestActions.REOPENED].includes(
       action as GithubPullRequestActions
     );
@@ -181,7 +181,7 @@ export default class GithubService extends Service {
 
       if (!pullRequest || isBot) return;
       await pullRequest.$fetchGraph('[build, repository]');
-      getLogger().info(`PR: comment edited by ${commentCreatorUsername}`);
+      getLogger().info(`PR: edited by=${commentCreatorUsername}`);
       await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
     } catch (error) {
       getLogger().error({ error }, `Unable to handle Github Issue Comment event`);
@@ -219,7 +219,7 @@ export default class GithubService extends Service {
         status,
         autoDeploy: false,
       });
-      getLogger().info(`Labels: ${action}${labels.length ? ` [${labels.map(({ name }) => name).join(', ')}]` : ''}`);
+      getLogger().info(`Label: ${action} labels=[${labels.map(({ name }) => name).join(',')}]`);
 
       if (pullRequest.deployOnUpdate === false) {
         // when pullRequest.deployOnUpdate is false, it means that there is no `lifecycle-deploy!` label
@@ -305,12 +305,14 @@ export default class GithubService extends Service {
           hasFailedDeploys = failedDeploys.length > 0;
 
           if (hasFailedDeploys) {
-            getLogger().info(`Push: ${failedDeploys.length} failed deploys, full redeploy ${repoName}/${branchName}`);
+            getLogger().info(
+              `Push: redeploying reason=failedDeploys count=${failedDeploys.length} repo=${repoName} branch=${branchName}`
+            );
           }
         }
 
         if (!hasFailedDeploys) {
-          getLogger().info(`Push: deploying ${repoName}/${branchName}`);
+          getLogger().info(`Push: deploying repo=${repoName} branch=${branchName}`);
         }
 
         await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
@@ -357,7 +359,7 @@ export default class GithubService extends Service {
 
       if (!build) return;
 
-      getLogger().info('Push: redeploying static env');
+      getLogger().info(`Push: redeploying reason=staticEnv`);
       await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build?.id,
         ...extractContextForQueue(),

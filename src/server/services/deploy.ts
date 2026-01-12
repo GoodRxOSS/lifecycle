@@ -152,7 +152,7 @@ export default class DeployService extends BaseService {
       ).catch((error) => {
         getLogger().error({ error }, 'Failed to create deploys from deployables');
       });
-      getLogger().info('Deploys initialized');
+      getLogger().info('Deploy: initialized');
     } else {
       const serviceInitFunc = async (service: Service, active: boolean): Promise<Deploy[]> => {
         const newDeploys: Deploy[] = [];
@@ -180,7 +180,7 @@ export default class DeployService extends BaseService {
             );
           })
         );
-        getLogger().info(`Deploys created: count=${newDeploys.length}`);
+        getLogger().info(`Deploy: created count=${newDeploys.length}`);
         return newDeploys;
       };
 
@@ -383,13 +383,13 @@ export default class DeployService extends BaseService {
           }
 
           if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
-            getLogger().info(`Aurora: already built, skipping`);
+            getLogger().info('Aurora: skipped reason=alreadyBuilt');
             return true;
           }
 
           const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
           if (existingDbEndpoint) {
-            getLogger().info(`Aurora: exists, skipping`);
+            getLogger().info('Aurora: skipped reason=exists');
             await deploy.$query().patch({
               cname: existingDbEndpoint,
               status: DeployStatus.BUILT,
@@ -471,7 +471,7 @@ export default class DeployService extends BaseService {
                 getLogger().warn({ error }, 'Failed to update activity feed');
               }
             );
-            getLogger().info('Codefresh: no changes, marked built');
+            getLogger().info('Codefresh: skipped reason=noChanges status=built');
             result = true;
           } else {
             let buildLogs: string;
@@ -489,7 +489,7 @@ export default class DeployService extends BaseService {
                 getLogger().error({ error }, 'Failed to receive codefresh build id');
                 return null;
               });
-              getLogger().info('Codefresh: build triggered');
+              getLogger().info('Codefresh: triggered');
               if (codefreshBuildId != null) {
                 buildLogs = `https://g.codefresh.io/build/${codefreshBuildId}`;
 
@@ -505,10 +505,10 @@ export default class DeployService extends BaseService {
                 ).catch((error) => {
                   getLogger().warn({ error }, 'Failed to update activity feed');
                 });
-                getLogger().info(`Codefresh: waiting for build url=${buildLogs}`);
+                getLogger().info(`Codefresh: waiting url=${buildLogs}`);
                 await cli.waitForCodefresh(codefreshBuildId);
                 const buildOutput = await getLogs(codefreshBuildId);
-                getLogger().info('Codefresh: build completed');
+                getLogger().info('Codefresh: completed');
                 await this.patchAndUpdateActivityFeed(
                   deploy,
                   {
@@ -740,7 +740,7 @@ export default class DeployService extends BaseService {
                   },
                   runUUID
                 );
-                getLogger().info('Image: public, marked built');
+                getLogger().info('Image: skipped reason=public status=built');
                 return true;
               case DeployTypes.HELM: {
                 try {
@@ -887,7 +887,7 @@ export default class DeployService extends BaseService {
     if (deploy.branchName === null) {
       // This means we're using an external host, rather than building from source.
       await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.READY }, runUUID);
-      getLogger().info('Deploy is marked ready for external Host');
+      getLogger().info('Deploy: ready reason=externalHost');
     } else {
       await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.CLONING }, runUUID);
 
@@ -987,7 +987,7 @@ export default class DeployService extends BaseService {
         };
 
         if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
-          getLogger().info(`Image: building (${deployable.builder.engine})`);
+          getLogger().info(`Image: building engine=${deployable.builder.engine}`);
 
           const nativeOptions = {
             ...buildOptions,
@@ -1023,7 +1023,7 @@ export default class DeployService extends BaseService {
           }
         }
 
-        getLogger().info('Image: building (Codefresh)');
+        getLogger().info('Image: building engine=codefresh');
 
         const buildPipelineId = await codefresh.buildImage(buildOptions);
         const buildLogs = `https://g.codefresh.io/build/${buildPipelineId}`;
@@ -1043,7 +1043,7 @@ export default class DeployService extends BaseService {
           return false;
         }
       } else {
-        getLogger().info('Image: exists, skipping build');
+        getLogger().info('Image: skipped reason=exists');
         await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT }, runUUID);
         return true;
@@ -1065,7 +1065,7 @@ export default class DeployService extends BaseService {
       const dependentDeploy = deploys.find((d) => d.uuid === waitingForService);
 
       if (dependentDeploy.uuid === waitingForService) {
-        getLogger().info({ waitingFor: waitingForService }, 'Waiting for service to complete');
+        getLogger().info(`Build: waiting service=${waitingForService}`);
 
         await this.patchAndUpdateActivityFeed(
           deploy,
@@ -1105,7 +1105,7 @@ export default class DeployService extends BaseService {
             // about the output of that build, we can just pass an empty string as the pattern
             if (!item.pattern || item.pattern.trim() === '') {
               extractedValues[item.envKey] = '';
-              getLogger().info({ envKey: item.envKey }, 'Empty pattern, assuming build dependency');
+              getLogger().info(`Build: dependency envKey=${item.envKey} pattern=empty`);
               return;
             }
 
@@ -1120,8 +1120,7 @@ export default class DeployService extends BaseService {
               );
             } else {
               getLogger().info(
-                { pattern: item.pattern, serviceName, pipelineId, envKey: item.envKey },
-                'No match found for pattern, value will be empty'
+                `Build: noMatch pattern=${item.pattern} service=${serviceName} pipelineId=${pipelineId} envKey=${item.envKey}`
               );
             }
           });

@@ -140,7 +140,7 @@ export default class ActivityStream extends BaseService {
 
     try {
       if (isRedeployRequested) {
-        getLogger().info('Redeploy triggered from comment edit');
+        getLogger().info('Deploy: redeploy reason=commentEdit');
         await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
           runUUID: runUuid,
@@ -420,7 +420,7 @@ export default class ActivityStream extends BaseService {
 
         if (targetGithubRepositoryId) {
           getLogger().info(
-            `Repo-filtered GitHub deployments: processing ${deploysForGithubDeployment.length}/${deploys.length} deploys`
+            `Deploy: filtered deployCount=${deploysForGithubDeployment.length} totalCount=${deploys.length} targetRepoId=${targetGithubRepositoryId}`
           );
         }
 
@@ -662,9 +662,7 @@ export default class ActivityStream extends BaseService {
       const isDeployedWithActiveErrors = isDeployed && hasErroringActiveDeploys;
       if (isDeployedWithActiveErrors) {
         const deployStatuses = deploys.map(({ branchName, uuid, status }) => ({ branchName, uuid, status }));
-        getLogger().info(
-          `Deployed build has erroring deploys: ${JSON.stringify(deployStatuses)} buildStatus=${buildStatus}`
-        );
+        getLogger().info(`Build: deployedWithErrors status=${buildStatus} deploys=${JSON.stringify(deployStatuses)}`);
         metrics
           .increment('deployWithErrors')
           .event('Deploy Finished with Erroring Deploys', `${eventDetails.description} with erroring deploys`);
@@ -1199,7 +1197,7 @@ export default class ActivityStream extends BaseService {
       if (fastlyServiceId) {
         await this.fastly.purgeAllServiceCache(fastlyServiceId, uuid, 'fastly');
       }
-      getLogger().info(`Fastly purgeFastlyServiceCache success fastlyServiceId=${fastlyServiceId}`);
+      getLogger().info(`Fastly: purged serviceId=${fastlyServiceId}`);
     } catch (error) {
       getLogger().error({ error }, 'Fastly purgeFastlyServiceCache error');
     }

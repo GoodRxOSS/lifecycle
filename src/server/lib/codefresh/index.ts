@@ -30,7 +30,7 @@ export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid =
   try {
     const command = `aws ecr describe-images --repository-name=${repoName} --image-ids=imageTag=${tag} --no-paginate --no-cli-auto-prompt --registry-id ${registryId}`;
     await shellPromise(command);
-    getLogger().info(`ECR: tag=${tag} exists in ${repoName}`);
+    getLogger().info(`ECR: exists tag=${tag} repo=${repoName}`);
     return true;
   } catch (error) {
     getLogger().debug(`ECR: tag=${tag} not found in ${repoName}`);

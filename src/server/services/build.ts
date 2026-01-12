@@ -83,7 +83,7 @@ export default class BuildService extends BaseService {
             if (!buildId) {
               getLogger().error('No build ID found for cleanup');
             }
-            getLogger().info('Queuing build for deletion');
+            getLogger().info('Build: queuing action=delete');
             await this.db.services.BuildService.deleteQueue.add('delete', { buildId, ...extractContextForQueue() });
           }
         }
@@ -619,7 +619,7 @@ export default class BuildService extends BaseService {
         githubDeployments,
         namespace: `env-${uuid}`,
       }));
-    getLogger().info(`Created build for pull request: branch=${options.repositoryBranchName}`);
+    getLogger().info(`Build: created branch=${options.repositoryBranchName}`);
     return build;
   }
 
@@ -716,7 +716,7 @@ export default class BuildService extends BaseService {
           buildId: build.id,
           ...extractContextForQueue(),
         });
-        getLogger().info('Deleted build');
+        getLogger().info('Build: deleted');
         await this.updateStatusAndComment(build, BuildStatus.TORN_DOWN, build.runUUID, true, true).catch((error) => {
           getLogger().warn({ error }, `Failed to update status to ${BuildStatus.TORN_DOWN}`);
         });
@@ -812,7 +812,7 @@ export default class BuildService extends BaseService {
         await deploy.$query().patch({ status: DeployStatus.BUILT });
       }
       const configUUIDs = configDeploys.map((deploy) => deploy?.uuid).join(',');
-      getLogger().info(`Config deploys marked built: ${configUUIDs}`);
+      getLogger().info(`Build: config deploys marked built uuids=${configUUIDs}`);
     } catch (error) {
       getLogger().error({ error }, 'Failed to update configuration type deploy as built');
     }
@@ -868,7 +868,7 @@ export default class BuildService extends BaseService {
                   return false;
                 });
 
-                if (!result) getLogger().info(`CLI deploy unsuccessful: deployUuid=${deploy.uuid}`);
+                if (!result) getLogger().info(`CLI: deploy failed deployUuid=${deploy.uuid}`);
                 return result;
               })
           )
@@ -954,7 +954,7 @@ export default class BuildService extends BaseService {
               }
               const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
               getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
-              if (!result) getLogger().info(`Build image unsuccessful: deployUuid=${deploy.uuid}`);
+              if (!result) getLogger().info(`Build: image failed deployUuid=${deploy.uuid}`);
               return result;
             })
         );
@@ -1217,9 +1217,9 @@ export default class BuildService extends BaseService {
           updateLogContext({ buildUuid: build.uuid });
         }
 
-        getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Deleting build');
+        getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Build: deleting');
         await this.db.services.BuildService.deleteBuild(build);
-        getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Build deleted');
+        getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Build: deleted');
       } catch (error) {
         getLogger({ stage: LogStage.CLEANUP_FAILED }).error(
           { error },
@@ -1247,7 +1247,7 @@ export default class BuildService extends BaseService {
           updateLogContext({ buildUuid: build.uuid });
         }
 
-        getLogger({ stage: LogStage.BUILD_STARTING }).info('Build started');
+        getLogger({ stage: LogStage.BUILD_STARTING }).info('Build: started');
 
         await build?.$fetchGraph('[pullRequest, environment]');
         await build.pullRequest.$fetchGraph('[repository]');
@@ -1262,7 +1262,7 @@ export default class BuildService extends BaseService {
           githubRepositoryId
         );
 
-        getLogger({ stage: LogStage.BUILD_COMPLETE }).info('Build completed');
+        getLogger({ stage: LogStage.BUILD_COMPLETE }).info('Build: completed');
       } catch (error) {
         if (error instanceof ParsingError || error instanceof ValidationError) {
           this.updateStatusAndComment(build, BuildStatus.CONFIG_ERROR, build?.runUUID, true, true, error);
@@ -1302,10 +1302,10 @@ export default class BuildService extends BaseService {
           updateLogContext({ buildUuid: build.uuid });
         }
 
-        getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build queued');
+        getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: queued');
 
         if (!build.pullRequest.deployOnUpdate) {
-          getLogger().info('Skipping: deployOnUpdate disabled');
+          getLogger().info('Deploy: skipping reason=deployOnUpdateDisabled');
           return;
         }
         // Enqueue a standard resolve build

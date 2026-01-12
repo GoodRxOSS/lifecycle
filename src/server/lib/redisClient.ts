@@ -93,7 +93,7 @@ export class RedisClient {
   public async close(): Promise<void> {
     try {
       await Promise.all([this.redis.quit(), this.subscriber.quit(), this.bullConn.quit()]);
-      getLogger().info('All Redis connections closed successfully');
+      getLogger().info('Redis: closed');
     } catch (error) {
       getLogger().warn({ error }, 'Error closing Redis connections, forcing disconnect');
       this.redis.disconnect();

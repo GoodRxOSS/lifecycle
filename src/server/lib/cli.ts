@@ -191,13 +191,13 @@ export async function deleteBuild(build: Build) {
             { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
             async () => {
               const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
-              getLogger().info('Deleting CLI deploy');
+              getLogger().info('CLI: deleting');
               return serviceType === DeployTypes.CODEFRESH ? codefreshDestroy(deploy) : deleteDeploy(deploy);
             }
           );
         })
     );
-    getLogger({ buildUuid }).info('Deleted CLI resources');
+    getLogger({ buildUuid }).info('CLI: deleted');
   } catch (e) {
     getLogger({ buildUuid, error: e }).error('Error deleting CLI resources');
   }

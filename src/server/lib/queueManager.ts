@@ -122,6 +122,6 @@ export default class QueueManager {
         }
       }
     }
-    getLogger().info('All queues closed successfully');
+    getLogger().info('Queue: closed');
   }
 }

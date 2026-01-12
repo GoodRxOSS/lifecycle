@@ -199,7 +199,7 @@ export async function createOrUpdateNamespace({
     buildUUID,
   });
 
-  getLogger({ namespace: name }).info(`Creating/updating namespace ${logMessage}`);
+  getLogger({ namespace: name }).info(`Deploy: creating namespace ${logMessage}`);
 
   const namespace = {
     apiVersion: 'v1',
@@ -221,10 +221,10 @@ export async function createOrUpdateNamespace({
       await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
         headers: { 'Content-Type': 'application/json-patch+json' },
       });
-      getLogger({ namespace: name }).info(`Updated namespace ${patchMessage}`);
+      getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
       return;
     } else {
-      getLogger({ namespace: name }).info('Namespace: static, skipping update');
+      getLogger({ namespace: name }).info('Deploy: skipped namespace update reason=static');
       return;
     }
   }
@@ -338,11 +338,11 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
  */
 export async function applyManifests(build: Build): Promise<k8s.KubernetesObject[]> {
   if (!build.manifest || build.manifest.trim().length === 0) {
-    getLogger().info('Deploying via DeploymentManager');
+    getLogger().info('Deploy: starting method=deploymentManager');
     return [];
   }
 
-  getLogger().info('Deploying via legacy manifest');
+  getLogger().info('Deploy: starting method=legacyManifest');
 
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
@@ -509,13 +509,13 @@ export async function waitForPodReady(build: Build) {
   const logCtx = { namespace, repo: fullName, branch: branchName, sha };
 
   let retries = 0;
-  getLogger(logCtx).info('Pods: waiting for creation');
+  getLogger(logCtx).info('Deploy: waiting for pods state=creation');
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const pods = await getPods({ uuid, namespace });
 
     if (pods.length > 0) {
-      getLogger(logCtx).info('Pods: created');
+      getLogger(logCtx).info('Deploy: pods created');
       break;
     } else if (retries < 60) {
       retries += 1;
@@ -528,7 +528,7 @@ export async function waitForPodReady(build: Build) {
 
   retries = 0;
 
-  getLogger(logCtx).info('Pods: waiting for ready state');
+  getLogger(logCtx).info('Deploy: waiting for pods state=ready');
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let isReady = false;
@@ -549,7 +549,7 @@ export async function waitForPodReady(build: Build) {
     }
 
     if (isReady) {
-      getLogger(logCtx).info('Pods: ready');
+      getLogger(logCtx).info('Deploy: pods ready');
       return true;
     }
     if (retries < 180) {
@@ -572,7 +572,7 @@ export async function deleteBuild(build: Build) {
     await shellPromise(
       `kubectl delete all,pvc,mapping,Httpscaledobjects -l lc_uuid=${build.uuid} --namespace ${build.namespace}`
     );
-    getLogger({ namespace: build.namespace }).info('Kubernetes: resources deleted');
+    getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
   } catch (e) {
     getLogger({
       namespace: build.namespace,
@@ -590,10 +590,10 @@ export async function deleteNamespace(name: string) {
 
   try {
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
-    getLogger({ namespace: name }).info('Namespace: deleted');
+    getLogger({ namespace: name }).info('Deploy: namespace deleted');
   } catch (e) {
     if (e.includes('Error from server (NotFound): namespaces')) {
-      getLogger({ namespace: name }).info('Namespace: not found, skipping');
+      getLogger({ namespace: name }).info('Deploy: namespace skipped reason=notFound');
     } else {
       getLogger({ namespace: name, error: e }).error('Error deleting namespace');
     }
@@ -649,7 +649,7 @@ export function generateManifest({
   const manifest = `${disks}---\n${builds}---\n${nodePorts}---\n${grpcMappings}---\n${loadBalancers}---\n${externalNameServices}`;
   const isDev = APP_ENV?.includes('dev') ?? false;
   if (!isDev) {
-    getLogger({ manifest }).info('Generated kubernetes manifest');
+    getLogger({ manifest }).info('Manifest: generated');
   }
   return manifest;
 }
@@ -1191,7 +1191,7 @@ export function generateDeployManifests(
         'tags.datadoghq.com/version': buildUUID,
       };
 
-      if (build.isStatic) getLogger().info('Building static environment');
+      if (build.isStatic) getLogger().info('Build: static environment=true');
 
       const yamlManifest = yaml.dump(
         {
@@ -1639,7 +1639,7 @@ export async function patchIngress(ingressName: string, bannerSnippet: any, name
       `kubectl patch ingress ${ingressName} --namespace ${namespace} --type merge --patch-file ${localPath}`
     );
 
-    getLogger({ ingressName, namespace }).info('Successfully patched ingress');
+    getLogger({ ingressName, namespace }).info('Deploy: ingress patched');
   } catch (error) {
     getLogger({ ingressName, namespace, error }).warn('Unable to patch ingress, banner might not work');
     throw error;
@@ -1725,7 +1725,7 @@ export function generateDeployManifest({
         },
       });
     } else {
-      getLogger().info('No manifest generated for deploy');
+      getLogger().info('Manifest: skipped reason=empty');
       return '';
     }
   }
@@ -2160,7 +2160,7 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
   const logCtx = { deployUuid: uuid, service: deployableName, namespace };
 
   let retries = 0;
-  getLogger(logCtx).info('Waiting for pods');
+  getLogger(logCtx).info('Deploy: waiting for pods');
 
   while (retries < 60) {
     const k8sApi = getK8sApi();
@@ -2215,7 +2215,7 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
     });
 
     if (allReady) {
-      getLogger({ ...logCtx, podCount: pods.length }).info('Pods ready');
+      getLogger({ ...logCtx, podCount: pods.length }).info('Deploy: pods ready');
       return true;
     }
 
