@@ -15,13 +15,9 @@
  */
 
 import { KubeConfig } from '@kubernetes/client-node';
-import rootLogger from './logger';
+import { getLogger } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { PassThrough, Writable } from 'stream';
-
-const logger = rootLogger.child({
-  filename: 'lib/k8sStreamer.ts',
-});
 
 export interface AbortHandle {
   abort: () => void;
@@ -52,7 +48,6 @@ export function streamK8sLogs(
 ): AbortHandle {
   const { podName, namespace, containerName: rawContainerName, follow, tailLines, timestamps } = params;
   const containerName = rawContainerName.startsWith('[init] ') ? rawContainerName.substring(7) : rawContainerName;
-  const logCtx = { podName, namespace, containerName, follow, tailLines };
 
   const kc = new KubeConfig();
   kc.loadFromDefault();
@@ -77,7 +72,10 @@ export function streamK8sLogs(
         }
       }
     } catch (e: any) {
-      logger.error({ ...logCtx, err: e }, 'Error processing log stream data chunk');
+      getLogger().error(
+        { error: e },
+        `K8sStream: data chunk processing failed podName=${podName} namespace=${namespace} containerName=${containerName}`
+      );
     }
   });
 
@@ -91,7 +89,10 @@ export function streamK8sLogs(
       }
       callbacks.onEnd();
     } catch (e: any) {
-      logger.error({ ...logCtx, err: e }, 'Error during log stream end processing');
+      getLogger().error(
+        { error: e },
+        `K8sStream: end processing failed podName=${podName} namespace=${namespace} containerName=${containerName}`
+      );
       callbacks.onError(e instanceof Error ? e : new Error(String(e)));
     }
   });
@@ -99,7 +100,10 @@ export function streamK8sLogs(
   stream.on('error', (err) => {
     if (streamEnded) return;
     streamEnded = true;
-    logger.error({ ...logCtx, err }, 'K8s log stream encountered an error event.');
+    getLogger().error(
+      { error: err },
+      `K8sStream: error event received podName=${podName} namespace=${namespace} containerName=${containerName}`
+    );
     buffer = '';
     callbacks.onError(err);
   });
@@ -115,12 +119,17 @@ export function streamK8sLogs(
 
       k8sRequest = await k8sLog.log(namespace, podName, containerName, stream as Writable, logOptions);
 
-      logger.debug(logCtx, 'k8sLog.log promise resolved (stream likely ended or follow=false).');
+      getLogger().debug(
+        `K8sStream: promise resolved podName=${podName} namespace=${namespace} containerName=${containerName} follow=${follow}`
+      );
 
       if (k8sRequest) {
         k8sRequest.on('error', (err: Error) => {
           if (streamEnded) return;
-          logger.error({ ...logCtx, err }, 'K8s request object emitted error.');
+          getLogger().error(
+            { error: err },
+            `K8sStream: request error emitted podName=${podName} namespace=${namespace} containerName=${containerName}`
+          );
           if (stream.writable) {
             stream.emit('error', err);
           } else {
@@ -137,7 +146,10 @@ export function streamK8sLogs(
     } catch (err: any) {
       if (streamEnded) return;
       if (err.name !== 'AbortError') {
-        logger.error({ ...logCtx, err }, 'Failed to establish K8s log stream connection.');
+        getLogger().error(
+          { error: err },
+          `K8sStream: connection failed podName=${podName} namespace=${namespace} containerName=${containerName}`
+        );
         buffer = '';
         if (stream.writable) {
           stream.emit('error', err);
@@ -158,10 +170,15 @@ export function streamK8sLogs(
         try {
           k8sRequest.abort();
         } catch (abortErr) {
-          logger.error({ ...logCtx, err: abortErr }, 'Error calling abort() on K8s request.');
+          getLogger().error(
+            { error: abortErr },
+            `K8sStream: abort call failed podName=${podName} namespace=${namespace} containerName=${containerName}`
+          );
         }
       } else {
-        logger.warn(logCtx, "Abort requested, but K8s request object not available or doesn't have abort method.");
+        getLogger().warn(
+          `K8sStream: abort requested but request unavailable podName=${podName} namespace=${namespace} containerName=${containerName}`
+        );
       }
       stream.destroy();
       streamEnded = true;

@@ -41,7 +41,7 @@ function lifecycleToGithubStatus(status: string) {
 export async function createOrUpdateGithubDeployment(deploy: Deploy) {
   getLogger().debug('Creating or updating github deployment');
   try {
-    getLogger().info('Deploy status update');
+    getLogger().info('GitHub: deployment status updated');
     await deploy.$fetchGraph('build.pullRequest.repository');
     const githubDeploymentId = deploy?.githubDeploymentId;
     const build = deploy?.build;
@@ -68,7 +68,7 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
       await updateDeploymentStatus(deploy, githubDeploymentId);
     }
   } catch (error) {
-    getLogger({ error }).error('Error creating or updating github deployment');
+    getLogger({ error }).error('GitHub: deployment update failed');
     throw error;
   }
 }
@@ -104,7 +104,7 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
     getLogger({
       error,
       repo: fullName,
-    }).error('Error creating github deployment');
+    }).error('GitHub: deployment create failed');
     throw error;
   }
 }

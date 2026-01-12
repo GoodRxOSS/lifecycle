@@ -16,7 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next';
 import { defaultDb } from 'server/lib/dependencies';
-import logger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import RedisClient from 'server/lib/redisClient';
 
 export default async function healthHandler(req: NextApiRequest, res: NextApiResponse) {
@@ -30,7 +30,7 @@ export default async function healthHandler(req: NextApiRequest, res: NextApiRes
     await defaultDb.knex.raw('SELECT 1');
     res.status(200).json({ status: 'Healthy' });
   } catch (error) {
-    logger.error(`Health check failed. Error:\n ${error}`);
+    getLogger().error({ error }, 'Health: check failed');
     return res.status(500).json({ status: 'Unhealthy', error: `An error occurred while performing health check.` });
   }
 }

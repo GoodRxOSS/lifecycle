@@ -157,7 +157,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(405).json({ error: `${req.method} is not allowed.` });
     }
   } catch (error) {
-    getLogger().error({ error }, 'Error occurred on TTL cleanup operation');
+    getLogger().error({ error }, 'TTL: cleanup operation failed');
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
@@ -169,13 +169,13 @@ async function getTTLConfig(res: NextApiResponse) {
     const ttlConfig = globalConfig.ttl_cleanup;
 
     if (!ttlConfig) {
-      getLogger().warn('TTL cleanup configuration not found in global config');
+      getLogger().warn('TTL: config not found');
       return res.status(404).json({ error: 'TTL cleanup configuration not found' });
     }
 
     return res.status(200).json({ config: ttlConfig });
   } catch (error) {
-    getLogger().error({ error }, 'Error occurred retrieving TTL cleanup config');
+    getLogger().error({ error }, 'TTL: config retrieval failed');
     return res.status(500).json({ error: 'Unable to retrieve TTL cleanup configuration' });
   }
 }
@@ -206,7 +206,7 @@ async function triggerTTLCleanup(req: NextApiRequest, res: NextApiResponse) {
         dryRun,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'Error occurred triggering TTL cleanup');
+      getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'TTL: cleanup trigger failed');
       return res.status(500).json({ error: 'Unable to trigger TTL cleanup job' });
     }
   });

@@ -155,7 +155,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(builds);
   } catch (error) {
-    getLogger().error({ error }, `Failed to fetch builds for pull request: id=${parsedId}`);
+    getLogger().error({ error }, `API: builds fetch failed pullRequestId=${parsedId}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

@@ -38,7 +38,7 @@ export async function createKubernetesApplyJob({
   const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
-  getLogger().info(`Creating Kubernetes apply job: jobName=${jobName} service=${serviceName}`);
+  getLogger().info(`Job: creating name=${jobName} service=${serviceName}`);
 
   const configMapName = `${jobName}-manifest`;
   await createManifestConfigMap(deploy, configMapName, namespace);
@@ -132,7 +132,7 @@ export async function createKubernetesApplyJob({
   };
 
   const createdJob = await batchApi.createNamespacedJob(namespace, job);
-  getLogger().info(`Created Kubernetes apply job: jobName=${jobName} jobId=${jobId}`);
+  getLogger().info(`Job: created name=${jobName} jobId=${jobId}`);
 
   return createdJob.body;
 }
@@ -218,7 +218,7 @@ export async function monitorKubernetesJob(
       await new Promise((resolve) => setTimeout(resolve, 5000));
       attempts++;
     } catch (error) {
-      getLogger().error({ error }, `Error monitoring job: jobName=${jobName}`);
+      getLogger({ error }).error(`Job: monitor failed name=${jobName}`);
       throw error;
     }
   }

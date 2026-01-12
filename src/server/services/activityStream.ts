@@ -82,7 +82,7 @@ export default class ActivityStream extends BaseService {
         await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
         const { build } = pullRequest;
         if (!build) {
-          getLogger({ stage: LogStage.COMMENT_FAILED }).warn(`Build id not found for pull request with id: ${id}`);
+          getLogger({ stage: LogStage.COMMENT_FAILED }).warn(`Build: id not found pullRequestId=${id}`);
           return;
         }
 
@@ -101,7 +101,10 @@ export default class ActivityStream extends BaseService {
 
         getLogger({ stage: LogStage.COMMENT_COMPLETE }).debug(`Comment updated for PR ${id}`);
       } catch (error) {
-        getLogger({ stage: LogStage.COMMENT_FAILED }).error({ error }, `Error processing comment for PR ${id}`);
+        getLogger({ stage: LogStage.COMMENT_FAILED }).error(
+          { error },
+          `Comment: processing failed pullRequestId=${id}`
+        );
       }
     });
   };
@@ -170,7 +173,7 @@ export default class ActivityStream extends BaseService {
         null,
         true
       ).catch((error) => {
-        getLogger().warn({ error }, 'Failed to update the activity feed for comment edit');
+        getLogger().warn({ error }, 'ActivityFeed: comment edit update failed');
       });
     }
   }
@@ -189,7 +192,7 @@ export default class ActivityStream extends BaseService {
     runUuid: string;
   }) {
     if (!build.id) {
-      getLogger().error('No build provided to apply overrides from comment edit');
+      getLogger().error('Build: missing for comment edit overrides');
       return;
     }
 
@@ -234,7 +237,7 @@ export default class ActivityStream extends BaseService {
       : deploys.find((d) => d.service.name === serviceName);
 
     if (!deploy) {
-      getLogger().warn(`No deploy found for service: ${serviceName}`);
+      getLogger().warn(`Deploy: not found service=${serviceName}`);
       return;
     }
 
@@ -252,7 +255,7 @@ export default class ActivityStream extends BaseService {
           active,
         })
         .catch((error) => {
-          getLogger().error({ error }, `Failed to patch deploy for service=${serviceName} with external URL`);
+          getLogger().error({ error }, `Deploy: patch failed service=${serviceName} field=externalUrl`);
         });
     } else {
       getLogger().debug(`Setting branch override: ${branchOrExternalUrl} for deployable: ${deployable?.name}`);
@@ -260,7 +263,7 @@ export default class ActivityStream extends BaseService {
         .$query()
         .patch({ commentBranchName: branchOrExternalUrl })
         .catch((error) => {
-          getLogger().error({ error }, `Failed to patch deployable for service=${serviceName} with branch`);
+          getLogger().error({ error }, `Deployable: patch failed service=${serviceName} field=branch`);
         });
 
       await deploy
@@ -273,7 +276,7 @@ export default class ActivityStream extends BaseService {
           active,
         })
         .catch((error) => {
-          getLogger().error({ error }, `Failed to patch deploy for service=${serviceName} with branch`);
+          getLogger().error({ error }, `Deploy: patch failed service=${serviceName} field=branch`);
         });
     }
 
@@ -309,7 +312,7 @@ export default class ActivityStream extends BaseService {
       });
 
       if (hasGithubMissionControlComment && !pullRequest?.commentId) {
-        getLogger().error('Status comment already exists but no mission control comment ID found');
+        getLogger().error('Comment: mission control id missing');
         return;
       }
 
@@ -329,7 +332,7 @@ export default class ActivityStream extends BaseService {
       const commentId = response?.data?.id;
       await pullRequest.$query().patch({ commentId, etag });
     } catch (error) {
-      getLogger().error({ error }, `Failed to update Github mission control comment for ${fullName}/${branchName}`);
+      getLogger().error({ error }, `GitHub: mission control update failed repo=${fullName}/${branchName}`);
     }
   }
 
@@ -347,7 +350,7 @@ export default class ActivityStream extends BaseService {
     });
 
     if (hasStatusComment && !commentId) {
-      getLogger().warn('Status comment already exists but no status comment ID found');
+      getLogger().warn('Comment: status id missing');
       return;
     }
     const message = await this.generateStatusCommentForBuild(build, deploys, pullRequest);
@@ -392,7 +395,7 @@ export default class ActivityStream extends BaseService {
     const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled();
     const isShowingStatusComment = isStatic || hasStatusComment || isDefaultStatusEnabled;
     if (!buildId) {
-      getLogger().error(`No build ID found for ${fullName}/${branchName}`);
+      getLogger().error(`Build: id not found repo=${fullName}/${branchName}`);
       throw new Error('No build ID found for this build!');
     }
     const resource = `build.${buildId}`;
@@ -431,7 +434,7 @@ export default class ActivityStream extends BaseService {
           await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
             getLogger().warn(
               { error },
-              `Unable to update ${queued} mission control comment fullYaml=${isFullYaml} for ${fullName}/${branchName}`
+              `Comment: mission control update failed repo=${fullName}/${branchName} fullYaml=${isFullYaml} queued=${queued}`
             );
           });
         } else {
@@ -443,12 +446,12 @@ export default class ActivityStream extends BaseService {
         await this.updateStatusComment(build, deploys, pullRequest, repository).catch((error) => {
           getLogger().warn(
             { error },
-            `Unable to update ${queued} status comment fullYaml=${isFullYaml} for ${fullName}/${branchName}`
+            `Comment: status update failed repo=${fullName}/${branchName} fullYaml=${isFullYaml} queued=${queued}`
           );
         });
       }
     } catch (error) {
-      getLogger().error({ error }, `Failed to update the activity feed for ${fullName}/${branchName}`);
+      getLogger().error({ error }, `ActivityFeed: update failed repo=${fullName}/${branchName}`);
     } finally {
       if (lock) {
         try {
@@ -464,7 +467,7 @@ export default class ActivityStream extends BaseService {
     try {
       await this.redis.del(resource);
     } catch (error) {
-      getLogger().error({ error }, `Failed to forcefully unlock ${resource} for ${fullName}/${branchName}`);
+      getLogger().error({ error }, `Lock: force unlock failed resource=${resource} repo=${fullName}/${branchName}`);
     }
   }
 
@@ -696,7 +699,7 @@ export default class ActivityStream extends BaseService {
       }
 
       message += await this.editCommentForBuild(build, deploys).catch((error) => {
-        getLogger().error({ error }, `Unable to generate mission control fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: mission control generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
 
@@ -704,7 +707,7 @@ export default class ActivityStream extends BaseService {
         message += '\n---\n\n';
         message += `## 📦 Deployments\n\n`;
         message += await this.environmentBlock(build).catch((error) => {
-          getLogger().error({ error }, `Unable to generate environment comment block fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
       }
@@ -712,7 +715,7 @@ export default class ActivityStream extends BaseService {
       message += `\n\nmission control ${isStaging() ? 'stg ' : ''}comment: enabled \n`;
       return message;
     } catch (error) {
-      getLogger().error({ error }, `Failed to generate mission control comment for ${fullName}/${branchName}`);
+      getLogger().error({ error }, `Comment: mission control generation failed repo=${fullName}/${branchName}`);
       return message;
     }
   }
@@ -804,13 +807,13 @@ export default class ActivityStream extends BaseService {
       message += 'We are busy building your code...\n';
       message += '## Build Status\n';
       message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-        getLogger().error({ error }, `Unable to generate build status fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
 
       message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((error) => {
-        getLogger().error({ error }, `Unable to generate environment comment block fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
 
@@ -824,26 +827,26 @@ export default class ActivityStream extends BaseService {
       message += `We're deploying your code. Please stand by....\n\n`;
       message += '## Build Status\n';
       message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-        getLogger().error({ error }, `Unable to generate build status fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
       message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((e) => {
-        getLogger().error(
-          { error: e },
-          `Unable to generate environment comment block fullYaml=${build.enableFullYaml}`
-        );
+        getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
       message += await this.dashboardBlock(build, deploys).catch((e) => {
-        getLogger().error({ error: e }, `Unable to generate dashboard fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
     } else if (isReadyToDeployBuild) {
       message += '## 🚀 Ready to deploy\n';
       message += `Your code is built. We're ready to deploy whenever you are.\n`;
       message += await this.deployingBlock(build).catch((e) => {
-        getLogger().error({ error: e }, `Unable to generate deployment status fullYaml=${build.enableFullYaml}`);
+        getLogger().error(
+          { error: e },
+          `Comment: deployment status generation failed fullYaml=${build.enableFullYaml}`
+        );
         return '';
       });
       message += await createDeployMessage();
@@ -854,18 +857,15 @@ export default class ActivityStream extends BaseService {
         message += `There was a problem deploying your code. Some services may have not rolled out successfully. Here are the URLs for your services:\n\n`;
         message += '## Build Status\n';
         message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-          getLogger().error({ error }, `Unable to generate build status fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
         message += await this.environmentBlock(build).catch((e) => {
-          getLogger().error(
-            { error: e },
-            `Unable to generate environment comment block fullYaml=${build.enableFullYaml}`
-          );
+          getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
         message += await this.dashboardBlock(build, deploys).catch((e) => {
-          getLogger().error({ error: e }, `Unable to generate dashboard fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
       } else if (build.status === BuildStatus.CONFIG_ERROR) {
@@ -875,19 +875,16 @@ export default class ActivityStream extends BaseService {
         message += '## ✅ Deployed\n';
         message += '## Build Status\n';
         message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-          getLogger().error({ error }, `Unable to generate build status fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
         message += `\nWe've deployed your code. Here's where you can find your services:\n`;
         message += await this.environmentBlock(build).catch((e) => {
-          getLogger().error(
-            { error: e },
-            `Unable to generate environment comment block fullYaml=${build.enableFullYaml}`
-          );
+          getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
         message += await this.dashboardBlock(build, deploys).catch((e) => {
-          getLogger().error({ error: e }, `Unable to generate dashboard fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
       } else {
@@ -1168,7 +1165,7 @@ export default class ActivityStream extends BaseService {
                   { deployId, action: 'create', ...extractContextForQueue() },
                   { delay: 10000, jobId: `deploy-${deployId}` }
                 )
-                .catch((error) => getLogger().warn({ error }, `manageDeployments error with deployId=${deployId}`));
+                .catch((error) => getLogger().warn({ error }, `Deploy: management failed deployId=${deployId}`));
             }
           );
         })
@@ -1199,7 +1196,7 @@ export default class ActivityStream extends BaseService {
       }
       getLogger().info(`Fastly: purged serviceId=${fastlyServiceId}`);
     } catch (error) {
-      getLogger().error({ error }, 'Fastly purgeFastlyServiceCache error');
+      getLogger().error({ error }, 'Fastly: cache purge failed');
     }
   }
 }

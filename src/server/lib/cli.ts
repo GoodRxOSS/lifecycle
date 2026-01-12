@@ -148,7 +148,7 @@ export async function codefreshDestroy(deploy: Deploy) {
     const id = output?.trim();
     return id;
   } catch (error) {
-    getLogger({ error }).error('Error destroying Codefresh pipeline');
+    getLogger({ error }).error('Codefresh: pipeline destroy failed');
     throw error;
   }
 }
@@ -202,7 +202,7 @@ export async function deleteBuild(build: Build) {
     );
     getLogger().info('CLI: deleted');
   } catch (e) {
-    getLogger({ error: e }).error('Error deleting CLI resources');
+    getLogger({ error: e }).error('CLI: delete failed');
   }
 }
 

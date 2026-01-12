@@ -66,7 +66,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           await llmService.initialize();
         }
       } catch (error) {
-        getLogger().error({ error }, 'Failed to initialize LLM service');
+        getLogger().error({ error }, 'AI: init failed');
         res.write(
           `data: ${JSON.stringify({
             error: error.message,
@@ -87,7 +87,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       try {
         context = await aiAgentContextService.gatherFullContext(buildUuid);
       } catch (error) {
-        getLogger().error({ error }, 'Failed to gather context');
+        getLogger().error({ error }, 'AI: context gather failed');
         res.write(
           `data: ${JSON.stringify({
             error: `Build not found: ${error.message}`,
@@ -161,7 +161,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           } catch (e) {
             getLogger().error(
               { error: e instanceof Error ? e.message : String(e), responseLength: aiResponse.length },
-              'JSON validation failed for investigation response'
+              'AI: JSON validation failed'
             );
             aiResponse =
               '⚠️ Investigation completed but response formatting failed. Please try asking a more specific question.';
@@ -175,7 +175,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           }
         }
       } catch (error: any) {
-        getLogger().error({ error }, 'LLM query failed');
+        getLogger().error({ error }, 'AI: query failed');
 
         if (
           error?.status === 429 ||
@@ -220,7 +220,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.end();
     });
   } catch (error: any) {
-    getLogger().error({ error }, 'Unexpected error in AI agent chat');
+    getLogger().error({ error }, 'AI: chat request failed');
     res.write(`data: ${JSON.stringify({ error: error?.message || 'Internal error' })}\n\n`);
     res.end();
   }

@@ -56,7 +56,7 @@ export default class OverrideService extends BaseService {
         return { valid: false, error: 'UUID is not available' };
       }
     } catch (error) {
-      getLogger().error({ error }, 'Error checking UUID uniqueness');
+      getLogger().error({ error }, 'UUID: uniqueness check failed');
       return { valid: false, error: 'Unable to validate UUID' };
     }
 
@@ -108,7 +108,7 @@ export default class OverrideService extends BaseService {
         const updatedBuild = await this.db.models.Build.query(trx).findById(build.id);
 
         k8s.deleteNamespace(oldNamespace).catch((error) => {
-          getLogger().warn({ error }, `Failed to delete old namespace ${oldNamespace}`);
+          getLogger().warn({ error }, `Namespace: delete failed name=${oldNamespace}`);
         });
         getLogger().info(`Override: updated oldUuid=${oldUuid} newUuid=${newUuid} deploysUpdated=${deploys.length}`);
 
@@ -118,7 +118,7 @@ export default class OverrideService extends BaseService {
         };
       });
     } catch (error) {
-      getLogger().error({ error }, `Failed to update UUID to '${newUuid}'`);
+      getLogger().error({ error }, `UUID: update failed newUuid=${newUuid}`);
       throw error;
     }
   }

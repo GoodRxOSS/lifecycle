@@ -15,11 +15,7 @@
  */
 
 import { Span, tracer, TracerOptions } from 'dd-trace';
-import rootLogger from 'server/lib/logger';
-
-export const logger = rootLogger.child({
-  filename: 'lib/tracer/index.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 // Refer to the readme for insights
 
@@ -31,7 +27,7 @@ export class Tracer {
   private constructor() {
     if (Tracer.instance) {
       const errorMsg = 'This class is a singleton!';
-      logger.error(errorMsg);
+      getLogger().error(`Tracer: singleton violation`);
       throw new Error(errorMsg);
     }
     Tracer.instance = this;
@@ -65,7 +61,7 @@ export class Tracer {
       }
       return this;
     } catch (error) {
-      logger.error(`[Tracer][initialize] error: ${error}`);
+      getLogger().error(`Tracer: initialization error error=${error}`);
       return this;
     }
   }
@@ -93,7 +89,7 @@ export class Tracer {
   }
 
   public static Trace(): Function {
-    return function (target: any, propertyKey: string | symbol, descriptor: PropertyDescriptor): any {
+    return function (_target: any, propertyKey: string | symbol, descriptor: PropertyDescriptor): any {
       const originalMethod = descriptor?.value;
       const profiler = Tracer.getInstance();
       descriptor.value = function (...args: any[]) {
@@ -108,9 +104,7 @@ export class Tracer {
             if (typeof tracer?.scope === 'function') {
               tracer.scope().active()?.setTag('error', true);
             }
-            logger
-              .child({ target, descriptor, error })
-              .error(`[Tracer][Trace] error decorating ${propertyKey.toString()}`);
+            getLogger().error(`Tracer: error decorating method=${propertyKey.toString()} error=${error}`);
             throw error;
           }
         });

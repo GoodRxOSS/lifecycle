@@ -109,7 +109,7 @@ export default class QueueManager {
         try {
           await worker.close();
         } catch (error) {
-          getLogger().warn({ error: error.message }, `Error closing worker: queueName=${worker.name}`);
+          getLogger().warn({ error: error.message }, `Queue: worker close failed name=${worker.name}`);
         }
       }
 
@@ -118,7 +118,7 @@ export default class QueueManager {
         try {
           await queue.close();
         } catch (error) {
-          getLogger().warn({ error: error.message }, `Error closing queue: queueName=${queue.name}`);
+          getLogger().warn({ error: error.message }, `Queue: close failed name=${queue.name}`);
         }
       }
     }

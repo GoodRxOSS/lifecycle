@@ -100,7 +100,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const { uuid, jobName } = req.query;
 
   return withLogContext({ buildUuid: uuid as string }, async () => {
-    getLogger().info(`method=${req.method} jobName=${jobName} Job logs endpoint called, delegating to unified handler`);
+    getLogger().info(`API: job logs called method=${req.method} jobName=${jobName}`);
 
     req.query.type = 'webhook';
 

@@ -32,7 +32,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     if (!aiAgentConfig.providers || !Array.isArray(aiAgentConfig.providers)) {
-      getLogger().warn('aiAgent config missing providers array');
+      getLogger().warn('AI: config missing providers array');
       return res.status(200).json({ models: [] });
     }
 
@@ -56,7 +56,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(200).json({ models });
   } catch (error: any) {
-    getLogger().error({ error }, 'Failed to fetch available models');
+    getLogger().error({ error }, 'AI: models fetch failed');
     return res.status(500).json({ error: 'Failed to fetch available models' });
   }
 }

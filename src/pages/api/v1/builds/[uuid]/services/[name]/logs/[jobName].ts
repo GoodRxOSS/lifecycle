@@ -176,12 +176,12 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
     const isWebhookRequest = type === 'webhook';
 
     if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
-      getLogger().warn(`API: invalid parameters uuid=${uuid} name=${name} jobName=${jobName} type=${type}`);
+      getLogger().warn(`API: invalid params uuid=${uuid} name=${name} jobName=${jobName} type=${type}`);
       return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
     if (type && (typeof type !== 'string' || !['build', 'deploy', 'webhook'].includes(type))) {
-      getLogger().warn(`API: invalid type parameter type=${type}`);
+      getLogger().warn(`API: invalid type param type=${type}`);
       return res.status(400).json({ error: 'Invalid type parameter. Must be "build", "deploy", or "webhook"' });
     }
 
@@ -197,7 +197,7 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
 
       return res.status(200).json(response);
     } catch (error: any) {
-      getLogger().error({ error }, `API: log stream info fetch failed jobName=${jobName} service=${name}`);
+      getLogger().error({ error }, `API: log streaming info failed jobName=${jobName} service=${name}`);
 
       if (error.message === 'Build not found') {
         return res.status(404).json({ error: 'Build not found' });

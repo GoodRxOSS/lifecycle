@@ -55,7 +55,7 @@ export default class RepositoryService extends BaseService {
           defaultEnvId,
         }));
     } catch (error) {
-      getLogger({ githubRepositoryId, error }).error('Failed to find or create repository');
+      getLogger({ githubRepositoryId, error }).error('Repository: find or create failed');
       throw error;
     }
 
@@ -82,7 +82,7 @@ export default class RepositoryService extends BaseService {
         ownerId,
       });
     } catch (error) {
-      getLogger({ githubRepositoryId, error }).error('Failed to find repository');
+      getLogger({ githubRepositoryId, error }).error('Repository: find failed');
       throw error;
     }
 

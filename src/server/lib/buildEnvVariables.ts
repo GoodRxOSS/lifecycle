@@ -59,7 +59,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             error.uuid = deploy.uuid;
             throw error;
           } else {
-            getLogger().warn({ error }, 'Fallback using database Environment Variables');
+            getLogger().warn({ error }, 'EnvVars: fallback to database');
           }
         }
       }
@@ -106,7 +106,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             error.uuid = deploy.uuid;
             throw error;
           } else {
-            getLogger().warn({ error }, 'Fallback using database Init Environment Variables');
+            getLogger().warn({ error }, 'EnvVars: init fallback to database');
           }
         }
       }
@@ -155,7 +155,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
             ),
           })
           .catch((error) => {
-            getLogger().error({ error }, 'Problem when preparing env variable');
+            getLogger().error({ error }, 'EnvVars: preparation failed');
           });
 
         if (deploy.deployable?.initDockerfilePath || deploy.service?.initDockerfilePath) {
@@ -174,7 +174,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
               ),
             })
             .catch((error) => {
-              getLogger().error({ error }, 'Problem when preparing init env variable');
+              getLogger().error({ error }, 'EnvVars: init preparation failed');
             });
         }
       });

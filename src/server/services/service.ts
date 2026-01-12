@@ -78,7 +78,7 @@ export default class ServiceService extends BaseService {
         }
       }
     } catch (error) {
-      getLogger({ environment: environment.name, error }).error('Failed to find or create default service');
+      getLogger({ environment: environment.name, error }).error('Service: find or create failed');
       throw error;
     }
 

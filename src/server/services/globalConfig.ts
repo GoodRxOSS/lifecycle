@@ -142,7 +142,7 @@ export default class GlobalConfigService extends BaseService {
       if (!labels) throw new Error('Labels configuration not found in global config');
       return labels;
     } catch (error) {
-      getLogger().error({ error }, 'Error retrieving labels configuration, using fallback defaults');
+      getLogger().error({ error }, 'Config: labels fetch failed using=defaults');
       // Return fallback defaults on error
       return {
         deploy: ['lifecycle-deploy!'],
@@ -161,7 +161,7 @@ export default class GlobalConfigService extends BaseService {
       try {
         deserializedConfigs[key as keyof GlobalConfig] = JSON.parse(value as string);
       } catch (e) {
-        getLogger().error({ error: e }, `Error deserializing config: key=${key}`);
+        getLogger().error({ error: e }, `Config: deserialize failed key=${key}`);
       }
     }
     return deserializedConfigs as GlobalConfig;
@@ -194,7 +194,7 @@ export default class GlobalConfigService extends BaseService {
       try {
         await this.getGithubClientToken(true);
       } catch (error) {
-        getLogger().error({ error }, 'Error refreshing GlobalConfig cache during boot');
+        getLogger().error({ error }, 'Config: cache refresh failed during=boot');
       }
     }
 
@@ -221,7 +221,7 @@ export default class GlobalConfigService extends BaseService {
         await this.getGithubClientToken(true);
         getLogger({ stage: LogStage.CONFIG_REFRESH }).debug('GlobalConfig and Github cache refreshed successfully');
       } catch (error) {
-        getLogger({ stage: LogStage.CONFIG_FAILED }).error({ error }, 'Error refreshing GlobalConfig cache');
+        getLogger({ stage: LogStage.CONFIG_FAILED }).error({ error }, 'Config: cache refresh failed');
       }
     });
   };
@@ -238,7 +238,7 @@ export default class GlobalConfigService extends BaseService {
       await this.db.knex('global_config').insert({ key, config: value }).onConflict('key').merge();
       getLogger().info(`Config: set key=${key}`);
     } catch (err: any) {
-      getLogger().error({ error: err }, `Error setting global config value: key=${key}`);
+      getLogger().error({ error: err }, `Config: set failed key=${key}`);
       throw err;
     }
   }

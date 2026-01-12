@@ -77,7 +77,7 @@ export default class DeployService extends BaseService {
 
       const buildId = build?.id;
       if (!buildId) {
-        getLogger().error('findOrCreateDeploys: No build ID found for this build');
+        getLogger().error('Deploy: build id missing for=findOrCreateDeploys');
         return [];
       }
 
@@ -96,11 +96,11 @@ export default class DeployService extends BaseService {
               deployableId: deployable.id,
               buildId,
             }).catch((error) => {
-              getLogger().warn({ error, serviceId: deployable.id }, 'Failed to find deploy');
+              getLogger().warn({ error, serviceId: deployable.id }, 'Deploy: find failed');
               return null;
             });
             if (deploy) {
-              getLogger().warn(`Deploy not in batch result but found via fallback: deployableId=${deployable.id}`);
+              getLogger().warn(`Deploy: fallback find succeeded deployableId=${deployable.id}`);
             }
           }
 
@@ -138,7 +138,7 @@ export default class DeployService extends BaseService {
               const sha = await getShaForDeploy(deploy);
               patchFields.sha = sha;
             } catch (error) {
-              getLogger().debug({ error }, 'Unable to get SHA, continuing');
+              getLogger().debug({ error }, 'Deploy: SHA fetch failed continuing=true');
             }
           }
 
@@ -150,7 +150,7 @@ export default class DeployService extends BaseService {
           await deploy.$query().patch(patchFields);
         })
       ).catch((error) => {
-        getLogger().error({ error }, 'Failed to create deploys from deployables');
+        getLogger().error({ error }, 'Deploy: create from deployables failed');
       });
       getLogger().info('Deploy: initialized');
     } else {
@@ -189,12 +189,12 @@ export default class DeployService extends BaseService {
         environment.defaultServices.map((service) => serviceInitFunc(service, true)),
         environment.optionalServices.map((service) => serviceInitFunc(service, false)),
       ]).catch((error) => {
-        getLogger().error({ error }, 'Failed to create/update deploys');
+        getLogger().error({ error }, 'Deploy: create/update failed');
       });
     }
     const buildId = build?.id;
     if (!buildId) {
-      getLogger().error('findOrCreateDeploy: No build ID found for this build');
+      getLogger().error('Deploy: build id missing for=findOrCreateDeploys');
     }
 
     await this.db.models.Deploy.query().where({ buildId });
@@ -222,18 +222,18 @@ export default class DeployService extends BaseService {
     const uuid = `${service.name}-${build?.uuid}`;
     const buildId = build?.id;
     if (!buildId) {
-      getLogger().error('findOrCreateDeploy: No build ID found for this build');
+      getLogger().error('Deploy: build id missing for=findOrCreateDeploy');
     }
     const serviceId = service?.id;
     if (!serviceId) {
-      getLogger().error('findOrCreateDeploy: No service ID found for this service');
+      getLogger().error('Deploy: service id missing for=findOrCreateDeploy');
     }
 
     // Deployable should be find at this point; otherwise, something is very wrong.
     const deployable: Deployable = await this.db.models.Deployable.query()
       .findOne({ buildId, serviceId })
       .catch((error) => {
-        getLogger().error({ error, serviceId }, 'Failed to find deployable');
+        getLogger().error({ error, serviceId }, 'Deployable: find failed');
         return null;
       });
 
@@ -241,7 +241,7 @@ export default class DeployService extends BaseService {
       serviceId,
       buildId,
     }).catch((error) => {
-      getLogger().warn({ error, serviceId }, 'Failed to find deploy');
+      getLogger().warn({ error, serviceId }, 'Deploy: find failed');
       return null;
     });
     if (deploy != null) {
@@ -256,11 +256,11 @@ export default class DeployService extends BaseService {
     } else {
       const buildId = build?.id;
       if (!buildId) {
-        getLogger().error('findOrCreateDeploy: No build ID found for this build');
+        getLogger().error('Deploy: build id missing for=findOrCreateDeploy');
       }
       const serviceId = service?.id;
       if (!serviceId) {
-        getLogger().error('findOrCreateDeploy: No service ID found for this service');
+        getLogger().error('Deploy: service id missing for=findOrCreateDeploy');
       }
       // Create deploy object if this is new deployment
       deploy = await this.db.models.Deploy.create({
@@ -364,7 +364,7 @@ export default class DeployService extends BaseService {
       }
       return null;
     } catch (error) {
-      getLogger().debug({ error }, 'Error checking for existing Aurora database');
+      getLogger().debug({ error }, 'Aurora: check failed');
       return null;
     }
   }
@@ -378,7 +378,7 @@ export default class DeployService extends BaseService {
           await deploy.$fetchGraph('[build, deployable]');
 
           if (!deploy.deployable) {
-            getLogger().error('Missing deployable for Aurora restore');
+            getLogger().error('Aurora: deployable missing for=restore');
             return false;
           }
 
@@ -422,7 +422,7 @@ export default class DeployService extends BaseService {
           getLogger().info('Aurora: restored');
           return true;
         } catch (e) {
-          getLogger().error({ error: e }, 'Aurora cluster restore failed');
+          getLogger().error({ error: e }, 'Aurora: cluster restore failed');
           await deploy.$query().patch({
             status: DeployStatus.ERROR,
           });
@@ -457,7 +457,7 @@ export default class DeployService extends BaseService {
         });
 
         if (!fullSha) {
-          getLogger().warn({ owner, name, branch: deploy.branchName }, 'Commit SHA cannot be falsy');
+          getLogger().warn({ owner, name, branch: deploy.branchName }, 'Git: SHA missing');
 
           result = false;
         } else {
@@ -468,7 +468,7 @@ export default class DeployService extends BaseService {
           if (deploy?.sha === buildSha) {
             await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT, sha: buildSha }, runUUID).catch(
               (error) => {
-                getLogger().warn({ error }, 'Failed to update activity feed');
+                getLogger().warn({ error }, 'ActivityFeed: update failed');
               }
             );
             getLogger().info('Codefresh: skipped reason=noChanges status=built');
@@ -486,7 +486,7 @@ export default class DeployService extends BaseService {
               });
 
               codefreshBuildId = await cli.codefreshDeploy(deploy, build, service, deployable).catch((error) => {
-                getLogger().error({ error }, 'Failed to receive codefresh build id');
+                getLogger().error({ error }, 'Codefresh: build id missing');
                 return null;
               });
               getLogger().info('Codefresh: triggered');
@@ -503,7 +503,7 @@ export default class DeployService extends BaseService {
                   },
                   runUUID
                 ).catch((error) => {
-                  getLogger().warn({ error }, 'Failed to update activity feed');
+                  getLogger().warn({ error }, 'ActivityFeed: update failed');
                 });
                 getLogger().info(`Codefresh: waiting url=${buildLogs}`);
                 await cli.waitForCodefresh(codefreshBuildId);
@@ -519,12 +519,12 @@ export default class DeployService extends BaseService {
                   },
                   runUUID
                 ).catch((error) => {
-                  getLogger().warn({ error }, 'Failed to update activity feed');
+                  getLogger().warn({ error }, 'ActivityFeed: update failed');
                 });
                 result = true;
               }
             } catch (error) {
-              getLogger().error({ error, url: buildLogs }, 'Codefresh build failed');
+              getLogger().error({ error, url: buildLogs }, 'Codefresh: build failed');
               await this.patchAndUpdateActivityFeed(
                 deploy,
                 {
@@ -669,10 +669,10 @@ export default class DeployService extends BaseService {
                   (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
                   (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
 
-                getLogger().debug({ tagsExist }, 'Tags exist check');
+                getLogger().debug({ tagsExist }, 'Build: tags exist check');
                 const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
                 if (!ecrDomain || !registry) {
-                  getLogger().error({ lifecycleDefaults }, 'Missing ECR config to build image');
+                  getLogger().error({ lifecycleDefaults }, 'ECR: config missing for build');
                   await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
                   return false;
                 }
@@ -723,7 +723,7 @@ export default class DeployService extends BaseService {
                 }
               }
             } else {
-              getLogger().debug({ type: service.type }, 'Build type not recognized');
+              getLogger().debug({ type: service.type }, 'Build: type not recognized');
               return false;
             }
             return true;
@@ -775,17 +775,17 @@ export default class DeployService extends BaseService {
                   );
                   return true;
                 } catch (error) {
-                  getLogger().warn({ error }, 'Error processing Helm deployment');
+                  getLogger().warn({ error }, 'Helm: deployment processing failed');
                   return false;
                 }
               }
               default:
-                getLogger().debug({ type: deployable.type }, 'Build type not recognized');
+                getLogger().debug({ type: deployable.type }, 'Build: type not recognized');
                 return false;
             }
           }
         } catch (e) {
-          getLogger().error({ error: e }, 'Uncaught error building docker image');
+          getLogger().error({ error: e }, 'Docker: build error');
           return false;
         }
       }
@@ -823,7 +823,7 @@ export default class DeployService extends BaseService {
         targetGithubRepositoryId
       );
     } catch (error) {
-      getLogger().warn({ error }, 'Failed to update the activity feeds');
+      getLogger().warn({ error }, 'ActivityFeed: update failed');
     }
   }
 
@@ -846,7 +846,7 @@ export default class DeployService extends BaseService {
           initDockerImage,
         })
         .catch((error) => {
-          getLogger().warn({ error }, 'patchDeployWithTag failed');
+          getLogger().warn({ error }, 'Deploy: tag patch failed');
         });
     }
 
@@ -912,7 +912,7 @@ export default class DeployService extends BaseService {
       // Verify we actually have a SHA from github before proceeding
       if (!fullSha) {
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-        getLogger().error({ owner, name, branch: deploy.branchName }, 'Failed to retrieve SHA to build');
+        getLogger().error({ owner, name, branch: deploy.branchName }, 'Git: SHA fetch failed');
         return false;
       }
 
@@ -936,7 +936,7 @@ export default class DeployService extends BaseService {
 
       const gitOrg = (app_setup?.org && app_setup.org.trim()) || 'REPLACE_ME_ORG';
       if (!ecrDomain || !registry) {
-        getLogger().error({ lifecycleDefaults }, 'Missing ECR config to build image');
+        getLogger().error({ lifecycleDefaults }, 'ECR: config missing for build');
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
         return false;
       }
@@ -945,7 +945,7 @@ export default class DeployService extends BaseService {
         (await codefresh.tagExists({ tag, ecrRepo, uuid })) &&
         (!initDockerfilePath || (await codefresh.tagExists({ tag: initTag, ecrRepo, uuid })));
 
-      getLogger().debug({ tagsExist }, 'Tags exist check');
+      getLogger().debug({ tagsExist }, 'Build: tags exist check');
 
       // Check for and skip duplicates
       if (!tagsExist) {
@@ -1039,7 +1039,7 @@ export default class DeployService extends BaseService {
           return true;
         } else {
           await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-          getLogger().warn({ url: buildLogs }, 'Error building image');
+          getLogger().warn({ url: buildLogs }, 'Build: image failed');
           return false;
         }
       } else {
@@ -1125,7 +1125,7 @@ export default class DeployService extends BaseService {
             }
           });
         } catch (error) {
-          getLogger().error({ error, pipelineId, serviceName }, 'Error processing pipeline');
+          getLogger().error({ error, pipelineId, serviceName }, 'Pipeline: processing failed');
           throw error;
         }
       }

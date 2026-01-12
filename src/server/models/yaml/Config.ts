@@ -66,10 +66,7 @@ export async function fetchLifecycleConfigByRepository(
     try {
       config = await new YamlConfigParser().parseYamlConfigFromBranch(repository.fullName, branchName);
     } catch (error) {
-      getLogger({ repository: repository.fullName, branch: branchName }).warn(
-        { error },
-        'Unable to fetch configuration'
-      );
+      getLogger({ repository: repository.fullName, branch: branchName }).warn({ error }, 'Config: fetch failed');
 
       if (error instanceof EmptyFileError) {
         config = null;
@@ -84,7 +81,7 @@ export async function fetchLifecycleConfigByRepository(
       } catch (error) {
         getLogger({ repository: repository.fullName, branch: branchName, version: config.version }).error(
           { error },
-          'YAML config validation failed'
+          'Config: validation failed'
         );
         throw new ValidationError(error);
       }
@@ -109,7 +106,7 @@ export function getDeployingServicesByName(config: LifecycleConfig, serviceName:
       }
     }
   } catch (error) {
-    getLogger({ serviceName }).error({ error }, 'Failed to get service by name');
+    getLogger({ serviceName }).error({ error }, 'Service: lookup failed');
     throw error;
   }
 
@@ -129,7 +126,7 @@ export async function resolveRepository(repositoryFullName: string): Promise<Rep
       const repositories: Repository[] = await Repository.query()
         .where(raw('LOWER(??)', [key]), '=', `${repositoryFullName.toLowerCase()}`)
         .catch((error) => {
-          getLogger({ repository: repositoryFullName }).error({ error }, 'Unable to find repository in database');
+          getLogger({ repository: repositoryFullName }).error({ error }, 'Repository: not found');
           return null;
         });
 
@@ -138,7 +135,7 @@ export async function resolveRepository(repositoryFullName: string): Promise<Rep
       }
     }
   } catch (error) {
-    getLogger({ repository: repositoryFullName }).error({ error }, 'Failed to resolve repository');
+    getLogger({ repository: repositoryFullName }).error({ error }, 'Repository: resolution failed');
     throw error;
   }
 

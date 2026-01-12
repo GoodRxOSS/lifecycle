@@ -46,13 +46,12 @@ export async function createOrUpdatePullRequestComment({
       headers: { etag },
     });
   } catch (error) {
-    const msg = 'Unable to create or update pull request comment';
     getLogger({
       error,
       repo: fullName,
       pr: pullRequestNumber,
-    }).error(msg);
-    throw new Error(error?.message || msg);
+    }).error('GitHub: comment update failed');
+    throw new Error(error?.message || 'Unable to create or update pull request comment');
   }
 }
 
@@ -79,7 +78,7 @@ export async function updatePullRequestLabels({
       repo: fullName,
       pr: pullRequestNumber,
       labels: labels.toString(),
-    }).error('Unable to update pull request labels');
+    }).error('GitHub: labels update failed');
     throw error;
   }
 }
@@ -88,13 +87,12 @@ export async function getPullRequest(owner: string, name: string, pullRequestNum
   try {
     return await cacheRequest(`GET /repos/${owner}/${name}/pulls/${pullRequestNumber}`);
   } catch (error) {
-    const msg = 'Unable to retrieve pull request';
     getLogger({
       error,
       repo: `${owner}/${name}`,
       pr: pullRequestNumber,
-    }).error(msg);
-    throw new Error(error?.message || msg);
+    }).error('GitHub: pull request fetch failed');
+    throw new Error(error?.message || 'Unable to retrieve pull request');
   }
 }
 
@@ -102,13 +100,12 @@ export async function getPullRequestByRepositoryFullName(fullName: string, pullR
   try {
     return await cacheRequest(`GET /repos/${fullName}/pulls/${pullRequestNumber}`);
   } catch (error) {
-    const msg = 'Unable to retrieve pull request';
     getLogger({
       error,
       repo: fullName,
       pr: pullRequestNumber,
-    }).error(msg);
-    throw new Error(error?.message || msg);
+    }).error('GitHub: pull request fetch failed');
+    throw new Error(error?.message || 'Unable to retrieve pull request');
   }
 }
 
@@ -137,7 +134,7 @@ export async function getPullRequestLabels({
       error,
       repo: fullName,
       pr: pullRequestNumber,
-    }).error('Unable to fetch labels');
+    }).error('GitHub: labels fetch failed');
     throw error;
   }
 }
@@ -152,13 +149,12 @@ export async function createDeploy({ owner, name, branch, installationId }: Repo
       },
     });
   } catch (error) {
-    const msg = 'Unable to create deploy';
     getLogger({
       error,
       repo: `${owner}/${name}`,
       branch,
-    }).error(msg);
-    throw new Error(error?.message || msg);
+    }).error('GitHub: deploy create failed');
+    throw new Error(error?.message || 'Unable to create deploy');
   }
 }
 
@@ -199,13 +195,12 @@ export async function getSHAForBranch(branchName: string, owner: string, name: s
     const ref = await getRefForBranchName(owner, name, branchName);
     return ref?.data?.object?.sha;
   } catch (error) {
-    const msg = 'Unable to retrieve SHA from branch';
     getLogger({
       error,
       repo: `${owner}/${name}`,
       branch: branchName,
-    }).warn(msg);
-    throw new Error(error?.message || msg);
+    }).warn('GitHub: SHA fetch failed');
+    throw new Error(error?.message || 'Unable to retrieve SHA from branch');
   }
 }
 
@@ -243,9 +238,8 @@ export async function getYamlFileContent({ fullName, branch = '', sha = '', isJS
 
     return configData;
   } catch (error) {
-    const msg = 'No lifecycle yaml found or parsed';
-    getLogger({ error, repo: fullName, branch }).warn(msg);
-    throw new ConfigFileNotFound(error?.message || msg);
+    getLogger({ error, repo: fullName, branch }).warn('GitHub: yaml fetch failed');
+    throw new ConfigFileNotFound(error?.message || 'No lifecycle yaml found or parsed');
   }
 }
 
@@ -258,13 +252,12 @@ export async function getYamlFileContentFromPullRequest(fullName: string, pullRe
     if (!config) throw new Error('Unable to get config from pull request');
     return config;
   } catch (error) {
-    const msg = 'Unable to retrieve YAML file content from pull request';
     getLogger({
       error,
       repo: fullName,
       pr: pullRequestNumber,
-    }).warn(msg);
-    throw new ConfigFileNotFound(error?.message || msg);
+    }).warn('GitHub: yaml fetch failed');
+    throw new ConfigFileNotFound(error?.message || 'Unable to retrieve YAML file content from pull request');
   }
 }
 
@@ -276,13 +269,12 @@ export async function getYamlFileContentFromBranch(
     const config = await getYamlFileContent({ fullName, branch: branchName });
     return config;
   } catch (error) {
-    const msg = 'Unable to retrieve YAML file content from branch';
     getLogger({
       error,
       repo: fullName,
       branch: branchName,
-    }).warn(msg);
-    throw new ConfigFileNotFound(error?.message || msg);
+    }).warn('GitHub: yaml fetch failed');
+    throw new ConfigFileNotFound(error?.message || 'Unable to retrieve YAML file content from branch');
   }
 }
 
@@ -301,7 +293,7 @@ export async function checkIfCommentExists({
       error,
       repo: fullName,
       pr: pullRequestNumber,
-    }).error('Unable to check for comments');
+    }).error('GitHub: comments check failed');
     return false;
   }
 }

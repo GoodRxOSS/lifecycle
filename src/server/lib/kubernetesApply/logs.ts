@@ -103,14 +103,14 @@ export async function getKubernetesApplyLogs(deploy: Deploy, tail?: number): Pro
           allLogs.push(`=== Logs from pod ${podName} ===\n${podLogs.body}`);
         }
       } catch (podError) {
-        getLogger({ error: podError }).error(`Failed to fetch logs from pod: podName=${podName}`);
+        getLogger({ error: podError }).error(`Pod: log fetch failed name=${podName}`);
         allLogs.push(`=== Error fetching logs from pod ${podName} ===\n${(podError as Error).message || podError}`);
       }
     }
 
     return allLogs.join('\n\n') || 'No logs available';
   } catch (error) {
-    getLogger({ error }).error('Failed to fetch logs');
+    getLogger({ error }).error('Logs: fetch failed');
     return `Failed to fetch logs: ${(error as Error).message || error}`;
   }
 }
@@ -243,7 +243,7 @@ export async function streamKubernetesApplyLogs(
           onClose();
         }
       } catch (error) {
-        getLogger({ error }).error('Error polling logs');
+        getLogger({ error }).error('Logs: poll failed');
         if ((error as any).response?.statusCode === 404) {
           // Pod was deleted, stop polling
           isActive = false;
@@ -261,7 +261,7 @@ export async function streamKubernetesApplyLogs(
       clearInterval(pollInterval);
     };
   } catch (error) {
-    getLogger({ error }).error('Failed to start log stream');
+    getLogger({ error }).error('Logs: stream start failed');
     onError(error as Error);
     onClose();
     return () => {};

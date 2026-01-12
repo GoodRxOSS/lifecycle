@@ -74,7 +74,7 @@ export default class PullRequestService extends BaseService {
             );
           }
         } else {
-          getLogger({ fullName, pullRequestNumber }).error({ error }, 'Failed to create pull request');
+          getLogger({ fullName, pullRequestNumber }).error({ error }, 'PR: create failed');
           throw error;
         }
       }
@@ -169,7 +169,7 @@ export default class PullRequestService extends BaseService {
         await this.db.services.BuildService.cleanupBuilds();
         getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Cleanup: closed PRs completed');
       } catch (error) {
-        getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'Error processing cleanup closed PRs');
+        getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'Cleanup: closed PRs processing failed');
       }
     });
   };

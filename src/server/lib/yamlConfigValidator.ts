@@ -85,7 +85,7 @@ export class YamlConfigValidator {
       throw new ValidationError('Config file is empty.');
     }
 
-    getLogger().debug(`Validating config file with version: ${version}`);
+    getLogger().debug(`Config: validating version=${version}`);
     switch (version.toLowerCase()) {
       case '1.0.0':
       case 'latest':

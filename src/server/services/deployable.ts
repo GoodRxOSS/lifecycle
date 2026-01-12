@@ -211,7 +211,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to generate deployable attributes from database configuration');
+      }).error('Deployable: generate attributes from DB failed');
       throw error;
     }
 
@@ -383,7 +383,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to generate deployable attributes from yaml configuration');
+      }).error('Deployable: generate attributes from YAML failed');
       throw error;
     }
 
@@ -419,7 +419,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to merge deployable attributes from database with yaml configuration');
+      }).error('Deployable: merge attributes failed');
       throw error;
     }
 
@@ -475,7 +475,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to overwrite deployable configuration with yaml configuration');
+      }).error('Deployable: overwrite config with YAML failed');
       throw error;
     }
   }
@@ -539,7 +539,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to create or update deployable attributes from database configuration');
+      }).error('Deployable: upsert attributes from DB failed');
       throw error;
     }
   }
@@ -643,7 +643,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         service: service.name,
         error,
-      }).error('Failed to create or update deployable attributes from yaml configuration');
+      }).error('Deployable: upsert attributes from YAML failed');
       throw error;
     }
   }
@@ -716,7 +716,7 @@ export default class DeployableService extends BaseService {
                   buildUUID,
                   service: dbEnvService.name,
                   error,
-                }).error('Failed during attribution while using database configuration');
+                }).error('Deployable: attribution failed source=db');
                 throw error;
               }
             })
@@ -736,7 +736,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         environment: environment.name,
         error,
-      }).error('Failed to create or update deployable from database configuration');
+      }).error('Deployable: upsert from DB config failed');
       throw error;
     }
   }
@@ -775,7 +775,7 @@ export default class DeployableService extends BaseService {
                         id: yamlEnvService.serviceId,
                       })
                       .catch((error) => {
-                        getLogger({ buildUUID, error }).warn('Query error');
+                        getLogger({ buildUUID, error }).warn('Query: failed');
                         return null;
                       });
 
@@ -804,7 +804,7 @@ export default class DeployableService extends BaseService {
                       buildUUID,
                       service: yamlEnvService.name,
                       error,
-                    }).error('Failed to create or update deployable from yaml configuration when using service ID');
+                    }).error('Deployable: create/update from yaml failed source=serviceId');
                     throw error;
                   }
                 } else {
@@ -895,7 +895,7 @@ export default class DeployableService extends BaseService {
                       buildUUID,
                       service: yamlEnvService.name,
                       error,
-                    }).error('Failed to create or update deployable from yaml configuration');
+                    }).error('Deployable: create/update from yaml failed');
                     throw error;
                   }
                 }
@@ -904,7 +904,7 @@ export default class DeployableService extends BaseService {
                   buildUUID,
                   service: yamlEnvService.name,
                   error,
-                }).error('Failed to create or update deployable from yaml configuration');
+                }).error('Deployable: create/update from yaml failed');
                 throw error;
               }
             })
@@ -963,10 +963,10 @@ export default class DeployableService extends BaseService {
           }
         }
       } else {
-        getLogger({ buildUUID }).warn('Missing PR branch name');
+        getLogger({ buildUUID }).warn('PR: branch name missing');
       }
     } catch (error) {
-      getLogger({ buildUUID, error }).error('Failed to create or update deployable from yaml configuration');
+      getLogger({ buildUUID, error }).error('Deployable: create/update from yaml failed');
       throw error;
     }
   }
@@ -1025,7 +1025,7 @@ export default class DeployableService extends BaseService {
         buildUUID,
         environment: environment.name,
         error,
-      }).error('Failed to upsert deployables');
+      }).error('Deployable: upsert failed');
       throw error;
     }
     getLogger({ buildUUID }).info(`Deployable: upserted count=${deployables.length}`);
@@ -1059,7 +1059,7 @@ export default class DeployableService extends BaseService {
                 buildUUID,
                 service: deployableAttr.name,
                 error,
-              }).error('Unable to search deployable');
+              }).error('Deployable: search failed');
               return undefined;
             });
 
@@ -1072,7 +1072,7 @@ export default class DeployableService extends BaseService {
                   buildUUID,
                   service: deployableAttr.name,
                   error,
-                }).error('Unable to patch deployable');
+                }).error('Deployable: patch failed');
               });
           } else {
             deployable = await this.db.models.Deployable.create(deployableAttr as object).catch((error) => {
@@ -1080,7 +1080,7 @@ export default class DeployableService extends BaseService {
                 buildUUID,
                 service: deployableAttr.name,
                 error,
-              }).error('Unable to create new deployable');
+              }).error('Deployable: create failed');
               return undefined;
             });
           }

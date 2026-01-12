@@ -130,7 +130,7 @@ const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<R
       const errors = error.message.split('\n');
       return res.status(400).json({ valid: false, error: errors });
     }
-    getLogger().error({ error }, 'Unexpected error during YAML validation');
+    getLogger().error({ error }, 'Schema: YAML validation failed');
     return res.status(500).json({ error: 'Internal server error' });
   }
 };

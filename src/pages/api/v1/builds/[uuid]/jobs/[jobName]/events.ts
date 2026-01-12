@@ -216,7 +216,7 @@ async function getJobEvents(jobName: string, namespace: string): Promise<K8sEven
 
     return events;
   } catch (error) {
-    getLogger().error({ error }, `jobName=${jobName} Error fetching events`);
+    getLogger().error({ error }, `API: events fetch failed jobName=${jobName}`);
     throw error;
   }
 }
@@ -225,16 +225,14 @@ const eventsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { uuid, jobName } = req.query;
 
   return withLogContext({ buildUuid: uuid as string }, async () => {
-    const logger = getLogger();
-
     if (req.method !== 'GET') {
-      logger.warn(`method=${req.method} Method not allowed`);
+      getLogger().warn(`API: method not allowed method=${req.method}`);
       res.setHeader('Allow', ['GET']);
       return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
     if (typeof uuid !== 'string' || typeof jobName !== 'string') {
-      logger.warn(`uuid=${uuid} jobName=${jobName} Missing or invalid query parameters`);
+      getLogger().warn(`API: invalid params uuid=${uuid} jobName=${jobName}`);
       return res.status(400).json({ error: 'Missing or invalid uuid or jobName parameters' });
     }
 
@@ -249,7 +247,7 @@ const eventsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
 
       return res.status(200).json(response);
     } catch (error) {
-      logger.error({ error }, `jobName=${jobName} Error getting events`);
+      getLogger().error({ error }, `API: events fetch failed jobName=${jobName}`);
 
       if (error instanceof HttpError) {
         if (error.response?.statusCode === 404) {

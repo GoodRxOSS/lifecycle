@@ -55,7 +55,7 @@ export const buildImage = async (options: ContainerBuildOptions) => {
       metrics
         .increment('total', { error: 'error_with_cli_output', result: 'error', codefreshBuildId: '' })
         .event(eventDetails.title, eventDetails.description);
-      getLogger().error({ output }, `buildImage noCodefreshBuildOutput: no output from Codefresh for ${suffix}`);
+      getLogger().error({ output }, `Codefresh: build output missing suffix=${suffix}`);
       if (!hasOutput) throw Error('no output from Codefresh');
     }
     const codefreshBuildId = getCodefreshPipelineIdFromOutput(output);
@@ -70,7 +70,7 @@ export const buildImage = async (options: ContainerBuildOptions) => {
       .event(eventDetails.title, eventDetails.description);
     return codefreshBuildId;
   } catch (error) {
-    getLogger().error({ error }, `buildImage failed for ${suffix}`);
+    getLogger().error({ error }, `Codefresh: build failed suffix=${suffix}`);
     throw error;
   }
 };

@@ -21,11 +21,7 @@ import { IServices } from 'server/services/types';
 import Model from 'server/models/_Model';
 import knexfile from '../../knexfile';
 
-import rootLogger from 'server/lib/logger';
-
-const initialLogger = rootLogger.child({
-  filename: 'server/database.ts',
-});
+import { getLogger } from 'server/lib/logger/index';
 
 export default class Database {
   models: models.IModels;
@@ -52,8 +48,8 @@ export default class Database {
     this.knexConfig = merge({}, knexfile, knexConfig);
   }
 
-  setLifecycleConfig(config: any = {}, logger = initialLogger) {
-    logger.debug('setLifecycleConfig: setting config', { config });
+  setLifecycleConfig(config: any = {}) {
+    getLogger().debug('Database: setting lifecycle config');
     this.config = merge({}, this.config, config);
   }
 

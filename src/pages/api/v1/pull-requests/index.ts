@@ -271,7 +271,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    getLogger().error({ error }, 'Failed to fetch pull requests');
+    getLogger().error({ error }, 'API: pull requests fetch failed');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

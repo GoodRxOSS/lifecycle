@@ -95,7 +95,7 @@ export class RedisClient {
       await Promise.all([this.redis.quit(), this.subscriber.quit(), this.bullConn.quit()]);
       getLogger().info('Redis: closed');
     } catch (error) {
-      getLogger().warn({ error }, 'Error closing Redis connections, forcing disconnect');
+      getLogger().warn({ error }, 'Redis: close failed forcing=true');
       this.redis.disconnect();
       this.subscriber.disconnect();
       this.bullConn.disconnect();

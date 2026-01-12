@@ -53,7 +53,7 @@ async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json(build);
   } catch (error) {
-    getLogger({ error }).error('Error fetching build');
+    getLogger({ error }).error('API: build fetch failed');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }
@@ -105,7 +105,7 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
       },
     });
   } catch (error) {
-    getLogger({ error }).error(`Error updating UUID to newUuid=${newUuid}`);
+    getLogger({ error }).error(`API: UUID update failed newUuid=${newUuid}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 }

@@ -152,7 +152,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     }
 
     if (typeof uuid !== 'string' || typeof name !== 'string') {
-      getLogger().warn(`API: invalid parameters uuid=${uuid} name=${name}`);
+      getLogger().warn(`API: invalid params uuid=${uuid} name=${name}`);
       return res.status(400).json({ error: 'Missing or invalid uuid or name parameters' });
     }
 

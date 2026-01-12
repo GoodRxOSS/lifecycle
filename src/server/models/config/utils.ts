@@ -36,7 +36,7 @@ export const resolveRepository = async (repositoryFullName: string) => {
     const repositories = await Repository.query()
       .where(raw('LOWER(??)', [key]), '=', name)
       .catch((error) => {
-        getLogger().error({ error }, `Unable to find ${repositoryFullName} from Lifecycle Database`);
+        getLogger().error({ error }, `Repository: not found name=${repositoryFullName}`);
         return null;
       });
     if (!repositories || repositories?.length === 0) {
@@ -44,7 +44,7 @@ export const resolveRepository = async (repositoryFullName: string) => {
     }
     return repositories[0];
   } catch (err) {
-    getLogger().error({ error: err }, `Problem resolving repository ${repositoryFullName}`);
+    getLogger().error({ error: err }, `Repository: resolution failed name=${repositoryFullName}`);
   }
 };
 
@@ -61,7 +61,7 @@ export const fetchLifecycleConfigByRepository = async (repository: Repository, b
     const validator = new YamlConfigValidator();
     const isConfigValid = validator.validate(configVersion, config);
     if (!isConfigValid) {
-      getLogger().error(`YAML Config validation failed for ${name}/${branchName} version=${configVersion}`);
+      getLogger().error(`Config: validation failed repo=${name}/${branchName} version=${configVersion}`);
       // TODO: This is a temporary fix to allow the UI to display the config
       // throw new Error(
       //   `YAML Config validation failed for ${name}/${branchName} using version Lifecyle Yaml version=${configVersion}`
@@ -69,7 +69,7 @@ export const fetchLifecycleConfigByRepository = async (repository: Repository, b
     }
     return config;
   } catch (err) {
-    getLogger().error({ error: err }, `fetchLifecycleConfigByRepository failed`);
+    getLogger().error({ error: err }, `Config: fetch failed`);
     return null;
   }
 };

@@ -39,7 +39,7 @@ import {
   GitHubClient,
 } from './tools';
 import { DebugContext, DebugMessage } from '../types/aiAgent';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 
 export interface AIAgentConfig {
   provider: ProviderType;
@@ -101,7 +101,6 @@ export class AIAgentCore {
     signal: AbortSignal
   ): Promise<ProcessQueryResult> {
     const startTime = Date.now();
-    const logger = rootLogger.child({ component: 'AIAgentCore', buildUuid: context.buildUuid });
 
     try {
       if (context.lifecycleContext.pullRequest.branch) {
@@ -121,14 +120,18 @@ export class AIAgentCore {
       }));
 
       if (await this.conversationManager.shouldCompress(messages)) {
-        logger.info(`Compressing conversation history from ${messages.length} messages`);
+        getLogger().info(
+          `AIAgentCore: compressing conversation fromMessageCount=${messages.length} buildUuid=${context.buildUuid}`
+        );
         const state = await this.conversationManager.compress(messages, this.provider, context.buildUuid);
         messages.splice(0, messages.length - 1);
         messages.unshift({
           role: 'user',
           content: this.conversationManager.buildPromptFromState(state),
         });
-        logger.info(`Conversation compressed to ${messages.length} messages`);
+        getLogger().info(
+          `AIAgentCore: conversation compressed toMessageCount=${messages.length} buildUuid=${context.buildUuid}`
+        );
       }
 
       const conversationHistoryForBuilder: DebugMessage[] = messages.map((m) => ({
@@ -172,10 +175,12 @@ export class AIAgentCore {
 
       const duration = Date.now() - startTime;
 
-      logger.info(
-        `Query processing ${result.success ? 'completed' : 'failed'}: iterations=${
+      getLogger().info(
+        `AIAgentCore: query processing ${result.success ? 'completed' : 'failed'} iterations=${
           result.metrics.iterations
-        } toolCalls=${result.metrics.toolCalls} duration=${duration}ms isJson=${finalResult.isJson}`
+        } toolCalls=${result.metrics.toolCalls} duration=${duration}ms isJson=${finalResult.isJson} buildUuid=${
+          context.buildUuid
+        }`
       );
 
       return {
@@ -186,7 +191,9 @@ export class AIAgentCore {
     } catch (error: any) {
       const duration = Date.now() - startTime;
 
-      logger.error(`Query processing error after ${duration}ms:`, error);
+      getLogger().error(
+        `AIAgentCore: query processing error duration=${duration}ms error=${error?.message} buildUuid=${context.buildUuid}`
+      );
 
       throw error;
     }

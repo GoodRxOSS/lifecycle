@@ -18,9 +18,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { BaseLLMProvider } from './base';
 import { ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
 import { Tool, ToolCall } from '../types/tool';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ component: 'GeminiProvider' });
+import { getLogger } from 'server/lib/logger/index';
 
 export class GeminiProvider extends BaseLLMProvider {
   name = 'gemini';
@@ -83,9 +81,12 @@ export class GeminiProvider extends BaseLLMProvider {
                       }
                       try {
                         JSON.parse(responseContent);
-                      } catch (e) {
-                        logger.warn(
-                          `Tool response is not valid JSON, sanitizing: ${responseContent.substring(0, 100)}...`
+                      } catch (e: any) {
+                        getLogger().warn(
+                          `GeminiProvider: tool response not valid JSON, sanitizing preview=${responseContent.substring(
+                            0,
+                            100
+                          )}`
                         );
                         responseContent = JSON.stringify({ content: responseContent });
                       }
@@ -105,8 +106,8 @@ export class GeminiProvider extends BaseLLMProvider {
                   }
                   return messages;
                 }
-              } catch (e) {
-                logger.warn(`Failed to parse tool results, treating as text: ${e.message}`);
+              } catch (e: any) {
+                getLogger().warn(`GeminiProvider: failed to parse tool results error=${e.message}`);
               }
             }
             return [
@@ -140,10 +141,8 @@ export class GeminiProvider extends BaseLLMProvider {
       lastCandidate = candidate;
 
       if (candidate.finishReason === 'STOP' && (!candidate.content?.parts || candidate.content.parts.length === 0)) {
-        logger.error(
-          `Gemini returned STOP with no content. Safety ratings: ${JSON.stringify(
-            candidate.safetyRatings
-          )}, full candidate: ${JSON.stringify(candidate)}`
+        getLogger().error(
+          `GeminiProvider: returned STOP with no content safetyRatings=${JSON.stringify(candidate.safetyRatings)}`
         );
       }
 
@@ -167,21 +166,21 @@ export class GeminiProvider extends BaseLLMProvider {
     const response = await result.response;
 
     if (accumulatedText.length === 0 && functionCalls.length === 0) {
-      let responseText = 'N/A';
+      let _responseText = 'N/A';
       try {
-        responseText = (response as any).text();
-      } catch (e) {
-        responseText = `Error getting text: ${e.message}`;
+        _responseText = (response as any).text();
+      } catch (e: any) {
+        _responseText = `Error getting text: ${e.message}`;
       }
-      logger.error(
-        `Gemini returned empty response. Last candidate: ${JSON.stringify(
-          lastCandidate
-        )}, promptFeedback: ${JSON.stringify((response as any).promptFeedback)}, response.text: ${responseText}`
-      );
-      logger.error(
-        `Full response object keys: ${Object.keys(response)}, candidates: ${JSON.stringify(
-          (response as any).candidates
+      getLogger().error(
+        `GeminiProvider: empty response finishReason=${lastCandidate?.finishReason} promptFeedback=${JSON.stringify(
+          (response as any).promptFeedback
         )}`
+      );
+      getLogger().error(
+        `GeminiProvider: debug info responseKeys=${Object.keys(response).join(',')} candidatesCount=${
+          (response as any).candidates?.length || 0
+        }`
       );
 
       throw new Error(

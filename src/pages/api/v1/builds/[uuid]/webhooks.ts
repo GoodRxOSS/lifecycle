@@ -207,7 +207,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
           return res.status(405).json({ error: `${req.method} is not allowed.` });
       }
     } catch (error) {
-      getLogger({ error }).error(`Error handling ${req.method} request`);
+      getLogger({ error }).error(`API: webhook request failed method=${req.method}`);
       res.status(500).json({ error: 'An unexpected error occurred.' });
     }
   });
@@ -252,9 +252,7 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
         message: `Webhook for build ${uuid} has been queued`,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.WEBHOOK_PROCESSING, error }).error(
-        `Unable to proceed with webhook for build ${uuid}`
-      );
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING, error }).error(`Webhook: invoke failed uuid=${uuid}`);
       return res.status(500).json({ error: `Unable to proceed with triggering webhook for build ${uuid}.` });
     }
   });
@@ -293,7 +291,7 @@ async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
       },
     });
   } catch (error) {
-    getLogger({ error }).error('Failed to retrieve webhooks');
+    getLogger({ error }).error('API: webhooks fetch failed');
     return res.status(500).json({ error: `Unable to retrieve webhooks for build ${uuid}.` });
   }
 }

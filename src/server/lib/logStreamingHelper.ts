@@ -14,14 +14,10 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { StreamingInfo, LogSourceStatus, K8sPodInfo, K8sContainerInfo } from 'shared/types';
 import { HttpError, V1ContainerStatus } from '@kubernetes/client-node';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 /**
  * Reusable logic to get log streaming info for a specific Kubernetes job name,
@@ -32,7 +28,7 @@ export async function getLogStreamingInfoForJob(
   namespace: string
 ): Promise<StreamingInfo | LogSourceStatus> {
   if (!jobName) {
-    logger.warn(`Job name not provided. Cannot get logs.`);
+    getLogger().warn('LogStreaming: job name not provided');
     const statusResponse: LogSourceStatus = {
       status: 'Unavailable',
       streamingRequired: false,
@@ -45,7 +41,7 @@ export async function getLogStreamingInfoForJob(
   try {
     podInfo = await getK8sJobStatusAndPod(jobName, namespace);
   } catch (k8sError: any) {
-    logger.error({ k8sError }, `Error calling getK8sJobStatusAndPod for ${jobName}.`);
+    getLogger().error(`LogStreaming: error fetching job status jobName=${jobName} error=${k8sError.message}`);
     const errorStatus: LogSourceStatus = {
       status: 'Unknown',
       streamingRequired: false,
@@ -125,30 +121,28 @@ export async function getLogStreamingInfoForJob(
  * @returns A promise resolving to K8sPodInfo containing status and container info, or null if not found/error.
  */
 export async function getK8sJobStatusAndPod(jobName: string, namespace: string): Promise<K8sPodInfo | null> {
-  const logCtx = { jobName, namespace };
-
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
   const batchV1Api = kc.makeApiClient(k8s.BatchV1Api);
 
   try {
-    logger.debug(logCtx, `Reading Job details for namespace: ${namespace} and jobName: ${jobName}`);
+    getLogger().debug(`LogStreaming: reading job details namespace=${namespace} jobName=${jobName}`);
     const jobResponse = await batchV1Api.readNamespacedJob(jobName, namespace);
     const job = jobResponse.body;
 
     if (!job?.spec?.selector?.matchLabels) {
       if (job?.status?.succeeded) {
-        logger.warn(logCtx, 'Job succeeded but selector missing.');
+        getLogger().warn(`LogStreaming: job succeeded but selector missing jobName=${jobName} namespace=${namespace}`);
         return { podName: null, namespace, status: 'Succeeded', containers: [] };
       }
       if (job?.status?.failed) {
-        logger.warn(logCtx, 'Job failed but selector missing.');
+        getLogger().warn(`LogStreaming: job failed but selector missing jobName=${jobName} namespace=${namespace}`);
         const failedCondition = job.status.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
         const failureMessage = failedCondition?.message || 'Job failed';
         return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
-      logger.error(logCtx, 'Job found, but missing spec.selector.matchLabels. Cannot find associated pods.');
+      getLogger().error(`LogStreaming: job found but missing selector jobName=${jobName} namespace=${namespace}`);
       return { podName: null, namespace, status: 'Unknown', containers: [] };
     }
 
@@ -156,7 +150,9 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
       .map(([key, value]) => `${key}=${value}`)
       .join(',');
 
-    logger.debug({ ...logCtx, labelSelector }, 'Listing Pods with label selector');
+    getLogger().debug(
+      `LogStreaming: listing pods jobName=${jobName} namespace=${namespace} labelSelector=${labelSelector}`
+    );
 
     const podListResponse = await coreV1Api.listNamespacedPod(
       namespace,
@@ -169,7 +165,7 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
     const pods = podListResponse.body.items;
 
     if (!pods || pods.length === 0) {
-      logger.warn(logCtx, 'No pods found matching the job selector.');
+      getLogger().warn(`LogStreaming: no pods found matching job selector jobName=${jobName} namespace=${namespace}`);
       const jobStatus = job.status;
       if (jobStatus?.succeeded && jobStatus.succeeded > 0) {
         return { podName: null, namespace, status: 'Succeeded', containers: [] };
@@ -178,7 +174,9 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
         const failedCondition = jobStatus.conditions?.find((c) => c.type === 'Failed' && c.status === 'True');
         const failureReason = failedCondition?.reason || 'Failed';
         const failureMessage = failedCondition?.message || 'Job failed';
-        logger.warn({ ...logCtx, failureReason }, 'Job indicates failure, but no pods found.');
+        getLogger().warn(
+          `LogStreaming: job indicates failure but no pods found jobName=${jobName} namespace=${namespace} reason=${failureReason}`
+        );
         return { podName: null, namespace, status: 'Failed', containers: [], message: failureMessage };
       }
       return { podName: null, namespace, status: 'NotFound', containers: [] };
@@ -190,11 +188,11 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
     const latestPod = pods[0];
 
     if (!latestPod?.metadata?.name || !latestPod?.status) {
-      logger.error(logCtx, 'Found pod(s), but latest pod is missing metadata or status.');
+      getLogger().error(`LogStreaming: pod missing metadata or status jobName=${jobName} namespace=${namespace}`);
       return null;
     }
     const podName = latestPod.metadata.name;
-    logger.debug({ ...logCtx, podName }, 'Found latest pod');
+    getLogger().debug(`LogStreaming: found latest pod jobName=${jobName} namespace=${namespace} podName=${podName}`);
 
     let podStatus: K8sPodInfo['status'] = 'Unknown';
     const phase = latestPod.status.phase;
@@ -259,7 +257,7 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
     return result;
   } catch (error: any) {
     if (error instanceof HttpError && error.response?.statusCode === 404) {
-      logger.warn(logCtx, `Job or associated resource not found (404) ${error.message}`);
+      getLogger().warn(`LogStreaming: job not found jobName=${jobName} namespace=${namespace} error=${error.message}`);
       return {
         podName: null,
         namespace,
@@ -268,7 +266,9 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
         message: 'Job no longer exists. Logs have been cleaned up after 24 hours.',
       };
     }
-    logger.error({ ...logCtx, err: error }, 'Error getting K8s job/pod status');
+    getLogger().error(
+      `LogStreaming: error getting job/pod status jobName=${jobName} namespace=${namespace} error=${error.message}`
+    );
     return null;
   }
 }
@@ -280,9 +280,7 @@ export async function getK8sJobStatusAndPod(jobName: string, namespace: string):
  * @returns A promise resolving to K8sPodInfo containing pod status and container info.
  */
 export async function getK8sPodContainers(podName: string, namespace: string = 'lifecycle-app'): Promise<K8sPodInfo> {
-  const logCtx = { podName, namespace };
-
-  logger.debug(logCtx, 'Fetching container information for pod');
+  getLogger().debug(`LogStreaming: fetching container info podName=${podName} namespace=${namespace}`);
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
@@ -351,7 +349,7 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
     };
   } catch (error: any) {
     if (error instanceof HttpError && error.response?.statusCode === 404) {
-      logger.warn(logCtx, `Pod not found (404): ${error.message}`);
+      getLogger().warn(`LogStreaming: pod not found podName=${podName} namespace=${namespace} error=${error.message}`);
       return {
         podName: null,
         namespace,
@@ -361,7 +359,9 @@ export async function getK8sPodContainers(podName: string, namespace: string = '
       };
     }
 
-    logger.error({ ...logCtx, err: error }, 'Error getting container information');
+    getLogger().error(
+      `LogStreaming: error getting container info podName=${podName} namespace=${namespace} error=${error.message}`
+    );
     throw error;
   }
 }

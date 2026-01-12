@@ -54,7 +54,7 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
 
       await build?.$fetchGraph('[services, deploys.service.repository]');
     } else {
-      getLogger().fatal("Build and Webhook shouldn't be undefined");
+      getLogger().fatal('Webhook: build and webhook undefined');
     }
 
     return result;

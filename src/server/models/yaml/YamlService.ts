@@ -509,7 +509,7 @@ export async function getHelmConfigFromYaml(service: Service): Promise<Helm> {
           `Unspported Chart: helmChart with name: ${helmService?.chart?.name} is not currently supported`
         );
       getLogger({ chartName: helmService?.chart?.name }).warn(
-        'Helm chart not currently supported, proceed with caution'
+        `Helm: chart not supported name=${helmService?.chart?.name}`
       );
     }
 
@@ -576,7 +576,7 @@ export function getRepositoryName(service: Service): string {
         break;
     }
   } catch (error) {
-    getLogger({ serviceName: service?.name }).error({ error }, 'Failed to get repository name for service');
+    getLogger({ serviceName: service?.name }).error({ error }, 'Service: repository name lookup failed');
     throw error;
   }
 

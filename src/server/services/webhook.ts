@@ -276,7 +276,7 @@ export default class WebhookService extends BaseService {
       try {
         await this.db.services.Webhook.runWebhooksForBuild(build);
       } catch (e) {
-        getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error({ error: e }, 'Failed to invoke the webhook');
+        getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error({ error: e }, 'Webhook: invocation failed');
       }
     });
   };

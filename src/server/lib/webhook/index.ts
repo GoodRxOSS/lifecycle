@@ -126,7 +126,7 @@ async function executeWebhookJob(jobConfig: WebhookJobConfig, build: Build): Pro
       metadata: {},
     };
   } catch (error) {
-    getLogger().error({ error }, `Webhook execution failed: webhookName=${jobConfig.webhookName}`);
+    getLogger().error({ error }, `Webhook: execution failed name=${jobConfig.webhookName}`);
 
     const errorMessage = error instanceof Error ? error.message : String(error);
     return {

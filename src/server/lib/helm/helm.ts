@@ -287,7 +287,7 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<strin
     await fs.promises.mkdir(CODEFRESH_PATH, { recursive: true });
     await fs.promises.writeFile(configPath, generatedYaml, 'utf8');
   } catch (error) {
-    getLogger({ error }).error(`Failed to write codefresh config file`);
+    getLogger({ error }).error(`Codefresh: config write failed`);
     throw error;
   }
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();

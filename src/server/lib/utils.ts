@@ -20,21 +20,17 @@ import { GithubPullRequestActions, PullRequestStatus, FallbackLabels } from 'sha
 import GlobalConfigService from 'server/services/globalConfig';
 import { GenerateDeployTagOptions, WaitUntilOptions, EnableKillswitchOptions } from 'server/lib/types';
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import { ENVIRONMENT } from 'shared/config';
-
-const initialLogger = rootLogger.child({
-  filename: 'lib/utils.ts',
-});
 
 const execFilePromise = promisify(execFile);
 
-export const exec = async (runner: string, cmd: string[], { logger = initialLogger, execCmd = execFilePromise }) => {
+export const exec = async (runner: string, cmd: string[], { execCmd = execFilePromise } = {}) => {
   try {
     const out = await execCmd(runner, cmd);
     return out?.stdout || '';
   } catch (err) {
-    logger.error(`exec: error executing ${JSON.stringify(err)}`);
+    getLogger().error(`Exec: error executing runner=${runner} error=${JSON.stringify(err)}`);
     return '';
   }
 };
@@ -153,11 +149,10 @@ export const enableKillSwitch = async ({
   action = '',
   branch = '',
   fullName = '',
-  logger = initialLogger,
   isBotUser = false,
   labels = [],
   status = '',
-}: EnableKillswitchOptions) => {
+}: Omit<EnableKillswitchOptions, 'logger'>) => {
   try {
     const isOpened = [GithubPullRequestActions.OPENED, GithubPullRequestActions.REOPENED].includes(
       action as GithubPullRequestActions
@@ -194,7 +189,7 @@ export const enableKillSwitch = async ({
     const isUnallowed = organizations.includes(owner?.toLowerCase());
     return isIgnore || isReleaseBranch || isUnallowed;
   } catch (error) {
-    logger.warn(`[UTIL ${fullName}/${branch}][enableKillswitch] ${error}`);
+    getLogger().warn(`Killswitch: error checking fullName=${fullName} branch=${branch} error=${error}`);
     return false;
   }
 };
@@ -293,7 +288,7 @@ export const isControlCommentsEnabled = async (): Promise<boolean> => {
     const labelsConfig = await GlobalConfigService.getInstance().getLabels();
     return labelsConfig.defaultControlComments ?? true;
   } catch (error) {
-    initialLogger.warn('[isControlCommentsEnabled] Error retrieving config, defaulting to true', error);
+    getLogger().warn(`Config: error retrieving control comments config error=${error}`);
     return true;
   }
 };

@@ -50,7 +50,7 @@ export async function getHelmReleaseStatus(releaseName: string, namespace: strin
     if (error.message?.includes('release: not found')) {
       return null;
     }
-    getLogger().warn({ error }, `Failed to get status for release: releaseName=${releaseName}`);
+    getLogger().warn({ error }, `Helm: release status fetch failed name=${releaseName}`);
     return null;
   }
 }
@@ -175,7 +175,7 @@ export async function checkIfJobWasSuperseded(jobName: string, namespace: string
 
     return annotations === 'superseded-by-retry';
   } catch (error) {
-    getLogger().debug({ error }, `Could not check job supersession status: jobName=${jobName}`);
+    getLogger().debug({ error }, `Helm: job supersession check failed jobName=${jobName}`);
     return false;
   }
 }

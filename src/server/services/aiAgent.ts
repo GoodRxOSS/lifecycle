@@ -31,9 +31,7 @@ import {
   PatchK8sResourceTool,
   GetIssueCommentTool,
 } from './ai/tools';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ component: 'AIAgentService' });
+import { getLogger } from 'server/lib/logger/index';
 
 export default class AIAgentService extends BaseService {
   private service: AIAgentCore | null = null;
@@ -239,10 +237,7 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
         return 'investigate';
       }
     } catch (error: any) {
-      logger.error(
-        { error, errorMessage: error?.message, errorStack: error?.stack },
-        'Failed to classify user intent, defaulting to investigate'
-      );
+      getLogger().error(`AI: classifyUserIntent failed error=${error?.message}`);
       return 'investigate';
     }
   }

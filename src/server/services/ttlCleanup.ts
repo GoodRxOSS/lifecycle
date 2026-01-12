@@ -100,7 +100,7 @@ export default class TTLCleanupService extends Service {
               }
             } catch (error) {
               errorCount++;
-              getLogger().error({ error }, `Failed to cleanup environment: namespace=${env.namespace}`);
+              getLogger().error({ error }, `TTL: cleanup failed namespace=${env.namespace}`);
             }
           });
         }
@@ -109,7 +109,7 @@ export default class TTLCleanupService extends Service {
           `TTL: completed found=${staleEnvironments.length} success=${successCount} errors=${errorCount}`
         );
       } catch (error) {
-        getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'Error in TTL cleanup job');
+        getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'TTL: cleanup job failed');
         throw error;
       }
     });
@@ -189,7 +189,7 @@ export default class TTLCleanupService extends Service {
 
         const buildUUID = labels['lfc/uuid'];
         if (!buildUUID) {
-          getLogger().warn(`Namespace ${nsName} has no lfc/uuid label, skipping`);
+          getLogger().warn(`TTL: namespace missing uuid label namespace=${nsName}`);
           continue;
         }
 
@@ -202,7 +202,7 @@ export default class TTLCleanupService extends Service {
           .withGraphFetched('[pullRequest.repository]');
 
         if (!build) {
-          getLogger().warn(`No build found for namespace ${nsName}, skipping`);
+          getLogger().warn(`TTL: build not found namespace=${nsName}`);
           continue;
         }
 
@@ -219,7 +219,7 @@ export default class TTLCleanupService extends Service {
         const pullRequest = build.pullRequest;
 
         if (!pullRequest) {
-          getLogger().warn(`No pull request found, skipping`);
+          getLogger().warn('TTL: pull request not found');
           continue;
         }
 
@@ -251,7 +251,7 @@ export default class TTLCleanupService extends Service {
             });
           }
         } catch (error) {
-          getLogger().warn({ error }, `Failed to fetch labels from GitHub, falling back to DB`);
+          getLogger().warn({ error }, 'TTL: GitHub labels fetch failed, using DB');
           currentLabels = this.parseLabels(pullRequest.labels);
         }
 

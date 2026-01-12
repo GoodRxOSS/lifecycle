@@ -120,7 +120,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         message: `Redeploy for build ${uuid} has been queued`,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.BUILD_FAILED, error }).error(`Unable to proceed with redeploy for build ${uuid}`);
+      getLogger({ stage: LogStage.BUILD_FAILED, error }).error(`Build: redeploy failed uuid=${uuid}`);
       return res.status(500).json({ error: `Unable to proceed with redeploy for build ${uuid}.` });
     }
   });

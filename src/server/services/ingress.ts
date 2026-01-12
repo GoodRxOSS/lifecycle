@@ -81,7 +81,7 @@ export default class IngressService extends BaseService {
         });
         getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: cleaned up');
       } catch (e) {
-        getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error: e }, 'Error cleaning up ingress');
+        getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error: e }, 'Ingress: cleanup failed');
       }
     });
   };
@@ -200,7 +200,7 @@ export default class IngressService extends BaseService {
       await fs.promises.writeFile(localPath, manifest, 'utf8');
       await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
     } catch (error) {
-      getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Failed to apply ingress manifest');
+      getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Ingress: manifest apply failed');
     }
   };
 }

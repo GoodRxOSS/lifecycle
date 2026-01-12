@@ -107,7 +107,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         dependencyGraph: build.dependencyGraph,
       });
     } catch (error) {
-      getLogger().error({ error }, 'Error fetching dependency graph');
+      getLogger().error({ error }, 'Build: dependency graph fetch failed');
       res.status(500).json({ error: 'An unexpected error occurred.' });
     }
   });

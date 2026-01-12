@@ -44,10 +44,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       return;
     }
 
-    getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).info(`Webhook received: event=${event}`);
+    getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).info(`Webhook: received event=${event}`);
 
     if (!['web', 'all'].includes(LIFECYCLE_MODE)) {
-      getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).info('Skipped: wrong LIFECYCLE_MODE');
+      getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).info('Webhook: skipped reason=wrongMode');
       return;
     }
 
@@ -60,10 +60,10 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         ...extractContextForQueue(),
       });
 
-      getLogger({ stage: LogStage.WEBHOOK_QUEUED }).info('Webhook queued for processing');
+      getLogger({ stage: LogStage.WEBHOOK_QUEUED }).info('Webhook: queued');
       res.status(200).end();
     } catch (error) {
-      getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).error({ error }, 'Webhook failure');
+      getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).error({ error }, 'Webhook: processing failed');
       res.status(500).end();
     }
   });

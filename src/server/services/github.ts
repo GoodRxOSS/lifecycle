@@ -75,7 +75,7 @@ export default class GithubService extends Service {
             isJSON: true,
           })) as LifecycleYamlConfigOptions;
         } catch (error) {
-          getLogger({}).warn({ error }, `Unable to fetch lifecycle config for ${fullName}/${branch}`);
+          getLogger({}).warn({ error }, `Config: fetch failed repo=${fullName}/${branch}`);
         }
       }
       repository = await this.db.services.Repository.findRepository(ownerId, repositoryId, installationId);
@@ -148,7 +148,7 @@ export default class GithubService extends Service {
           pullRequestId,
         });
         if (!build) {
-          getLogger({}).warn(`No build found for closed pull request ${fullName}/${branch}, skipping deletion`);
+          getLogger({}).warn(`Build: not found for closed PR repo=${fullName}/${branch}`);
           return;
         }
         await this.db.services.BuildService.deleteBuild(build);
@@ -162,7 +162,7 @@ export default class GithubService extends Service {
         });
       }
     } catch (error) {
-      getLogger().fatal({ error }, `Unable to handle Github pull request event for ${fullName}/${branch}`);
+      getLogger().fatal({ error }, `Github: PR event handling failed repo=${fullName} branch=${branch}`);
     }
   }
 
@@ -184,7 +184,7 @@ export default class GithubService extends Service {
       getLogger().info(`PR: edited by=${commentCreatorUsername}`);
       await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
     } catch (error) {
-      getLogger().error({ error }, `Unable to handle Github Issue Comment event`);
+      getLogger().error({ error }, `GitHub: issue comment handling failed`);
     }
   };
 
@@ -229,14 +229,14 @@ export default class GithubService extends Service {
 
       const buildId = build?.id;
       if (!buildId) {
-        getLogger().error(`No build ID found for this pull request in handleLabelWebhook`);
+        getLogger().error(`Build: id not found for=handleLabelWebhook`);
       }
       await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId,
         ...extractContextForQueue(),
       });
     } catch (error) {
-      getLogger().error({ error }, `Error processing label webhook`);
+      getLogger().error({ error }, `Label: webhook processing failed`);
     }
   };
 
@@ -292,7 +292,7 @@ export default class GithubService extends Service {
       for (const build of buildsToDeploy) {
         const buildId = build?.id;
         if (!buildId) {
-          getLogger().error(`No build ID found for this build in handlePushWebhook`);
+          getLogger().error(`Build: id not found for=handlePushWebhook`);
         }
         // Only check for failed deploys on PR environments, not static environments
         let hasFailedDeploys = false;
@@ -322,7 +322,7 @@ export default class GithubService extends Service {
         });
       }
     } catch (error) {
-      getLogger({}).error({ error }, `Error processing push webhook`);
+      getLogger({}).error({ error }, `Push: webhook processing failed`);
     }
   };
 
@@ -367,7 +367,7 @@ export default class GithubService extends Service {
     } catch (error) {
       getLogger({}).error(
         { error },
-        `Error processing push webhook for static env for branch=${branchName} repositoryId=${githubRepositoryId}`
+        `Push: static env webhook failed branch=${branchName} repositoryId=${githubRepositoryId}`
       );
     }
   };
@@ -395,21 +395,21 @@ export default class GithubService extends Service {
           if (hasLabelChange) return await this.handleLabelWebhook(body);
           else return await this.handlePullRequestHook(body);
         } catch (e) {
-          getLogger({}).error({ error: e }, `Error handling PULL_REQUEST event`);
+          getLogger({}).error({ error: e }, `GitHub: PULL_REQUEST event handling failed`);
           throw e;
         }
       case GithubWebhookTypes.PUSH:
         try {
           return await this.handlePushWebhook(body);
         } catch (e) {
-          getLogger({}).error({ error: e }, `Error handling PUSH event`);
+          getLogger({}).error({ error: e }, `GitHub: PUSH event handling failed`);
           throw e;
         }
       case GithubWebhookTypes.ISSUE_COMMENT:
         try {
           return await this.handleIssueCommentWebhook(body);
         } catch (e) {
-          getLogger({}).error({ error: e }, `Error handling ISSUE_COMMENT event`);
+          getLogger({}).error({ error: e }, `GitHub: ISSUE_COMMENT event handling failed`);
           throw e;
         }
       default:
@@ -500,7 +500,7 @@ export default class GithubService extends Service {
         labels: JSON.stringify(labelNames),
       });
     } catch (error) {
-      getLogger().error({ error }, `Error patching pull request for ${pullRequest?.fullName}/${branch}`);
+      getLogger().error({ error }, `PR: patch failed repo=${pullRequest?.fullName}/${branch}`);
     }
   };
 

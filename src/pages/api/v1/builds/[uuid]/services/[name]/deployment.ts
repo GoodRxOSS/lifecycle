@@ -247,13 +247,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
   return withLogContext({ buildUuid: uuid as string }, async () => {
     if (req.method !== 'GET') {
-      getLogger().warn(`Method not allowed: method=${req.method}`);
+      getLogger().warn(`API: method not allowed method=${req.method}`);
       res.setHeader('Allow', ['GET']);
       return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
     if (typeof uuid !== 'string' || typeof name !== 'string') {
-      getLogger().warn(`Missing or invalid query parameters: uuid=${uuid} name=${name}`);
+      getLogger().warn(`API: invalid query params uuid=${uuid} name=${name}`);
       return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
@@ -276,10 +276,10 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(200).json(githubDetails);
       }
 
-      getLogger().warn(`No deployment details found: deployUuid=${deployUuid}`);
+      getLogger().warn(`API: deployment not found deployUuid=${deployUuid}`);
       return res.status(404).json({ error: 'Deployment not found' });
     } catch (error) {
-      getLogger().error({ error }, `Error getting deployment details: deployUuid=${deployUuid}`);
+      getLogger().error({ error }, `API: deployment details error deployUuid=${deployUuid}`);
 
       if (error instanceof HttpError) {
         if (error.response?.statusCode === 404) {

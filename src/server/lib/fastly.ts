@@ -79,7 +79,7 @@ class Fastly {
       this.redis.expire(cacheKey, 86400);
       return id;
     } catch (error) {
-      getLogger().warn({ error }, `Fastly lookup failed: serviceName=${name}`);
+      getLogger().warn({ error }, `Fastly: lookup failed service=${name}`);
     }
   }
 
@@ -107,7 +107,7 @@ class Fastly {
       if (!serviceId) throw new Error('Service ID is missing');
       await fastlyPurge.purgeAll({ service_id: serviceId });
     } catch (error) {
-      getLogger().info({ error }, `Fastly cache purge failed: serviceId=${serviceId} serviceType=${fastlyServiceType}`);
+      getLogger().warn({ error }, `Fastly: purge failed serviceId=${serviceId} type=${fastlyServiceType}`);
     }
   }
 

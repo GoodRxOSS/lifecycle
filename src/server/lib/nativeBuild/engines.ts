@@ -399,7 +399,7 @@ EOF`);
     const { logs, success } = await waitForJobAndGetLogs(jobName, options.namespace, jobTimeout);
     return { success, logs, jobName };
   } catch (error) {
-    getLogger().error(`Job: log retrieval failed job=${jobName} error=${error.message}`);
+    getLogger({ error }).error(`Job: log retrieval failed name=${jobName}`);
 
     try {
       const jobStatus = await shellPromise(
@@ -412,7 +412,7 @@ EOF`);
         return { success: true, logs: 'Log retrieval failed but job completed successfully', jobName };
       }
     } catch (statusError) {
-      getLogger().error(`Job: status check failed job=${jobName} error=${statusError.message}`);
+      getLogger({ error: statusError }).error(`Job: status check failed name=${jobName}`);
     }
 
     return { success: false, logs: `Build failed: ${error.message}`, jobName };

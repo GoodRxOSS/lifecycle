@@ -180,7 +180,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    getLogger().error({ error }, 'Error fetching repos');
+    getLogger().error({ error }, 'API: repos fetch failed');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

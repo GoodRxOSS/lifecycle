@@ -16,7 +16,7 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { updateSecret, getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
-import logger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger/index';
 import GlobalConfigService from 'server/services/globalConfig';
 import { SECRET_BOOTSTRAP_NAME } from 'shared/config';
 
@@ -27,19 +27,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'Missing installation_id' });
   }
   if (setup_action && setup_action !== 'install') {
-    logger.warn(`Received setup_action: ${setup_action}, expected 'install'.`);
+    getLogger().warn(`Setup: invalid setup_action received=${setup_action} expected=install`);
     return res.status(500).json({ error: 'Invalid setup_action' });
   }
 
   const globalConfigService = new GlobalConfigService();
   const app_setup = await globalConfigService.getConfig('app_setup');
   if (!app_setup) {
-    logger.warn('No app_setup found.');
+    getLogger().warn('Setup: app_setup not found');
     return res.status(404).json({ error: 'No app_setup found.' });
   }
 
   if (app_setup.installed) {
-    logger.warn('App already installed.');
+    getLogger().warn('Setup: app already installed');
     return res.status(400).json({ error: 'App already installed.' });
   }
 
@@ -48,7 +48,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     installed: true,
   };
   await globalConfigService.setConfig('app_setup', updated_app_setup);
-  logger.info(`Successfully recorded installation ID: ${installation_id}`);
+  getLogger().info(`Setup: installation recorded installationId=${installation_id}`);
   const namespace = getCurrentNamespaceFromFile();
   await updateSecret(
     SECRET_BOOTSTRAP_NAME,
@@ -59,6 +59,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   );
 
   const app_setup_url_encoded = encodeURIComponent(JSON.stringify(updated_app_setup));
-  logger.child({ app_setup: updated_app_setup }).info(`Redirecting user to setup completion page`);
+  getLogger().info('Setup: redirecting to completion page');
   res.redirect(`/setup/complete?app_setup=${app_setup_url_encoded}`);
 }

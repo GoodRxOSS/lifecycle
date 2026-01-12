@@ -143,7 +143,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         namespacesUpdated: updatedDeploys,
       });
     } catch (error) {
-      getLogger().error({ error }, 'Error in cleanup API');
+      getLogger().error({ error }, 'Build: teardown failed');
       return res.status(500).json({ error: 'An unexpected error occurred.' });
     }
   });
