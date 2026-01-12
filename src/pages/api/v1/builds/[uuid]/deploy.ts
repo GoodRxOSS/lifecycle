@@ -85,16 +85,15 @@ import BuildService from 'server/services/build';
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
   const correlationId = `api-redeploy-${Date.now()}-${nanoid(8)}`;
+  const { uuid } = req.query;
 
-  return withLogContext({ correlationId }, async () => {
+  return withLogContext({ correlationId, buildUuid: uuid as string }, async () => {
     if (req.method !== 'POST') {
       return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    const { uuid } = req.query;
-
     try {
-      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Redeploy requested for build ${uuid}`);
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: redeploy requested uuid=${uuid}`);
 
       const buildService = new BuildService();
       const build: Build = await buildService.db.models.Build.query()
@@ -102,7 +101,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         .withGraphFetched('deploys.deployable');
 
       if (!build) {
-        getLogger({ buildUuid: uuid as string }).debug('Build not found');
+        getLogger().debug('Build not found');
         return res.status(404).json({ error: `Build not found for ${uuid}` });
       }
 
@@ -114,14 +113,14 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         correlationId,
       });
 
-      getLogger({ stage: LogStage.BUILD_QUEUED, buildUuid: build.uuid }).info(`Redeploy queued for build ${uuid}`);
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: redeploy queued uuid=${uuid}`);
 
       return res.status(200).json({
         status: 'success',
         message: `Redeploy for build ${uuid} has been queued`,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.BUILD_FAILED }).error({ error }, `Unable to proceed with redeploy for build ${uuid}`);
+      getLogger({ stage: LogStage.BUILD_FAILED, error }).error(`Unable to proceed with redeploy for build ${uuid}`);
       return res.status(500).json({ error: `Unable to proceed with redeploy for build ${uuid}.` });
     }
   });

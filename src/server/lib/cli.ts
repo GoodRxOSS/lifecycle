@@ -18,7 +18,7 @@ import { merge } from 'lodash';
 import { Build, Deploy, Service, Deployable } from 'server/models';
 import { CLIDeployTypes, DeployTypes } from 'shared/constants';
 import { shellPromise } from './shell';
-import { getLogger, withLogContext } from './logger/index';
+import { getLogger, withLogContext, updateLogContext } from './logger/index';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DatabaseSettings } from 'server/services/types/globalConfig';
 
@@ -65,7 +65,8 @@ export async function cliDeploy(deploy: Deploy) {
  */
 export async function codefreshDeploy(deploy: Deploy, build: Build, service: Service, deployable: Deployable) {
   const buildUuid = build?.uuid;
-  getLogger({ buildUuid }).debug('Invoking the codefresh CLI to deploy this deploy');
+  updateLogContext({ buildUuid });
+  getLogger().debug('Invoking the codefresh CLI to deploy this deploy');
 
   const envVariables = merge(deploy.env || {}, deploy.build.commentRuntimeEnv);
 
@@ -88,9 +89,9 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, service: Ser
   const command = `codefresh run ${serviceDeployPipelineId} -b "${deploy.branchName}" ${variables.join(
     ' '
   )} ${deployTrigger} -d`;
-  getLogger({ buildUuid }).debug(`About to run codefresh command: command=${command}`);
+  getLogger().debug(`About to run codefresh command: command=${command}`);
   const output = await shellPromise(command);
-  getLogger({ buildUuid }).debug(`Codefresh run output: output=${output}`);
+  getLogger().debug(`Codefresh run output: output=${output}`);
   const id = output.trim();
   return id;
 }
@@ -101,7 +102,8 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, service: Ser
  */
 export async function codefreshDestroy(deploy: Deploy) {
   const buildUuid = deploy?.build?.uuid;
-  getLogger({ buildUuid }).debug('Invoking the codefresh CLI to delete this deploy');
+  updateLogContext({ buildUuid });
+  getLogger().debug('Invoking the codefresh CLI to delete this deploy');
 
   try {
     /** Reset the SHA so we will re-run the pipelines post destroy */
@@ -141,12 +143,12 @@ export async function codefreshDestroy(deploy: Deploy) {
     const command = `codefresh run ${destroyPipelineId} -b "${serviceBranchName}" ${variables.join(
       ' '
     )} ${destroyTrigger} -d`;
-    getLogger({ buildUuid }).debug(`Destroy command: command=${command}`);
+    getLogger().debug(`Destroy command: command=${command}`);
     const output = await shellPromise(command);
     const id = output?.trim();
     return id;
   } catch (error) {
-    getLogger({ buildUuid, error }).error('Error destroying Codefresh pipeline');
+    getLogger({ error }).error('Error destroying Codefresh pipeline');
     throw error;
   }
 }
@@ -172,6 +174,7 @@ export async function waitForCodefresh(id: string) {
  */
 export async function deleteBuild(build: Build) {
   const buildUuid = build?.uuid;
+  updateLogContext({ buildUuid });
   try {
     const buildId = build?.id;
 
@@ -197,9 +200,9 @@ export async function deleteBuild(build: Build) {
           );
         })
     );
-    getLogger({ buildUuid }).info('CLI: deleted');
+    getLogger().info('CLI: deleted');
   } catch (e) {
-    getLogger({ buildUuid, error: e }).error('Error deleting CLI resources');
+    getLogger({ error: e }).error('Error deleting CLI resources');
   }
 }
 

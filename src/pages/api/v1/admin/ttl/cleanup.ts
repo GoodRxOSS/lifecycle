@@ -197,7 +197,7 @@ async function triggerTTLCleanup(req: NextApiRequest, res: NextApiResponse) {
       const job = await ttlCleanupService.ttlCleanupQueue.add('manual-ttl-cleanup', { dryRun, correlationId });
 
       getLogger({ stage: LogStage.CLEANUP_STARTING }).info(
-        `TTL cleanup job triggered manually: jobId=${job.id} dryRun=${dryRun}`
+        `TTL: cleanup job triggered manually jobId=${job.id} dryRun=${dryRun}`
       );
 
       return res.status(200).json({

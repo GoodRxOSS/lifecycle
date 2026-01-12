@@ -15,7 +15,7 @@
  */
 
 import BaseService from './_service';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, updateLogContext } from 'server/lib/logger/index';
 import { Build } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
@@ -73,7 +73,8 @@ export default class OverrideService extends BaseService {
     const oldUuid = build.uuid;
     const oldNamespace = build.namespace;
 
-    getLogger({ buildUuid: oldUuid }).info(`Updating UUID to '${newUuid}'`);
+    updateLogContext({ buildUuid: oldUuid, newUuid });
+    getLogger().info(`Override: updating newUuid=${newUuid}`);
 
     try {
       return await this.db.models.Build.transact(async (trx) => {
@@ -107,11 +108,9 @@ export default class OverrideService extends BaseService {
         const updatedBuild = await this.db.models.Build.query(trx).findById(build.id);
 
         k8s.deleteNamespace(oldNamespace).catch((error) => {
-          getLogger({ buildUuid: oldUuid }).warn({ error }, `Failed to delete old namespace ${oldNamespace}`);
+          getLogger().warn({ error }, `Failed to delete old namespace ${oldNamespace}`);
         });
-        getLogger({ buildUuid: newUuid }).info(
-          `Successfully updated UUID from '${oldUuid}' to '${newUuid}', updated ${deploys.length} deploys`
-        );
+        getLogger().info(`Override: updated oldUuid=${oldUuid} newUuid=${newUuid} deploysUpdated=${deploys.length}`);
 
         return {
           build: updatedBuild,
@@ -119,7 +118,7 @@ export default class OverrideService extends BaseService {
         };
       });
     } catch (error) {
-      getLogger({ buildUuid: oldUuid }).error({ error }, `Failed to update UUID to '${newUuid}'`);
+      getLogger().error({ error }, `Failed to update UUID to '${newUuid}'`);
       throw error;
     }
   }

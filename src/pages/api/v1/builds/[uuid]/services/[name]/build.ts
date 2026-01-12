@@ -100,7 +100,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   const { uuid, name } = req.query;
   const correlationId = `api-service-redeploy-${Date.now()}-${nanoid(8)}`;
 
-  return withLogContext({ correlationId }, async () => {
+  return withLogContext({ correlationId, buildUuid: uuid as string }, async () => {
     try {
       const githubService = new GithubService();
       const build: Build = await githubService.db.models.Build.query()
@@ -112,14 +112,14 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       const buildId = build.id;
 
       if (!build) {
-        getLogger({ buildUuid: uuid as string }).debug(`Build not found`);
+        getLogger().debug(`Build not found`);
         return res.status(404).json({ error: `Build not found for ${uuid}` });
       }
 
       const deploy = build.deploys.find((deploy) => deploy.deployable.name === name);
 
       if (!deploy) {
-        getLogger({ buildUuid: uuid as string }).debug(`Deployable not found: service=${name}`);
+        getLogger().debug(`Deployable not found: service=${name}`);
         res.status(404).json({ error: `${name} service is not found in ${uuid} build.` });
         return;
       }
@@ -135,9 +135,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         ...extractContextForQueue(),
       });
 
-      getLogger({ stage: LogStage.BUILD_QUEUED, buildUuid: uuid as string }).info(
-        `Service redeploy queued: service=${name}`
-      );
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: service redeploy queued service=${name}`);
 
       const deployService = new DeployService();
 

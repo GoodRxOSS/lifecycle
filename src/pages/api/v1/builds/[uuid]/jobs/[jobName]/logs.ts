@@ -15,7 +15,7 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import unifiedLogStreamHandler from '../../services/[name]/logs/[jobName]';
 
 /**
@@ -98,13 +98,14 @@ import unifiedLogStreamHandler from '../../services/[name]/logs/[jobName]';
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { uuid, jobName } = req.query;
-  getLogger({ buildUuid: uuid as string }).info(
-    `method=${req.method} jobName=${jobName} Job logs endpoint called, delegating to unified handler`
-  );
 
-  req.query.type = 'webhook';
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    getLogger().info(`method=${req.method} jobName=${jobName} Job logs endpoint called, delegating to unified handler`);
 
-  req.query.name = undefined;
+    req.query.type = 'webhook';
 
-  return unifiedLogStreamHandler(req, res);
+    req.query.name = undefined;
+
+    return unifiedLogStreamHandler(req, res);
+  });
 }

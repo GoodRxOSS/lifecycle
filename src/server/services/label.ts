@@ -18,7 +18,7 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger/index';
 import { waitForColumnValue } from 'shared/utils';
 import { updatePullRequestLabels } from 'server/lib/github';
 import { getDeployLabel } from 'server/lib/utils';
@@ -73,23 +73,24 @@ export default class LabelService extends Service {
 
         const { repository, build } = pullRequest;
         const buildUuid = build?.uuid || 'unknown';
+        updateLogContext({ buildUuid });
         if (!repository) {
           throw new Error(`Repository not found for pull request ${pullRequestId}`);
         }
 
-        getLogger({ stage: LogStage.LABEL_PROCESSING, buildUuid }).info(
-          `Processing label ${action} for PR ${pullRequest.pullRequestNumber}`
+        getLogger({ stage: LogStage.LABEL_PROCESSING }).info(
+          `Label: processing action=${action} pr=${pullRequest.pullRequestNumber}`
         );
 
         if (waitForComment && !pullRequest.commentId) {
-          getLogger({ stage: LogStage.LABEL_PROCESSING, buildUuid }).debug(
+          getLogger({ stage: LogStage.LABEL_PROCESSING }).debug(
             'Waiting for comment_id to be set before updating labels'
           );
           // 60 attempts * 5 seconds = 5 minutes
           const updatedPullRequest = await waitForColumnValue(pullRequest, 'commentId', 60, 5000);
 
           if (!updatedPullRequest) {
-            getLogger({ stage: LogStage.LABEL_PROCESSING, buildUuid }).warn(
+            getLogger({ stage: LogStage.LABEL_PROCESSING }).warn(
               'Timeout waiting for comment_id while updating labels after 5 minutes'
             );
           }
@@ -102,7 +103,7 @@ export default class LabelService extends Service {
           if (!currentLabels.includes(deployLabel)) {
             updatedLabels = [...currentLabels, deployLabel];
           } else {
-            getLogger({ stage: LogStage.LABEL_COMPLETE, buildUuid }).debug(
+            getLogger({ stage: LogStage.LABEL_COMPLETE }).debug(
               `Deploy label "${deployLabel}" already exists on PR, skipping update`
             );
             return;
@@ -120,8 +121,8 @@ export default class LabelService extends Service {
           labels: updatedLabels,
         });
 
-        getLogger({ stage: LogStage.LABEL_COMPLETE, buildUuid }).info(
-          `Successfully ${action === 'enable' ? 'added' : 'removed'} ${deployLabel} label`
+        getLogger({ stage: LogStage.LABEL_COMPLETE }).info(
+          `Label: ${action === 'enable' ? 'added' : 'removed'} label=${deployLabel}`
         );
       } catch (error) {
         getLogger({ stage: LogStage.LABEL_FAILED }).error(

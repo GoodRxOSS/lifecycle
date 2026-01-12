@@ -15,7 +15,7 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
@@ -245,52 +245,52 @@ async function getGitHubDeploymentDetails(
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { uuid, name } = req.query;
 
-  if (req.method !== 'GET') {
-    getLogger({ buildUuid: uuid as string }).warn(`Method not allowed: method=${req.method}`);
-    res.setHeader('Allow', ['GET']);
-    return res.status(405).json({ error: `${req.method} is not allowed` });
-  }
-
-  if (typeof uuid !== 'string' || typeof name !== 'string') {
-    getLogger({ buildUuid: uuid as string }).warn(`Missing or invalid query parameters: uuid=${uuid} name=${name}`);
-    return res.status(400).json({ error: 'Missing or invalid parameters' });
-  }
-
-  const deployUuid = `${name}-${uuid}`;
-
-  try {
-    const namespace = `env-${uuid}`;
-
-    getLogger({ buildUuid: uuid }).debug(
-      `Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`
-    );
-
-    const helmDetails = await getHelmDeploymentDetails(namespace, deployUuid);
-    if (helmDetails) {
-      getLogger({ buildUuid: uuid }).debug(`Found Helm deployment details: deployUuid=${deployUuid}`);
-      return res.status(200).json(helmDetails);
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    if (req.method !== 'GET') {
+      getLogger().warn(`Method not allowed: method=${req.method}`);
+      res.setHeader('Allow', ['GET']);
+      return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    const githubDetails = await getGitHubDeploymentDetails(namespace, deployUuid);
-    if (githubDetails) {
-      getLogger({ buildUuid: uuid }).debug(`Found GitHub-type deployment details: deployUuid=${deployUuid}`);
-      return res.status(200).json(githubDetails);
+    if (typeof uuid !== 'string' || typeof name !== 'string') {
+      getLogger().warn(`Missing or invalid query parameters: uuid=${uuid} name=${name}`);
+      return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
-    getLogger({ buildUuid: uuid }).warn(`No deployment details found: deployUuid=${deployUuid}`);
-    return res.status(404).json({ error: 'Deployment not found' });
-  } catch (error) {
-    getLogger({ buildUuid: uuid }).error({ error }, `Error getting deployment details: deployUuid=${deployUuid}`);
+    const deployUuid = `${name}-${uuid}`;
 
-    if (error instanceof HttpError) {
-      if (error.response?.statusCode === 404) {
-        return res.status(404).json({ error: 'Deployment not found' });
+    try {
+      const namespace = `env-${uuid}`;
+
+      getLogger().debug(`Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`);
+
+      const helmDetails = await getHelmDeploymentDetails(namespace, deployUuid);
+      if (helmDetails) {
+        getLogger().debug(`Found Helm deployment details: deployUuid=${deployUuid}`);
+        return res.status(200).json(helmDetails);
       }
-      return res.status(502).json({ error: 'Failed to communicate with Kubernetes' });
-    }
 
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+      const githubDetails = await getGitHubDeploymentDetails(namespace, deployUuid);
+      if (githubDetails) {
+        getLogger().debug(`Found GitHub-type deployment details: deployUuid=${deployUuid}`);
+        return res.status(200).json(githubDetails);
+      }
+
+      getLogger().warn(`No deployment details found: deployUuid=${deployUuid}`);
+      return res.status(404).json({ error: 'Deployment not found' });
+    } catch (error) {
+      getLogger().error({ error }, `Error getting deployment details: deployUuid=${deployUuid}`);
+
+      if (error instanceof HttpError) {
+        if (error.response?.statusCode === 404) {
+          return res.status(404).json({ error: 'Deployment not found' });
+        }
+        return res.status(502).json({ error: 'Failed to communicate with Kubernetes' });
+      }
+
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  });
 };
 
 export default handler;

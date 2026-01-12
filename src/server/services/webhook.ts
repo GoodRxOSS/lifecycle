@@ -48,6 +48,10 @@ export default class WebhookService extends BaseService {
       throw new WebhookError('Pull Request and Build cannot be null when upserting webhooks');
     }
 
+    if (build?.uuid) {
+      updateLogContext({ buildUuid: build.uuid });
+    }
+
     await pullRequest.$fetchGraph('repository');
 
     // if build is in classic mode, we should not proceed with yaml webhooks since db webhooks are not supported anymore
@@ -62,12 +66,10 @@ export default class WebhookService extends BaseService {
       if (yamlConfig?.environment?.webhooks != null) {
         webhooks = yamlConfig.environment.webhooks;
         await build.$query().patch({ webhooksYaml: JSON.stringify(webhooks) });
-        getLogger({ buildUuid: build.uuid }).info(
-          `Updated build with webhooks from config: webhooks=${JSON.stringify(webhooks)}`
-        );
+        getLogger().info(`Webhook: config updated webhooks=${JSON.stringify(webhooks)}`);
       } else {
         await build.$query().patch({ webhooksYaml: null });
-        getLogger({ buildUuid: build.uuid }).info('No webhooks found in config');
+        getLogger().info('Webhook: config empty');
       }
     }
     return webhooks;
@@ -78,11 +80,13 @@ export default class WebhookService extends BaseService {
    * @param build the build for which we want to run webhooks against
    */
   async runWebhooksForBuild(build: Build): Promise<void> {
+    updateLogContext({ buildUuid: build.uuid });
+
     // Check feature flag - if disabled, skip all webhooks
     // Only skips if explicitly set to false. If undefined/missing, webhooks execute (default behavior)
     const { features } = await this.db.services.GlobalConfig.getAllConfigs();
     if (features?.webhooks === false) {
-      getLogger({ buildUuid: build.uuid }).debug('Webhooks feature flag is disabled, skipping webhook execution');
+      getLogger().debug('Webhooks feature flag is disabled, skipping webhook execution');
       return;
     }
 
@@ -92,15 +96,13 @@ export default class WebhookService extends BaseService {
       case BuildStatus.TORN_DOWN:
         break;
       default:
-        getLogger({ buildUuid: build.uuid }).debug(`Skipping Lifecycle Webhooks execution for status: ${build.status}`);
+        getLogger().debug(`Skipping Lifecycle Webhooks execution for status: ${build.status}`);
         return;
     }
 
     // if build is not full yaml and no webhooks defined in YAML config, we should not run webhooks (no more db webhook support)
     if (!build.enableFullYaml && build.webhooksYaml == null) {
-      getLogger({ buildUuid: build.uuid }).debug(
-        `Skipping Lifecycle Webhooks (non yaml config build) execution for status: ${build.status}`
-      );
+      getLogger().debug(`Skipping Lifecycle Webhooks (non yaml config build) execution for status: ${build.status}`);
       return;
     }
     const webhooks: YamlService.Webhook[] = JSON.parse(build.webhooksYaml);
@@ -112,18 +114,18 @@ export default class WebhookService extends BaseService {
     const configFileWebhooks: YamlService.Webhook[] = webhooks.filter((webhook) => webhook.state === build.status);
     // if no webhooks defined in YAML config, we should not run webhooks
     if (configFileWebhooks != null && configFileWebhooks.length < 1) {
-      getLogger({ buildUuid: build.uuid }).info(`No webhooks found to be triggered for build status: ${build.status}`);
+      getLogger().info(`Webhook: skipped reason=noMatch status=${build.status}`);
       return;
     }
-    getLogger({ buildUuid: build.uuid }).info(`Triggering webhooks for build status: ${build.status}`);
+    getLogger().info(`Webhook: triggering status=${build.status}`);
     for (const webhook of configFileWebhooks) {
       await withLogContext({ webhookName: webhook.name, webhookType: webhook.type }, async () => {
         getLogger().info(`Webhook: running name=${webhook.name}`);
         await this.runYamlConfigFileWebhookForBuild(webhook, build);
       });
     }
-    getLogger({ stage: LogStage.WEBHOOK_COMPLETE, buildUuid: build.uuid }).info(
-      `Webhooks completed: count=${configFileWebhooks.length} status=${build.status}`
+    getLogger({ stage: LogStage.WEBHOOK_COMPLETE }).info(
+      `Webhook: completed count=${configFileWebhooks.length} status=${build.status}`
     );
   }
 

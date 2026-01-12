@@ -17,12 +17,13 @@
 import BaseService from './_service';
 import * as YamlService from 'server/models/yaml';
 import { triggerPipeline } from 'server/lib/codefresh';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, updateLogContext } from 'server/lib/logger/index';
 
 export default class CodefreshService extends BaseService {
   async triggerYamlConfigWebhookPipeline(webhook: YamlService.Webhook, data: Record<string, any>): Promise<string> {
     let buildId: string;
     const buildUuid = data?.buildUUID;
+    updateLogContext({ buildUuid });
     if (
       webhook.state !== undefined &&
       webhook.type !== undefined &&
@@ -31,7 +32,7 @@ export default class CodefreshService extends BaseService {
     ) {
       buildId = await triggerPipeline(webhook.pipelineId, webhook.trigger, data);
     } else {
-      getLogger({ buildUuid, webhook }).error(
+      getLogger({ webhook }).error(
         `Invalid webhook configuration: name=${webhook.name ?? ''} pipelineId=${webhook.pipelineId} trigger=${
           webhook.trigger
         }`

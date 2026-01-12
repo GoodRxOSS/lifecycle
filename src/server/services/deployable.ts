@@ -1028,7 +1028,7 @@ export default class DeployableService extends BaseService {
       }).error('Failed to upsert deployables');
       throw error;
     }
-    getLogger({ buildUUID }).info(`Created/Updated ${deployables.length} deployables`);
+    getLogger({ buildUUID }).info(`Deployable: upserted count=${deployables.length}`);
     return deployables;
   }
 

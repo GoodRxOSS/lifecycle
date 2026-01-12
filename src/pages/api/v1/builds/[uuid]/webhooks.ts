@@ -195,20 +195,22 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     return res.status(400).json({ error: 'Invalid UUID' });
   }
 
-  try {
-    switch (req.method) {
-      case 'GET':
-        return retrieveWebhooks(req, res);
-      case 'POST':
-        return invokeWebhooks(req, res);
-      default:
-        res.setHeader('Allow', ['GET', 'POST']);
-        return res.status(405).json({ error: `${req.method} is not allowed.` });
+  return withLogContext({ buildUuid: uuid }, async () => {
+    try {
+      switch (req.method) {
+        case 'GET':
+          return retrieveWebhooks(req, res);
+        case 'POST':
+          return invokeWebhooks(req, res);
+        default:
+          res.setHeader('Allow', ['GET', 'POST']);
+          return res.status(405).json({ error: `${req.method} is not allowed.` });
+      }
+    } catch (error) {
+      getLogger({ error }).error(`Error handling ${req.method} request`);
+      res.status(500).json({ error: 'An unexpected error occurred.' });
     }
-  } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error({ error }, `Error handling ${req.method} request`);
-    res.status(500).json({ error: 'An unexpected error occurred.' });
-  }
+  });
 };
 
 async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
@@ -225,12 +227,12 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
       const buildId = build.id;
 
       if (!build) {
-        getLogger({ buildUuid: uuid as string }).debug('Build not found');
+        getLogger().debug('Build not found');
         return res.status(404).json({ error: `Build not found for ${uuid}` });
       }
 
       if (!build.webhooksYaml) {
-        getLogger({ buildUuid: uuid as string }).debug('No webhooks found for build');
+        getLogger().debug('No webhooks found for build');
         return res.status(204).json({
           status: 'no_content',
           message: `No webhooks found for build ${uuid}.`,
@@ -243,17 +245,14 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
         correlationId,
       });
 
-      getLogger({ stage: LogStage.WEBHOOK_PROCESSING, buildUuid: uuid as string }).info(
-        'Webhook invocation queued via API'
-      );
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).info('Webhook invocation queued via API');
 
       return res.status(200).json({
         status: 'success',
         message: `Webhook for build ${uuid} has been queued`,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).error(
-        { error },
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING, error }).error(
         `Unable to proceed with webhook for build ${uuid}`
       );
       return res.status(500).json({ error: `Unable to proceed with triggering webhook for build ${uuid}.` });
@@ -294,7 +293,7 @@ async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
       },
     });
   } catch (error) {
-    getLogger({ buildUuid: uuid as string }).error({ error }, 'Failed to retrieve webhooks');
+    getLogger({ error }).error('Failed to retrieve webhooks');
     return res.status(500).json({ error: `Unable to retrieve webhooks for build ${uuid}.` });
   }
 }

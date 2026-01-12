@@ -159,56 +159,57 @@
  *                   example: Failed to communicate with Kubernetes.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import { LogStreamingService } from 'server/services/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
 
 const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { uuid, name, jobName, type } = req.query;
-  const logger = getLogger({ buildUuid: uuid as string });
 
-  if (req.method !== 'GET') {
-    logger.warn(`API: method not allowed method=${req.method}`);
-    res.setHeader('Allow', ['GET']);
-    return res.status(405).json({ error: `${req.method} is not allowed` });
-  }
-
-  const isWebhookRequest = type === 'webhook';
-
-  if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
-    logger.warn(`API: invalid parameters uuid=${uuid} name=${name} jobName=${jobName} type=${type}`);
-    return res.status(400).json({ error: 'Missing or invalid parameters' });
-  }
-
-  if (type && (typeof type !== 'string' || !['build', 'deploy', 'webhook'].includes(type))) {
-    logger.warn(`API: invalid type parameter type=${type}`);
-    return res.status(400).json({ error: 'Invalid type parameter. Must be "build", "deploy", or "webhook"' });
-  }
-
-  try {
-    const logService = new LogStreamingService();
-
-    const response = await logService.getLogStreamInfo(
-      uuid,
-      jobName,
-      name as string | undefined,
-      type as string | undefined
-    );
-
-    return res.status(200).json(response);
-  } catch (error: any) {
-    logger.error({ error }, `API: log stream info fetch failed jobName=${jobName} service=${name}`);
-
-    if (error.message === 'Build not found') {
-      return res.status(404).json({ error: 'Build not found' });
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    if (req.method !== 'GET') {
+      getLogger().warn(`API: method not allowed method=${req.method}`);
+      res.setHeader('Allow', ['GET']);
+      return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    if (error instanceof HttpError || error.message?.includes('Kubernetes') || error.statusCode === 502) {
-      return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
+    const isWebhookRequest = type === 'webhook';
+
+    if (typeof uuid !== 'string' || typeof jobName !== 'string' || (!isWebhookRequest && typeof name !== 'string')) {
+      getLogger().warn(`API: invalid parameters uuid=${uuid} name=${name} jobName=${jobName} type=${type}`);
+      return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
-    return res.status(500).json({ error: 'Internal server error occurred.' });
-  }
+    if (type && (typeof type !== 'string' || !['build', 'deploy', 'webhook'].includes(type))) {
+      getLogger().warn(`API: invalid type parameter type=${type}`);
+      return res.status(400).json({ error: 'Invalid type parameter. Must be "build", "deploy", or "webhook"' });
+    }
+
+    try {
+      const logService = new LogStreamingService();
+
+      const response = await logService.getLogStreamInfo(
+        uuid,
+        jobName,
+        name as string | undefined,
+        type as string | undefined
+      );
+
+      return res.status(200).json(response);
+    } catch (error: any) {
+      getLogger().error({ error }, `API: log stream info fetch failed jobName=${jobName} service=${name}`);
+
+      if (error.message === 'Build not found') {
+        return res.status(404).json({ error: 'Build not found' });
+      }
+
+      if (error instanceof HttpError || error.message?.includes('Kubernetes') || error.statusCode === 502) {
+        return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
+      }
+
+      return res.status(500).json({ error: 'Internal server error occurred.' });
+    }
+  });
 };
 
 export default unifiedLogStreamHandler;

@@ -142,7 +142,7 @@
  *                   example: Failed to communicate with Kubernetes.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 
@@ -166,7 +166,7 @@ interface EventsResponse {
   events: K8sEvent[];
 }
 
-async function getJobEvents(jobName: string, namespace: string, buildUuid: string): Promise<K8sEvent[]> {
+async function getJobEvents(jobName: string, namespace: string): Promise<K8sEvent[]> {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
@@ -216,48 +216,51 @@ async function getJobEvents(jobName: string, namespace: string, buildUuid: strin
 
     return events;
   } catch (error) {
-    getLogger({ buildUuid }).error({ error }, `jobName=${jobName} Error fetching events`);
+    getLogger().error({ error }, `jobName=${jobName} Error fetching events`);
     throw error;
   }
 }
 
 const eventsHandler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { uuid, jobName } = req.query;
-  const logger = getLogger({ buildUuid: uuid as string });
 
-  if (req.method !== 'GET') {
-    logger.warn(`method=${req.method} Method not allowed`);
-    res.setHeader('Allow', ['GET']);
-    return res.status(405).json({ error: `${req.method} is not allowed` });
-  }
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    const logger = getLogger();
 
-  if (typeof uuid !== 'string' || typeof jobName !== 'string') {
-    logger.warn(`uuid=${uuid} jobName=${jobName} Missing or invalid query parameters`);
-    return res.status(400).json({ error: 'Missing or invalid uuid or jobName parameters' });
-  }
-
-  try {
-    const namespace = `env-${uuid}`;
-
-    const events = await getJobEvents(jobName, namespace, uuid);
-
-    const response: EventsResponse = {
-      events,
-    };
-
-    return res.status(200).json(response);
-  } catch (error) {
-    logger.error({ error }, `jobName=${jobName} Error getting events`);
-
-    if (error instanceof HttpError) {
-      if (error.response?.statusCode === 404) {
-        return res.status(404).json({ error: 'Environment or job not found.' });
-      }
-      return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
+    if (req.method !== 'GET') {
+      logger.warn(`method=${req.method} Method not allowed`);
+      res.setHeader('Allow', ['GET']);
+      return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    return res.status(500).json({ error: 'Internal server error occurred.' });
-  }
+    if (typeof uuid !== 'string' || typeof jobName !== 'string') {
+      logger.warn(`uuid=${uuid} jobName=${jobName} Missing or invalid query parameters`);
+      return res.status(400).json({ error: 'Missing or invalid uuid or jobName parameters' });
+    }
+
+    try {
+      const namespace = `env-${uuid}`;
+
+      const events = await getJobEvents(jobName, namespace);
+
+      const response: EventsResponse = {
+        events,
+      };
+
+      return res.status(200).json(response);
+    } catch (error) {
+      logger.error({ error }, `jobName=${jobName} Error getting events`);
+
+      if (error instanceof HttpError) {
+        if (error.response?.statusCode === 404) {
+          return res.status(404).json({ error: 'Environment or job not found.' });
+        }
+        return res.status(502).json({ error: 'Failed to communicate with Kubernetes.' });
+      }
+
+      return res.status(500).json({ error: 'Internal server error occurred.' });
+    }
+  });
 };
 
 export default eventsHandler;

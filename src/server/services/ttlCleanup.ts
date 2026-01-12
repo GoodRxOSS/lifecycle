@@ -18,7 +18,7 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger/index';
 import * as k8s from '@kubernetes/client-node';
 import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel } from 'server/lib/utils';
@@ -79,33 +79,30 @@ export default class TTLCleanupService extends Service {
         const staleEnvironments = await this.findStaleEnvironments(config.inactivityDays, config.excludedRepositories);
 
         getLogger({ stage: LogStage.CLEANUP_STARTING }).info(
-          `TTL: found ${staleEnvironments.length} stale envs (${config.inactivityDays}d inactive)`
+          `TTL: found stale environments count=${staleEnvironments.length} inactivityDays=${config.inactivityDays}`
         );
 
         let successCount = 0;
         let errorCount = 0;
 
         for (const env of staleEnvironments) {
-          try {
-            if (dryRun) {
-              getLogger({ buildUuid: env.buildUUID }).info(
-                `TTL: [DRY RUN] would cleanup ${env.namespace} PR#${env.pullRequest.pullRequestNumber}`
-              );
-              successCount++;
-            } else {
-              getLogger({ buildUuid: env.buildUUID }).info(
-                `TTL: cleaning ${env.namespace} PR#${env.pullRequest.pullRequestNumber}`
-              );
-              await this.cleanupStaleEnvironment(env, config.inactivityDays, config.commentTemplate, dryRun);
-              successCount++;
+          await withLogContext({ buildUuid: env.buildUUID }, async () => {
+            try {
+              if (dryRun) {
+                getLogger().info(
+                  `TTL: dry run would cleanup namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`
+                );
+                successCount++;
+              } else {
+                getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
+                await this.cleanupStaleEnvironment(env, config.inactivityDays, config.commentTemplate, dryRun);
+                successCount++;
+              }
+            } catch (error) {
+              errorCount++;
+              getLogger().error({ error }, `Failed to cleanup environment: namespace=${env.namespace}`);
             }
-          } catch (error) {
-            errorCount++;
-            getLogger({ buildUuid: env.buildUUID }).error(
-              { error },
-              `Failed to cleanup environment: namespace=${env.namespace}`
-            );
-          }
+          });
         }
 
         getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info(
@@ -161,7 +158,7 @@ export default class TTLCleanupService extends Service {
 
       const namespaces = namespacesResponse.body.items;
 
-      getLogger({ stage: LogStage.CLEANUP_STARTING }).info(`TTL: scanning ${namespaces.length} namespaces`);
+      getLogger({ stage: LogStage.CLEANUP_STARTING }).info(`TTL: scanning namespaces count=${namespaces.length}`);
 
       // Fetch dynamic labels once at the start
       const keepLabel = await getKeepLabel();
@@ -178,7 +175,7 @@ export default class TTLCleanupService extends Service {
         const expireAtUnix = labels['lfc/ttl-expireAtUnix'];
 
         if (!expireAtUnix) {
-          getLogger({}).debug(`Namespace ${nsName} has no TTL expiration label, skipping`);
+          getLogger().debug(`Namespace ${nsName} has no TTL expiration label, skipping`);
           continue;
         }
 
@@ -190,53 +187,52 @@ export default class TTLCleanupService extends Service {
 
         const daysExpired = Math.floor((now - expireTime) / (1000 * 60 * 60 * 24));
 
-        const buildUUID = labels['lfc/uuid']; // Use lfc/uuid (intentional difference)
+        const buildUUID = labels['lfc/uuid'];
         if (!buildUUID) {
-          getLogger({}).warn(`Namespace ${nsName} has no lfc/uuid label, skipping`);
+          getLogger().warn(`Namespace ${nsName} has no lfc/uuid label, skipping`);
           continue;
         }
 
-        getLogger({ buildUuid: buildUUID }).debug(`Namespace ${nsName} expired ${daysExpired} days ago`);
+        updateLogContext({ buildUuid: buildUUID });
+
+        getLogger().debug(`Namespace ${nsName} expired ${daysExpired} days ago`);
 
         const build = await this.db.models.Build.query()
           .findOne({ uuid: buildUUID })
           .withGraphFetched('[pullRequest.repository]');
 
         if (!build) {
-          getLogger({ buildUuid: buildUUID }).warn(`No build found for namespace ${nsName}, skipping`);
+          getLogger().warn(`No build found for namespace ${nsName}, skipping`);
           continue;
         }
 
         if (build.status === 'torn_down' || build.status === 'pending') {
-          getLogger({ buildUuid: buildUUID }).debug(`Build is already ${build.status}, skipping`);
+          getLogger().debug(`Build is already ${build.status}, skipping`);
           continue;
         }
 
         if (build.isStatic) {
-          getLogger({ buildUuid: buildUUID }).debug(`Build is static environment, skipping`);
+          getLogger().debug(`Build is static environment, skipping`);
           continue;
         }
 
         const pullRequest = build.pullRequest;
 
         if (!pullRequest) {
-          getLogger({ buildUuid: buildUUID }).warn(`No pull request found, skipping`);
+          getLogger().warn(`No pull request found, skipping`);
           continue;
         }
 
         if (pullRequest.status !== 'open') {
-          getLogger({ buildUuid: buildUUID }).debug(`PR is ${pullRequest.status}, skipping`);
+          getLogger().debug(`PR is ${pullRequest.status}, skipping`);
           continue;
         }
 
         if (excludedRepositories.length > 0 && excludedRepositories.includes(pullRequest.fullName)) {
-          getLogger({ buildUuid: buildUUID }).debug(
-            `Repository ${pullRequest.fullName} is excluded from TTL cleanup, skipping`
-          );
+          getLogger().debug(`Repository ${pullRequest.fullName} is excluded from TTL cleanup, skipping`);
           continue;
         }
 
-        // Fetch current labels from GitHub to avoid stale data due to webhook incidents
         let currentLabels: string[];
         try {
           currentLabels = await getPullRequestLabels({
@@ -245,37 +241,30 @@ export default class TTLCleanupService extends Service {
             fullName: pullRequest.fullName,
           });
 
-          getLogger({ buildUuid: buildUUID }).debug(
-            `Fetched ${currentLabels.length} labels from GitHub: ${currentLabels.join(', ')}`
-          );
+          getLogger().debug(`Fetched ${currentLabels.length} labels from GitHub: ${currentLabels.join(', ')}`);
 
-          // Sync labels back to DB if they differ (self-healing)
           const dbLabels = this.parseLabels(pullRequest.labels);
           if (JSON.stringify(currentLabels.sort()) !== JSON.stringify(dbLabels.sort())) {
-            getLogger({ buildUuid: buildUUID }).debug('TTL: label drift detected, syncing to DB');
+            getLogger().debug('TTL: label drift detected, syncing to DB');
             await pullRequest.$query().patch({
               labels: JSON.stringify(currentLabels) as any,
             });
           }
         } catch (error) {
-          getLogger({ buildUuid: buildUUID }).warn({ error }, `Failed to fetch labels from GitHub, falling back to DB`);
-          // Fallback to DB labels if GitHub API fails
+          getLogger().warn({ error }, `Failed to fetch labels from GitHub, falling back to DB`);
           currentLabels = this.parseLabels(pullRequest.labels);
         }
 
         if (currentLabels.includes(keepLabel)) {
-          getLogger({ buildUuid: buildUUID }).debug(`Has ${keepLabel} label (verified from GitHub), skipping`);
+          getLogger().debug(`Has ${keepLabel} label (verified from GitHub), skipping`);
           continue;
         }
 
         if (currentLabels.includes(disabledLabel)) {
-          getLogger({ buildUuid: buildUUID }).debug(
-            `Already has ${disabledLabel} label (verified from GitHub), skipping`
-          );
+          getLogger().debug(`Already has ${disabledLabel} label (verified from GitHub), skipping`);
           continue;
         }
 
-        // Store current labels and drift status for dry-run reporting
         const dbLabels = this.parseLabels(pullRequest.labels);
         const hadLabelDrift = JSON.stringify(currentLabels.sort()) !== JSON.stringify(dbLabels.sort());
 
@@ -313,7 +302,9 @@ export default class TTLCleanupService extends Service {
     const buildUuid = build.uuid;
     const repository = pullRequest.repository;
 
-    getLogger({ buildUuid }).info(`TTL: cleaning ${namespace} PR#${pullRequest.pullRequestNumber}`);
+    updateLogContext({ buildUuid });
+
+    getLogger().info(`TTL: cleaning namespace=${namespace} pr=${pullRequest.pullRequestNumber}`);
 
     // Fetch dynamic labels at runtime
     const deployLabel = await getDeployLabel();
@@ -331,7 +322,7 @@ export default class TTLCleanupService extends Service {
         labels: updatedLabels,
       });
 
-      getLogger({ buildUuid }).debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
+      getLogger().debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
 
       const commentMessage = await this.generateCleanupComment(inactivityDays, commentTemplate);
 
@@ -344,7 +335,7 @@ export default class TTLCleanupService extends Service {
         etag: null,
       });
 
-      getLogger({ buildUuid }).debug(`TTL: cleanup comment posted PR#${pullRequest.pullRequestNumber}`);
+      getLogger().debug(`TTL: cleanup comment posted PR#${pullRequest.pullRequestNumber}`);
 
       await pullRequest.$query().patch({
         labels: JSON.stringify(updatedLabels) as any,
@@ -354,7 +345,7 @@ export default class TTLCleanupService extends Service {
       const metrics = new Metrics('ttl.cleanup', { repositoryName: pullRequest.fullName });
       metrics.increment('total', { dry_run: dryRun.toString() });
     } catch (error) {
-      getLogger({ buildUuid }).error(
+      getLogger().error(
         { error },
         `Failed to cleanup stale environment: namespace=${namespace} prNumber=${pullRequest.pullRequestNumber}`
       );
@@ -395,7 +386,7 @@ export default class TTLCleanupService extends Service {
     const config = await this.getTTLConfig();
 
     if (!config.enabled) {
-      getLogger({}).debug('TTL: disabled in config');
+      getLogger().debug('TTL: disabled in config');
       return;
     }
 
@@ -411,6 +402,6 @@ export default class TTLCleanupService extends Service {
       }
     );
 
-    getLogger({}).info(`TTL: scheduled every ${config.checkIntervalMinutes}min`);
+    getLogger().info(`TTL: scheduled interval=${config.checkIntervalMinutes}min`);
   }
 }
