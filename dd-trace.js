@@ -35,3 +35,11 @@ tracer.use('next', {
 
 tracer.use('net', false);
 tracer.use('dns', false);
+
+tracer.use('ioredis', {
+  service: 'lifecycle-redis',
+});
+
+tracer.use('pg', {
+  service: 'lifecycle-postgres',
+});
