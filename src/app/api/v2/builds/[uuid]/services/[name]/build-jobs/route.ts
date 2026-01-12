@@ -15,15 +15,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { HttpError } from '@kubernetes/client-node';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getNativeBuildJobs } from 'server/lib/kubernetes/getNativeBuildJobs';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 /**
  * @openapi
@@ -87,7 +83,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { uuid: string
   const { uuid, name } = params;
 
   if (!uuid || !name) {
-    logger.warn({ uuid, name }, 'Missing or invalid path parameters');
+    getLogger().warn(`API: invalid params uuid=${uuid} name=${name}`);
     return errorResponse('Missing or invalid uuid or name parameters', { status: 400 }, req);
   }
 
@@ -99,7 +95,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { uuid: string
 
     return successResponse(response, { status: 200 }, req);
   } catch (error) {
-    logger.error({ err: error }, `Error getting build logs for service ${name} in environment ${uuid}.`);
+    getLogger().error({ error }, `API: build logs fetch failed service=${name}`);
 
     if (error instanceof HttpError) {
       if (error.response?.statusCode === 404) {
