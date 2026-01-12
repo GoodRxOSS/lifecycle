@@ -93,7 +93,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     }
 
     try {
-      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: redeploy requested uuid=${uuid}`);
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: redeploy requested');
 
       const buildService = new BuildService();
       const build: Build = await buildService.db.models.Build.query()
@@ -113,14 +113,14 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         correlationId,
       });
 
-      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: redeploy queued uuid=${uuid}`);
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: redeploy queued');
 
       return res.status(200).json({
         status: 'success',
         message: `Redeploy for build ${uuid} has been queued`,
       });
     } catch (error) {
-      getLogger({ stage: LogStage.BUILD_FAILED, error }).error(`Build: redeploy failed uuid=${uuid}`);
+      getLogger({ stage: LogStage.BUILD_FAILED }).error({ error }, 'Build: redeploy failed');
       return res.status(500).json({ error: `Unable to proceed with redeploy for build ${uuid}.` });
     }
   });

@@ -1304,7 +1304,7 @@ export default class BuildService extends BaseService {
           updateLogContext({ buildUuid: build.uuid });
         }
 
-        getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: queued');
+        getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: processing');
 
         if (!build.pullRequest.deployOnUpdate) {
           getLogger().info('Deploy: skipping reason=deployOnUpdateDisabled');
