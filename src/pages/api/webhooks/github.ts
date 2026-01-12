@@ -34,7 +34,15 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     const isVerified = github.verifyWebhookSignature(req);
     if (!isVerified) throw new Error('Webhook not verified');
 
-    getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).info(`Webhook received: event=${req.headers['x-github-event']}`);
+    const event = req.headers['x-github-event'] as string;
+    getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).info(`Webhook received: event=${event}`);
+
+    const isBot = sender?.includes('[bot]') === true;
+    if (event === 'issue_comment' && isBot) {
+      getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).debug('Skipped: bot-triggered issue_comment');
+      res.status(200).end();
+      return;
+    }
 
     if (!['web', 'all'].includes(LIFECYCLE_MODE)) {
       getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).info('Skipped: wrong LIFECYCLE_MODE');
