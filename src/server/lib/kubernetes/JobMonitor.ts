@@ -280,7 +280,17 @@ export class JobMonitor {
         );
 
         if (failedStatus.trim() === 'True') {
-          getLogger().error(`Job: failed name=${this.jobName}`);
+          const failedReason = await shellPromise(
+            `kubectl get job ${this.jobName} -n ${this.namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}'`
+          );
+          const failedMessage = await shellPromise(
+            `kubectl get job ${this.jobName} -n ${this.namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'`
+          );
+          getLogger().error(
+            `Job: failed name=${this.jobName} reason=${failedReason.trim() || 'Unknown'} message=${
+              failedMessage.trim() || 'No message'
+            }`
+          );
 
           // Check if job was superseded
           try {

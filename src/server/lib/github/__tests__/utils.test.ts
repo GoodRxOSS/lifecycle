@@ -35,9 +35,9 @@ jest.mock('server/services/globalConfig', () => {
 
 jest.mock('server/lib/github/client');
 
-jest.mock('server/lib/rootLogger');
+jest.mock('server/lib/logger/rootLogger');
 
-import logger from 'server/lib/rootLogger';
+import { rootLogger as logger } from 'server/lib/logger';
 
 test('getAppToken success', async () => {
   const app = jest.fn().mockResolvedValue({ token: '123' });

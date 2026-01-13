@@ -23,7 +23,7 @@ const mockChild = jest.fn().mockReturnValue({
   debug: jest.fn(),
 });
 
-jest.mock('../../rootLogger', () => ({
+jest.mock('../rootLogger', () => ({
   __esModule: true,
   default: {
     child: (...args: unknown[]) => mockChild(...args),

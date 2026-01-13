@@ -15,7 +15,7 @@
  */
 
 import tracer from 'dd-trace';
-import rootLogger from '../rootLogger';
+import rootLogger from './rootLogger';
 import { getLogContext } from './context';
 import type { LogContext } from './types';
 

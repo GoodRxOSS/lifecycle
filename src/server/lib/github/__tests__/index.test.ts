@@ -53,8 +53,7 @@ jest.mock('server/lib/logger', () => ({
     warn: jest.fn(),
   }),
 }));
-import { getLogger } from 'server/lib/logger';
-import logger from 'server/lib/rootLogger';
+import { getLogger, rootLogger as logger } from 'server/lib/logger';
 
 test('createOrUpdatePullRequestComment success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
