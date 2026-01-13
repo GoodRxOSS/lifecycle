@@ -76,7 +76,7 @@ describe('exec', () => {
     const execCmd = jest.fn().mockRejectedValue(new Error('error'));
 
     await exec('cmd', ['arg1', 'arg2'], { execCmd });
-    expect(getLogger().error).toHaveBeenCalledWith('Exec: error executing runner=cmd error={}');
+    expect(getLogger().error).toHaveBeenCalledWith({ error: new Error('error') }, 'Exec: command failed runner=cmd');
   });
 
   test('exec no stdout', async () => {

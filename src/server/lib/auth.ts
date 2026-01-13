@@ -52,7 +52,7 @@ export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
   const jwksUrl = process.env.KEYCLOAK_JWKS_URL;
 
   if (!issuer || !audience || !jwksUrl) {
-    console.error('Missing required Keycloak environment variables');
+    console.error('Auth: missing Keycloak environment variables');
     return {
       success: false,
       error: { message: 'Server configuration error', status: 500 },
@@ -73,7 +73,7 @@ export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
     return { success: true, payload };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-    console.error('JWT Verification Error:', errorMessage);
+    console.error('Auth: JWT verification failed', error);
 
     // 6. If any part of the verification fails, return an error.
     return {

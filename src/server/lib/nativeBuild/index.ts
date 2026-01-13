@@ -64,7 +64,7 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
           return result;
         } catch (error) {
           const duration = Date.now() - startTime;
-          getLogger().error(`Build: failed error=${error.message} duration=${duration}ms`);
+          getLogger().error({ error }, `Build: failed duration=${duration}ms`);
 
           return {
             success: false,

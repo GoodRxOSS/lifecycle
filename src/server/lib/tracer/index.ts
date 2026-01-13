@@ -61,7 +61,7 @@ export class Tracer {
       }
       return this;
     } catch (error) {
-      getLogger().error(`Tracer: initialization error error=${error}`);
+      getLogger().error({ error }, 'Tracer: initialization failed');
       return this;
     }
   }
@@ -104,7 +104,7 @@ export class Tracer {
             if (typeof tracer?.scope === 'function') {
               tracer.scope().active()?.setTag('error', true);
             }
-            getLogger().error(`Tracer: error decorating method=${propertyKey.toString()} error=${error}`);
+            getLogger().error({ error }, `Tracer: decorator failed method=${propertyKey.toString()}`);
             throw error;
           }
         });

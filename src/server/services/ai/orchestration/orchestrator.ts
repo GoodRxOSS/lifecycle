@@ -82,7 +82,7 @@ export class ToolOrchestrator {
           }
         }
       } catch (error: any) {
-        getLogger().error(`AI: stream error message=${error.message} buildUuid=${buildUuid || 'none'}`);
+        getLogger().error({ error }, `AI: stream error buildUuid=${buildUuid || 'none'}`);
         return {
           success: false,
           error: error.message || 'Provider error',

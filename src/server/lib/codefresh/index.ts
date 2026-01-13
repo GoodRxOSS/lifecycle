@@ -91,6 +91,7 @@ export const waitForImage = async (id: string, { timeoutMs = 180000, intervalMs 
     const checkStatus = checkPipelineStatus(id);
     return await waitUntil(checkStatus, { timeoutMs, intervalMs });
   } catch (error) {
+    getLogger().error({ error }, `Codefresh: waitForImage failed pipelineId=${id}`);
     return false;
   }
 };
@@ -140,6 +141,7 @@ export const getLogs = async (id: string) => {
     const output = await shellPromise(command);
     return output;
   } catch (error) {
-    return error;
+    getLogger().error({ error }, `Codefresh: getLogs failed pipelineId=${id}`);
+    return '';
   }
 };

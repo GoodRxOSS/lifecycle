@@ -30,7 +30,7 @@ export const exec = async (runner: string, cmd: string[], { execCmd = execFilePr
     const out = await execCmd(runner, cmd);
     return out?.stdout || '';
   } catch (err) {
-    getLogger().error(`Exec: error executing runner=${runner} error=${JSON.stringify(err)}`);
+    getLogger().error({ error: err }, `Exec: command failed runner=${runner}`);
     return '';
   }
 };

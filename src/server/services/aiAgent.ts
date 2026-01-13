@@ -237,7 +237,7 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
         return 'investigate';
       }
     } catch (error: any) {
-      getLogger().error(`AI: classifyUserIntent failed error=${error?.message}`);
+      getLogger().error({ error }, 'AI: classifyUserIntent failed');
       return 'investigate';
     }
   }

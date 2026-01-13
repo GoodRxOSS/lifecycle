@@ -41,7 +41,7 @@ export async function getLogStreamingInfoForJob(
   try {
     podInfo = await getK8sJobStatusAndPod(jobName, namespace);
   } catch (k8sError: any) {
-    getLogger().error(`LogStreaming: error fetching job status jobName=${jobName} error=${k8sError.message}`);
+    getLogger().error({ error: k8sError }, `LogStreaming: job status fetch failed jobName=${jobName}`);
     const errorStatus: LogSourceStatus = {
       status: 'Unknown',
       streamingRequired: false,

@@ -45,7 +45,7 @@ export class JSONBuffer {
     try {
       return JSON.parse(this.buffer);
     } catch (error: any) {
-      getLogger().error(`JSONBuffer: parse failed bufferLength=${this.buffer.length} error=${error?.message}`);
+      getLogger().error({ error }, `JSONBuffer: parse failed bufferLength=${this.buffer.length}`);
       return null;
     }
   }

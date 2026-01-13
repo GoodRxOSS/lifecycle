@@ -148,7 +148,7 @@ export const constructFastlyBuildLink = async (
     const { href: url = '' } = (await fastlyFn(fastlyBuildId, fastlyServiceType)) || {};
     return url ? { name: 'Fastly Dashboard', url } : {};
   } catch (err) {
-    getLogger().error(`Fastly: error constructing build link error=${err}`);
+    getLogger().error({ error: err }, 'Fastly: build link construction failed');
     return {};
   }
 };
