@@ -21,7 +21,7 @@ import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import Repository from 'server/models/Repository';
 import { Service } from 'server/models/yaml/types';
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export const isInObj = (obj, key) => (!obj ? false : key in obj);
 

@@ -15,7 +15,7 @@
  */
 
 import { IServices } from 'server/services/types';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { defaultDb, redisClient } from 'server/lib/dependencies';
 import RedisClient from 'server/lib/redisClient';
 import QueueManager from 'server/lib/queueManager';

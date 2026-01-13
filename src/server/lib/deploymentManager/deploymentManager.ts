@@ -20,7 +20,7 @@ import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
 import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { waitForDeployPodReady } from '../kubernetes';
 

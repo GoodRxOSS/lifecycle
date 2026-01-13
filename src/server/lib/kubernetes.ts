@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from './logger/index';
+import { getLogger } from './logger';
 import yaml from 'js-yaml';
 import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';

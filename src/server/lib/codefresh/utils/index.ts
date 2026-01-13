@@ -17,7 +17,7 @@
 import { generateYaml } from 'server/lib/codefresh/utils/generateYaml';
 import { generateCodefreshCmd } from 'server/lib/codefresh/utils/generateCodefreshCmd';
 import { CF, CF_CHECKOUT_STEP, CF_BUILD_STEP, CF_AFTER_BUILD_STEP } from 'server/lib/codefresh/constants';
-import { updateLogContext } from 'server/lib/logger/index';
+import { updateLogContext } from 'server/lib/logger';
 
 export const constructBuildArgs = (envVars = {}) => {
   const envVarsItems = Object.keys(envVars);

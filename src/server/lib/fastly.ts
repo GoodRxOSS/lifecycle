@@ -15,7 +15,7 @@
  */
 
 import * as FastlyInstance from 'fastly/dist/index.js';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { Redis } from 'ioredis';
 import { FASTLY_TOKEN } from 'shared/config';
 import GlobalConfigService from 'server/services/globalConfig';

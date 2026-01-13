@@ -16,7 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { nanoid } from 'nanoid';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
 import WebhookService from 'server/services/webhook';

@@ -15,7 +15,7 @@
  */
 
 import GlobalConfigService from 'server/services/globalConfig';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { setupServiceAccountInNamespace } from '../../nativeHelm/utils';
 
 export async function ensureServiceAccountForJob(

@@ -20,7 +20,7 @@ import { GithubPullRequestActions, PullRequestStatus, FallbackLabels } from 'sha
 import GlobalConfigService from 'server/services/globalConfig';
 import { GenerateDeployTagOptions, WaitUntilOptions, EnableKillswitchOptions } from 'server/lib/types';
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { ENVIRONMENT } from 'shared/config';
 
 const execFilePromise = promisify(execFile);

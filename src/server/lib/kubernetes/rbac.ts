@@ -16,7 +16,7 @@
 
 import { V1ServiceAccount, V1Role, V1RoleBinding } from '@kubernetes/client-node';
 import * as k8s from '@kubernetes/client-node';
-import { getLogger } from '../logger/index';
+import { getLogger } from '../logger';
 
 export interface RBACConfig {
   namespace: string;

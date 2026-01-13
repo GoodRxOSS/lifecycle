@@ -21,7 +21,7 @@ import { LIFECYCLE_MODE } from 'shared/index';
 import { stringify } from 'flatted';
 import BootstrapJobs from 'server/jobs/index';
 import createAndBindServices from 'server/services';
-import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 
 const services = createAndBindServices();
 

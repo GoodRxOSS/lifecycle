@@ -15,7 +15,7 @@
  */
 
 import { Deploy } from '../../models';
-import { getLogger, withSpan, withLogContext } from '../logger/index';
+import { getLogger, withSpan, withLogContext } from '../logger';
 import { ensureNamespaceExists } from './utils';
 import { buildWithEngine, NativeBuildOptions } from './engines';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import { PullRequest, Repository } from 'server/models';
 import BaseService from './_service';
 import { UniqueViolationError } from 'objection';

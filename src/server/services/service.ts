@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { Environment, Repository } from 'server/models';
 import ServiceModel from 'server/models/Service';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';

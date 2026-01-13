@@ -18,7 +18,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
-import { getLogger, withSpan, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withSpan, withLogContext } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 import { randomAlphanumeric } from 'server/lib/random';
 import { nanoid } from 'nanoid';

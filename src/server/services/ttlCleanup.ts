@@ -18,7 +18,7 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel } from 'server/lib/utils';

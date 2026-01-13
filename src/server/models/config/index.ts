@@ -24,7 +24,7 @@ import {
 } from 'server/models/config/utils';
 import { LifecycleConfig, Service } from 'server/models/config/types';
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export const isGithubServiceDockerConfig = (obj) => isInObj(obj, 'dockerfilePath');
 export const isDockerServiceConfig = (obj) => isInObj(obj, 'dockerImage');

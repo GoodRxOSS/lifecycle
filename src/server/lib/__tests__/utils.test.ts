@@ -54,7 +54,7 @@ jest.mock('server/services/globalConfig', () => {
   };
 });
 
-jest.mock('server/lib/logger/index', () => ({
+jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn().mockReturnValue({
     info: jest.fn(),
     warn: jest.fn(),
@@ -62,7 +62,7 @@ jest.mock('server/lib/logger/index', () => ({
     debug: jest.fn(),
   }),
 }));
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 describe('exec', () => {
   test('exec success', async () => {

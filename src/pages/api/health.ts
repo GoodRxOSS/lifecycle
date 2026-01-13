@@ -16,7 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next';
 import { defaultDb } from 'server/lib/dependencies';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import RedisClient from 'server/lib/redisClient';
 
 export default async function healthHandler(req: NextApiRequest, res: NextApiResponse) {

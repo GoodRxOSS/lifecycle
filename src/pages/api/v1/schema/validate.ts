@@ -103,7 +103,7 @@ type Response = ValidationResponse | ErrorResponse;
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { getYamlFileContentFromBranch, ConfigFileNotFound } from 'server/lib/github';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { YamlConfigParser, ParsingError } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator, ValidationError } from 'server/lib/yamlConfigValidator';
 

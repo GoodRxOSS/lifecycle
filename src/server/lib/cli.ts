@@ -18,7 +18,7 @@ import { merge } from 'lodash';
 import { Build, Deploy, Service, Deployable } from 'server/models';
 import { CLIDeployTypes, DeployTypes } from 'shared/constants';
 import { shellPromise } from './shell';
-import { getLogger, withLogContext, updateLogContext } from './logger/index';
+import { getLogger, withLogContext, updateLogContext } from './logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DatabaseSettings } from 'server/services/types/globalConfig';
 

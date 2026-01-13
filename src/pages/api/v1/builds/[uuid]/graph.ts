@@ -16,7 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { generateGraph } from 'server/lib/dependencyGraph';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 import BuildService from 'server/services/build';
 

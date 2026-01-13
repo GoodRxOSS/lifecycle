@@ -30,7 +30,7 @@ import BaseService from './_service';
 import _ from 'lodash';
 import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
-import { withLogContext, getLogger, extractContextForQueue, LogStage, updateLogContext } from 'server/lib/logger/index';
+import { withLogContext, getLogger, extractContextForQueue, LogStage, updateLogContext } from 'server/lib/logger';
 import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 

@@ -22,7 +22,7 @@ import { createWebhookJob, WebhookJobConfig } from 'server/lib/kubernetes/webhoo
 import { shellPromise } from 'server/lib/shell';
 import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { nanoid } from 'nanoid';
 
 const MANIFEST_PATH = process.env.MANIFEST_PATH || '/tmp/lifecycle/manifests';

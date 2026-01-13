@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from './logger/index';
+import { getLogger } from './logger';
 import { CommentParser } from 'shared/constants';
 import { compact, flatten, set } from 'lodash';
 

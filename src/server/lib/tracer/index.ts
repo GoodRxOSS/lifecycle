@@ -15,7 +15,7 @@
  */
 
 import { Span, tracer, TracerOptions } from 'dd-trace';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 // Refer to the readme for insights
 

@@ -16,7 +16,7 @@
 
 import { randomBytes } from 'crypto';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { APP_HOST } from 'shared/config';
 

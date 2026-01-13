@@ -39,7 +39,7 @@ import {
   GitHubClient,
 } from './tools';
 import { DebugContext, DebugMessage } from '../types/aiAgent';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export interface AIAgentConfig {
   provider: ProviderType;

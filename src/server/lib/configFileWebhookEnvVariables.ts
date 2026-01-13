@@ -16,7 +16,7 @@
 
 import { EnvironmentVariables } from 'server/lib/envVariables';
 import { Build } from 'server/models';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { Webhook } from 'server/models/yaml';
 import { FeatureFlags } from 'shared/constants';
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class JSONBuffer {
   private buffer: string = '';

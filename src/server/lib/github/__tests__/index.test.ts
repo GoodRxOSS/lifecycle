@@ -45,7 +45,7 @@ jest.mock('server/services/globalConfig', () => {
 jest.mock('axios');
 jest.mock('server/lib/github/client');
 jest.mock('server/lib/github/utils');
-jest.mock('server/lib/logger/index', () => ({
+jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn().mockReturnValue({
     info: jest.fn(),
     debug: jest.fn(),
@@ -53,8 +53,8 @@ jest.mock('server/lib/logger/index', () => ({
     warn: jest.fn(),
   }),
 }));
-import { getLogger } from 'server/lib/logger/index';
-import logger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
+import logger from 'server/lib/rootLogger';
 
 test('createOrUpdatePullRequestComment success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({

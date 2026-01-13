@@ -20,7 +20,7 @@ import AIAgentContextService from 'server/services/ai/context/gatherer';
 import AIAgentConversationService from 'server/services/ai/conversation/storage';
 import AIAgentService from 'server/services/aiAgent';
 import GlobalConfigService from 'server/services/globalConfig';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {

@@ -17,7 +17,7 @@
 import { parse as fParse } from 'flatted';
 import _ from 'lodash';
 import Service from './_service';
-import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
 import {
   GithubPullRequestActions,

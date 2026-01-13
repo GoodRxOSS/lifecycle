@@ -16,7 +16,7 @@
 
 /* eslint-disable no-case-declarations */
 import _ from 'lodash';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import Build from '../Build';

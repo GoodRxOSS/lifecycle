@@ -27,7 +27,7 @@ import {
   NO_DEFAULT_ENV_UUID,
 } from 'shared/constants';
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { LifecycleError } from './errors';
 import GlobalConfigService from 'server/services/globalConfig';
 

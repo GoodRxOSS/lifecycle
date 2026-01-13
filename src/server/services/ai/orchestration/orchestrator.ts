@@ -20,7 +20,7 @@ import { StreamCallbacks } from '../types/stream';
 import { ToolRegistry } from '../tools/registry';
 import { ToolSafetyManager } from './safety';
 import { LoopDetector } from './loopProtection';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export interface OrchestrationResult {
   success: boolean;

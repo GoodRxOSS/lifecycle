@@ -15,7 +15,7 @@
  */
 
 import BaseService from './_service';
-import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
 import { APP_HOST, QUEUE_NAMES } from 'shared/config';

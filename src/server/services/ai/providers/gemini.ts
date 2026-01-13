@@ -18,7 +18,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { BaseLLMProvider } from './base';
 import { ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
 import { Tool, ToolCall } from '../types/tool';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class GeminiProvider extends BaseLLMProvider {
   name = 'gemini';

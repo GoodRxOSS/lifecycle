@@ -17,7 +17,7 @@
 import Redis from 'ioredis';
 import Redlock from 'redlock';
 import { REDIS_URL, APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD, APP_REDIS_TLS } from 'shared/config';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class RedisClient {
   private static instance: RedisClient;

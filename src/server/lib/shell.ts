@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import shell, { ExecOptions } from 'shelljs';
 
 interface Options extends ExecOptions {

@@ -16,7 +16,7 @@
 
 import { Deploy } from '../../models';
 import { shellPromise } from '../shell';
-import { getLogger } from '../logger/index';
+import { getLogger } from '../logger';
 import GlobalConfigService from '../../services/globalConfig';
 import {
   waitForJobAndGetLogs,

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import Environment from 'server/models/Environment';
 import Service from './_service';
 

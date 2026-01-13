@@ -16,7 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next';
 import { nanoid } from 'nanoid';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import TTLCleanupService from 'server/services/ttlCleanup';
 

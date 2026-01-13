@@ -15,7 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import { Build } from 'server/models';
 import { nanoid } from 'nanoid';
 import BuildService from 'server/services/build';

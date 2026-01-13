@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { StreamingInfo, LogSourceStatus, K8sPodInfo, K8sContainerInfo } from 'shared/types';
 import { HttpError, V1ContainerStatus } from '@kubernetes/client-node';

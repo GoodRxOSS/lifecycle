@@ -15,7 +15,7 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';

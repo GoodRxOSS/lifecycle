@@ -17,7 +17,7 @@
 import BaseService from './_service';
 import * as YamlService from 'server/models/yaml';
 import { triggerPipeline } from 'server/lib/codefresh';
-import { getLogger, updateLogContext } from 'server/lib/logger/index';
+import { getLogger, updateLogContext } from 'server/lib/logger';
 
 export default class CodefreshService extends BaseService {
   async triggerYamlConfigWebhookPipeline(webhook: YamlService.Webhook, data: Record<string, any>): Promise<string> {

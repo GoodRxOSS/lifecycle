@@ -15,7 +15,7 @@
  */
 
 import { createAppAuth } from '@octokit/auth-app';
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import { GlobalConfig, LabelsConfig } from './types/globalConfig';
 import { GITHUB_APP_INSTALLATION_ID, APP_AUTH, APP_ENV, QUEUE_NAMES } from 'shared/config';

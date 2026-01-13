@@ -17,7 +17,7 @@
 import { EnvironmentVariables } from 'server/lib/envVariables';
 import { Build, Deploy } from 'server/models';
 import { DeployTypes, FeatureFlags } from 'shared/constants';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { ValidationError } from './yamlConfigValidator';
 import * as YamlService from 'server/models/yaml';
 

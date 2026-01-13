@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import BaseService from './_service';
 import { Build, PullRequest } from 'server/models';
 import * as YamlService from 'server/models/yaml';

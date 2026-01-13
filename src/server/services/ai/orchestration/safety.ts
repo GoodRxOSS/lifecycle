@@ -17,7 +17,7 @@
 import JsonSchema from 'jsonschema';
 import { Tool, ToolResult, ToolSafetyLevel } from '../types/tool';
 import { StreamCallbacks } from '../types/stream';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class ToolSafetyManager {
   private requireConfirmation: boolean;

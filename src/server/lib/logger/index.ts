@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-export { default as rootLogger } from '../logger';
+export { default as rootLogger } from '../rootLogger';
 export { getLogContext, withLogContext, updateLogContext, extractContextForQueue } from './context';
 export { getLogger } from './contextLogger';
 export { withSpan } from './spans';

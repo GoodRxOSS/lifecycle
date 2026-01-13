@@ -15,7 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 
 import { BuildStatus, DeployStatus } from 'shared/constants';

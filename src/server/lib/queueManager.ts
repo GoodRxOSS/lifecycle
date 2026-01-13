@@ -16,7 +16,7 @@
 
 import { Queue, Worker, QueueOptions, WorkerOptions, Processor } from 'bullmq';
 import { Redis } from 'ioredis';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 interface RegisteredQueue {
   queue: Queue;

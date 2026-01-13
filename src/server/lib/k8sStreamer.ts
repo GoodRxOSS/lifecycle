@@ -15,7 +15,7 @@
  */
 
 import { KubeConfig } from '@kubernetes/client-node';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { PassThrough, Writable } from 'stream';
 

@@ -15,7 +15,7 @@
  */
 
 import { cloneDeep, merge } from 'lodash';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { GITHUB_API_CACHE_EXPIRATION_SECONDS } from 'shared/constants';
 import { createOctokitClient } from 'server/lib/github/client';
 import { CacheRequestData } from 'server/lib/github/types';

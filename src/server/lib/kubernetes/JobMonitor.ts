@@ -15,7 +15,7 @@
  */
 
 import { shellPromise } from '../shell';
-import { getLogger } from '../logger/index';
+import { getLogger } from '../logger';
 
 export interface JobStatus {
   logs: string;

@@ -21,7 +21,7 @@ import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValid
 import Repository from '../Repository';
 import { Environment } from './YamlEnvironment';
 import { Service, Service001 } from './YamlService';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export interface LifecycleConfig {
   readonly version: string;

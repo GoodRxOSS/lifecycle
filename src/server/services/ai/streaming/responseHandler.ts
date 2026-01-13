@@ -16,7 +16,7 @@
 
 import { StreamCallbacks } from '../types/stream';
 import { JSONBuffer } from './jsonBuffer';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class ResponseHandler {
   private jsonBuffer: JSONBuffer;

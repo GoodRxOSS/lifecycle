@@ -16,7 +16,7 @@
 
 import * as k8s from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 /**
  * Fetches logs from a Kubernetes apply job for a deploy

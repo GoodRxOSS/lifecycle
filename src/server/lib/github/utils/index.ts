@@ -15,7 +15,7 @@
  */
 
 import { Octokit } from '@octokit/core';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 
 import { ConstructOctokitClientOptions, GetAppTokenOptions } from 'server/lib/github/types';

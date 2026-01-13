@@ -15,7 +15,7 @@
  */
 
 import { shellPromise } from 'server/lib/shell';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { generateCodefreshCmd, constructEcrTag, getCodefreshPipelineIdFromOutput } from 'server/lib/codefresh/utils';
 import { waitUntil } from 'server/lib/utils';
 import { ContainerBuildOptions } from 'server/lib/codefresh/types';

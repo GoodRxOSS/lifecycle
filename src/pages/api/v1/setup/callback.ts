@@ -16,7 +16,7 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { updateSecret, getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { SECRET_BOOTSTRAP_NAME } from 'shared/config';
 

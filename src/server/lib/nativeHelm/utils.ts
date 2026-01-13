@@ -26,7 +26,7 @@ import {
   setupDeployServiceAccountInNamespace,
 } from 'server/lib/kubernetes/rbac';
 import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 

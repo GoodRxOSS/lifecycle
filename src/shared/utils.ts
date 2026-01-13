@@ -21,7 +21,7 @@ import { Deploy } from 'server/models';
 import Fastly from 'server/lib/fastly';
 import { Link, FeatureFlags } from 'shared/types';
 import { DD_URL, DD_LOG_URL } from 'shared/constants';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import Model from 'server/models/_Model';
 
 /**

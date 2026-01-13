@@ -15,7 +15,7 @@
  */
 
 import BaseService from './_service';
-import { getLogger, updateLogContext } from 'server/lib/logger/index';
+import { getLogger, updateLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';

@@ -15,7 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import BuildService from 'server/services/build';
 import PullRequestService from 'server/services/pullRequest';
 

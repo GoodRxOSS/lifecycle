@@ -15,7 +15,7 @@
  */
 
 /* eslint-disable no-unused-vars */
-import { withLogContext, getLogger, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import fs from 'fs';
 import { TMP_PATH, QUEUE_NAMES } from 'shared/config';

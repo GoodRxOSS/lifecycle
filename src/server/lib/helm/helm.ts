@@ -20,7 +20,7 @@ import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { TMP_PATH } from 'shared/config';
 import { DeployStatus } from 'shared/constants';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';

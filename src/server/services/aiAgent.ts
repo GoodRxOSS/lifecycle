@@ -31,7 +31,7 @@ import {
   PatchK8sResourceTool,
   GetIssueCommentTool,
 } from './ai/tools';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export default class AIAgentService extends BaseService {
   private service: AIAgentCore | null = null;

@@ -18,7 +18,7 @@ import { Deploy } from 'server/models';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 import { getPullRequest } from 'server/lib/github/index';
 import { DeployStatus } from 'shared/constants';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 const githubDeploymentStatuses = {
   deployed: 'success',

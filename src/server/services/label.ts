@@ -18,7 +18,7 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger/index';
+import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import { waitForColumnValue } from 'shared/utils';
 import { updatePullRequestLabels } from 'server/lib/github';
 import { getDeployLabel } from 'server/lib/utils';

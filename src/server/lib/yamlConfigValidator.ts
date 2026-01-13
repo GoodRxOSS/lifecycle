@@ -19,7 +19,7 @@ import { LifecycleError } from './errors';
 import JsonSchema from 'jsonschema';
 import { BuildStatus, CAPACITY_TYPE, DiskAccessMode } from 'shared/constants';
 import { schema_1_0_0 } from './yamlSchemas';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export class ValidationError extends LifecycleError {
   constructor(msg: string, uuid: string = null, service: string = null) {

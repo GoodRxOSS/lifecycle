@@ -15,7 +15,7 @@
  */
 
 import { LLMProvider, Message, StreamChunk } from '../types/provider';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export interface ConversationState {
   summary: string;

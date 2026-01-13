@@ -15,7 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger/index';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
 import DeployService from 'server/services/deploy';

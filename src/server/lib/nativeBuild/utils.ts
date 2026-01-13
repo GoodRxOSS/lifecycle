@@ -16,7 +16,7 @@
 
 import { V1Job } from '@kubernetes/client-node';
 import { shellPromise } from '../shell';
-import { getLogger } from '../logger/index';
+import { getLogger } from '../logger';
 import * as k8s from '@kubernetes/client-node';
 import GlobalConfigService from '../../services/globalConfig';
 import { createBuildJob } from '../kubernetes/jobFactory';

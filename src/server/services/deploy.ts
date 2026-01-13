@@ -17,7 +17,7 @@
 import BaseService from './_service';
 import { Environment, Build, Service, Deploy, Deployable } from 'server/models';
 import * as codefresh from 'server/lib/codefresh';
-import { getLogger, withLogContext } from 'server/lib/logger/index';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import hash from 'object-hash';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 import * as cli from 'server/lib/cli';

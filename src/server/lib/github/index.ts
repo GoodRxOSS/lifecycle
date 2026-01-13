@@ -19,7 +19,7 @@ import crypto from 'crypto';
 import { NextApiRequest } from 'next';
 import { GITHUB_WEBHOOK_SECRET } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 import { createOctokitClient } from 'server/lib/github/client';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 import { LIFECYCLE_FILE_NAME_REGEX } from 'server/lib/github/constants';

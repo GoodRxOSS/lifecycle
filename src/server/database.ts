@@ -21,7 +21,7 @@ import { IServices } from 'server/services/types';
 import Model from 'server/models/_Model';
 import knexfile from '../../knexfile';
 
-import { getLogger } from 'server/lib/logger/index';
+import { getLogger } from 'server/lib/logger';
 
 export default class Database {
   models: models.IModels;
