@@ -34,7 +34,7 @@ export class LogStreamingService {
     uuid: string,
     jobName: string,
     serviceName?: string, // Optional for webhooks
-    explicitType?: string
+    explicitType?: LogType
   ): Promise<LogStreamResponse> {
     // 1. Validate Build Existence
     const build = await this.buildService.db.models.Build.query().findOne({ uuid });
