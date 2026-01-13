@@ -222,6 +222,91 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description A single deployment job record for a service within a build.
+         */
+        DeploymentJobInfo: {
+          type: 'object',
+          properties: {
+            jobName: {
+              type: 'string',
+              description: 'Kubernetes job name',
+              example: 'deploy-uuid-helm-123-abc123',
+            },
+            deployUuid: {
+              type: 'string',
+              description: 'Deploy UUID',
+              example: 'deploy-uuid',
+            },
+            sha: {
+              type: 'string',
+              description: 'Git commit SHA',
+              example: 'abc123',
+            },
+            status: {
+              type: 'string',
+              enum: ['Active', 'Complete', 'Failed', 'Pending'],
+              description: 'Current status of the deployment job',
+            },
+            startedAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'When the job started',
+            },
+            completedAt: {
+              type: 'string',
+              format: 'date-time',
+              description: 'When the job completed',
+            },
+            duration: {
+              type: 'number',
+              description: 'Deployment duration in seconds',
+            },
+            error: {
+              type: 'string',
+              description: 'Error message if job failed',
+              example: 'Job failed due to ...',
+            },
+            podName: {
+              type: 'string',
+              description: 'Name of the pod running the job',
+              example: 'deploy-uuid-helm-123-abc123-pod',
+            },
+            deploymentType: {
+              type: 'string',
+              enum: ['helm', 'github'],
+              description: 'Type of deployment job',
+            },
+          },
+          required: ['jobName', 'deployUuid', 'sha', 'status', 'deploymentType'],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/services/{name}/deploy-jobs
+         */
+        GetDeployLogsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    deployments: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DeploymentJobInfo' },
+                    },
+                  },
+                  required: ['deployments'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description The specific success response for
          * GET /api/v2/builds/{uuid}/services/{name}/build-jobs
          */
