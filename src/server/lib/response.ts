@@ -16,11 +16,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { PaginationMetadata } from './paginate';
-import rootLogger from './logger';
-
-const logger = rootLogger.child({
-  filename: 'server/lib/response.ts',
-});
+import { getLogger } from 'server/lib/logger';
 
 interface Metadata {
   pagination?: PaginationMetadata;
@@ -79,7 +75,7 @@ export function errorResponse(error: unknown, options: ErrorResponseOptions, req
     errorStack = error.stack || '';
   }
 
-  logger.error(`API Error: ${errorMessage}`, { stack: errorStack });
+  getLogger().error({ error, stack: errorStack }, `API: error message=${errorMessage}`);
 
   const { status } = options;
 

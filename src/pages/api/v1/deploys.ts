@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'api/v1/deploys.ts',
-});
 
 /**
  * @openapi
@@ -70,10 +66,6 @@ const logger = rootLogger.child({
  *                     type: string
  *                   env:
  *                     type: object
- *                   buildLogs:
- *                     type: string
- *                   containerLogs:
- *                     type: string
  *                   serviceId:
  *                     type: integer
  *                   buildId:
@@ -108,8 +100,6 @@ const logger = rootLogger.child({
  *                     type: string
  *                   replicaCount:
  *                     type: integer
- *                   yamlConfig:
- *                     type: object
  *                   deployableId:
  *                     type: integer
  *                   isRunningLatest:
@@ -117,8 +107,6 @@ const logger = rootLogger.child({
  *                   runningImage:
  *                     type: string
  *                   deployPipelineId:
- *                     type: string
- *                   buildOutput:
  *                     type: string
  *                   buildJobName:
  *                     type: string
@@ -177,7 +165,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     const build = await buildService.db.models.Build.query().findById(parsedBuildId).select('id');
 
     if (!build) {
-      logger.info(`Build with ID ${parsedBuildId} not found`);
+      getLogger().debug(`Build not found: buildId=${parsedBuildId}`);
       return res.status(404).json({ error: 'Build not found' });
     }
 
@@ -198,8 +186,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       'internalHostname',
       'publicUrl',
       'env',
-      'buildLogs',
-      'containerLogs',
       'serviceId',
       'buildId',
       'createdAt',
@@ -215,18 +201,16 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       'cname',
       'runUUID',
       'replicaCount',
-      'yamlConfig',
       'deployableId',
       'isRunningLatest',
       'runningImage',
       'deployPipelineId',
-      'buildOutput',
       'buildJobName'
     );
 
     return res.status(200).json(deploys);
   } catch (error) {
-    logger.error(`Error fetching deploys for build ${parsedBuildId}:`, error);
+    getLogger({ error }).error(`API: deploys fetch failed buildId=${parsedBuildId}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

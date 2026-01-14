@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import BaseService from './_service';
 import { Environment, Repository, Service, PullRequest, Build, Deploy } from 'server/models';
 import Deployable from 'server/models/Deployable';
@@ -23,10 +23,6 @@ import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 
 import { Builder, Helm, KedaScaleToZero } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
-
-const logger = rootLogger.child({
-  filename: 'services/deployable.ts',
-});
 
 export interface DeployableAttributes {
   appShort?: string;
@@ -211,11 +207,11 @@ export default class DeployableService extends BaseService {
         attributes.serviceDisksYaml = JSON.stringify(yamlServiceDisks);
       }
     } catch (error) {
-      logger
-        .child({ service, error })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem generating deployable attributes from the database configuration.`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: generate attributes from DB failed');
       throw error;
     }
 
@@ -383,11 +379,11 @@ export default class DeployableService extends BaseService {
         };
       }
     } catch (error) {
-      logger
-        .child({ service, deployment })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem generating deployable attributes from the yaml configuration. Error: ${error}`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: generate attributes from YAML failed');
       throw error;
     }
 
@@ -419,11 +415,11 @@ export default class DeployableService extends BaseService {
         mergedAttributes = { ...yamlAttributes };
       }
     } catch (error) {
-      logger
-        .child({ dbAttributes, yamlAttributes, error })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem merging deployable attributes from the database with the yaml configuration. ${error}`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: merge attributes failed');
       throw error;
     }
 
@@ -475,11 +471,11 @@ export default class DeployableService extends BaseService {
         }
       }
     } catch (error) {
-      logger
-        .child({ service, error })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem overwriting the deployable object configuration with the yaml configuration.`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: overwrite config with YAML failed');
       throw error;
     }
   }
@@ -514,8 +510,8 @@ export default class DeployableService extends BaseService {
 
       const dependencies: Service[] = await this.db.models.Service.query().where('dependsOnServiceId', service.id);
 
-      logger.debug(
-        `[BUILD ${buildUUID}] ${service.name} has ${dependencies.length} database dependency(dependsOnServiceId).`
+      getLogger({ buildUUID, service: service.name }).debug(
+        `Service has ${dependencies.length} database dependency(dependsOnServiceId)`
       );
 
       await Promise.all(
@@ -539,11 +535,11 @@ export default class DeployableService extends BaseService {
         })
       );
     } catch (error) {
-      logger
-        .child({ service, error })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem creating or updating the deployable attributes from the database configuration.`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: upsert attributes from DB failed');
       throw error;
     }
   }
@@ -570,9 +566,11 @@ export default class DeployableService extends BaseService {
       const dbService: Service = await Service.query()
         .findOne({ name: service.name })
         .catch((error) => {
-          logger
-            .child({ error })
-            .debug(`[BUILD ${buildUUID}] Not really an error. Just no db config for this yaml based service`);
+          getLogger({
+            buildUUID,
+            service: service.name,
+            error,
+          }).debug('No database config for this yaml based service');
           return null;
         });
 
@@ -592,8 +590,8 @@ export default class DeployableService extends BaseService {
           await build?.pullRequest?.$fetchGraph('[repository]');
           repository = build?.pullRequest?.repository;
           if (!repository) {
-            logger.error(
-              `[BUILD ${buildUUID}] [SERVICE ${service.name}] Unable to find ${repoName} from Lifecycle database. Please verify the repository name and make sure Lifecycle Github app is installed on repository.`
+            getLogger({ buildUUID, service: service.name }).error(
+              `Unable to find ${repoName} from Lifecycle database. Verify repository name and ensure Lifecycle Github app is installed`
             );
           }
         }
@@ -641,11 +639,11 @@ export default class DeployableService extends BaseService {
         );
       }
     } catch (error) {
-      logger
-        .child({ deployableServices, service, error })
-        .error(
-          `[BUILD ${buildUUID}] [SERVICE ${service.name}] There was a problem creating or updating the deployable attributes from the yaml configuration when using a services yaml configuration.`
-        );
+      getLogger({
+        buildUUID,
+        service: service.name,
+        error,
+      }).error('Deployable: upsert attributes from YAML failed');
       throw error;
     }
   }
@@ -714,11 +712,11 @@ export default class DeployableService extends BaseService {
                   build
                 );
               } catch (error) {
-                logger
-                  .child({ dbEnvService, error })
-                  .error(
-                    `[BUILD ${buildUUID}] [SERVICE ${dbEnvService.name}] There was a problem during attribution while using the database configuration.`
-                  );
+                getLogger({
+                  buildUUID,
+                  service: dbEnvService.name,
+                  error,
+                }).error('Deployable: attribution failed source=db');
                 throw error;
               }
             })
@@ -734,11 +732,11 @@ export default class DeployableService extends BaseService {
         await attribution(environment.optionalServices, false);
       }
     } catch (error) {
-      logger
-        .child({ environment, error })
-        .error(
-          `[BUILD ${buildUUID}] [ENVIRONMENT ${environment.name}] There was a problem creating or update the deployable object from the database configuration.`
-        );
+      getLogger({
+        buildUUID,
+        environment: environment.name,
+        error,
+      }).error('Deployable: upsert from DB config failed');
       throw error;
     }
   }
@@ -777,7 +775,7 @@ export default class DeployableService extends BaseService {
                         id: yamlEnvService.serviceId,
                       })
                       .catch((error) => {
-                        logger.child({ error }).warn(`[BUILD ${buildUUID}] error`);
+                        getLogger({ buildUUID, error }).warn('Query: failed');
                         return null;
                       });
 
@@ -797,18 +795,16 @@ export default class DeployableService extends BaseService {
                         build
                       );
                     } else {
-                      logger.error(`[BUILD ${buildUUID}] [yamlEnvService ${yamlEnvService}]`);
-                      logger.error(`[BUILD ${buildUUID}] [service ${service}]`);
-                      logger.error(
-                        `[BUILD ${buildUUID}] Service ID (${yamlEnvService.serviceId}) cannot be find in the database configuration.`
+                      getLogger({ buildUUID, serviceId: yamlEnvService.serviceId }).error(
+                        'Service ID cannot be found in the database configuration'
                       );
                     }
                   } catch (error) {
-                    logger
-                      .child({ yamlEnvService, error })
-                      .error(
-                        `[BUILD ${buildUUID}] [SERVICE ${yamlEnvService.name}]  There was a problem creating or updating the deployable object from the yaml configuration when using a services ID.`
-                      );
+                    getLogger({
+                      buildUUID,
+                      service: yamlEnvService.name,
+                      error,
+                    }).error('Deployable: create/update from yaml failed source=serviceId');
                     throw error;
                   }
                 } else {
@@ -885,32 +881,30 @@ export default class DeployableService extends BaseService {
                           build
                         );
                       } else {
-                        logger.warn(
-                          `[BUILD ${buildUUID}] Service Name (${yamlEnvService.name}) cannot be find in the yaml configuration. Is it referenced via the Lifecycle database?`
+                        getLogger({ buildUUID, service: yamlEnvService.name }).warn(
+                          'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
                         );
                       }
                     } else {
-                      logger
-                        .child({ repository, deploy })
-                        .warn(
-                          `[BUILD ${buildUUID}][DEPLOY ${deploy?.uuid}] Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
-                        );
+                      getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
+                        `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
+                      );
                     }
                   } catch (error) {
-                    logger
-                      .child({ error, yamlEnvService })
-                      .error(
-                        `[BUILD ${buildUUID}] There was a problem creating or updating the deployable object from the yaml configuration when using a services yaml configuration.`
-                      );
+                    getLogger({
+                      buildUUID,
+                      service: yamlEnvService.name,
+                      error,
+                    }).error('Deployable: create/update from yaml failed');
                     throw error;
                   }
                 }
               } catch (error) {
-                logger
-                  .child({ error, yamlEnvService })
-                  .error(
-                    `[BUILD ${buildUUID}] There was a problem creating or updating the deployable object from the yaml configuration.`
-                  );
+                getLogger({
+                  buildUUID,
+                  service: yamlEnvService.name,
+                  error,
+                }).error('Deployable: create/update from yaml failed');
                 throw error;
               }
             })
@@ -969,14 +963,10 @@ export default class DeployableService extends BaseService {
           }
         }
       } else {
-        logger.warn(`[BUILD ${buildUUID}] Missing PR branch name.`);
+        getLogger({ buildUUID }).warn('PR: branch name missing');
       }
     } catch (error) {
-      logger
-        .child({ error })
-        .error(
-          `[BUILD ${buildUUID}] There was a problem creating or updating the deployable object from the yaml configuration.`
-        );
+      getLogger({ buildUUID, error }).error('Deployable: create/update from yaml failed');
       throw error;
     }
   }
@@ -1028,15 +1018,17 @@ export default class DeployableService extends BaseService {
           Array.from(deployableServices.values())
         );
       } else {
-        logger.fatal(`[BUILD ${buildUUID}] Pull Request cannot be undefined`);
+        getLogger({ buildUUID }).fatal('Pull Request cannot be undefined');
       }
     } catch (error) {
-      logger
-        .child({ environment, error })
-        .error(`[BUILD ${buildUUID}] [ENVIRONMENT ${environment.name}] There was a problem upserting the deployables.`);
+      getLogger({
+        buildUUID,
+        environment: environment.name,
+        error,
+      }).error('Deployable: upsert failed');
       throw error;
     }
-    logger.info(`[BUILD ${buildUUID}] Created/Updated ${deployables.length} deployables`);
+    getLogger({ buildUUID }).info(`Deployable: upserted count=${deployables.length}`);
     return deployables;
   }
 
@@ -1063,9 +1055,11 @@ export default class DeployableService extends BaseService {
             .where('buildId', buildId)
             .first()
             .catch((error) => {
-              logger
-                .child({ error })
-                .error(`[BUILD ${buildUUID}] [SERVICE ${deployableAttr.name}] Unable to search deployable`);
+              getLogger({
+                buildUUID,
+                service: deployableAttr.name,
+                error,
+              }).error('Deployable: search failed');
               return undefined;
             });
 
@@ -1074,15 +1068,19 @@ export default class DeployableService extends BaseService {
               .$query()
               .patch(deployableAttr as object)
               .catch((error) => {
-                logger
-                  .child({ error })
-                  .error(`[BUILD ${buildUUID}] [SERVICE ${deployableAttr.name}] Unable to patch deployable`);
+                getLogger({
+                  buildUUID,
+                  service: deployableAttr.name,
+                  error,
+                }).error('Deployable: patch failed');
               });
           } else {
             deployable = await this.db.models.Deployable.create(deployableAttr as object).catch((error) => {
-              logger
-                .child({ error })
-                .error(`[BUILD ${buildUUID}] [SERVICE ${deployableAttr.name}] Unable to create new deployable`);
+              getLogger({
+                buildUUID,
+                service: deployableAttr.name,
+                error,
+              }).error('Deployable: create failed');
               return undefined;
             });
           }

@@ -15,32 +15,56 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import tracer from 'dd-trace';
 import * as github from 'server/lib/github';
 import { LIFECYCLE_MODE } from 'shared/index';
 import { stringify } from 'flatted';
 import BootstrapJobs from 'server/jobs/index';
 import createAndBindServices from 'server/services';
-
-const logger = rootLogger.child({
-  filename: 'webhooks/github.ts',
-});
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 
 const services = createAndBindServices();
 
 /* Only want to listen on web nodes, otherwise no-op for safety */
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
-  const isVerified = github.verifyWebhookSignature(req);
-  if (!isVerified) throw new Error('Webhook not verified');
-  if (!['web', 'all'].includes(LIFECYCLE_MODE)) return;
-  try {
-    if (LIFECYCLE_MODE === 'all') BootstrapJobs(services);
-    const message = stringify({ ...req, ...{ headers: req.headers } });
-    await services.GithubService.webhookQueue.add('webhook', { message });
-    res.status(200).end();
-  } catch (error) {
-    logger.child({ error }).error(`Github Webhook failure: Error: ${error}`);
-    res.status(500).end();
-  }
+  const correlationId = (req.headers['x-github-delivery'] as string) || `webhook-${Date.now()}`;
+  const sender = req.body?.sender?.login;
+
+  return withLogContext({ correlationId, sender }, async () => {
+    const isVerified = github.verifyWebhookSignature(req);
+    if (!isVerified) throw new Error('Webhook not verified');
+
+    const event = req.headers['x-github-event'] as string;
+
+    const isBot = sender?.includes('[bot]') === true;
+    if (event === 'issue_comment' && isBot) {
+      tracer.scope().active()?.setTag('manual.drop', true);
+      res.status(200).end();
+      return;
+    }
+
+    getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).info(`Webhook: received event=${event}`);
+
+    if (!['web', 'all'].includes(LIFECYCLE_MODE)) {
+      getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).info('Webhook: skipped reason=wrongMode');
+      return;
+    }
+
+    try {
+      if (LIFECYCLE_MODE === 'all') BootstrapJobs(services);
+      const message = stringify({ ...req, ...{ headers: req.headers } });
+
+      await services.GithubService.webhookQueue.add('webhook', {
+        message,
+        ...extractContextForQueue(),
+      });
+
+      getLogger({ stage: LogStage.WEBHOOK_QUEUED }).info('Webhook: queued');
+      res.status(200).end();
+    } catch (error) {
+      getLogger({ stage: LogStage.WEBHOOK_RECEIVED }).error({ error }, 'Webhook: processing failed');
+      res.status(500).end();
+    }
+  });
 };

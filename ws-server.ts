@@ -31,7 +31,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { parse } from 'url';
 import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
-import rootLogger from './src/server/lib/logger';
+import { rootLogger } from './src/server/lib/logger';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 
 const dev = process.env.NODE_ENV !== 'production';

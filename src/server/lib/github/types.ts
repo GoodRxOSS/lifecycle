@@ -26,7 +26,6 @@ export interface RepoOptions {
   owner?: string;
   name?: string;
   githubPullRequestId?: number;
-  logger?: Logger;
 }
 
 export type DeployState = 'error' | 'failure' | 'inactive' | 'in_progress' | 'queued' | 'pending' | 'success';
@@ -40,7 +39,6 @@ export type GetAppTokenOptions = {
 export type CreateOctokitClientOptions = {
   accessToken?: string;
   installationId?: number;
-  logger?: Logger;
   caller?: string;
   cache?: typeof Redis;
 };
@@ -118,7 +116,6 @@ export interface CheckIfCommentExistsOptions {
   fullName: string;
   pullRequestNumber: number;
   commentIdentifier: string;
-  logger?: Logger;
 }
 
 export interface DetermineIfQueueIsNeededOptions {

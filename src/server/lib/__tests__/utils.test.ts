@@ -54,8 +54,15 @@ jest.mock('server/services/globalConfig', () => {
   };
 });
 
-jest.mock('server/lib/logger');
-import logger from 'server/lib/logger';
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn().mockReturnValue({
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
+}));
+import { getLogger } from 'server/lib/logger';
 
 describe('exec', () => {
   test('exec success', async () => {
@@ -68,8 +75,8 @@ describe('exec', () => {
   test('exec failure', async () => {
     const execCmd = jest.fn().mockRejectedValue(new Error('error'));
 
-    await exec('cmd', ['arg1', 'arg2'], { logger, execCmd });
-    expect(logger.error).toHaveBeenCalledWith('exec: error executing {}');
+    await exec('cmd', ['arg1', 'arg2'], { execCmd });
+    expect(getLogger().error).toHaveBeenCalledWith({ error: new Error('error') }, 'Exec: command failed runner=cmd');
   });
 
   test('exec no stdout', async () => {

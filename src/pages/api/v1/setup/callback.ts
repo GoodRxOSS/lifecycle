@@ -16,7 +16,7 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { updateSecret, getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
-import logger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { SECRET_BOOTSTRAP_NAME } from 'shared/config';
 
@@ -26,19 +26,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!code) return res.status(400).send({ error: 'Missing authorization code' });
     if (!state) return res.status(400).send({ error: 'Missing state parameter' });
 
-    logger.info(`Received callback with state: ${state}`);
+    getLogger().info(`Setup: callback received state=${state}`);
 
     const globalConfigService = new GlobalConfigService();
     const { state: storedState } = await globalConfigService.getConfig('app_setup');
     if (storedState !== state) {
-      logger.warn(`Invalid state parameter: ${state}, expected: ${storedState}`);
+      getLogger().warn(`Setup: invalid state received=${state} expected=${storedState}`);
       return res.status(400).send({ error: 'Invalid state parameter' });
     }
 
     // check if app is already installed
     const app_setup = await globalConfigService.getConfig('app_setup');
     if (app_setup.installed) {
-      logger.warn('App already installed.');
+      getLogger().warn('Setup: app already installed');
       return res.status(400).send({ error: 'App already installed' });
     }
 
@@ -51,7 +51,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!response.ok) {
       const errorData = await response.json();
-      logger.error('Error converting manifest code:', errorData);
+      getLogger().error({ errorData }, 'Setup: manifest conversion failed');
       return res.status(response.status).json({ error: 'Failed to convert manifest code' });
     }
 
@@ -76,7 +76,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       namespace
     );
 
-    logger.info(`Updated secrets for app with app id: ${id}`);
+    getLogger().info(`Setup: secrets updated appId=${id}`);
 
     await globalConfigService.setConfig('app_setup', {
       ...app_setup,
@@ -86,10 +86,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     const installationUrl = `${html_url}/installations/new`;
-    logger.info(`Redirecting user to install the app: ${installationUrl}`);
+    getLogger().info(`Setup: redirecting to install url=${installationUrl}`);
     res.redirect(installationUrl);
   } catch (error) {
-    logger.error(`Error in GitHub app setup callback: ${error}`);
+    getLogger().error({ error }, 'Setup: callback failed');
     res.status(500).send({ error: 'An error occurred during GitHub app setup' });
   }
 }

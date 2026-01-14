@@ -15,7 +15,7 @@
  */
 
 import { shellPromise } from 'server/lib/shell';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { generateCodefreshCmd, constructEcrTag, getCodefreshPipelineIdFromOutput } from 'server/lib/codefresh/utils';
 import { waitUntil } from 'server/lib/utils';
 import { ContainerBuildOptions } from 'server/lib/codefresh/types';
@@ -23,23 +23,17 @@ import { Metrics } from 'server/lib/metrics';
 import { ENVIRONMENT } from 'shared/config';
 import GlobalConfigService from 'server/services/globalConfig';
 
-const logger = rootLogger.child({
-  filename: 'lib/codefresh/codefresh.ts',
-});
-
 export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid = '' }) => {
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   const repoName = ecrRepo;
-  // fetch the ecr registry id from ecrDomain value `acctid.dkr.ecr.us-west-2.amazonaws.com`.  this is useful if registry is in a different account
-  // if its in the same account as lifecycle app, still passed for clarity here
   const registryId = (lifecycleDefaults.ecrDomain?.split?.('.') || [])[0] || '';
   try {
     const command = `aws ecr describe-images --repository-name=${repoName} --image-ids=imageTag=${tag} --no-paginate --no-cli-auto-prompt --registry-id ${registryId}`;
     await shellPromise(command);
-    logger.info(`[BUILD ${uuid}] Image with tag:${tag} exists in ecr repo ${repoName}`);
+    getLogger().info(`ECR: exists tag=${tag} repo=${repoName}`);
     return true;
   } catch (error) {
-    logger.info(`[BUILD ${uuid}] Image with tag:${tag} does not exist in ecr repo ${repoName}`);
+    getLogger().debug(`ECR: tag=${tag} not found in ${repoName}`);
     return false;
   }
 };
@@ -47,7 +41,6 @@ export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid =
 export const buildImage = async (options: ContainerBuildOptions) => {
   const { repo: repositoryName, branch, uuid, revision: sha, tag } = options;
   const metrics = new Metrics('build.codefresh.image', { uuid, repositoryName, branch, sha });
-  const prefix = uuid ? `[DEPLOY ${uuid}][buildImage]:` : '[DEPLOY][buildImage]:';
   const suffix = `${repositoryName}/${branch}:${sha}`;
   const eventDetails = {
     title: 'Codefresh Build Image',
@@ -62,7 +55,7 @@ export const buildImage = async (options: ContainerBuildOptions) => {
       metrics
         .increment('total', { error: 'error_with_cli_output', result: 'error', codefreshBuildId: '' })
         .event(eventDetails.title, eventDetails.description);
-      logger.child({ output }).error(`${prefix}[noCodefreshBuildOutput] no output from Codefresh for ${suffix}`);
+      getLogger().error({ output }, `Codefresh: build output missing suffix=${suffix}`);
       if (!hasOutput) throw Error('no output from Codefresh');
     }
     const codefreshBuildId = getCodefreshPipelineIdFromOutput(output);
@@ -77,7 +70,7 @@ export const buildImage = async (options: ContainerBuildOptions) => {
       .event(eventDetails.title, eventDetails.description);
     return codefreshBuildId;
   } catch (error) {
-    logger.child({ error }).error(`${prefix} failed for ${suffix}`);
+    getLogger().error({ error }, `Codefresh: build failed suffix=${suffix}`);
     throw error;
   }
 };
@@ -98,6 +91,7 @@ export const waitForImage = async (id: string, { timeoutMs = 180000, intervalMs 
     const checkStatus = checkPipelineStatus(id);
     return await waitUntil(checkStatus, { timeoutMs, intervalMs });
   } catch (error) {
+    getLogger().error({ error }, `Codefresh: waitForImage failed pipelineId=${id}`);
     return false;
   }
 };
@@ -147,6 +141,7 @@ export const getLogs = async (id: string) => {
     const output = await shellPromise(command);
     return output;
   } catch (error) {
-    return error;
+    getLogger().error({ error }, `Codefresh: getLogs failed pipelineId=${id}`);
+    return '';
   }
 };

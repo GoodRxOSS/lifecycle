@@ -17,6 +17,7 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import { getCurrentNamespaceFromFile } from 'server/lib/kubernetes';
 import { shellPromise } from 'server/lib/shell';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { APP_HOST } from 'shared/config';
 
@@ -63,6 +64,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     await globalConfigService.setConfig('app_setup', updated_app_setup);
     res.status(200).json({ message: 'Deployment restarted' });
   } catch (error) {
+    getLogger().error({ error }, 'Setup: deployment restart failed');
     return res.status(500).json({ error: 'Restarting deployment failed' });
   }
 }

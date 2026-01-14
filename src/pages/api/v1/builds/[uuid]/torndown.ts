@@ -15,15 +15,11 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 
 import { BuildStatus, DeployStatus } from 'shared/constants';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/torndown.ts',
-});
 
 /**
  * @openapi
@@ -101,51 +97,54 @@ const logger = rootLogger.child({
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'PATCH') {
-    logger.info({ method: req.method }, `[${req.method}] Method not allowed`);
+    getLogger().debug(`Method not allowed: method=${req.method}`);
     return res.status(405).json({ error: `${req.method} is not allowed` });
   }
 
   const uuid = req.query?.uuid;
 
-  try {
-    if (!uuid) {
-      logger.info(`[${uuid}] The uuid is required`);
-      return res.status(500).json({ error: 'The uuid is required' });
-    }
-    const buildService = new BuildService();
-
-    const build: Build = await buildService.db.models.Build.query()
-      .findOne({
-        uuid,
-      })
-      .withGraphFetched('[deploys]');
-
-    if (build.isStatic || !build) {
-      logger.info(`[${uuid}] The build doesn't exist or is static environment`);
-      return res.status(404).json({ error: `The build doesn't exist or is static environment` });
-    }
-
-    const deploysIds = build.deploys.map((deploy) => deploy.id);
-
-    await buildService.db.models.Build.query().findById(build.id).patch({
-      status: BuildStatus.TORN_DOWN,
-      statusMessage: 'Namespace was deleted successfully',
-    });
-
-    await buildService.db.models.Deploy.query()
-      .whereIn('id', deploysIds)
-      .patch({ status: DeployStatus.TORN_DOWN, statusMessage: 'Namespace was deleted successfully' });
-
-    const updatedDeploys = await buildService.db.models.Deploy.query()
-      .whereIn('id', deploysIds)
-      .select('id', 'uuid', 'status');
-
-    return res.status(200).json({
-      status: `The namespace env-${uuid} it was delete sucessfuly`,
-      namespacesUpdated: updatedDeploys,
-    });
-  } catch (error) {
-    logger.error({ error }, `[${uuid}] Error in cleanup API in`);
-    return res.status(500).json({ error: 'An unexpected error occurred.' });
+  if (!uuid) {
+    getLogger().debug('The uuid is required');
+    return res.status(500).json({ error: 'The uuid is required' });
   }
+
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    try {
+      const buildService = new BuildService();
+
+      const build: Build = await buildService.db.models.Build.query()
+        .findOne({
+          uuid,
+        })
+        .withGraphFetched('[deploys]');
+
+      if (build.isStatic || !build) {
+        getLogger().debug('Build does not exist or is static environment');
+        return res.status(404).json({ error: `The build doesn't exist or is static environment` });
+      }
+
+      const deploysIds = build.deploys.map((deploy) => deploy.id);
+
+      await buildService.db.models.Build.query().findById(build.id).patch({
+        status: BuildStatus.TORN_DOWN,
+        statusMessage: 'Namespace was deleted successfully',
+      });
+
+      await buildService.db.models.Deploy.query()
+        .whereIn('id', deploysIds)
+        .patch({ status: DeployStatus.TORN_DOWN, statusMessage: 'Namespace was deleted successfully' });
+
+      const updatedDeploys = await buildService.db.models.Deploy.query()
+        .whereIn('id', deploysIds)
+        .select('id', 'uuid', 'status');
+
+      return res.status(200).json({
+        status: `The namespace env-${uuid} it was delete sucessfuly`,
+        namespacesUpdated: updatedDeploys,
+      });
+    } catch (error) {
+      getLogger().error({ error }, 'Build: teardown failed');
+      return res.status(500).json({ error: 'An unexpected error occurred.' });
+    }
+  });
 };

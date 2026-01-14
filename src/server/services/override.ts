@@ -15,14 +15,10 @@
  */
 
 import BaseService from './_service';
-import rootLogger from 'server/lib/logger';
+import { getLogger, updateLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
-
-const logger = rootLogger.child({
-  filename: 'services/override.ts',
-});
 
 interface ValidationResult {
   valid: boolean;
@@ -60,7 +56,7 @@ export default class OverrideService extends BaseService {
         return { valid: false, error: 'UUID is not available' };
       }
     } catch (error) {
-      logger.error('Error checking UUID uniqueness:', error);
+      getLogger().error({ error }, 'UUID: uniqueness check failed');
       return { valid: false, error: 'Unable to validate UUID' };
     }
 
@@ -77,7 +73,8 @@ export default class OverrideService extends BaseService {
     const oldUuid = build.uuid;
     const oldNamespace = build.namespace;
 
-    logger.info(`[BUILD ${oldUuid}] Updating UUID to '${newUuid}'`);
+    updateLogContext({ buildUuid: oldUuid, newUuid });
+    getLogger().info(`Override: updating newUuid=${newUuid}`);
 
     try {
       return await this.db.models.Build.transact(async (trx) => {
@@ -110,13 +107,10 @@ export default class OverrideService extends BaseService {
 
         const updatedBuild = await this.db.models.Build.query(trx).findById(build.id);
 
-        // Delete the old namespace for cleanup (non-blocking, outside transaction)
         k8s.deleteNamespace(oldNamespace).catch((error) => {
-          logger.warn(`[BUILD ${oldUuid}] Failed to delete old namespace ${oldNamespace}:`, error);
+          getLogger().warn({ error }, `Namespace: delete failed name=${oldNamespace}`);
         });
-        logger.info(
-          `[BUILD ${newUuid}] Successfully updated UUID from '${oldUuid}' to '${newUuid}', updated ${deploys.length} deploys`
-        );
+        getLogger().info(`Override: updated oldUuid=${oldUuid} newUuid=${newUuid} deploysUpdated=${deploys.length}`);
 
         return {
           build: updatedBuild,
@@ -124,7 +118,7 @@ export default class OverrideService extends BaseService {
         };
       });
     } catch (error) {
-      logger.error(`[BUILD ${oldUuid}] Failed to update UUID to '${newUuid}': ${error}`, error);
+      getLogger().error({ error }, `UUID: update failed newUuid=${newUuid}`);
       throw error;
     }
   }

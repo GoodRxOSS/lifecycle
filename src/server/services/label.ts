@@ -18,14 +18,10 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import { waitForColumnValue } from 'shared/utils';
 import { updatePullRequestLabels } from 'server/lib/github';
 import { getDeployLabel } from 'server/lib/utils';
-
-const logger = rootLogger.child({
-  filename: 'services/label.ts',
-});
 
 interface LabelJob {
   pullRequestId: number;
@@ -55,62 +51,86 @@ export default class LabelService extends Service {
    * Process label queue jobs
    */
   processLabelQueue = async (job: Job<LabelJob>) => {
-    const { pullRequestId, action, waitForComment, labels: currentLabels } = job.data;
+    const {
+      pullRequestId,
+      action,
+      waitForComment,
+      labels: currentLabels,
+      sender,
+      correlationId,
+      _ddTraceContext,
+    } = job.data as LabelJob & { sender?: string; correlationId?: string; _ddTraceContext?: Record<string, string> };
 
-    try {
-      const pullRequest = await this.db.models.PullRequest.query()
-        .findById(pullRequestId)
-        .withGraphFetched('[repository, build]');
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      try {
+        const pullRequest = await this.db.models.PullRequest.query()
+          .findById(pullRequestId)
+          .withGraphFetched('[repository, build]');
 
-      if (!pullRequest) {
-        throw new Error(`[BUILD unknown] Pull request with id ${pullRequestId} not found`);
-      }
-
-      const { repository, build } = pullRequest;
-      const buildUuid = build?.uuid || 'unknown';
-      if (!repository) {
-        throw new Error(`[BUILD ${buildUuid}] Repository not found for pull request ${pullRequestId}`);
-      }
-
-      if (waitForComment && !pullRequest.commentId) {
-        logger.debug(`[BUILD ${buildUuid}] Waiting for comment_id to be set before updating labels`);
-        // 60 attempts * 5 seconds = 5 minutes
-        const updatedPullRequest = await waitForColumnValue(pullRequest, 'commentId', 60, 5000);
-
-        if (!updatedPullRequest) {
-          logger.warn(`[BUILD ${buildUuid}] Timeout waiting for comment_id while updating labels after 5 minutes`);
+        if (!pullRequest) {
+          throw new Error(`Pull request with id ${pullRequestId} not found`);
         }
-      }
 
-      let updatedLabels: string[];
+        const { repository, build } = pullRequest;
+        const buildUuid = build?.uuid || 'unknown';
+        updateLogContext({ buildUuid });
+        if (!repository) {
+          throw new Error(`Repository not found for pull request ${pullRequestId}`);
+        }
 
-      const deployLabel = await getDeployLabel();
-      if (action === 'enable') {
-        if (!currentLabels.includes(deployLabel)) {
-          updatedLabels = [...currentLabels, deployLabel];
+        getLogger({ stage: LogStage.LABEL_PROCESSING }).info(
+          `Label: processing action=${action} pr=${pullRequest.pullRequestNumber}`
+        );
+
+        if (waitForComment && !pullRequest.commentId) {
+          getLogger({ stage: LogStage.LABEL_PROCESSING }).debug(
+            'Waiting for comment_id to be set before updating labels'
+          );
+          // 60 attempts * 5 seconds = 5 minutes
+          const updatedPullRequest = await waitForColumnValue(pullRequest, 'commentId', 60, 5000);
+
+          if (!updatedPullRequest) {
+            getLogger({ stage: LogStage.LABEL_PROCESSING }).warn(
+              'Timeout waiting for comment_id while updating labels after 5 minutes'
+            );
+          }
+        }
+
+        let updatedLabels: string[];
+
+        const deployLabel = await getDeployLabel();
+        if (action === 'enable') {
+          if (!currentLabels.includes(deployLabel)) {
+            updatedLabels = [...currentLabels, deployLabel];
+          } else {
+            getLogger({ stage: LogStage.LABEL_COMPLETE }).debug(
+              `Deploy label "${deployLabel}" already exists on PR, skipping update`
+            );
+            return;
+          }
         } else {
-          logger.debug(`[BUILD ${buildUuid}] Deploy label "${deployLabel}" already exists on PR, skipping update`);
-          return;
+          const labelsConfig = await this.db.services.GlobalConfig.getLabels();
+          const deployLabels = labelsConfig.deploy || [];
+          updatedLabels = currentLabels.filter((label) => !deployLabels.includes(label));
         }
-      } else {
-        const labelsConfig = await this.db.services.GlobalConfig.getLabels();
-        const deployLabels = labelsConfig.deploy || [];
-        updatedLabels = currentLabels.filter((label) => !deployLabels.includes(label));
+
+        await updatePullRequestLabels({
+          installationId: repository.githubInstallationId,
+          pullRequestNumber: pullRequest.pullRequestNumber,
+          fullName: pullRequest.fullName,
+          labels: updatedLabels,
+        });
+
+        getLogger({ stage: LogStage.LABEL_COMPLETE }).info(
+          `Label: ${action === 'enable' ? 'added' : 'removed'} label=${deployLabel}`
+        );
+      } catch (error) {
+        getLogger({ stage: LogStage.LABEL_FAILED }).error(
+          { error },
+          `Failed to process label job for PR ${pullRequestId}`
+        );
+        throw error;
       }
-
-      await updatePullRequestLabels({
-        installationId: repository.githubInstallationId,
-        pullRequestNumber: pullRequest.pullRequestNumber,
-        fullName: pullRequest.fullName,
-        labels: updatedLabels,
-      });
-
-      logger.info(
-        `[BUILD ${buildUuid}] Successfully ${action === 'enable' ? 'added' : 'removed'} ${deployLabel} label`
-      );
-    } catch (error) {
-      logger.error({ error }, `[PR ${pullRequestId}] Failed to process label job`);
-      throw error;
-    }
+    });
   };
 }

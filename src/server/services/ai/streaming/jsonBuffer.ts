@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ component: 'JSONBuffer' });
+import { getLogger } from 'server/lib/logger';
 
 export class JSONBuffer {
   private buffer: string = '';
@@ -46,8 +44,8 @@ export class JSONBuffer {
 
     try {
       return JSON.parse(this.buffer);
-    } catch (error) {
-      logger.error({ error, bufferLength: this.buffer.length }, 'Failed to parse JSON buffer');
+    } catch (error: any) {
+      getLogger().error({ error }, `JSONBuffer: parse failed bufferLength=${this.buffer.length}`);
       return null;
     }
   }

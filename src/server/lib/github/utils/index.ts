@@ -15,22 +15,20 @@
  */
 
 import { Octokit } from '@octokit/core';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { cacheRequest } from 'server/lib/github/cacheRequest';
 
 import { ConstructOctokitClientOptions, GetAppTokenOptions } from 'server/lib/github/types';
 
-const initialLogger = rootLogger.child({
-  filename: 'lib/github/utils.ts',
-});
-
-export const getAppToken = async ({ installationId, app, logger = initialLogger }: GetAppTokenOptions) => {
+export const getAppToken = async ({ installationId, app }: Omit<GetAppTokenOptions, 'logger'>) => {
   try {
     const resp = await app({ type: 'installation', installationId });
     return resp?.token;
   } catch (error) {
     const msg = 'Unable to get App Token';
-    logger.child({ error }).error(`[GITHUB createOctokitClient] Unable to create a new client`);
+    getLogger().error(
+      `GitHub: unable to get app token installationId=${installationId} error=${error?.message || msg}`
+    );
     throw new Error(error?.message || msg);
   }
 };
@@ -45,12 +43,14 @@ export const constructOctokitClient = ({ token }: ConstructOctokitClientOptions)
   });
 };
 
-export async function getRefForBranchName(owner: string, name: string, branchName: string, logger = initialLogger) {
+export async function getRefForBranchName(owner: string, name: string, branchName: string) {
   try {
     return await cacheRequest(`GET /repos/${owner}/${name}/git/ref/heads/${branchName}`);
   } catch (error) {
     const msg = 'Unable to get ref for Branch Name';
-    logger.child({ error }).error(`[GITHUB ${owner}/${name}:${branchName}][getRefForBranchName] ${msg}`);
+    getLogger().error(
+      `GitHub: unable to get ref for branch repo=${owner}/${name} branch=${branchName} error=${error?.message || msg}`
+    );
     throw new Error(error?.message || msg);
   }
 }

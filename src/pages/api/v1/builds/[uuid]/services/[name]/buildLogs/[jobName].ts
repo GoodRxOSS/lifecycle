@@ -15,12 +15,8 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import unifiedLogStreamHandler from '../logs/[jobName]';
-
-const logger = rootLogger.child({
-  filename: 'buildLogs/[jobName].ts',
-});
 
 /**
  * @openapi
@@ -101,11 +97,13 @@ const logger = rootLogger.child({
  *         description: Internal server error
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  logger.info(
-    `method=${req.method} jobName=${req.query.jobName} message="Build logs endpoint called, delegating to unified handler"`
-  );
+  const { uuid, jobName } = req.query;
 
-  req.query.type = 'build';
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    getLogger().info(`API: build logs endpoint called method=${req.method} jobName=${jobName}`);
 
-  return unifiedLogStreamHandler(req, res);
+    req.query.type = 'build';
+
+    return unifiedLogStreamHandler(req, res);
+  });
 }

@@ -20,7 +20,7 @@ import { StreamCallbacks } from '../types/stream';
 import { ToolRegistry } from '../tools/registry';
 import { ToolSafetyManager } from './safety';
 import { LoopDetector } from './loopProtection';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 
 export interface OrchestrationResult {
   success: boolean;
@@ -55,9 +55,6 @@ export class ToolOrchestrator {
     let totalToolCalls = 0;
     let fullResponse = '';
     const protection = this.loopDetector.getProtection();
-    const logger = buildUuid
-      ? rootLogger.child({ component: 'AIAgentOrchestrator', buildUuid })
-      : rootLogger.child({ component: 'AIAgentOrchestrator' });
 
     this.loopDetector.reset();
 
@@ -85,7 +82,7 @@ export class ToolOrchestrator {
           }
         }
       } catch (error: any) {
-        logger.error(`Stream error: ${error.message}`, error);
+        getLogger().error({ error }, `AI: stream error buildUuid=${buildUuid || 'none'}`);
         return {
           success: false,
           error: error.message || 'Provider error',
@@ -106,7 +103,11 @@ export class ToolOrchestrator {
 
       totalToolCalls += toolCalls.length;
       if (totalToolCalls > protection.maxToolCalls) {
-        logger.warn(`Tool call limit exceeded: ${totalToolCalls} > ${protection.maxToolCalls}`);
+        getLogger().warn(
+          `AI: tool call limit exceeded totalToolCalls=${totalToolCalls} maxToolCalls=${
+            protection.maxToolCalls
+          } buildUuid=${buildUuid || 'none'}`
+        );
         return {
           success: false,
           error:
@@ -187,8 +188,10 @@ export class ToolOrchestrator {
       });
     }
 
-    logger.warn(
-      `Tool loop hit iteration limit: ${iteration}/${protection.maxIterations}, totalToolCalls=${totalToolCalls}`
+    getLogger().warn(
+      `AI: iteration limit reached iteration=${iteration} maxIterations=${
+        protection.maxIterations
+      } totalToolCalls=${totalToolCalls} buildUuid=${buildUuid || 'none'}`
     );
     return {
       success: false,

@@ -15,7 +15,7 @@
  */
 
 /* eslint-disable no-unused-vars */
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import fs from 'fs';
 import { TMP_PATH, QUEUE_NAMES } from 'shared/config';
@@ -26,10 +26,6 @@ import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
 
 const MANIFEST_PATH = `${TMP_PATH}/ingress`;
-
-const logger = rootLogger.child({
-  filename: 'services/ingress.ts',
-});
 
 export default class IngressService extends BaseService {
   async updateIngressManifest(): Promise<boolean> {
@@ -66,47 +62,57 @@ export default class IngressService extends BaseService {
    * @param done the done callback
    */
   ingressCleanupForBuild = async (job) => {
-    // queue has retry attempts configured, so errors will cause retries
-    const buildId = job.data.buildId;
-    // For cleanup purpose, we want to include the ingresses for all the services (active or not) to cleanup just in case.
-    const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, true);
-    const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
-    try {
-      configurations.forEach(async (configuration) => {
-        await shellPromise(`kubectl delete ingress ingress-${configuration.deployUUID} --namespace ${namespace}`).catch(
-          (error) => {
-            logger.warn(`[DEPLOY ${configuration.deployUUID}] ${error}`);
+    const { buildId, buildUuid, sender, correlationId, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
+      getLogger({ stage: LogStage.INGRESS_PROCESSING }).info('Ingress: cleaning up');
+
+      // For cleanup purpose, we want to include the ingresses for all the services (active or not) to cleanup just in case.
+      const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, true);
+      const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
+      try {
+        configurations.forEach(async (configuration) => {
+          await shellPromise(
+            `kubectl delete ingress ingress-${configuration.deployUUID} --namespace ${namespace}`
+          ).catch((error) => {
+            getLogger({ stage: LogStage.INGRESS_PROCESSING }).warn(`${error}`);
             return null;
-          }
-        );
-      });
-    } catch (e) {
-      // It's ok if this fails.
-      logger.warn(e);
-    }
+          });
+        });
+        getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: cleaned up');
+      } catch (e) {
+        getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error: e }, 'Ingress: cleanup failed');
+      }
+    });
   };
 
   createOrUpdateIngressForBuild = async (job) => {
-    // queue has retry attempts configured, so errors will cause retries
-    const buildId = job.data.buildId;
-    // We just want to create/update ingress for active services only
-    const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
-    const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
-    const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-    const manifests = configurations.map((configuration) => {
-      return yaml.dump(
-        this.generateNginxManifestForConfiguration({
-          configuration,
-          ingressClassName: lifecycleDefaults?.ingressClassName,
-          altHosts: domainDefaults?.altHttp || [],
-        }),
-        {
-          skipInvalid: true,
-        }
-      );
-    });
-    manifests.forEach(async (manifest, idx) => {
-      await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace);
+    const { buildId, buildUuid, sender, correlationId, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
+      getLogger({ stage: LogStage.INGRESS_PROCESSING }).info('Ingress: creating');
+
+      // We just want to create/update ingress for active services only
+      const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
+      const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
+      const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+      const manifests = configurations.map((configuration) => {
+        return yaml.dump(
+          this.generateNginxManifestForConfiguration({
+            configuration,
+            ingressClassName: lifecycleDefaults?.ingressClassName,
+            altHosts: domainDefaults?.altHttp || [],
+          }),
+          {
+            skipInvalid: true,
+          }
+        );
+      });
+      manifests.forEach(async (manifest, idx) => {
+        await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace);
+      });
+
+      getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: created');
     });
   };
 
@@ -194,7 +200,7 @@ export default class IngressService extends BaseService {
       await fs.promises.writeFile(localPath, manifest, 'utf8');
       await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
     } catch (error) {
-      logger.warn(error);
+      getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Ingress: manifest apply failed');
     }
   };
 }

@@ -15,15 +15,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { LogStreamingService } from 'server/services/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 interface RouteParams {
   uuid: string;
@@ -96,7 +92,7 @@ const getHandler = async (req: NextRequest, { params }: { params: RouteParams })
   const { uuid, name: serviceName, jobName } = params;
 
   if (!uuid || !jobName || !serviceName) {
-    logger.warn({ uuid, serviceName, jobName }, 'Missing or invalid path parameters');
+    getLogger().warn(`API: invalid params uuid=${uuid} serviceName=${serviceName} jobName=${jobName}`);
     return errorResponse('Missing or invalid parameters', { status: 400 }, req);
   }
 
@@ -107,7 +103,7 @@ const getHandler = async (req: NextRequest, { params }: { params: RouteParams })
 
     return successResponse(response, { status: 200 }, req);
   } catch (error: any) {
-    logger.error({ err: error, uuid, serviceName, jobName }, 'Error getting log streaming info');
+    getLogger().error({ error }, `API: log streaming info failed jobName=${jobName} service=${serviceName}`);
 
     if (error.message === 'Build not found') {
       return errorResponse('Build not found', { status: 404 }, req);

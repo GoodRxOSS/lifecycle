@@ -102,14 +102,10 @@ type ErrorResponse = {
 type Response = ValidationResponse | ErrorResponse;
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { getYamlFileContentFromBranch } from 'server/lib/github';
-import rootLogger from 'server/lib/logger';
+import { getYamlFileContentFromBranch, ConfigFileNotFound } from 'server/lib/github';
+import { getLogger } from 'server/lib/logger';
 import { YamlConfigParser, ParsingError } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator, ValidationError } from 'server/lib/yamlConfigValidator';
-
-const logger = rootLogger.child({
-  filename: 'v1/schema/validate',
-});
 
 const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<Response>) => {
   if (req.method !== 'POST') {
@@ -134,7 +130,10 @@ const schemaValidateHandler = async (req: NextApiRequest, res: NextApiResponse<R
       const errors = error.message.split('\n');
       return res.status(400).json({ valid: false, error: errors });
     }
-    logger.error({ err: error }, 'Unexpected error during YAML validation');
+    if (error instanceof ConfigFileNotFound) {
+      return res.status(404).json({ valid: false, error: ['Config file not found'] });
+    }
+    getLogger().error({ error }, 'Schema: YAML validation failed');
     return res.status(500).json({ error: 'Internal server error' });
   }
 };

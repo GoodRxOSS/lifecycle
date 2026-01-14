@@ -22,11 +22,16 @@ import { PushEvent } from '@octokit/webhooks-types';
 mockRedisClient();
 
 jest.mock('server/lib/logger', () => ({
-  error: jest.fn(),
-  info: jest.fn(),
-  warn: jest.fn(),
-  debug: jest.fn(),
-  child: jest.fn().mockReturnThis(),
+  getLogger: jest.fn(() => ({
+    error: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    child: jest.fn().mockReturnThis(),
+  })),
+  withLogContext: jest.fn((ctx, fn) => fn()),
+  extractContextForQueue: jest.fn(() => ({})),
+  LogStage: {},
 }));
 
 describe('Github Service - handlePushWebhook', () => {

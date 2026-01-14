@@ -15,14 +15,10 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 const kc = new k8s.KubeConfig();
 kc.loadFromDefault();
@@ -47,12 +43,12 @@ async function getHelmDeploymentDetails(namespace: string, deployUuid: string): 
 
   try {
     const secretName = `sh.helm.release.v1.${deployUuid}.v1`;
-    logger.debug(`Checking for Helm secret: ${secretName} in namespace ${namespace}`);
+    getLogger({}).debug(`Checking for Helm secret: secretName=${secretName} namespace=${namespace}`);
 
     const secret = await coreV1Api.readNamespacedSecret(secretName, namespace);
 
     if (!secret.body.data?.release) {
-      logger.debug(`Helm secret ${secretName} found but no release data`);
+      getLogger({}).debug(`Helm secret found but no release data: secretName=${secretName}`);
       return null;
     }
 
@@ -78,8 +74,8 @@ async function getHelmDeploymentDetails(namespace: string, deployUuid: string): 
       try {
         release = JSON.parse(releaseData.toString());
       } catch (parseError: any) {
-        logger.warn(
-          `Failed to parse Helm release data for ${deployUuid}: decompress_error=${decompressError.message} parse_error=${parseError.message}`
+        getLogger({}).warn(
+          `Failed to parse Helm release data: deployUuid=${deployUuid} decompress_error=${decompressError.message} parse_error=${parseError.message}`
         );
         return null;
       }
@@ -247,52 +243,54 @@ async function getGitHubDeploymentDetails(
  *                   type: string
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
-  if (req.method !== 'GET') {
-    logger.warn({ method: req.method }, 'Method not allowed');
-    res.setHeader('Allow', ['GET']);
-    return res.status(405).json({ error: `${req.method} is not allowed` });
-  }
-
   const { uuid, name } = req.query;
 
-  if (typeof uuid !== 'string' || typeof name !== 'string') {
-    logger.warn({ uuid, name }, 'Missing or invalid query parameters');
-    return res.status(400).json({ error: 'Missing or invalid parameters' });
-  }
-
-  const deployUuid = `${name}-${uuid}`;
-
-  try {
-    const namespace = `env-${uuid}`;
-
-    logger.info(`Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`);
-
-    const helmDetails = await getHelmDeploymentDetails(namespace, deployUuid);
-    if (helmDetails) {
-      logger.info(`Found Helm deployment details for ${deployUuid}`);
-      return res.status(200).json(helmDetails);
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    if (req.method !== 'GET') {
+      getLogger().warn(`API: method not allowed method=${req.method}`);
+      res.setHeader('Allow', ['GET']);
+      return res.status(405).json({ error: `${req.method} is not allowed` });
     }
 
-    const githubDetails = await getGitHubDeploymentDetails(namespace, deployUuid);
-    if (githubDetails) {
-      logger.info(`Found GitHub-type deployment details for ${deployUuid}`);
-      return res.status(200).json(githubDetails);
+    if (typeof uuid !== 'string' || typeof name !== 'string') {
+      getLogger().warn(`API: invalid query params uuid=${uuid} name=${name}`);
+      return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
-    logger.warn(`No deployment details found for ${deployUuid}`);
-    return res.status(404).json({ error: 'Deployment not found' });
-  } catch (error) {
-    logger.error({ err: error }, `Error getting deployment details for ${deployUuid}`);
+    const deployUuid = `${name}-${uuid}`;
 
-    if (error instanceof HttpError) {
-      if (error.response?.statusCode === 404) {
-        return res.status(404).json({ error: 'Deployment not found' });
+    try {
+      const namespace = `env-${uuid}`;
+
+      getLogger().debug(`Fetching deployment details: deployUuid=${deployUuid} namespace=${namespace} service=${name}`);
+
+      const helmDetails = await getHelmDeploymentDetails(namespace, deployUuid);
+      if (helmDetails) {
+        getLogger().debug(`Found Helm deployment details: deployUuid=${deployUuid}`);
+        return res.status(200).json(helmDetails);
       }
-      return res.status(502).json({ error: 'Failed to communicate with Kubernetes' });
-    }
 
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+      const githubDetails = await getGitHubDeploymentDetails(namespace, deployUuid);
+      if (githubDetails) {
+        getLogger().debug(`Found GitHub-type deployment details: deployUuid=${deployUuid}`);
+        return res.status(200).json(githubDetails);
+      }
+
+      getLogger().warn(`API: deployment not found deployUuid=${deployUuid}`);
+      return res.status(404).json({ error: 'Deployment not found' });
+    } catch (error) {
+      getLogger().error({ error }, `API: deployment details error deployUuid=${deployUuid}`);
+
+      if (error instanceof HttpError) {
+        if (error.response?.statusCode === 404) {
+          return res.status(404).json({ error: 'Deployment not found' });
+        }
+        return res.status(502).json({ error: 'Failed to communicate with Kubernetes' });
+      }
+
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  });
 };
 
 export default handler;

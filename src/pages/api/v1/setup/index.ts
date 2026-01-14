@@ -16,7 +16,7 @@
 
 import { randomBytes } from 'crypto';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import logger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { APP_HOST } from 'shared/config';
 
@@ -55,7 +55,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const state = randomBytes(16).toString('hex');
-  logger.info(`Generated state for setup: ${state}`);
+  getLogger().info(`Setup: state generated state=${state}`);
 
   await gc.setConfig('app_setup', {
     state,

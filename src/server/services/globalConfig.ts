@@ -15,16 +15,12 @@
  */
 
 import { createAppAuth } from '@octokit/auth-app';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import { GlobalConfig, LabelsConfig } from './types/globalConfig';
 import { GITHUB_APP_INSTALLATION_ID, APP_AUTH, APP_ENV, QUEUE_NAMES } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import { redisClient } from 'server/lib/dependencies';
-
-const logger = rootLogger.child({
-  filename: 'services/globalConfig.ts',
-});
 
 const REDIS_CACHE_KEY = 'global_config';
 const GITHUB_CACHED_CLIENT_TOKEN = 'github_cached_client_token';
@@ -32,11 +28,20 @@ const GITHUB_CACHED_CLIENT_TOKEN = 'github_cached_client_token';
 export default class GlobalConfigService extends BaseService {
   private static instance: GlobalConfigService;
 
+  private memoryCache: GlobalConfig | null = null;
+  private memoryCacheExpiry: number = 0;
+  private static MEMORY_CACHE_TTL_MS = 30000; // 30 seconds
+
   static getInstance(): GlobalConfigService {
     if (!this.instance) {
       this.instance = new GlobalConfigService();
     }
     return this.instance;
+  }
+
+  clearMemoryCache(): void {
+    this.memoryCache = null;
+    this.memoryCacheExpiry = 0;
   }
 
   protected cacheRefreshQueue = this.queueManager.registerQueue(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, {
@@ -60,29 +65,46 @@ export default class GlobalConfigService extends BaseService {
   }
 
   /**
-   * Get all global configs. First, it will try to retrieve them from the cache.
-   * If they are not available if cache is empty, it will fetch them from the DB, cache them, and then return them.
+   * Get all global configs. Uses a three-tier caching strategy:
+   * 1. In-memory cache (30 second TTL) - fastest, eliminates Redis calls
+   * 2. Redis cache - shared across pods
+   * 3. Database - source of truth
    * @returns A map of all config keys values.
    **/
   async getAllConfigs(refreshCache: boolean = false): Promise<GlobalConfig> {
+    const now = Date.now();
+
+    if (!refreshCache && this.memoryCache && now < this.memoryCacheExpiry) {
+      return this.memoryCache;
+    }
+
     const cachedConfigs = await this.redis.hgetall(REDIS_CACHE_KEY);
     if (Object.keys(cachedConfigs).length === 0 || refreshCache) {
-      logger.debug('Cache miss for all configs, fetching from DB');
+      getLogger().debug('Cache miss for all configs, fetching from DB');
       const configsFromDb = await this.getAllConfigsFromDb();
 
-      // to delete keys removed from database
-      // this is not a common scenario that happens with global config table, but just to be safe
       const keysFromDb = new Set(Object.keys(configsFromDb));
       const keysToRemove = Object.keys(cachedConfigs).filter((key) => !keysFromDb.has(key));
       if (keysToRemove.length > 0) {
         await this.redis.hdel(REDIS_CACHE_KEY, ...keysToRemove);
-        logger.debug(`Deleted stale keys from cache: ${keysToRemove.join(', ')}`);
+        getLogger().debug(`Deleted stale keys from cache: keys=${keysToRemove.join(', ')}`);
       }
 
       await this.redis.hmset(REDIS_CACHE_KEY, configsFromDb);
-      return this.deserialize(configsFromDb);
+      const result = this.deserialize(configsFromDb);
+
+      this.memoryCache = result;
+      this.memoryCacheExpiry = now + GlobalConfigService.MEMORY_CACHE_TTL_MS;
+
+      return result;
     }
-    return this.deserialize(cachedConfigs);
+
+    const result = this.deserialize(cachedConfigs);
+
+    this.memoryCache = result;
+    this.memoryCacheExpiry = now + GlobalConfigService.MEMORY_CACHE_TTL_MS;
+
+    return result;
   }
 
   /**
@@ -120,7 +142,7 @@ export default class GlobalConfigService extends BaseService {
       if (!labels) throw new Error('Labels configuration not found in global config');
       return labels;
     } catch (error) {
-      logger.error('Error retrieving labels configuration, using fallback defaults', error);
+      getLogger().error({ error }, 'Config: labels fetch failed using=defaults');
       // Return fallback defaults on error
       return {
         deploy: ['lifecycle-deploy!'],
@@ -139,7 +161,7 @@ export default class GlobalConfigService extends BaseService {
       try {
         deserializedConfigs[key as keyof GlobalConfig] = JSON.parse(value as string);
       } catch (e) {
-        logger.error(`Error deserializing config for key ${key}: ${e.message}`);
+        getLogger().error({ error: e }, `Config: deserialize failed key=${key}`);
       }
     }
     return deserializedConfigs as GlobalConfig;
@@ -172,7 +194,7 @@ export default class GlobalConfigService extends BaseService {
       try {
         await this.getGithubClientToken(true);
       } catch (error) {
-        logger.child({ error }).error(`Error refreshing GlobalConfig cache during boot: ${error}`);
+        getLogger().error({ error }, 'Config: cache refresh failed during=boot');
       }
     }
 
@@ -189,14 +211,19 @@ export default class GlobalConfigService extends BaseService {
     );
   }
 
-  processCacheRefresh = async () => {
-    try {
-      await this.getAllConfigs(true);
-      await this.getGithubClientToken(true);
-      logger.debug('GlobalConfig and Github cache refreshed successfully.');
-    } catch (error) {
-      logger.child({ error }).error('Error refreshing GlobalConfig cache');
-    }
+  processCacheRefresh = async (job) => {
+    const { correlationId } = job?.data || {};
+
+    return withLogContext({ correlationId: correlationId || `cache-refresh-${Date.now()}` }, async () => {
+      try {
+        getLogger({ stage: LogStage.CONFIG_REFRESH }).info('Config: refreshing type=global_config,github_token');
+        await this.getAllConfigs(true);
+        await this.getGithubClientToken(true);
+        getLogger({ stage: LogStage.CONFIG_REFRESH }).debug('GlobalConfig and Github cache refreshed successfully');
+      } catch (error) {
+        getLogger({ stage: LogStage.CONFIG_FAILED }).error({ error }, 'Config: cache refresh failed');
+      }
+    });
   };
 
   /**
@@ -209,9 +236,9 @@ export default class GlobalConfigService extends BaseService {
   async setConfig(key: string, value: any): Promise<void> {
     try {
       await this.db.knex('global_config').insert({ key, config: value }).onConflict('key').merge();
-      logger.info(`Set global config value for key: ${key}`);
+      getLogger().info(`Config: set key=${key}`);
     } catch (err: any) {
-      logger.child({ err }).error(`Error setting global config value for key: ${key}`);
+      getLogger().error({ error: err }, `Config: set failed key=${key}`);
       throw err;
     }
   }

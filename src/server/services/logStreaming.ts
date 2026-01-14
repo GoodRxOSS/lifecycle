@@ -14,14 +14,10 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
 import BuildService from 'server/services/build';
 import { LogStreamResponse, LogType } from './types/logStreaming';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 export class LogStreamingService {
   private buildService: BuildService;
@@ -46,9 +42,7 @@ export class LogStreamingService {
     const namespace = `env-${uuid}`;
     const logType: LogType = (explicitType as LogType) || this.detectLogType(jobName);
 
-    logger.info(
-      `uuid=${uuid} name=${serviceName} jobName=${jobName} logType=${logType} message="Processing log request"`
-    );
+    getLogger().info(`LogStreaming: processing log request name=${serviceName} jobName=${jobName} logType=${logType}`);
 
     // 3. Fetch K8s Data
     const podInfo = await getK8sJobStatusAndPod(jobName, namespace);

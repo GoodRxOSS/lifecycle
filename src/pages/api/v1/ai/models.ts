@@ -16,9 +16,7 @@
 
 import { NextApiRequest, NextApiResponse } from 'next';
 import GlobalConfigService from 'server/services/globalConfig';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ filename: 'api/v1/ai/models' });
+import { getLogger } from 'server/lib/logger';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -34,7 +32,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     if (!aiAgentConfig.providers || !Array.isArray(aiAgentConfig.providers)) {
-      logger.warn('aiAgent config missing providers array');
+      getLogger().warn('AI: config missing providers array');
       return res.status(200).json({ models: [] });
     }
 
@@ -58,7 +56,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(200).json({ models });
   } catch (error: any) {
-    logger.error({ error, errorMessage: error?.message }, 'Failed to fetch available models');
+    getLogger().error({ error }, 'AI: models fetch failed');
     return res.status(500).json({ error: 'Failed to fetch available models' });
   }
 }

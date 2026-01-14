@@ -20,7 +20,7 @@ import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { TMP_PATH } from 'shared/config';
 import { DeployStatus } from 'shared/constants';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';
@@ -35,10 +35,6 @@ import {
 } from 'server/lib/codefresh/utils/generateCodefreshCmd';
 
 const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
-
-const logger = rootLogger.child({
-  filename: 'lib/helm/helm.ts',
-});
 
 /**
  * Generates codefresh deployment step for public Helm charts.
@@ -250,7 +246,7 @@ export async function deployHelm(deploys: Deploy[]) {
  */
 
 export async function fetchUntilSuccess(url, retries, deploy, namespace) {
-  logger.info(`[Number of maxRetries: ${retries}] Trying to fetch the url: ${url}`);
+  getLogger().debug(`Helm: waiting for pods url=${url} maxRetries=${retries}`);
   for (let i = 0; i < retries; i++) {
     const pods = await shellPromise(
       `kubectl get deploy ${deploy} -n ${namespace} -o jsonpath='{.status.availableReplicas}'`
@@ -258,14 +254,14 @@ export async function fetchUntilSuccess(url, retries, deploy, namespace) {
     try {
       const response = await fetch(url);
       if (1 <= parseInt(pods, 10)) {
-        logger.info(` [ On Deploy ${deploy} ] There's ${pods} pods available for deployment`);
+        getLogger().debug(`Pods: available deploy=${deploy} pods=${pods}`);
         return;
       } else {
-        logger.info(` [ On Deploy ${deploy} ] There's 0 pods available for deployment`);
-        logger.error(`[ REQUEST TO ${url}] Request failed and Status code number: ${response.status}`);
+        getLogger().debug(`Pods: unavailable deploy=${deploy}`);
+        getLogger().error(`Helm: request failed url=${url} status=${response.status}`);
       }
     } catch (error) {
-      logger.error(`[ Error function fetchUntilSuccess : ${error.message}`);
+      getLogger().error({ error }, `Helm: fetch failed url=${url}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 10000));
   }
@@ -291,7 +287,7 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<strin
     await fs.promises.mkdir(CODEFRESH_PATH, { recursive: true });
     await fs.promises.writeFile(configPath, generatedYaml, 'utf8');
   } catch (error) {
-    logger.error(`Failed to write file: ${error.message}`);
+    getLogger({ error }).error(`Codefresh: config write failed`);
     throw error;
   }
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
@@ -437,19 +433,19 @@ export async function uninstallHelmReleases(build: Build) {
         await deploy.$query().patch({ statusMessage: 'Uninstalled via Helm' });
       } catch (error) {
         if (error.includes('release: not found')) {
-          logger.info(`[DELETE ${deploy?.uuid}] Helm release not found, skipping uninstall.`);
+          getLogger().debug(`Helm: release not found, skipping uninstall`);
           await deploy.$query().patch({ statusMessage: 'Helm release not found, skipping uninstall.' });
         } else {
-          logger.error(`[DELETE ${deploy?.uuid}] Failed to uninstall helm deploy: ${error}`);
+          getLogger({ error }).error(`Helm: uninstall failed`);
           await deploy.$query().patch({ statusMessage: `Failed to uninstall via Helm\n${error}` });
           throw error;
         }
       }
     }
 
-    logger.info(`[DELETE ${build.uuid}] Uninstalled helm releases`);
+    getLogger().debug(`Helm: releases uninstalled`);
   } catch (error) {
-    logger.error(`[DELETE ${build.uuid}] Failed to uninstall helm releases: ${error}`);
+    getLogger().error({ error }, `Helm: uninstall releases failed`);
   }
 }
 
@@ -459,15 +455,15 @@ export async function uninstallHelmReleases(build: Build) {
  * @param {Deploy} deploy - The deploy object containing deploy details.
  */
 function addHelmCustomValues(deploy: Deploy): string[] {
-  logger.info(
-    `[DEPLOY ${deploy.uuid}][addHelmCustomValues] isStatic: ${deploy?.kedaScaleToZero?.type}, isKedaHttp: ${deploy.build.isStatic}`
+  getLogger().debug(
+    `Helm: custom values kedaScaleToZeroType=${deploy?.kedaScaleToZero?.type} isStatic=${deploy?.build?.isStatic}`
   );
   if (
     deploy?.kedaScaleToZero?.type === 'http' &&
     deploy.build.isStatic == false &&
     deploy?.build.isStatic != undefined
   ) {
-    logger.info(`[HPA Enable ${deploy.uuid}] Enabling autoscaling for Keda Scale to Zero feature`);
+    getLogger().debug(`Helm: enabling autoscaling for KEDA scale-to-zero`);
     return ['autoscaling.enabled=true'];
   }
   return [];
@@ -517,7 +513,7 @@ async function httpIngress(deploy: Deploy): Promise<string[]> {
     deploy?.build.isStatic != undefined
   ) {
     ingressValues.push(`ingress.backendService=${deploy.uuid}-external-service`, 'ingress.port=8080');
-    logger.info(`[INGRESS] Redirect ingress request to Keda proxy`);
+    getLogger().debug(`Helm: redirecting ingress to KEDA proxy`);
   }
 
   return ingressValues;
@@ -547,9 +543,7 @@ export const constructHelmDeploysBuildMetaData = async (deploys: Deploy[]) => {
       error: '',
     };
   } catch (error) {
-    logger
-      .child({ error })
-      .error(`[BUILD][constructHelmDeploysBuildMetaData] Failed to construct Helm deploy metadata: ${error?.message}`);
+    getLogger().error({ error }, `Helm: metadata construction failed`);
     return {
       uuid: '',
       branchName: '',

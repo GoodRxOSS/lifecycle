@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 
 export interface BuildJobInfo {
@@ -29,10 +29,6 @@ export interface BuildJobInfo {
   error?: string;
   podName?: string;
 }
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 export async function getNativeBuildJobs(serviceName: string, namespace: string): Promise<BuildJobInfo[]> {
   const kc = new k8s.KubeConfig();
@@ -115,7 +111,7 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
             }
           }
         } catch (podError) {
-          logger.warn(`Failed to get pods for job ${jobName}:`, podError);
+          getLogger().warn({ error: podError }, `K8s: failed to get pods jobName=${jobName}`);
         }
       }
 
@@ -141,7 +137,7 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
 
     return buildJobs;
   } catch (error) {
-    logger.error(`Error listing native build jobs for service ${serviceName}:`, error);
+    getLogger().error({ error }, `K8s: failed to list build jobs service=${serviceName}`);
     throw error;
   }
 }

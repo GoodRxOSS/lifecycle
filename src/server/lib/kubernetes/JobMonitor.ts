@@ -15,7 +15,7 @@
  */
 
 import { shellPromise } from '../shell';
-import logger from '../logger';
+import { getLogger } from '../logger';
 
 export interface JobStatus {
   logs: string;
@@ -70,7 +70,7 @@ export class JobMonitor {
         status,
       };
     } catch (error) {
-      logger.error(`Error monitoring job ${this.jobName}: ${error.message}`);
+      getLogger().error({ error }, `Job: monitor failed name=${this.jobName}`);
       return {
         logs: logs || `Job monitoring failed: ${error.message}`,
         success: false,
@@ -146,12 +146,14 @@ export class JobMonitor {
             );
             logs += `\n=== Init Container Logs (${initName}) ===\n${initLogs}\n`;
           } catch (err: any) {
-            logger.debug(`Could not get logs for init container ${initName}: ${err.message || 'Unknown error'}`);
+            getLogger().debug(
+              `K8s: init container logs failed container=${initName} error=${err.message || 'Unknown error'}`
+            );
           }
         }
       }
     } catch (error: any) {
-      logger.debug(`No init containers found for pod ${podName}: ${error.message || 'Unknown error'}`);
+      getLogger().debug(`K8s: no init containers found pod=${podName} error=${error.message || 'Unknown error'}`);
     }
 
     return logs;
@@ -175,8 +177,8 @@ export class JobMonitor {
           if (!allContainersReady) {
             const waiting = statuses.find((s: any) => s.state.waiting);
             if (waiting && waiting.state.waiting.reason) {
-              logger.info(
-                `Container ${waiting.name} is waiting: ${waiting.state.waiting.reason} - ${
+              getLogger().info(
+                `Container: waiting name=${waiting.name} reason=${waiting.state.waiting.reason} message=${
                   waiting.state.waiting.message || 'no message'
                 }`
               );
@@ -209,7 +211,7 @@ export class JobMonitor {
         containerNames = containerNames.filter((name) => containerFilters.includes(name));
       }
     } catch (error) {
-      logger.warn(`Could not get container names: ${error}`);
+      getLogger().warn({ error }, `Container: names fetch failed`);
     }
 
     for (const containerName of containerNames) {
@@ -223,7 +225,7 @@ export class JobMonitor {
           logs += `\n=== Container Logs (${containerName}) ===\n${containerLog}\n`;
         }
       } catch (error: any) {
-        logger.warn(`Error getting logs from container ${containerName}: ${error.message}`);
+        getLogger().warn({ error }, `Container: logs fetch failed name=${containerName}`);
         logs += `\n=== Container Logs (${containerName}) ===\nError retrieving logs: ${error.message}\n`;
       }
     }
@@ -252,7 +254,9 @@ export class JobMonitor {
           await this.sleep(JobMonitor.POLL_INTERVAL);
         }
       } catch (error: any) {
-        logger.debug(`Job status check failed for ${this.jobName}, will retry: ${error.message || 'Unknown error'}`);
+        getLogger().debug(
+          `Job status check failed for ${this.jobName}, will retry: ${error.message || 'Unknown error'}`
+        );
         await this.sleep(JobMonitor.POLL_INTERVAL);
       }
     }
@@ -276,7 +280,17 @@ export class JobMonitor {
         );
 
         if (failedStatus.trim() === 'True') {
-          logger.error(`Job ${this.jobName} failed`);
+          const failedReason = await shellPromise(
+            `kubectl get job ${this.jobName} -n ${this.namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}'`
+          );
+          const failedMessage = await shellPromise(
+            `kubectl get job ${this.jobName} -n ${this.namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'`
+          );
+          getLogger().error(
+            `Job: failed name=${this.jobName} reason=${failedReason.trim() || 'Unknown'} message=${
+              failedMessage.trim() || 'No message'
+            }`
+          );
 
           // Check if job was superseded
           try {
@@ -286,13 +300,13 @@ export class JobMonitor {
             );
 
             if (annotations === 'superseded-by-retry') {
-              logger.info(`${logPrefix || ''} Job ${this.jobName} superseded by newer deployment`);
+              getLogger().info(`K8s: job superseded name=${this.jobName}`);
               success = true;
               status = 'superseded';
             }
           } catch (annotationError: any) {
-            logger.debug(
-              `Could not check supersession annotation for job ${this.jobName}: ${
+            getLogger().debug(
+              `K8s: supersession annotation check failed job=${this.jobName} error=${
                 annotationError.message || 'Unknown error'
               }`
             );
@@ -302,7 +316,7 @@ export class JobMonitor {
         status = 'succeeded';
       }
     } catch (error) {
-      logger.error(`Failed to check job status for ${this.jobName}:`, error);
+      getLogger().error({ error }, `Job: status check failed name=${this.jobName}`);
     }
 
     return { success, status };

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from './logger';
+import { getLogger } from './logger';
 import yaml from 'js-yaml';
 import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
@@ -30,10 +30,6 @@ import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
 import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 import { staticEnvTolerations } from './helm/constants';
-
-const logger = rootLogger.child({
-  filename: 'lib/kubernetes.ts',
-});
 
 interface VOLUME {
   name: string;
@@ -51,7 +47,7 @@ async function namespaceExists(client: k8s.CoreV1Api, name: string): Promise<boo
     if (err?.response?.statusCode === 404) {
       return false;
     }
-    logger.error(`[${name}] Error reading namespace: ${err}`);
+    getLogger({ namespace: name, error: err }).error('Namespace: read failed');
     throw err;
   }
 }
@@ -65,9 +61,7 @@ async function getTTLConfig(buildUUID: string): Promise<{ daysToExpire: number }
     const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
     daysToExpire = globalConfig.ttl_cleanup?.inactivityDays ?? DEFAULT_TTL_INACTIVITY_DAYS;
   } catch (error) {
-    logger.warn(
-      `[NS ${buildUUID}] Failed to get TTL config, using default ${DEFAULT_TTL_INACTIVITY_DAYS} days: ${error}`
-    );
+    getLogger({ error }).warn(`TTL: config fetch failed default=${DEFAULT_TTL_INACTIVITY_DAYS}days`);
   }
   return { daysToExpire };
 }
@@ -205,7 +199,7 @@ export async function createOrUpdateNamespace({
     buildUUID,
   });
 
-  logger.info(`[NS ${buildUUID}] Creating/updating namespace ${name} ${logMessage}`);
+  getLogger({ namespace: name }).info(`Deploy: creating namespace ${logMessage}`);
 
   const namespace = {
     apiVersion: 'v1',
@@ -227,19 +221,19 @@ export async function createOrUpdateNamespace({
       await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
         headers: { 'Content-Type': 'application/json-patch+json' },
       });
-      logger.info(`[NS ${buildUUID}] Updated namespace ${patchMessage}`);
+      getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
       return;
     } else {
-      logger.info(`[NS ${buildUUID}] Namespace exists and is static env, skipping update`);
+      getLogger({ namespace: name }).info('Deploy: skipped namespace update reason=static');
       return;
     }
   }
 
   try {
     await client.createNamespace(namespace);
-    logger.debug(`[NS ${name}] Namespace created`);
+    getLogger({ namespace: name }).debug('Namespace created');
   } catch (err) {
-    logger.error(`[NS ${name}] Error creating namespace: ${err}`);
+    getLogger({ namespace: name, error: err }).error('Namespace: create failed');
     throw err;
   }
 }
@@ -273,34 +267,31 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
     };
 
     try {
-      // Check if service account already exists
       if (!(await serviceAccountExists())) {
-        logger.info(`[NS ${namespace}] Creating service account ${serviceAccountName}`);
+        getLogger({ namespace, serviceAccountName }).debug('ServiceAccount: creating');
         await client.createNamespacedServiceAccount(namespace, serviceAccountManifest);
-        logger.debug(`[NS ${namespace}] Created service account ${serviceAccountName}`);
+        getLogger({ namespace, serviceAccountName }).debug('Created service account');
       } else {
-        logger.debug(`[NS ${namespace}] Service account ${serviceAccountName} already exists`);
+        getLogger({ namespace, serviceAccountName }).debug('Service account already exists');
       }
     } catch (err) {
-      logger.error(`[NS ${namespace}] Error creating service account ${serviceAccountName}:`, {
+      getLogger({
+        namespace,
+        serviceAccountName,
         error: err,
         statusCode: err?.response?.statusCode,
         statusMessage: err?.response?.statusMessage,
-        body: err?.response?.body,
-        serviceAccountName,
-        namespace,
-      });
+      }).error('ServiceAccount: create failed');
       throw err;
     }
   } else {
-    // Wait until the default service account exists in the given namespace
     try {
       await waitUntil(serviceAccountExists, {
         timeoutMs: 120000,
         intervalMs: 2000,
       });
     } catch (error) {
-      logger.error(`[NS ${namespace}] Timeout waiting for ${serviceAccountName} service account to exist: ${error}`);
+      getLogger({ namespace, serviceAccountName, error }).error('ServiceAccount: wait timeout');
       throw error;
     }
   }
@@ -316,28 +307,27 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
 
   try {
     await client.patchNamespacedServiceAccount(
-      serviceAccountName, // service account name
-      namespace, // namespace
-      patch, // patch payload
-      undefined, // pretty
-      undefined, // dryRun
-      undefined, // fieldManager
-      undefined, // fieldValidation
-      undefined, // force
-      { headers: { 'Content-Type': 'application/merge-patch+json' } } // patch options
+      serviceAccountName,
+      namespace,
+      patch,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/merge-patch+json' } }
     );
-    logger.debug(`[NS ${namespace}] Annotated ${serviceAccountName} service account in namespace ${namespace}`);
+    getLogger({ namespace, serviceAccountName }).debug('Annotated service account');
 
-    // Set up RBAC for the service account
     await setupServiceAccountWithRBAC({
       namespace,
       serviceAccountName,
       awsRoleArn: role,
-      permissions: 'deploy', // Give full permissions for deployment
+      permissions: 'deploy',
     });
-    logger.info(`[NS ${namespace}] Set up RBAC for ${serviceAccountName} service account`);
+    getLogger({ namespace, serviceAccountName }).debug('RBAC: configured');
   } catch (err) {
-    logger.error(`[NS ${namespace}] Error setting up service account ${serviceAccountName}: ${err}`);
+    getLogger({ namespace, serviceAccountName, error: err }).error('ServiceAccount: setup failed');
     throw err;
   }
 }
@@ -347,15 +337,12 @@ export async function createOrUpdateServiceAccount({ namespace, role }: { namesp
  * @param build
  */
 export async function applyManifests(build: Build): Promise<k8s.KubernetesObject[]> {
-  // Check if this is a legacy deployment (has build.manifest)
   if (!build.manifest || build.manifest.trim().length === 0) {
-    // New deployments are handled by DeploymentManager
-    logger.info(`[Build ${build.uuid}] No build manifest found, using new deployment pattern via DeploymentManager`);
+    getLogger().info('Deploy: starting method=deploymentManager');
     return [];
   }
 
-  // Legacy deployment path - apply manifest directly
-  logger.info(`[Build ${build.uuid}] Using legacy deployment pattern with build.manifest`);
+  getLogger().info('Deploy: starting method=legacyManifest');
 
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
@@ -383,12 +370,14 @@ export async function applyManifests(build: Build): Promise<k8s.KubernetesObject
       }
       created.push(response.body);
     } catch (e) {
-      // no resource found, creating
       try {
         const response = await client.create(spec);
         created.push(response.body);
       } catch (e) {
-        logger.error(`[Build ${build.uuid}] [Spec: ${spec?.metadata?.name}] - kubectl apply unsuccessful: ${e}`);
+        getLogger({
+          specName: spec?.metadata?.name,
+          error: e,
+        }).error('kubectl apply unsuccessful');
       }
     }
   }
@@ -398,7 +387,7 @@ export async function applyManifests(build: Build): Promise<k8s.KubernetesObject
 export async function applyHttpScaleObjectManifestYaml(deploy: Deploy, namespace: string) {
   const manifest = await generateHttpScaleObject(deploy);
   const scaleHttpObject = yaml.dump(manifest, { skipInvalid: true });
-  logger.info(`[CREATE on ${deploy.uuid}] HttpScaleObject maifest`);
+  getLogger({ namespace }).debug('HttpScaleObject: creating');
   try {
     const localPath = `${TMP_PATH}/keda/${deploy.uuid}-scaleHttpObject.yaml`;
     await fs.promises.mkdir(`${TMP_PATH}/keda/`, {
@@ -406,9 +395,12 @@ export async function applyHttpScaleObjectManifestYaml(deploy: Deploy, namespace
     });
     await fs.promises.writeFile(localPath, scaleHttpObject, 'utf8');
     await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
-    logger.info(`[DEPLOY ${deploy.uuid}][applyHttpScaleObjectManifestYaml] applied HttpScaleObject manifest`);
+    getLogger({ namespace }).debug('HttpScaleObject: applied');
   } catch (error) {
-    logger.error(error);
+    getLogger({
+      namespace,
+      error,
+    }).error('HttpScaleObject: apply failed');
     throw new Error(`Failed to apply HTTP scale object manifest for deploy ${error}`);
   }
 }
@@ -416,7 +408,7 @@ export async function applyHttpScaleObjectManifestYaml(deploy: Deploy, namespace
 export async function applyExternalServiceManifestYaml(deploy: Deploy, namespace: string) {
   const manifest = generateExternalService(deploy);
   const externalService = yaml.dump(manifest, { skipInvalid: true });
-  logger.info(`[CREATE on ${deploy.uuid}] ExternalService manifest`);
+  getLogger({ namespace }).debug('ExternalService: creating');
   try {
     const localPath = `${TMP_PATH}/keda/${deploy.uuid}-externalService.yaml`;
     await fs.promises.mkdir(`${TMP_PATH}/keda/`, {
@@ -424,9 +416,12 @@ export async function applyExternalServiceManifestYaml(deploy: Deploy, namespace
     });
     await fs.promises.writeFile(localPath, externalService, 'utf8');
     await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
-    logger.info(`[DEPLOY ${deploy.uuid}][ExternalService] applied ExternalService manifest`);
+    getLogger({ namespace }).debug('ExternalService: applied');
   } catch (error) {
-    logger.error(error);
+    getLogger({
+      namespace,
+      error,
+    }).error('ExternalService: apply failed');
     throw new Error(`Failed to apply ExternalService object manifest for deploy ${error}`);
   }
 }
@@ -511,37 +506,34 @@ export async function waitForPodReady(build: Build) {
   const { pullRequest, sha, uuid, namespace } = build;
   const { branchName, fullName } = pullRequest || {};
 
-  const buildTaxonomy = `[DEPLOY ${uuid}][waitForPodReady]:`;
-  const gitTaxonomy = `for repo:${fullName}, branch:${branchName}, commit:${sha}`;
+  const logCtx = { namespace, repo: fullName, branch: branchName, sha };
 
   let retries = 0;
-  logger.info(`${buildTaxonomy} Waiting for pods to be created ${gitTaxonomy}`);
+  getLogger(logCtx).info('Deploy: waiting for pods state=creation');
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const pods = await getPods({ uuid, namespace });
 
     if (pods.length > 0) {
-      logger.info(`${buildTaxonomy} Pods created ${gitTaxonomy}`);
+      getLogger(logCtx).info('Deploy: pods created');
       break;
     } else if (retries < 60) {
-      // wait for 5 minutes for pods to be created
       retries += 1;
       await new Promise((r) => setTimeout(r, 5000));
     } else {
-      logger.warn(`${buildTaxonomy} No pods found within 5 minutes ${gitTaxonomy}. `);
+      getLogger(logCtx).warn('Pod: not found timeout=5m');
       break;
     }
   }
 
   retries = 0;
 
-  logger.info(`${buildTaxonomy} Waiting 15 minutes for pods to be ready ${gitTaxonomy}`);
+  getLogger(logCtx).info('Deploy: waiting for pods state=ready');
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let isReady = false;
     try {
       const pods = await getPods({ uuid, namespace });
-      // only check pods that are not managed by Helm
       const matches =
         pods?.filter(
           (pod) =>
@@ -553,18 +545,20 @@ export async function waitForPodReady(build: Build) {
         return conditions.some((condition) => condition?.type === 'Ready' && condition?.status === 'True');
       });
     } catch (error) {
-      logger.child({ error, isReady }).warn(`${buildTaxonomy} error checking pod readiness ${gitTaxonomy}`);
+      getLogger({ ...logCtx, error, isReady }).warn('Pod: readiness check failed');
     }
 
     if (isReady) {
-      logger.info(`${buildTaxonomy} Pods are ready ${gitTaxonomy}`);
+      getLogger(logCtx).info('Deploy: pods ready');
       return true;
     }
     if (retries < 180) {
       retries += 1;
       await new Promise((r) => setTimeout(r, 5000));
     } else {
-      throw new Error(`${buildTaxonomy} Pods for build not ready after 15 minutes ${gitTaxonomy}`);
+      throw new Error(
+        `Pods for build not ready after 15 minutes buildUuid=${uuid} repo=${fullName} branch=${branchName}`
+      );
     }
   }
 }
@@ -578,9 +572,12 @@ export async function deleteBuild(build: Build) {
     await shellPromise(
       `kubectl delete all,pvc,mapping,Httpscaledobjects -l lc_uuid=${build.uuid} --namespace ${build.namespace}`
     );
-    logger.info(`[DELETE ${build.uuid}] Deleted kubernetes resources`);
+    getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
   } catch (e) {
-    logger.error(`[DELETE ${build.uuid}] Error deleting kubernetes resources: ${e}`);
+    getLogger({
+      namespace: build.namespace,
+      error: e,
+    }).error('Resources: delete failed');
   }
 }
 
@@ -589,21 +586,16 @@ export async function deleteBuild(build: Build) {
  * @param name namespace to delete
  */
 export async function deleteNamespace(name: string) {
-  // this is a final safety check to only delete namespaces that start with `env-`
   if (!name.startsWith('env-')) return;
 
   try {
-    // Native helm now uses namespace-scoped RBAC (Role/RoleBinding) which gets deleted with the namespace
-    // No need for manual cleanup of cluster-level resources
-
-    // adding a grace-period to make sure resources and finalizers are gone before we delete the namespace
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
-    logger.info(`[DELETE ${name}] Deleted namespace`);
+    getLogger({ namespace: name }).info('Deploy: namespace deleted');
   } catch (e) {
     if (e.includes('Error from server (NotFound): namespaces')) {
-      logger.info(`[DELETE ${name}] Namespace not found, skipping deletion.`);
+      getLogger({ namespace: name }).info('Deploy: namespace skipped reason=notFound');
     } else {
-      logger.error(`[DELETE ${name}] Error deleting namespace: ${e}`);
+      getLogger({ namespace: name, error: e }).error('Namespace: delete failed');
     }
   }
 }
@@ -657,7 +649,7 @@ export function generateManifest({
   const manifest = `${disks}---\n${builds}---\n${nodePorts}---\n${grpcMappings}---\n${loadBalancers}---\n${externalNameServices}`;
   const isDev = APP_ENV?.includes('dev') ?? false;
   if (!isDev) {
-    logger.child({ manifest }).info(`[BUILD ${build.uuid}][lifecycleConfigLog][kubernetesManifest] Generated manifest`);
+    getLogger({ manifest }).info('Manifest: generated');
   }
   return manifest;
 }
@@ -1120,13 +1112,13 @@ export function generateDeployManifests(
                   });
                   break;
                 default:
-                  logger.warn(`Unknown disk medium type: ${disk.medium}`);
+                  getLogger({ medium: disk.medium }).warn(`Disk: unknown medium medium=${disk.medium}`);
               }
             });
           }
         }
       } else {
-        logger.debug('Service disks: %j', service.serviceDisks);
+        getLogger({ serviceDisks: service.serviceDisks }).debug('Processing service disks');
         if (service.serviceDisks && service.serviceDisks.length > 0) {
           strategy = {
             // @ts-ignore
@@ -1199,7 +1191,7 @@ export function generateDeployManifests(
         'tags.datadoghq.com/version': buildUUID,
       };
 
-      if (build.isStatic) logger.info(`${buildUUID} building static environment`);
+      if (build.isStatic) getLogger().info('Build: static environment=true');
 
       const yamlManifest = yaml.dump(
         {
@@ -1484,13 +1476,13 @@ export function generateExternalNameManifests(deploys: Deploy[], buildUUID: stri
   return deploys
     .filter((deploy) => {
       if (deploy.active) {
-        logger.debug(`Deploy ${deploy.id} ${deploy.cname}`);
+        getLogger({ deployId: deploy.id, cname: deploy.cname }).debug('Checking deploy for external service');
         return deploy.cname !== undefined && deploy.cname !== null;
       }
     })
     .map((deploy) => {
       const name = deploy.uuid;
-      logger.debug(`Creating external service for ${name}`);
+      getLogger().debug('Creating external service');
       return yaml.dump(
         {
           apiVersion: 'v1',
@@ -1575,7 +1567,7 @@ export async function checkKubernetesStatus(build: Build) {
   try {
     status += (await shellPromise(command)) + '\n';
   } catch (err) {
-    logger.debug(`[${build.uuid}] ${command} ==> ${err}`);
+    getLogger({ command, error: err }).debug('Error executing kubectl command');
   }
 
   return status;
@@ -1598,7 +1590,7 @@ async function getExistingIngress(ingressName: string, namespace: string): Promi
     const response = await k8sApi.readNamespacedIngress(ingressName, namespace);
     return response.body;
   } catch (error) {
-    logger.warn(`Failed to get existing ingress ${ingressName}: ${error}`);
+    getLogger({ ingressName, namespace, error }).warn('Ingress: fetch failed');
     return null;
   }
 }
@@ -1647,9 +1639,9 @@ export async function patchIngress(ingressName: string, bannerSnippet: any, name
       `kubectl patch ingress ${ingressName} --namespace ${namespace} --type merge --patch-file ${localPath}`
     );
 
-    logger.info(`Successfully patched ingress ${ingressName}`);
+    getLogger({ ingressName, namespace }).info('Deploy: ingress patched');
   } catch (error) {
-    logger.warn(`Unable to patch ingress ${ingressName}, banner might not work: ${error}`);
+    getLogger({ ingressName, namespace, error }).warn('Ingress: patch failed (banner may not work)');
     throw error;
   }
 }
@@ -1677,7 +1669,7 @@ export async function updateSecret(secretName: string, secretData: Record<string
     secretObject.data = updated;
     await k8sApi.replaceNamespacedSecret(secretName, namespace, secretObject);
   } catch (error) {
-    logger.error('Error updating secret:', error);
+    getLogger({ secretName, namespace, error }).error('Secret: update failed');
     throw error;
   }
 }
@@ -1691,7 +1683,7 @@ export function getCurrentNamespaceFromFile(): string {
   try {
     return fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'utf8').trim();
   } catch (err) {
-    logger.error('Error getting current namespace from file:', err);
+    getLogger({ error: err }).error('Namespace: file read failed');
     return 'default';
   }
 }
@@ -1733,7 +1725,7 @@ export function generateDeployManifest({
         },
       });
     } else {
-      logger.info(`[DEPLOY ${deploy.uuid}] No manifest generated for deploy`);
+      getLogger().info('Manifest: skipped reason=empty');
       return '';
     }
   }
@@ -2165,10 +2157,11 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
   const { namespace } = build;
   const deployableName = deploy.deployable?.name || deploy.service?.name || 'unknown';
 
-  let retries = 0;
-  logger.info(`[DEPLOY ${uuid}] Waiting for pods service=${deployableName} namespace=${namespace}`);
+  const logCtx = { deployUuid: uuid, service: deployableName, namespace };
 
-  // Wait up to 5 minutes for pods to be created
+  let retries = 0;
+  getLogger(logCtx).info('Deploy: waiting for pods');
+
   while (retries < 60) {
     const k8sApi = getK8sApi();
     const resp = await k8sApi?.listNamespacedPod(
@@ -2180,7 +2173,6 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
       `deploy_uuid=${uuid}`
     );
     const allPods = resp?.body?.items || [];
-    // Filter out job pods - we only want deployment/statefulset pods
     const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
 
     if (pods.length > 0) {
@@ -2192,13 +2184,12 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
   }
 
   if (retries >= 60) {
-    logger.warn(`[DEPLOY ${uuid}] No pods found within 5 minutes service=${deployableName}`);
+    getLogger(logCtx).warn('Pod: not found timeout=5m');
     return false;
   }
 
   retries = 0;
 
-  // Wait up to 15 minutes for pods to be ready
   while (retries < 180) {
     const k8sApi = getK8sApi();
     const resp = await k8sApi?.listNamespacedPod(
@@ -2210,11 +2201,10 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
       `deploy_uuid=${uuid}`
     );
     const allPods = resp?.body?.items || [];
-    // Filter out job pods - we only want deployment/statefulset pods
     const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
 
     if (pods.length === 0) {
-      logger.warn(`[DEPLOY ${uuid}] No deployment pods found service=${deployableName}`);
+      getLogger(logCtx).warn('Pod: deployment pods not found');
       return false;
     }
 
@@ -2225,7 +2215,7 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
     });
 
     if (allReady) {
-      logger.info(`[DEPLOY ${uuid}] Pods ready service=${deployableName} count=${pods.length}`);
+      getLogger({ ...logCtx, podCount: pods.length }).info('Deploy: pods ready');
       return true;
     }
 
@@ -2233,6 +2223,6 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 5000));
   }
 
-  logger.warn(`[DEPLOY ${uuid}] Pods not ready within 15 minutes service=${deployableName}`);
+  getLogger(logCtx).warn('Pod: not ready timeout=15m');
   return false;
 }

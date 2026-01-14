@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'api/v1/builds/index.ts',
-});
 
 /**
  * @openapi
@@ -208,7 +204,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    logger.error('Error fetching builds:', error);
+    getLogger({ error }).error('API: builds fetch failed');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

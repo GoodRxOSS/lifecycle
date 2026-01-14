@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import PullRequestService from 'server/services/pullRequest';
-
-const logger = rootLogger.child({
-  filename: 'api/v1/users/index.ts',
-});
 
 /**
  * @openapi
@@ -184,7 +180,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(response);
   } catch (error) {
-    logger.error('Error fetching users:', error);
+    getLogger().error({ error }, 'API: users fetch failed');
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

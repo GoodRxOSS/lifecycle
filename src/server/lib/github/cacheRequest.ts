@@ -15,24 +15,19 @@
  */
 
 import { cloneDeep, merge } from 'lodash';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { GITHUB_API_CACHE_EXPIRATION_SECONDS } from 'shared/constants';
 import { createOctokitClient } from 'server/lib/github/client';
 import { CacheRequestData } from 'server/lib/github/types';
 
 import { redisClient } from 'server/lib/dependencies';
 
-const initialLogger = rootLogger.child({
-  filename: 'lib/github/cacheRequest.ts',
-});
-
 export async function cacheRequest(
   endpoint: string,
   requestData = {} as CacheRequestData,
-  { logger = initialLogger, cache = redisClient.getRedis(), ignoreCache = false } = {}
+  { cache = redisClient.getRedis(), ignoreCache = false } = {}
 ) {
   const cacheKey = `github:req_cache:${endpoint}`;
-  const text = `[GITHUB ${cacheKey}][cacheRequest]`;
   let cached;
   try {
     const octokit = await createOctokitClient({ caller: 'cacheRequest' });
@@ -70,17 +65,14 @@ export async function cacheRequest(
         const data = JSON.parse(cached?.data);
         return { data };
       } catch (error) {
-        return cacheRequest(endpoint, requestData, { logger, cache, ignoreCache: true });
+        return cacheRequest(endpoint, requestData, { cache, ignoreCache: true });
       }
     } else if (error?.status === 404) {
-      const msg = '[retryCacheRequest] The requested resource was not found. Maybe the branch was deleted?';
-      logger.child({ error }).info(`${text} ${msg}`);
-      throw new Error(error?.message || msg);
+      getLogger().info(`GitHub: cache request not found endpoint=${endpoint}`);
+      throw new Error('Resource not found');
     } else {
-      const msg = 'cache request request error';
-      const message = error?.message || msg;
-      logger.child({ error }).error(`${text} ${msg}`);
-      throw new Error(message);
+      getLogger().error({ error }, `GitHub: cache request failed endpoint=${endpoint}`);
+      throw new Error('GitHub API request failed');
     }
   }
 }

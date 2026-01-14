@@ -21,12 +21,8 @@ import { Deploy } from 'server/models';
 import Fastly from 'server/lib/fastly';
 import { Link, FeatureFlags } from 'shared/types';
 import { DD_URL, DD_LOG_URL } from 'shared/constants';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import Model from 'server/models/_Model';
-
-const logger = rootLogger.child({
-  filename: 'src/shared/utils.ts',
-});
 
 /**
  * determineIfFastlyIsUsed
@@ -152,7 +148,7 @@ export const constructFastlyBuildLink = async (
     const { href: url = '' } = (await fastlyFn(fastlyBuildId, fastlyServiceType)) || {};
     return url ? { name: 'Fastly Dashboard', url } : {};
   } catch (err) {
-    logger.error(`constructFastlyBuildLink: there was an error constructing the fastly build link: ${err}`);
+    getLogger().error({ error: err }, 'Fastly: build link construction failed');
     return {};
   }
 };

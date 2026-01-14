@@ -15,6 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -39,6 +40,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       configured: apiKeySet,
     });
   } catch (error) {
+    getLogger().error({ error }, 'AI: config fetch failed');
     return res.status(500).json({ enabled: false });
   }
 }

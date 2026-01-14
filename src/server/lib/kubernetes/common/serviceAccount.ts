@@ -15,10 +15,8 @@
  */
 
 import GlobalConfigService from 'server/services/globalConfig';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { setupServiceAccountInNamespace } from '../../nativeHelm/utils';
-
-const logger = rootLogger.child({ filename: 'lib/kubernetes/serviceAccount.ts' });
 
 export async function ensureServiceAccountForJob(
   namespace: string,
@@ -28,8 +26,8 @@ export async function ensureServiceAccountForJob(
   const serviceAccountName = serviceAccount?.name || 'default';
   const role = serviceAccount?.role || 'default';
 
-  logger.info(
-    `Setting up service account for ${jobType} job: namespace=${namespace} serviceAccount=${serviceAccountName} role=${role}`
+  getLogger().info(
+    `ServiceAccount: setting up for job type=${jobType} namespace=${namespace} serviceAccount=${serviceAccountName} role=${role}`
   );
 
   await setupServiceAccountInNamespace(namespace, serviceAccountName, role);

@@ -16,7 +16,7 @@
 
 import { V1ServiceAccount, V1Role, V1RoleBinding } from '@kubernetes/client-node';
 import * as k8s from '@kubernetes/client-node';
-import logger from '../logger';
+import { getLogger } from '../logger';
 
 export interface RBACConfig {
   namespace: string;
@@ -77,7 +77,7 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
 
   try {
     await coreV1Api.createNamespacedServiceAccount(namespace, serviceAccount);
-    logger.info(`Created service account ${serviceAccountName} in namespace ${namespace}`);
+    getLogger().debug(`ServiceAccount: created ${serviceAccountName} namespace=${namespace}`);
   } catch (error) {
     if (error?.response?.statusCode === 409) {
       await coreV1Api.patchNamespacedServiceAccount(
@@ -91,7 +91,7 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
         undefined,
         { headers: { 'Content-Type': 'application/merge-patch+json' } }
       );
-      logger.info(`Updated service account ${serviceAccountName} in namespace ${namespace}`);
+      getLogger().debug(`ServiceAccount: updated ${serviceAccountName} namespace=${namespace}`);
     } else {
       throw error;
     }
@@ -114,7 +114,7 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
 
   try {
     await rbacApi.createNamespacedRole(namespace, role);
-    logger.info(`Created role ${roleName} in namespace ${namespace}`);
+    getLogger().debug(`RBAC: created role ${roleName} namespace=${namespace}`);
   } catch (error) {
     if (error?.response?.statusCode === 409) {
       await rbacApi.patchNamespacedRole(
@@ -128,7 +128,7 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
         undefined,
         { headers: { 'Content-Type': 'application/merge-patch+json' } }
       );
-      logger.info(`Updated role ${roleName} in namespace ${namespace}`);
+      getLogger().debug(`RBAC: updated role ${roleName} namespace=${namespace}`);
     } else {
       throw error;
     }
@@ -161,11 +161,10 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
 
   try {
     await rbacApi.createNamespacedRoleBinding(namespace, roleBinding);
-    logger.info(`Created role binding ${roleBindingName} in namespace ${namespace}`);
+    getLogger().debug(`RBAC: created binding ${roleBindingName} namespace=${namespace}`);
   } catch (error) {
     if (error?.response?.statusCode === 409) {
-      // Role binding already exists, ignore
-      logger.info(`Role binding ${roleBindingName} already exists in namespace ${namespace}`);
+      getLogger().debug(`RBAC: binding exists ${roleBindingName} namespace=${namespace}`);
     } else {
       throw error;
     }

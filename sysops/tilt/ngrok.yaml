@@ -29,15 +29,14 @@ spec:
     spec:
       containers:
         - name: ngrok
-          image: ngrok/ngrok:latest
+          image: wernight/ngrok
           command: ['ngrok']
           args:
             - 'http'
+            - '--authtoken=$(NGROK_AUTHTOKEN)'
             - '--hostname=$(NGROK_LIFECYCLE_DOMAIN)'
             - '--log=stdout'
-            - '--log-level=debug'
             - 'lifecycle-web:80' # point at the K8s Service's name & port
-
           envFrom:
             - secretRef:
                 name: ngrok-secret

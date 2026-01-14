@@ -45,8 +45,15 @@ jest.mock('server/services/globalConfig', () => {
 jest.mock('axios');
 jest.mock('server/lib/github/client');
 jest.mock('server/lib/github/utils');
-jest.mock('server/lib/logger');
-import logger from 'server/lib/logger';
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn().mockReturnValue({
+    info: jest.fn(),
+    debug: jest.fn(),
+    error: jest.fn(),
+    warn: jest.fn(),
+  }),
+}));
+import { getLogger, rootLogger as logger } from 'server/lib/logger';
 
 test('createOrUpdatePullRequestComment success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
@@ -138,7 +145,7 @@ test('getSHAForBranch failure', async () => {
   const mockError = new Error('error');
   (utils.getRefForBranchName as jest.Mock).mockRejectedValue(mockError);
   await expect(getSHAForBranch('main', 'foo', 'bar')).rejects.toThrow('error');
-  expect(logger.child).toHaveBeenCalledWith({ error: mockError });
+  expect(getLogger).toHaveBeenCalledWith({ error: mockError, repo: 'foo/bar', branch: 'main' });
 });
 
 test('checkIfCommentExists to return true', async () => {

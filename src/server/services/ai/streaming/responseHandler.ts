@@ -16,27 +16,23 @@
 
 import { StreamCallbacks } from '../types/stream';
 import { JSONBuffer } from './jsonBuffer';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({ component: 'AIAgentResponseHandler' });
+import { getLogger } from 'server/lib/logger';
 
 export class ResponseHandler {
   private jsonBuffer: JSONBuffer;
   private isJsonResponse: boolean = false;
   private textBuffer: string = '';
-  private logger: typeof logger;
+  private buildUuid?: string;
 
   constructor(private callbacks: StreamCallbacks, buildUuid?: string) {
     this.jsonBuffer = new JSONBuffer();
-    this.logger = buildUuid
-      ? rootLogger.child({ component: 'AIAgentResponseHandler', buildUuid })
-      : rootLogger.child({ component: 'AIAgentResponseHandler' });
+    this.buildUuid = buildUuid;
   }
 
   handleChunk(text: string): void {
     if (!this.isJsonResponse && this.isJsonStart(text)) {
       this.isJsonResponse = true;
-      this.logger.info('Detected JSON response start, switching to JSON buffering mode');
+      getLogger().info(`AI: JSON response detected buildUuid=${this.buildUuid || 'none'}`);
       this.callbacks.onThinking('Generating structured report...');
       this.jsonBuffer.append(text);
       return;
@@ -46,13 +42,13 @@ export class ResponseHandler {
       this.jsonBuffer.append(text);
 
       if (this.jsonBuffer.isComplete()) {
-        this.logger.info('JSON response complete, parsing structured output');
+        getLogger().info(`AI: JSON response complete buildUuid=${this.buildUuid || 'none'}`);
         const parsed = this.jsonBuffer.parse();
         if (parsed) {
-          this.logger.info(`Parsed structured output of type: ${parsed.type}`);
+          getLogger().info(`AI: structured output parsed type=${parsed.type} buildUuid=${this.buildUuid || 'none'}`);
           this.callbacks.onStructuredOutput(parsed);
         } else {
-          this.logger.warn('Failed to parse completed JSON buffer');
+          getLogger().warn(`AI: JSON parse failed buildUuid=${this.buildUuid || 'none'}`);
         }
       }
       return;

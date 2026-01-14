@@ -21,11 +21,7 @@ import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import Repository from 'server/models/Repository';
 import { Service } from 'server/models/yaml/types';
 
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({
-  filename: 'models/yaml/utils.ts',
-});
+import { getLogger } from 'server/lib/logger';
 
 export const isInObj = (obj, key) => (!obj ? false : key in obj);
 
@@ -40,7 +36,7 @@ export const resolveRepository = async (repositoryFullName: string) => {
     const repositories = await Repository.query()
       .where(raw('LOWER(??)', [key]), '=', name)
       .catch((error) => {
-        logger.error(`Unable to find ${repositoryFullName} from Lifecycle Database: ${error}`);
+        getLogger().error({ error }, `Repository: not found name=${repositoryFullName}`);
         return null;
       });
     if (!repositories || repositories?.length === 0) {
@@ -48,7 +44,7 @@ export const resolveRepository = async (repositoryFullName: string) => {
     }
     return repositories[0];
   } catch (err) {
-    logger.error(`There was a problem resolving the repository ${repositoryFullName} \n Error: ${err}`);
+    getLogger().error({ error: err }, `Repository: resolution failed name=${repositoryFullName}`);
   }
 };
 
@@ -65,9 +61,7 @@ export const fetchLifecycleConfigByRepository = async (repository: Repository, b
     const validator = new YamlConfigValidator();
     const isConfigValid = validator.validate(configVersion, config);
     if (!isConfigValid) {
-      logger.error(
-        `YAML Config validation failed for ${name}/${branchName} using version Lifecyle Yaml version=${configVersion}`
-      );
+      getLogger().error(`Config: validation failed repo=${name}/${branchName} version=${configVersion}`);
       // TODO: This is a temporary fix to allow the UI to display the config
       // throw new Error(
       //   `YAML Config validation failed for ${name}/${branchName} using version Lifecyle Yaml version=${configVersion}`
@@ -75,7 +69,7 @@ export const fetchLifecycleConfigByRepository = async (repository: Repository, b
     }
     return config;
   } catch (err) {
-    logger.error(`fetchLifecycleConfigByRepository error: ${err}`);
+    getLogger().error({ error: err }, `Config: fetch failed`);
     return null;
   }
 };

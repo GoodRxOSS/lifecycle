@@ -17,6 +17,7 @@
 import { generateYaml } from 'server/lib/codefresh/utils/generateYaml';
 import { generateCodefreshCmd } from 'server/lib/codefresh/utils/generateCodefreshCmd';
 import { CF, CF_CHECKOUT_STEP, CF_BUILD_STEP, CF_AFTER_BUILD_STEP } from 'server/lib/codefresh/constants';
+import { updateLogContext } from 'server/lib/logger';
 
 export const constructBuildArgs = (envVars = {}) => {
   const envVarsItems = Object.keys(envVars);
@@ -88,6 +89,7 @@ export const getCodefreshPipelineIdFromOutput = (output: string) => {
   for (const line of lines) {
     const trimmedLine = line.trim();
     if (regex.test(trimmedLine)) {
+      updateLogContext({ pipelineId: trimmedLine });
       return trimmedLine;
     }
   }

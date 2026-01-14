@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
-
-const logger = rootLogger.child({
-  filename: 'v1/config/cache.ts',
-});
 
 /**
  * @openapi
@@ -111,7 +107,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(405).json({ error: `${req.method} is not allowed.` });
     }
   } catch (error) {
-    logger.error(`Error occurred on config cache operation: \n ${error}`);
+    getLogger().error({ error }, 'Config: cache operation failed');
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
@@ -122,7 +118,7 @@ async function getCachedConfig(res: NextApiResponse, refresh: boolean = false) {
     const configs = await configService.getAllConfigs(refresh);
     return res.status(200).json({ configs });
   } catch (error) {
-    logger.error(`[API] Error occurred retrieving cache config: \n ${error}`);
+    getLogger().error({ error }, 'Config: cache retrieval failed');
     return res.status(500).json({ error: `Unable to retrieve global config values` });
   }
 }

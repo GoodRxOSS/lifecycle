@@ -15,12 +15,8 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'deploy-summary.ts',
-});
 
 /**
  * @openapi
@@ -130,7 +126,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
     const build = await buildService.db.models.Build.query().findById(parsedBuildId).select('id');
 
     if (!build) {
-      logger.info(`Build with ID ${parsedBuildId} not found`);
+      getLogger().debug(`Build not found: buildId=${parsedBuildId}`);
       return res.status(404).json({ error: 'Build not found' });
     }
 
@@ -162,7 +158,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     return res.status(200).json(result.rows);
   } catch (error) {
-    logger.error(`Error fetching deploy summary for build ${parsedBuildId}:`, error);
+    getLogger({ error }).error(`API: deploy summary fetch failed buildId=${parsedBuildId}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 };

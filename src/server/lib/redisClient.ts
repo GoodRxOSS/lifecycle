@@ -17,11 +17,7 @@
 import Redis from 'ioredis';
 import Redlock from 'redlock';
 import { REDIS_URL, APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD, APP_REDIS_TLS } from 'shared/config';
-import rootLogger from './logger';
-
-const logger = rootLogger.child({
-  filename: 'lib/redisClient.ts',
-});
+import { getLogger } from 'server/lib/logger';
 
 export class RedisClient {
   private static instance: RedisClient;
@@ -97,9 +93,9 @@ export class RedisClient {
   public async close(): Promise<void> {
     try {
       await Promise.all([this.redis.quit(), this.subscriber.quit(), this.bullConn.quit()]);
-      logger.info(' ✅All Redis connections closed successfully.');
+      getLogger().info('Redis: closed');
     } catch (error) {
-      logger.warn(' ⚠️Error closing Redis connections. Forcing disconnect.', error);
+      getLogger().warn({ error }, 'Redis: close failed forcing=true');
       this.redis.disconnect();
       this.subscriber.disconnect();
       this.bullConn.disconnect();

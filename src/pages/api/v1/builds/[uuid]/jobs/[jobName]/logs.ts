@@ -15,12 +15,8 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import unifiedLogStreamHandler from '../../services/[name]/logs/[jobName]';
-
-const logger = rootLogger.child({
-  filename: __filename,
-});
 
 /**
  * @openapi
@@ -101,15 +97,15 @@ const logger = rootLogger.child({
  *         description: Internal server error
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  logger.info(
-    `method=${req.method} jobName=${req.query.jobName} message="Job logs endpoint called, delegating to unified handler"`
-  );
+  const { uuid, jobName } = req.query;
 
-  // Set type to 'webhook' for job logs
-  req.query.type = 'webhook';
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    getLogger().info(`API: job logs called method=${req.method} jobName=${jobName}`);
 
-  // Set name to undefined since it's not required for webhook jobs
-  req.query.name = undefined;
+    req.query.type = 'webhook';
 
-  return unifiedLogStreamHandler(req, res);
+    req.query.name = undefined;
+
+    return unifiedLogStreamHandler(req, res);
+  });
 }

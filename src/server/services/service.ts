@@ -14,16 +14,12 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { Environment, Repository } from 'server/models';
 import ServiceModel from 'server/models/Service';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 import BaseService from './_service';
 import GlobalConfigService from './globalConfig';
-
-const logger = rootLogger.child({
-  filename: 'services/service.ts',
-});
 
 export default class ServiceService extends BaseService {
   async findOrCreateDefaultService(environment: Environment, repository: Repository): Promise<ServiceModel[]> {
@@ -32,8 +28,8 @@ export default class ServiceService extends BaseService {
     try {
       await environment.$fetchGraph('[defaultServices]');
       if (environment.defaultServices != null && environment.defaultServices.length > 0) {
-        logger.debug(
-          `[${environment.name}] There is/are ${environment.defaultServices.length} default dependency service(s) in the database.`
+        getLogger({ environment: environment.name }).debug(
+          `Found ${environment.defaultServices.length} default dependency service(s) in database`
         );
         services = environment.defaultServices;
       } else {
@@ -82,7 +78,7 @@ export default class ServiceService extends BaseService {
         }
       }
     } catch (error) {
-      logger.error(error);
+      getLogger({ environment: environment.name, error }).error('Service: find or create failed');
       throw error;
     }
 

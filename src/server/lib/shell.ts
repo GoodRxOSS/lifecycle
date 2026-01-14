@@ -14,12 +14,8 @@
  * limitations under the License.
  */
 
-import rootLogger from './logger';
+import { getLogger } from 'server/lib/logger';
 import shell, { ExecOptions } from 'shelljs';
-
-const logger = rootLogger.child({
-  filename: 'lib/shell.ts',
-});
 
 interface Options extends ExecOptions {
   debug?: boolean;
@@ -39,7 +35,7 @@ export async function shellPromise(cmd: string, options: Options = {}): Promise<
     shell.exec(cmd, opts, (code, stdout, stderr) => {
       if (code !== 0) {
         if (stderr.length > 0) {
-          logger.debug(`Shell command failed: ${cmd} => ${stderr}`);
+          getLogger().debug(`Shell command failed: cmd=${cmd} stderr=${stderr}`);
         }
         const options = opts ? JSON.stringify(opts) : '';
         reject(

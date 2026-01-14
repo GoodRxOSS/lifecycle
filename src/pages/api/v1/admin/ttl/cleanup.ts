@@ -15,13 +15,10 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next';
-import rootLogger from 'server/lib/logger';
+import { nanoid } from 'nanoid';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import TTLCleanupService from 'server/services/ttlCleanup';
-
-const logger = rootLogger.child({
-  filename: 'v1/admin/ttl/cleanup.ts',
-});
 
 /**
  * @openapi
@@ -160,7 +157,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         return res.status(405).json({ error: `${req.method} is not allowed.` });
     }
   } catch (error) {
-    logger.error(`Error occurred on TTL cleanup operation: \n ${error}`);
+    getLogger().error({ error }, 'TTL: cleanup operation failed');
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
@@ -172,39 +169,45 @@ async function getTTLConfig(res: NextApiResponse) {
     const ttlConfig = globalConfig.ttl_cleanup;
 
     if (!ttlConfig) {
-      logger.warn('[API] TTL cleanup configuration not found in global config');
+      getLogger().warn('TTL: config not found');
       return res.status(404).json({ error: 'TTL cleanup configuration not found' });
     }
 
     return res.status(200).json({ config: ttlConfig });
   } catch (error) {
-    logger.error(`[API] Error occurred retrieving TTL cleanup config: \n ${error}`);
+    getLogger().error({ error }, 'TTL: config retrieval failed');
     return res.status(500).json({ error: 'Unable to retrieve TTL cleanup configuration' });
   }
 }
 
 async function triggerTTLCleanup(req: NextApiRequest, res: NextApiResponse) {
-  try {
-    const { dryRun = false } = req.body || {};
+  const correlationId = `api-ttl-cleanup-${Date.now()}-${nanoid(8)}`;
 
-    // Validate dryRun parameter type
-    if (typeof dryRun !== 'boolean') {
-      return res.status(400).json({ error: 'dryRun must be a boolean value' });
+  return withLogContext({ correlationId }, async () => {
+    try {
+      const { dryRun = false } = req.body || {};
+
+      // Validate dryRun parameter type
+      if (typeof dryRun !== 'boolean') {
+        return res.status(400).json({ error: 'dryRun must be a boolean value' });
+      }
+
+      // Create new service instance and add job to queue
+      const ttlCleanupService = new TTLCleanupService();
+      const job = await ttlCleanupService.ttlCleanupQueue.add('manual-ttl-cleanup', { dryRun, correlationId });
+
+      getLogger({ stage: LogStage.CLEANUP_STARTING }).info(
+        `TTL: cleanup job triggered manually jobId=${job.id} dryRun=${dryRun}`
+      );
+
+      return res.status(200).json({
+        message: 'TTL cleanup job triggered successfully',
+        jobId: job.id,
+        dryRun,
+      });
+    } catch (error) {
+      getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'TTL: cleanup trigger failed');
+      return res.status(500).json({ error: 'Unable to trigger TTL cleanup job' });
     }
-
-    // Create new service instance and add job to queue
-    const ttlCleanupService = new TTLCleanupService();
-    const job = await ttlCleanupService.ttlCleanupQueue.add('manual-ttl-cleanup', { dryRun });
-
-    logger.info(`[API] TTL cleanup job triggered manually (job ID: ${job.id}, dryRun: ${dryRun})`);
-
-    return res.status(200).json({
-      message: 'TTL cleanup job triggered successfully',
-      jobId: job.id,
-      dryRun,
-    });
-  } catch (error) {
-    logger.error(`[API] Error occurred triggering TTL cleanup: \n ${error}`);
-    return res.status(500).json({ error: 'Unable to trigger TTL cleanup job' });
-  }
+  });
 }

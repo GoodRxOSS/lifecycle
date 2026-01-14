@@ -139,7 +139,7 @@ describe('GitHub Deployment Functions', () => {
     const error = new Error('Network error');
     mockOctokit.request.mockRejectedValue(error);
 
-    await expect(deleteGithubDeployment(mockDeploy)).rejects.toThrow('Network error');
+    await expect(deleteGithubDeployment(mockDeploy)).rejects.toThrow('GitHub API request failed');
     expect(mockOctokit.request).toHaveBeenCalledWith(
       `DELETE /repos/${mockDeploy.build.pullRequest.repository.fullName}/deployments/${mockDeploy.githubDeploymentId}`
     );

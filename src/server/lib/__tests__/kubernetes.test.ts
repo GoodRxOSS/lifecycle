@@ -19,15 +19,12 @@ import * as k8s from '../kubernetes';
 
 // Mock the logger to avoid console output during tests
 jest.mock('../logger', () => ({
-  __esModule: true,
-  default: {
-    child: () => ({
-      info: jest.fn(),
-      debug: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-    }),
-  },
+  getLogger: jest.fn(() => ({
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  })),
 }));
 
 describe('Kubernetes Node Placement', () => {

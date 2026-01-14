@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import { PullRequest, Repository } from 'server/models';
 import BaseService from './_service';
 import { UniqueViolationError } from 'objection';
@@ -33,10 +33,6 @@ export interface PullRequestOptions {
   githubLogin: string;
   branch: string;
 }
-
-const logger = rootLogger.child({
-  filename: 'services/pullRequest.ts',
-});
 
 export default class PullRequestService extends BaseService {
   /**
@@ -66,22 +62,19 @@ export default class PullRequestService extends BaseService {
         });
       } catch (error) {
         if (error instanceof UniqueViolationError) {
-          logger.info(
-            `[REPO]${fullName} [PR#]${pullRequestNumber} Pull request already exists, fetching existing record`
-          );
+          getLogger({ fullName, pullRequestNumber }).debug('PR: exists, fetching');
           pullRequest = await this.db.models.PullRequest.findOne({
             repositoryId: repository.id,
             githubPullRequestId,
           });
 
           if (!pullRequest) {
-            // should never happen, but just in case
             throw new Error(
               `Failed to find pull request after unique violation for repo ${repository.id}, PR ${githubPullRequestId}`
             );
           }
         } else {
-          logger.error(`[REPO]${fullName} [PR#]${pullRequestNumber} Failed to create pull request: ${error}`);
+          getLogger({ fullName, pullRequestNumber }).error({ error }, 'PR: create failed');
           throw error;
         }
       }
@@ -124,7 +117,10 @@ export default class PullRequestService extends BaseService {
       );
       return hasLabel;
     } catch (e) {
-      logger.error(`[REPO]${pullRequest.fullName} [PR NUM]${pullRequest.pullRequestNumber}: ${e}`);
+      getLogger({ fullName: pullRequest.fullName, pullRequestNumber: pullRequest.pullRequestNumber }).error(
+        { error: e },
+        'Failed to check lifecycle enabled for pull request'
+      );
       return true;
     }
   }
@@ -146,7 +142,10 @@ export default class PullRequestService extends BaseService {
       const hasState = response.data.state === state;
       return hasLabels && hasState;
     } catch (e) {
-      logger.error(`[REPO]${name} [PR ID]${githubPullRequestId}: ${e}`);
+      getLogger({ fullName: name, githubPullRequestId }).error(
+        { error: e },
+        'Failed to check pull request labels and state'
+      );
       return true;
     }
   }
@@ -161,12 +160,18 @@ export default class PullRequestService extends BaseService {
   });
 
   // eslint-disable-next-line no-unused-vars
-  processCleanupClosedPRs = async (_job) => {
-    try {
-      await this.db.services.BuildService.cleanupBuilds();
-    } catch (error) {
-      logger.error(`Error processing cleanup closed PRs:`, error);
-    }
+  processCleanupClosedPRs = async (job) => {
+    const { correlationId } = job.data || {};
+
+    return withLogContext({ correlationId: correlationId || `cleanup-${Date.now()}` }, async () => {
+      try {
+        getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Cleanup: processing closed PRs');
+        await this.db.services.BuildService.cleanupBuilds();
+        getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Cleanup: closed PRs completed');
+      } catch (error) {
+        getLogger({ stage: LogStage.CLEANUP_FAILED }).error({ error }, 'Cleanup: closed PRs processing failed');
+      }
+    });
   };
 
   /**
@@ -183,7 +188,10 @@ export default class PullRequestService extends BaseService {
       const response = await github
         .getPullRequestByRepositoryFullName(pullRequest.repository.fullName, pullRequest.pullRequestNumber)
         .catch((error) => {
-          logger.error(`${error}`);
+          getLogger({
+            fullName: pullRequest.repository.fullName,
+            pullRequestNumber: pullRequest.pullRequestNumber,
+          }).error({ error }, 'Failed to get pull request by repository full name');
           return null;
         });
 

@@ -15,7 +15,7 @@
  */
 
 import { IServices } from 'server/services/types';
-import rootLogger from '../lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { defaultDb, redisClient } from 'server/lib/dependencies';
 import RedisClient from 'server/lib/redisClient';
 import QueueManager from 'server/lib/queueManager';
@@ -23,16 +23,12 @@ import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, QUEUE_NAMES } from
 
 let isBootstrapped = false;
 
-const logger = rootLogger.child({
-  filename: 'jobs/index.ts',
-});
-
 export default function bootstrapJobs(services: IServices) {
   if (defaultDb.services) {
     return;
   }
 
-  logger.info(`Bootstrapping jobs...... Yes`);
+  getLogger().info('Jobs: bootstrapping');
   const queueManager = QueueManager.getInstance();
 
   queueManager.registerWorker(QUEUE_NAMES.WEBHOOK_PROCESSING, services.GithubService.processWebhooks, {
@@ -49,22 +45,6 @@ export default function bootstrapJobs(services: IServices) {
     },
   });
 
-  /* Run once per hour */
-  services.PullRequest.cleanupClosedPRQueue.add(
-    'cleanup',
-    {},
-    {
-      repeat: {
-        every: 60000 * 60, // Once an hour
-      },
-    }
-  );
-
-  queueManager.registerWorker(QUEUE_NAMES.CLEANUP, services.PullRequest.processCleanupClosedPRs, {
-    connection: redisClient.getConnection(),
-    concurrency: 1,
-  });
-
   services.GlobalConfig.setupCacheRefreshJob();
 
   queueManager.registerWorker(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, services.GlobalConfig.processCacheRefresh, {
@@ -79,8 +59,6 @@ export default function bootstrapJobs(services: IServices) {
     connection: redisClient.getConnection(),
     concurrency: 1,
   });
-
-  services.PullRequest.cleanupClosedPRQueue.add('cleanup', {}, {});
 
   queueManager.registerWorker(QUEUE_NAMES.INGRESS_MANIFEST, services.Ingress.createOrUpdateIngressForBuild, {
     connection: redisClient.getConnection(),
@@ -133,7 +111,7 @@ export default function bootstrapJobs(services: IServices) {
 
       // This function is used to handle graceful shutdowns add things as needed.
       const handleExit = async (signal: string) => {
-        logger.info(` ✍️Shutting down (${signal})`);
+        getLogger().info(`Jobs: shutting down signal=${signal}`);
         try {
           const redisClient = RedisClient.getInstance();
           const queueManager = QueueManager.getInstance();
@@ -141,15 +119,15 @@ export default function bootstrapJobs(services: IServices) {
           await redisClient.close();
           process.exit(0);
         } catch (error) {
-          logger.info(`Unable to shutdown gracefully: ${error}`);
+          getLogger().error({ error }, 'Jobs: shutdown failed');
           process.exit(0);
         }
       };
 
       process.on('SIGINT', () => handleExit('SIGINT'));
       process.on('SIGTERM', () => handleExit('SIGTERM'));
-      logger.info(' ✍️Signal handlers registered');
+      getLogger().info('Jobs: signal handlers registered');
     }
   }
-  logger.info('Bootstrapping complete');
+  getLogger().info('Jobs: bootstrap complete');
 }

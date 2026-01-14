@@ -17,7 +17,7 @@
 import { parse as fParse } from 'flatted';
 import _ from 'lodash';
 import Service from './_service';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
 import {
   GithubPullRequestActions,
@@ -34,10 +34,6 @@ import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
 import { enableKillSwitch, isStaging, hasDeployLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
-
-const logger = rootLogger.child({
-  filename: 'services/github.ts',
-});
 
 export default class GithubService extends Service {
   // Handle the pull request webhook mapping the entrance with webhook body
@@ -60,7 +56,7 @@ export default class GithubService extends Service {
       labels,
     },
   }: PullRequestEvent) {
-    logger.info(`[GITHUB ${fullName}/${branch}] Pull request ${action}`);
+    getLogger({}).info(`PR: ${action} repo=${fullName} branch=${branch}`);
     const isOpened = [GithubPullRequestActions.OPENED, GithubPullRequestActions.REOPENED].includes(
       action as GithubPullRequestActions
     );
@@ -79,16 +75,7 @@ export default class GithubService extends Service {
             isJSON: true,
           })) as LifecycleYamlConfigOptions;
         } catch (error) {
-          logger
-            .child({
-              action,
-              status,
-              branch,
-              branchSha,
-              fullName,
-              error,
-            })
-            .warn(`[GITHUB ${fullName}/${branch}][handlePullRequestHook] Unable to fetch lifecycle config`);
+          getLogger({}).warn({ error }, `Config: fetch failed repo=${fullName}/${branch}`);
         }
       }
       repository = await this.db.services.Repository.findRepository(ownerId, repositoryId, installationId);
@@ -153,6 +140,7 @@ export default class GithubService extends Service {
             action: 'enable',
             waitForComment: true,
             labels: labels.map((l) => l.name),
+            ...extractContextForQueue(),
           });
         }
       } else if (isClosed) {
@@ -160,7 +148,7 @@ export default class GithubService extends Service {
           pullRequestId,
         });
         if (!build) {
-          logger.warn(`[GITHUB ${fullName}/${branch}] No build found for closed pull request. Skipping deletion`);
+          getLogger({}).warn(`Build: not found for closed PR repo=${fullName}/${branch}`);
           return;
         }
         await this.db.services.BuildService.deleteBuild(build);
@@ -170,20 +158,11 @@ export default class GithubService extends Service {
           action: 'disable',
           waitForComment: false,
           labels: labels.map((l) => l.name),
+          ...extractContextForQueue(),
         });
       }
     } catch (error) {
-      logger
-        .child({
-          action,
-          status,
-          pullRequest,
-          environment,
-          repository,
-          error,
-          build,
-        })
-        .fatal(`[GITHUB ${fullName}/${branch}] Unable to handle Github pull request event: ${error}`);
+      getLogger().fatal({ error }, `Github: PR event handling failed repo=${fullName} branch=${branch}`);
     }
   }
 
@@ -202,16 +181,14 @@ export default class GithubService extends Service {
 
       if (!pullRequest || isBot) return;
       await pullRequest.$fetchGraph('[build, repository]');
-      logger.info(`[GITHUB ${pullRequest.build?.uuid}] Pull request comment edited by ${commentCreatorUsername}`);
-      await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
+      const buildUuid = pullRequest.build?.uuid;
+
+      return withLogContext({ buildUuid }, async () => {
+        getLogger().info(`PR: edited by=${commentCreatorUsername}`);
+        await this.db.services.ActivityStream.updateBuildsAndDeploysFromCommentEdit(pullRequest, body);
+      });
     } catch (error) {
-      logger
-        .child({
-          error,
-          pullRequest,
-          commentCreatorUsername,
-        })
-        .error(`Unable to handle Github Issue Comment event: ${error}`);
+      getLogger().error({ error }, `GitHub: issue comment handling failed`);
     }
   };
 
@@ -220,7 +197,7 @@ export default class GithubService extends Service {
       action,
       pull_request: { id: githubPullRequestId, labels, state: status },
     } = body;
-    let pullRequest: PullRequest, build: Build, repository: Repository;
+    let pullRequest: PullRequest, build: Build, _repository: Repository;
     try {
       // this is a hacky way to force deploy by adding a label
       const labelNames = labels.map(({ name }) => name.toLowerCase()) || [];
@@ -238,7 +215,7 @@ export default class GithubService extends Service {
 
       await pullRequest.$fetchGraph('[build, repository]');
       build = pullRequest?.build;
-      repository = pullRequest?.repository;
+      _repository = pullRequest?.repository;
       await this.patchPullRequest({
         pullRequest,
         labels,
@@ -246,11 +223,7 @@ export default class GithubService extends Service {
         status,
         autoDeploy: false,
       });
-      logger.info(
-        `[BUILD ${build?.uuid}] Patched pull request with labels(${action}) ${
-          labels.length ? `: ${labels.map(({ name }) => name).join(', ')}` : ''
-        }`
-      );
+      getLogger().info(`Label: ${action} labels=[${labels.map(({ name }) => name).join(',')}]`);
 
       if (pullRequest.deployOnUpdate === false) {
         // when pullRequest.deployOnUpdate is false, it means that there is no `lifecycle-deploy!` label
@@ -260,22 +233,14 @@ export default class GithubService extends Service {
 
       const buildId = build?.id;
       if (!buildId) {
-        logger
-          .child({ build })
-          .error(`[BUILD ${build?.uuid}][handleLabelWebhook][buidIdError] No build ID found for this pull request!`);
+        getLogger().error(`Build: id not found for=handleLabelWebhook`);
       }
       await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId,
+        ...extractContextForQueue(),
       });
     } catch (error) {
-      logger
-        .child({
-          build,
-          pullRequest,
-          repository,
-          error,
-        })
-        .error(`[BUILD ${build?.uuid}][handleLabelWebhook] Error processing label webhook`);
+      getLogger().error({ error }, `Label: webhook processing failed`);
     }
   };
 
@@ -284,7 +249,7 @@ export default class GithubService extends Service {
     const branchName = ref.split('refs/heads/')[1];
     if (!branchName) return;
     const hasVoidCommit = [previousCommit, latestCommit].some((commit) => this.isVoidCommit(commit));
-    logger.debug(`[GITHUB] Push event repo ${repoName}, branch ${branchName}`);
+    getLogger({}).debug(`Push event repo=${repoName} branch=${branchName}`);
     const models = this.db.models;
 
     try {
@@ -331,7 +296,7 @@ export default class GithubService extends Service {
       for (const build of buildsToDeploy) {
         const buildId = build?.id;
         if (!buildId) {
-          logger.error(`[BUILD ${build?.uuid}][handlePushWebhook][buidIdError] No build ID found for this build!`);
+          getLogger().error(`Build: id not found for=handlePushWebhook`);
         }
         // Only check for failed deploys on PR environments, not static environments
         let hasFailedDeploys = false;
@@ -344,23 +309,24 @@ export default class GithubService extends Service {
           hasFailedDeploys = failedDeploys.length > 0;
 
           if (hasFailedDeploys) {
-            logger.info(
-              `[BUILD ${build?.uuid}] Detected ${failedDeploys.length} failed deploy(s). Triggering full redeploy for push on repo: ${repoName} branch: ${branchName}`
+            getLogger().info(
+              `Push: redeploying reason=failedDeploys count=${failedDeploys.length} repo=${repoName} branch=${branchName}`
             );
           }
         }
 
         if (!hasFailedDeploys) {
-          logger.info(`[BUILD ${build?.uuid}] Deploying build for push on repo: ${repoName} branch: ${branchName}`);
+          getLogger().info(`Push: deploying repo=${repoName} branch=${branchName}`);
         }
 
         await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
           buildId,
           ...(hasFailedDeploys ? {} : { githubRepositoryId }),
+          ...extractContextForQueue(),
         });
       }
     } catch (error) {
-      logger.error(`[GITHUB] Error processing push webhook: ${error}`);
+      getLogger({}).error({ error }, `Push: webhook processing failed`);
     }
   };
 
@@ -397,13 +363,15 @@ export default class GithubService extends Service {
 
       if (!build) return;
 
-      logger.info(`[BUILD ${build?.uuid}] Redeploying static env for push on branch`);
+      getLogger().info(`Push: redeploying reason=staticEnv`);
       await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
         buildId: build?.id,
+        ...extractContextForQueue(),
       });
     } catch (error) {
-      logger.error(
-        `[GITHUB] Error processing push webhook for static env for branch: ${branchName} at repository id: ${githubRepositoryId}.\n Error: ${error}`
+      getLogger({}).error(
+        { error },
+        `Push: static env webhook failed branch=${branchName} repositoryId=${githubRepositoryId}`
       );
     }
   };
@@ -412,7 +380,7 @@ export default class GithubService extends Service {
     const { body } = req;
     const type = req.headers['x-github-event'];
 
-    logger.debug(`***** Incoming Github Webhook: ${type} *****`);
+    getLogger({}).debug(`Incoming Github Webhook type=${type}`);
 
     const isVerified = github.verifyWebhookSignature(req);
     if (!isVerified) {
@@ -424,28 +392,28 @@ export default class GithubService extends Service {
         try {
           const labelNames = body.pull_request.labels.map(({ name }) => name.toLowerCase()) || [];
           if (isStaging() && !labelNames.includes(FallbackLabels.DEPLOY_STG)) {
-            logger.debug(`[GITHUB] STAGING RUN DETECTED - Skipping processing of this event`);
+            getLogger({}).debug(`Staging run detected, skipping processing of this event`);
             return;
           }
           const hasLabelChange = [GithubWebhookTypes.LABELED, GithubWebhookTypes.UNLABELED].includes(body.action);
           if (hasLabelChange) return await this.handleLabelWebhook(body);
           else return await this.handlePullRequestHook(body);
         } catch (e) {
-          logger.error(`There is problem when handling PULL_REQUEST event: ${e}`);
+          getLogger({}).error({ error: e }, `GitHub: PULL_REQUEST event handling failed`);
           throw e;
         }
       case GithubWebhookTypes.PUSH:
         try {
           return await this.handlePushWebhook(body);
         } catch (e) {
-          logger.error(`There is problem when handling PUSH event: ${e}`);
+          getLogger({}).error({ error: e }, `GitHub: PUSH event handling failed`);
           throw e;
         }
       case GithubWebhookTypes.ISSUE_COMMENT:
         try {
           return await this.handleIssueCommentWebhook(body);
         } catch (e) {
-          logger.error(`There is problem when handling ISSUE_COMMENT event: ${e}`);
+          getLogger({}).error({ error: e }, `GitHub: ISSUE_COMMENT event handling failed`);
           throw e;
         }
       default:
@@ -462,11 +430,16 @@ export default class GithubService extends Service {
   });
 
   processWebhooks = async (job) => {
-    try {
-      await this.db.services.GithubService.dispatchWebhook(fParse(job.data.message));
-    } catch (error) {
-      logger.error(`Error processing webhook:`, error);
-    }
+    const { correlationId, sender, message, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      try {
+        getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).debug('Webhook: processing');
+        await this.db.services.GithubService.dispatchWebhook(fParse(message));
+      } catch (error) {
+        getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).fatal({ error }, 'Error processing webhook');
+      }
+    });
   };
 
   githubDeploymentQueue = this.queueManager.registerQueue(QUEUE_NAMES.GITHUB_DEPLOYMENT, {
@@ -478,26 +451,34 @@ export default class GithubService extends Service {
   });
 
   processGithubDeployment = async (job) => {
-    // This queue has 3 attempts configured, so errors will cause retries
-    const { deployId, action } = job.data;
-    const text = `[DEPLOYMENT ${deployId}][processGithubDeployment] ${action}`;
-    const deploy = await this.db.models.Deploy.query().findById(deployId);
-    try {
-      switch (action) {
-        case 'create': {
-          await createOrUpdateGithubDeployment(deploy);
-          break;
+    const { deployId, action, sender, correlationId, _ddTraceContext } = job.data;
+
+    return withLogContext({ correlationId, sender, _ddTraceContext, deployUuid: String(deployId) }, async () => {
+      const deploy = await this.db.models.Deploy.query().findById(deployId);
+      try {
+        getLogger({ stage: LogStage.DEPLOY_STARTING }).debug(`GitHub deployment: ${action}`);
+
+        switch (action) {
+          case 'create': {
+            await createOrUpdateGithubDeployment(deploy);
+            break;
+          }
+          case 'delete': {
+            await deleteGithubDeploymentAndEnvironment(deploy);
+            break;
+          }
+          default:
+            throw new Error(`Unknown action: ${action}`);
         }
-        case 'delete': {
-          await deleteGithubDeploymentAndEnvironment(deploy);
-          break;
-        }
-        default:
-          throw new Error(`Unknown action: ${action}`);
+
+        getLogger({ stage: LogStage.DEPLOY_COMPLETE }).debug(`GitHub deployment: ${action} completed`);
+      } catch (error) {
+        getLogger({ stage: LogStage.DEPLOY_FAILED }).warn(
+          { error },
+          `Error processing GitHub deployment job=${job?.id} action=${action}`
+        );
       }
-    } catch (error) {
-      logger.child({ error }).warn(`${text} Error processing job ${job?.id} with action ${action}`);
-    }
+    });
   };
 
   private patchPullRequest = async ({ pullRequest, labels, action, status, autoDeploy = false }) => {
@@ -523,15 +504,7 @@ export default class GithubService extends Service {
         labels: JSON.stringify(labelNames),
       });
     } catch (error) {
-      logger
-        .child({
-          error,
-          pullRequest,
-          labels,
-          action,
-          status,
-        })
-        .error(`[BUILD][patchPullRequest] Error patching pull request for ${pullRequest?.fullName}/${branch}`);
+      getLogger().error({ error }, `PR: patch failed repo=${pullRequest?.fullName}/${branch}`);
     }
   };
 

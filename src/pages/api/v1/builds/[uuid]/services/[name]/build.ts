@@ -15,17 +15,13 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import rootLogger from 'server/lib/logger';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import GithubService from 'server/services/github';
 import { Build } from 'server/models';
 import DeployService from 'server/services/deploy';
 import { DeployStatus } from 'shared/constants';
 import { nanoid } from 'nanoid';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/services/[name]/build.ts',
-});
 
 /**
  * @openapi
@@ -102,59 +98,69 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   const { uuid, name } = req.query;
+  const correlationId = `api-service-redeploy-${Date.now()}-${nanoid(8)}`;
 
-  try {
-    const githubService = new GithubService();
-    const build: Build = await githubService.db.models.Build.query()
-      .findOne({
-        uuid,
-      })
-      .withGraphFetched('deploys.deployable');
+  return withLogContext({ correlationId, buildUuid: uuid as string }, async () => {
+    try {
+      const githubService = new GithubService();
+      const build: Build = await githubService.db.models.Build.query()
+        .findOne({
+          uuid,
+        })
+        .withGraphFetched('deploys.deployable');
 
-    const buildId = build.id;
+      const buildId = build.id;
 
-    if (!build) {
-      logger.info(`Build with UUID ${uuid} not found`);
-      return res.status(404).json({ error: `Build not found for ${uuid}` });
+      if (!build) {
+        getLogger().debug(`Build not found`);
+        return res.status(404).json({ error: `Build not found for ${uuid}` });
+      }
+
+      const deploy = build.deploys.find((deploy) => deploy.deployable.name === name);
+
+      if (!deploy) {
+        getLogger().debug(`Deployable not found: service=${name}`);
+        res.status(404).json({ error: `${name} service is not found in ${uuid} build.` });
+        return;
+      }
+
+      const githubRepositoryId = deploy.deployable.repositoryId;
+
+      const runUUID = nanoid();
+      const buildService = new BuildService();
+      await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+        buildId,
+        githubRepositoryId,
+        runUUID,
+        ...extractContextForQueue(),
+      });
+
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: service redeploy queued service=${name}`);
+
+      const deployService = new DeployService();
+
+      await deploy.$query().patchAndFetch({
+        runUUID,
+      });
+
+      await deployService.patchAndUpdateActivityFeed(
+        deploy,
+        {
+          status: DeployStatus.QUEUED,
+        },
+        runUUID,
+        githubRepositoryId
+      );
+      return res.status(200).json({
+        status: 'success',
+        message: `Redeploy for service ${name} in build ${uuid} has been queued`,
+      });
+    } catch (error) {
+      getLogger({ stage: LogStage.BUILD_FAILED }).error(
+        { error },
+        `Unable to proceed with redeploy for services ${name} in build ${uuid}`
+      );
+      return res.status(500).json({ error: `Unable to proceed with redeploy for services ${name} in build ${uuid}.` });
     }
-
-    const deploy = build.deploys.find((deploy) => deploy.deployable.name === name);
-
-    if (!deploy) {
-      logger.info(`Deployable ${name} not found in build ${uuid}`);
-      res.status(404).json({ error: `${name} service is not found in ${uuid} build.` });
-      return;
-    }
-
-    const githubRepositoryId = deploy.deployable.repositoryId;
-
-    const runUUID = nanoid();
-    const buildService = new BuildService();
-    await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
-      buildId,
-      githubRepositoryId,
-      runUUID,
-    });
-
-    const deployService = new DeployService();
-
-    await deploy.$query().patchAndFetch({
-      runUUID,
-    });
-
-    await deployService.patchAndUpdateActivityFeed(
-      deploy,
-      {
-        status: DeployStatus.QUEUED,
-      },
-      runUUID
-    );
-    return res.status(200).json({
-      status: 'success',
-      message: `Redeploy for service ${name} in build ${uuid} has been queued`,
-    });
-  } catch (error) {
-    logger.error(`Unable to proceed with redeploy for services ${name} in build ${uuid}. Error: \n ${error}`);
-    return res.status(500).json({ error: `Unable to proceed with redeploy for services ${name} in build ${uuid}.` });
-  }
+  });
 };

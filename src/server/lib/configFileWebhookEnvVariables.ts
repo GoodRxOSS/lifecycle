@@ -16,13 +16,9 @@
 
 import { EnvironmentVariables } from 'server/lib/envVariables';
 import { Build } from 'server/models';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { Webhook } from 'server/models/yaml';
 import { FeatureFlags } from 'shared/constants';
-
-const logger = rootLogger.child({
-  filename: 'lib/configFileWebhookEnvVariables.ts',
-});
 
 export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables {
   /**
@@ -58,7 +54,7 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
 
       await build?.$fetchGraph('[services, deploys.service.repository]');
     } else {
-      logger.fatal("Build and Webhook shouldn't be undefined.");
+      getLogger().fatal('Webhook: build and webhook undefined');
     }
 
     return result;

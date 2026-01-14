@@ -16,13 +16,9 @@
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { generateGraph } from 'server/lib/dependencyGraph';
-import rootLogger from 'server/lib/logger';
+import { getLogger, withLogContext } from 'server/lib/logger';
 import { Build } from 'server/models';
 import BuildService from 'server/services/build';
-
-const logger = rootLogger.child({
-  filename: 'builds/[uuid]/graph.ts',
-});
 
 /**
  * @openapi
@@ -88,30 +84,31 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
   const { uuid } = req.query;
 
-  try {
-    const buildService = new BuildService();
+  return withLogContext({ buildUuid: uuid as string }, async () => {
+    try {
+      const buildService = new BuildService();
 
-    const build: Build = await buildService.db.models.Build.query()
-      .findOne({
-        uuid,
-      })
-      .withGraphFetched('[deploys.deployable, deployables]');
+      const build: Build = await buildService.db.models.Build.query()
+        .findOne({
+          uuid,
+        })
+        .withGraphFetched('[deploys.deployable, deployables]');
 
-    if (Object.keys(build.dependencyGraph).length === 0) {
-      // generate the graph if it does not exist
-      const dependencyGraph = await generateGraph(build, 'TB');
-      await build.$query().patchAndFetch({
-        dependencyGraph,
+      if (Object.keys(build.dependencyGraph).length === 0) {
+        const dependencyGraph = await generateGraph(build, 'TB');
+        await build.$query().patchAndFetch({
+          dependencyGraph,
+        });
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        message: `Dependency  graph for ${uuid} returned.`,
+        dependencyGraph: build.dependencyGraph,
       });
+    } catch (error) {
+      getLogger().error({ error }, 'Build: dependency graph fetch failed');
+      res.status(500).json({ error: 'An unexpected error occurred.' });
     }
-
-    return res.status(200).json({
-      status: 'success',
-      message: `Dependency  graph for ${uuid} returned.`,
-      dependencyGraph: build.dependencyGraph,
-    });
-  } catch (error) {
-    logger.error(`Eorror fetching dependency graph for ${uuid}: ${error}`);
-    res.status(500).json({ error: 'An unexpected error occurred.' });
-  }
+  });
 };

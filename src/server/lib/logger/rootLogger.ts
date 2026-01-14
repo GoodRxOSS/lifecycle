@@ -16,7 +16,7 @@
 
 import pino from 'pino';
 import pinoCaller from 'pino-caller';
-import { LOG_LEVEL } from '../../shared/config';
+import { LOG_LEVEL } from '../../../shared/config';
 
 export const enabled = process.env.PINO_LOGGER === 'false' ? false : true;
 export const level = LOG_LEVEL || 'info';
@@ -31,9 +31,32 @@ const transport = {
   },
 };
 
+const serializers = {
+  error: (value: unknown): Record<string, unknown> | string => {
+    if (value instanceof Error) {
+      return {
+        type: value.name,
+        message: value.message,
+        stack: value.stack,
+        ...((value as any).code && { code: (value as any).code }),
+        ...((value as any).statusCode && { statusCode: (value as any).statusCode }),
+      };
+    }
+    if (typeof value === 'object' && value !== null) {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return '[Unserializable Object]';
+      }
+    }
+    return String(value);
+  },
+};
+
 let rootLogger = pino({
   level,
   enabled,
+  serializers,
   ...(pinoPretty ? transport : {}),
 });
 

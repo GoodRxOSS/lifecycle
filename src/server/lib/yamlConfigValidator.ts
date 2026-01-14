@@ -19,11 +19,7 @@ import { LifecycleError } from './errors';
 import JsonSchema from 'jsonschema';
 import { BuildStatus, CAPACITY_TYPE, DiskAccessMode } from 'shared/constants';
 import { schema_1_0_0 } from './yamlSchemas';
-import rootLogger from 'server/lib/logger';
-
-const logger = rootLogger.child({
-  filename: 'models/yaml/YamlService.ts',
-});
+import { getLogger } from 'server/lib/logger';
 
 export class ValidationError extends LifecycleError {
   constructor(msg: string, uuid: string = null, service: string = null) {
@@ -89,7 +85,7 @@ export class YamlConfigValidator {
       throw new ValidationError('Config file is empty.');
     }
 
-    logger.debug(`Validating config file with version: ${version}`);
+    getLogger().debug(`Config: validating version=${version}`);
     switch (version.toLowerCase()) {
       case '1.0.0':
       case 'latest':

@@ -17,7 +17,7 @@
 import JsonSchema from 'jsonschema';
 import { Tool, ToolResult, ToolSafetyLevel } from '../types/tool';
 import { StreamCallbacks } from '../types/stream';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 
 export class ToolSafetyManager {
   private requireConfirmation: boolean;
@@ -35,13 +35,13 @@ export class ToolSafetyManager {
     signal?: AbortSignal,
     buildUuid?: string
   ): Promise<ToolResult> {
-    const logger = buildUuid
-      ? rootLogger.child({ component: 'AIAgentSafetyManager', buildUuid })
-      : rootLogger.child({ component: 'AIAgentSafetyManager' });
-
     const validation = this.validateArgs(tool.parameters, args);
     if (!validation.valid) {
-      logger.warn(`Tool ${tool.name} failed validation:`, validation.errors);
+      getLogger().warn(
+        `AI: validation failed tool=${tool.name} errors=${validation.errors.join(', ')} buildUuid=${
+          buildUuid || 'none'
+        }`
+      );
       return {
         success: false,
         error: {
@@ -57,7 +57,7 @@ export class ToolSafetyManager {
 
       if (confirmDetails) {
         if (!callbacks.onToolConfirmation) {
-          logger.error(`Tool ${tool.name} requires confirmation but no confirmation callback provided`);
+          getLogger().error(`AI: confirmation callback missing tool=${tool.name} buildUuid=${buildUuid || 'none'}`);
           return {
             success: false,
             error: {
@@ -91,7 +91,7 @@ export class ToolSafetyManager {
       return result;
     } catch (error: any) {
       if (error.message === 'Tool execution timeout') {
-        logger.warn(`Tool ${tool.name} timed out after 30 seconds`);
+        getLogger().warn(`AI: tool timeout tool=${tool.name} timeout=30s buildUuid=${buildUuid || 'none'}`);
         return {
           success: false,
           error: {
@@ -103,7 +103,9 @@ export class ToolSafetyManager {
         };
       }
 
-      logger.error(`Tool ${tool.name} execution error:`, error);
+      getLogger().error(
+        `AI: tool execution failed tool=${tool.name} error=${error?.message} buildUuid=${buildUuid || 'none'}`
+      );
       return {
         success: false,
         error: {
@@ -150,13 +152,11 @@ export class ToolSafetyManager {
 
   private logToolExecution(name: string, args: Record<string, unknown>, result: ToolResult, buildUuid?: string): void {
     if (!result.success && !result.error?.recoverable) {
-      const logger = buildUuid
-        ? rootLogger.child({ component: 'AIAgentSafetyManager', buildUuid })
-        : rootLogger.child({ component: 'AIAgentSafetyManager' });
-      logger.error(`Tool ${name} failed with non-recoverable error: ${result.error?.message}`, {
-        errorCode: result.error?.code,
-        recoverable: result.error?.recoverable,
-      });
+      getLogger().error(
+        `AI: non-recoverable tool error tool=${name} error=${result.error?.message} errorCode=${
+          result.error?.code
+        } buildUuid=${buildUuid || 'none'}`
+      );
     }
   }
 }

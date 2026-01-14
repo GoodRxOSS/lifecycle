@@ -15,7 +15,7 @@
  */
 
 import { LLMProvider, Message, StreamChunk } from '../types/provider';
-import rootLogger from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 
 export interface ConversationState {
   summary: string;
@@ -41,10 +41,7 @@ export class ConversationManager {
   }
 
   async compress(messages: Message[], llmProvider: LLMProvider, buildUuid?: string): Promise<ConversationState> {
-    const logger = buildUuid
-      ? rootLogger.child({ component: 'AIAgentConversationManager', buildUuid })
-      : rootLogger.child({ component: 'AIAgentConversationManager' });
-    logger.info(`Starting conversation compression for ${messages.length} messages`);
+    getLogger().info(`AI: compression starting messageCount=${messages.length} buildUuid=${buildUuid || 'none'}`);
     const compressionPrompt = `
 Analyze this debugging conversation and create a structured summary.
 
@@ -79,8 +76,8 @@ ${this.formatMessages(messages)}
     state.messageCount = messages.length;
     state.compressionLevel = 1;
 
-    logger.info(
-      `Compression complete: ${messages.length} messages -> ${state.tokenCount} tokens, identified ${state.identifiedIssues.length} issues, investigated ${state.investigatedServices.length} services`
+    getLogger().info(
+      `AIAgentConversationManager: compression complete messageCount=${messages.length} tokenCount=${state.tokenCount} issueCount=${state.identifiedIssues.length} serviceCount=${state.investigatedServices.length}`
     );
 
     return state;
