@@ -282,6 +282,69 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         /**
          * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/services/{name}/pods
+         */
+        GetDeploymentPodsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    pods: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DeploymentPodInfo' },
+                    },
+                  },
+                  required: ['pods'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description Information about a deployment pod.
+         */
+        DeploymentPodInfo: {
+          type: 'object',
+          properties: {
+            podName: { type: 'string' },
+            status: { type: 'string' },
+            restarts: { type: 'integer' },
+            ageSeconds: { type: 'integer' },
+            age: { type: 'string' },
+            ready: { type: 'boolean' },
+            containers: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/DeploymentPodContainerInfo' },
+            },
+          },
+          required: ['podName', 'status', 'restarts', 'ageSeconds', 'age', 'ready', 'containers'],
+        },
+
+        /**
+         * @description Information about a container within a deployment pod.
+         */
+        DeploymentPodContainerInfo: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            image: { type: 'string', nullable: true },
+            ready: { type: 'boolean' },
+            restarts: { type: 'integer' },
+            state: { type: 'string' },
+            reason: { type: 'string', nullable: true },
+            isInit: { type: 'boolean' },
+          },
+          required: ['name', 'ready', 'restarts', 'state', 'isInit'],
+        },
+
+        /**
+         * @description The specific success response for
          * GET /api/v2/builds/{uuid}/services/{name}/deploy-jobs
          */
         GetDeployLogsSuccessResponse: {
