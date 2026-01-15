@@ -170,15 +170,34 @@ export default class BuildService extends BaseService {
     const build = await this.db.models.Build.query()
       .findOne({ uuid })
       .select('id', 'uuid', 'status', 'namespace', 'manifest', 'sha', 'createdAt', 'updatedAt', 'dependencyGraph')
-      .withGraphFetched('[pullRequest, deploys.[deployable]]')
+      .withGraphFetched('[pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {
         b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
       })
       .modifyGraph('deploys', (b) => {
-        b.select('id', 'uuid', 'status', 'active', 'deployableId', 'branchName', 'publicUrl');
+        b.select(
+          'id',
+          'uuid',
+          'status',
+          'statusMessage',
+          'active',
+          'deployableId',
+          'branchName',
+          'publicUrl',
+          'dockerImage',
+          'buildLogs',
+          'createdAt',
+          'updatedAt',
+          'sha',
+          'initDockerImage',
+          'initEnv'
+        );
       })
       .modifyGraph('deploys.deployable', (b) => {
-        b.select('name');
+        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr');
+      })
+      .modifyGraph('deploys.repository', (b) => {
+        b.select('fullName');
       });
 
     return build;
