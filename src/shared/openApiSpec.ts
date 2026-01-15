@@ -1,5 +1,5 @@
 import { OAS3Options } from 'swagger-jsdoc';
-import { BuildStatus, DeployStatus } from './constants';
+import { BuildStatus, DeployStatus, DeployTypes } from './constants';
 
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
@@ -445,8 +445,24 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             name: { type: 'string', example: 'web' },
+            type: { type: 'string', enum: Object.values(DeployTypes) },
+            dockerfilePath: { type: 'string', example: 'Dockerfile' },
+            deploymentDependsOn: { type: 'string', example: '{redis}' },
+            builder: { type: 'json' },
+            ecr: { type: 'string', example: '123456789012.dkr.ecr.us-west-2.amazonaws.com/myapp' },
           },
-          required: ['name'],
+          required: ['name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr'],
+        },
+
+        /**
+         * @description The Repository associated with a Deploy.
+         */
+        Repository: {
+          type: 'object',
+          properties: {
+            fullName: { type: 'string', example: 'goodrx/lifecycle' },
+          },
+          required: ['fullName'],
         },
 
         /**
@@ -466,13 +482,40 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             id: { type: 'integer' },
             uuid: { type: 'string', example: 'deploy-uuid' },
             status: { $ref: '#/components/schemas/DeployStatus' },
+            statusMessage: { type: 'string', example: 'Deployment in progress' },
+            dockerImage: { type: 'string', example: 'myapp:web' },
+            buildLogs: { type: 'string', example: 'https://g.codefresh.io/build/123...' },
             active: { type: 'boolean', example: true },
             branchName: { type: 'string', example: 'main' },
             publicUrl: { type: 'string', example: 'http://myapp.example.com' },
             deployableId: { type: 'integer' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+            sha: { type: 'string', example: 'a1b2c3d4e5f6g7h8i9j0' },
+            initEnv: { type: 'json' },
+            initDockerImage: { type: 'string', example: 'node:14-alpine' },
             deployable: { $ref: '#/components/schemas/Deployable' },
+            repository: { $ref: '#/components/schemas/Repository' },
           },
-          required: ['id', 'uuid', 'status', 'active', 'deployableId', 'deployable'],
+          required: [
+            'id',
+            'uuid',
+            'status',
+            'statusMessage',
+            'dockerImage',
+            'buildLogs',
+            'active',
+            'branchName',
+            'publicUrl',
+            'deployableId',
+            'deployable',
+            'repository',
+            'createdAt',
+            'updatedAt',
+            'sha',
+            'initEnv',
+            'initDockerImage',
+          ],
         },
 
         /**
