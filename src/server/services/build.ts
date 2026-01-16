@@ -189,12 +189,11 @@ export default class BuildService extends BaseService {
           'createdAt',
           'updatedAt',
           'sha',
-          'initDockerImage',
-          'initEnv'
+          'initDockerImage'
         );
       })
       .modifyGraph('deploys.deployable', (b) => {
-        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr');
+        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr', 'grpc');
       })
       .modifyGraph('deploys.repository', (b) => {
         b.select('fullName');
