@@ -448,8 +448,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             type: { type: 'string', enum: Object.values(DeployTypes) },
             dockerfilePath: { type: 'string', example: 'Dockerfile' },
             deploymentDependsOn: { type: 'string', example: '{redis}' },
-            builder: { type: 'string', example: 'docker' },
+            builder: {
+              type: 'object',
+              properties: {
+                engine: { type: 'string', example: 'buildkit' },
+              },
+            },
             ecr: { type: 'string', example: '123456789012.dkr.ecr.us-west-2.amazonaws.com/myapp' },
+            grpc: { type: 'boolean', example: true },
           },
           required: ['name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr'],
         },
@@ -492,7 +498,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
             sha: { type: 'string', example: 'a1b2c3d4e5f6g7h8i9j0' },
-            initEnv: { type: 'string', example: 'NODE_ENV=production' },
             initDockerImage: { type: 'string', example: 'node:14-alpine' },
             deployable: { $ref: '#/components/schemas/Deployable' },
             repository: { $ref: '#/components/schemas/Repository' },
