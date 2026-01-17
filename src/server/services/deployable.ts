@@ -94,6 +94,7 @@ export interface DeployableAttributes {
   deploymentDependsOn?: string[];
   kedaScaleToZero?: KedaScaleToZero;
   builder?: Builder;
+  envLens?: boolean;
   nodeSelector?: Record<string, string>;
   nodeAffinity?: Record<string, unknown>;
 }
@@ -376,6 +377,7 @@ export default class DeployableService extends BaseService {
           deploymentDependsOn: service.deploymentDependsOn || [],
           kedaScaleToZero: kedaScaleToZero?.enabled ? YamlService.getScaleToZeroConfig(service) : null,
           builder: YamlService.getBuilder(service) ?? {},
+          envLens: YamlService.getEnvLens(service),
         };
       }
     } catch (error) {

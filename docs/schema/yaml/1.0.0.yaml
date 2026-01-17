@@ -528,6 +528,8 @@ services:
         # @param services.github.deployment.node_affinity
         node_affinity:
 
+      # @param services.github.envLens
+      envLens: false
     # @param services.docker
     docker:
       # @param services.docker.dockerImage (required)
@@ -667,6 +669,8 @@ services:
         # @param services.docker.deployment.node_affinity
         node_affinity:
 
+      # @param services.docker.envLens
+      envLens: false
     # @param services.externalHttp
     externalHttp:
       # @param services.externalHttp.defaultInternalHostname (required)

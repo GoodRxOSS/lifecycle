@@ -37,6 +37,7 @@ export default class Deployable extends Service {
   deploymentDependsOn: string[];
   kedaScaleToZero: KedaScaleToZero;
   builder: Builder;
+  envLens?: boolean;
 
   static relationMappings = {
     environment: {
