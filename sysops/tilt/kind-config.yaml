@@ -16,8 +16,10 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 containerdConfigPatches:
   - |-
-    [plugins."io.containerd.grpc.v1.cri".registry.configs."10.96.188.230:5000".tls]
-      plain_http = true
-      insecure_skip_verify = true
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."10.96.188.230:5000"]
-      endpoint = ["http://10.96.188.230:5000"]
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /tmp/kind-registry-config
+        containerPath: /etc/containerd/certs.d

@@ -1,0 +1,80 @@
+[tools]
+node = "20"
+pnpm = "9.15.0"
+kubectl = "latest"
+helm = "latest"
+kind = "latest"
+tilt = "latest"
+
+[env]
+_.path = ["./node_modules/.bin"]
+
+[tasks.dev]
+description = "Set up kind cluster and run tilt"
+run = """
+#!/usr/bin/env bash
+set -e
+
+CLUSTER_NAME="lfc"
+REGISTRY_CONFIG_DIR="/tmp/kind-registry-config/10.96.188.230:5000"
+
+echo "Setting up registry config for containerd..."
+mkdir -p "$REGISTRY_CONFIG_DIR"
+cat > "$REGISTRY_CONFIG_DIR/hosts.toml" << 'EOF'
+server = "http://10.96.188.230:5000"
+
+[host."http://10.96.188.230:5000"]
+  capabilities = ["pull", "resolve", "push"]
+  skip_verify = true
+EOF
+
+if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+  echo "Kind cluster '$CLUSTER_NAME' already exists"
+else
+  echo "Creating kind cluster '$CLUSTER_NAME'..."
+  kind create cluster --config sysops/tilt/kind-config.yaml --name "$CLUSTER_NAME"
+fi
+
+echo "Switching kubectl context to kind-$CLUSTER_NAME..."
+kubectl config use-context "kind-$CLUSTER_NAME"
+
+echo "Starting tilt..."
+tilt up
+"""
+
+[tasks.down]
+description = "Stop tilt (cluster remains)"
+run = """
+#!/usr/bin/env bash
+set -e
+
+echo "Stopping tilt..."
+tilt down
+
+echo "Tilt stopped. Kind cluster 'lfc' is still running."
+echo "Run 'mise run clean' to delete the cluster."
+"""
+
+[tasks.clean]
+description = "Delete kind cluster and clean up"
+run = """
+#!/usr/bin/env bash
+set -e
+
+CLUSTER_NAME="lfc"
+
+echo "Stopping tilt (if running)..."
+tilt down 2>/dev/null || true
+
+if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+  echo "Deleting kind cluster '$CLUSTER_NAME'..."
+  kind delete cluster --name "$CLUSTER_NAME"
+else
+  echo "Kind cluster '$CLUSTER_NAME' does not exist"
+fi
+
+echo "Cleaning up registry config..."
+rm -rf /tmp/kind-registry-config
+
+echo "Cleanup complete."
+"""
