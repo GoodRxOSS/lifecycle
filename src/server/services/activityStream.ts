@@ -419,18 +419,6 @@ export default class ActivityStream extends BaseService {
       }
 
       if (updateStatus || updateMissionControl) {
-        const deploysForGithubDeployment = targetGithubRepositoryId
-          ? deploys.filter((d) => d.githubRepositoryId === targetGithubRepositoryId)
-          : deploys;
-
-        if (targetGithubRepositoryId) {
-          getLogger().info(
-            `Deploy: filtered deployCount=${deploysForGithubDeployment.length} totalCount=${deploys.length} targetRepoId=${targetGithubRepositoryId}`
-          );
-        }
-
-        await this.manageDeployments(build, deploysForGithubDeployment);
-
         const isControlEnabled = await isControlCommentsEnabled();
         if (isControlEnabled) {
           await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
@@ -928,7 +916,7 @@ export default class ActivityStream extends BaseService {
     }
     message += '\n';
 
-    await build?.$fetchGraph('[deploys.[service, deployable]]');
+    await build?.$fetchGraph('[deploys.[service, deployable.repository]]');
     deploys = build.deploys;
 
     const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
@@ -1049,7 +1037,7 @@ export default class ActivityStream extends BaseService {
     message += '| Service | Branch | Link |\n';
     message += '|---|---|---|\n';
 
-    await build?.$fetchGraph('[deploys.[service, deployable]]');
+    await build?.$fetchGraph('[deploys.[service, deployable.repository]]');
 
     let { deploys } = build;
     if (deploys.length > 1) {
@@ -1131,50 +1119,6 @@ export default class ActivityStream extends BaseService {
     message += '</details>\n';
 
     return message;
-  }
-
-  private async manageDeployments(build, deploys) {
-    const isGithubDeployments = build?.githubDeployments;
-    if (!isGithubDeployments) return;
-    const isFullYaml = build?.enableFullYaml;
-    const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
-
-    try {
-      await Promise.all(
-        deploys.map(async (deploy) => {
-          return withLogContext(
-            { deployUuid: deploy?.uuid, serviceName: deploy?.deployable?.name || deploy?.service?.name },
-            async () => {
-              const deployId = deploy?.id;
-              const service = deploy?.service;
-              const deployable = deploy?.deployable;
-              const isActive = deploy?.active;
-              const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
-              const isPublic = isFullYaml ? deployable.public || isOrgHelmChart : service.public;
-              const serviceType = isFullYaml ? deployable?.type : service?.type;
-              const isActiveAndPublic = isActive && isPublic;
-              const isDeploymentType = [DeployTypes.DOCKER, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(
-                serviceType
-              );
-              const isDeployment = isActiveAndPublic && isDeploymentType;
-              if (!isDeployment) {
-                getLogger().debug(`Skipping deployment ${deploy?.name}`);
-                return;
-              }
-              await this.db.services.GithubService.githubDeploymentQueue
-                .add(
-                  'deployment',
-                  { deployId, action: 'create', ...extractContextForQueue() },
-                  { delay: 10000, jobId: `deploy-${deployId}` }
-                )
-                .catch((error) => getLogger().warn({ error }, `Deploy: management failed deployId=${deployId}`));
-            }
-          );
-        })
-      );
-    } catch (error) {
-      getLogger().debug({ error }, 'manageDeployments error');
-    }
   }
 
   private async purgeFastlyServiceCache(uuid: string) {
