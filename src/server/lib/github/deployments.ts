@@ -22,26 +22,35 @@ import { getLogger } from 'server/lib/logger';
 
 const githubDeploymentStatuses = {
   deployed: 'success',
+  ready: 'success',
   error: 'failure',
+  build_failed: 'failure',
+  deploy_failed: 'failure',
   config_error: 'error',
+  torn_down: 'inactive',
 };
 
-function lifecycleToGithubStatus(status: string) {
-  if (
-    [DeployStatus.CLONING, DeployStatus.QUEUED, DeployStatus.BUILDING, DeployStatus.BUILT].includes(
-      status as DeployStatus
-    )
-  ) {
+function lifecycleToGithubStatus(status: string): string {
+  const inProgressStatuses = [
+    DeployStatus.CLONING,
+    DeployStatus.QUEUED,
+    DeployStatus.BUILDING,
+    DeployStatus.BUILT,
+    DeployStatus.DEPLOYING,
+    DeployStatus.WAITING,
+    DeployStatus.PENDING,
+  ];
+
+  if (inProgressStatuses.includes(status as DeployStatus)) {
     return 'in_progress';
   }
 
-  return githubDeploymentStatuses[status];
+  return githubDeploymentStatuses[status] || 'error';
 }
 
 export async function createOrUpdateGithubDeployment(deploy: Deploy) {
-  getLogger().debug('Creating or updating github deployment');
+  getLogger().debug('GitHub deployment: action=create_or_update');
   try {
-    getLogger().info('GitHub: deployment status updated');
     await deploy.$fetchGraph('build.pullRequest.repository');
     const githubDeploymentId = deploy?.githubDeploymentId;
     const build = deploy?.build;
@@ -63,12 +72,13 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
         return;
       }
     }
-    await createGithubDeployment(deploy, lastCommit);
-    if (build?.status === 'deployed') {
-      await updateDeploymentStatus(deploy, githubDeploymentId);
+    const newDeployment = await createGithubDeployment(deploy, lastCommit);
+    const newDeploymentId = newDeployment?.data?.id;
+    if (newDeploymentId) {
+      await updateDeploymentStatus(deploy, newDeploymentId);
     }
   } catch (error) {
-    getLogger({ error }).error('GitHub: deployment update failed');
+    getLogger().error(`GitHub deployment failed: error=${error.message}`);
     throw error;
   }
 }
@@ -76,7 +86,26 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
 export async function deleteGithubDeploymentAndEnvironment(deploy: Deploy) {
   if (deploy.githubDeploymentId !== null) {
     await deploy.$fetchGraph('build.pullRequest.repository');
+    await markDeploymentInactive(deploy);
     await Promise.all([deleteGithubDeployment(deploy), deleteGithubEnvironment(deploy)]);
+  }
+}
+
+async function markDeploymentInactive(deploy: Deploy) {
+  const repository = deploy.build.pullRequest.repository;
+  try {
+    await cacheRequest(`POST /repos/${repository.fullName}/deployments/${deploy.githubDeploymentId}/statuses`, {
+      data: {
+        state: 'inactive',
+        environment: deploy.uuid,
+        description: 'Environment torn down',
+      },
+    });
+    getLogger().debug(`GitHub deployment: marked inactive deploymentId=${deploy.githubDeploymentId}`);
+  } catch (error) {
+    getLogger().warn(
+      `GitHub deployment: failed to mark inactive deploymentId=${deploy.githubDeploymentId} error=${error.message}`
+    );
   }
 }
 
@@ -92,7 +121,7 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
         environment,
         auto_merge: false,
         required_contexts: [],
-        transient_environment: false,
+        transient_environment: true,
         production_environment: false,
       },
     });
@@ -101,16 +130,13 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
     await deploy.$query().patch({ githubDeploymentId });
     return resp;
   } catch (error) {
-    getLogger({
-      error,
-      repo: fullName,
-    }).error('GitHub: deployment create failed');
+    getLogger().error(`GitHub deployment create failed: repo=${fullName} error=${error.message}`);
     throw error;
   }
 }
 
 export async function deleteGithubDeployment(deploy: Deploy) {
-  getLogger().debug('Deleting github deployment');
+  getLogger().debug('GitHub deployment: action=delete');
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
   const resp = await cacheRequest(
     `DELETE /repos/${deploy.build.pullRequest.repository.fullName}/deployments/${deploy.githubDeploymentId}`
@@ -122,20 +148,29 @@ export async function deleteGithubDeployment(deploy: Deploy) {
 }
 
 export async function deleteGithubEnvironment(deploy: Deploy) {
-  getLogger().debug('Deleting github environment');
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
   const repository = deploy.build.pullRequest.repository;
+  const environmentName = deploy.uuid;
   try {
-    await cacheRequest(`DELETE /repos/${repository.fullName}/environments/${deploy.uuid}`);
+    await cacheRequest(`DELETE /repos/${repository.fullName}/environments/${environmentName}`);
+    getLogger().debug(`GitHub environment: deleted environment=${environmentName}`);
   } catch (e) {
-    if (e.status !== 404) {
-      throw e;
+    if (e.status === 404) {
+      getLogger().debug(`GitHub environment: not found environment=${environmentName}`);
+    } else if (e.status === 403) {
+      getLogger().warn(
+        `GitHub environment: no permission to delete environment=${environmentName} (check GitHub App permissions)`
+      );
+    } else {
+      getLogger().warn(
+        `GitHub environment: delete failed environment=${environmentName} status=${e.status} error=${e.message}`
+      );
     }
   }
 }
 
 export async function updateDeploymentStatus(deploy: Deploy, deploymentId: number) {
-  getLogger().debug('Updating github deployment status');
+  getLogger().debug(`GitHub deployment status: action=update deploymentId=${deploymentId}`);
   const repository = deploy.build.pullRequest.repository;
   let buildStatus = determineStatus(deploy);
   const resp = await cacheRequest(`POST /repos/${repository.fullName}/deployments/${deploymentId}/statuses`, {

@@ -17,7 +17,7 @@
 import BaseService from './_service';
 import { Environment, Build, Service, Deploy, Deployable } from 'server/models';
 import * as codefresh from 'server/lib/codefresh';
-import { getLogger, withLogContext } from 'server/lib/logger';
+import { getLogger, withLogContext, extractContextForQueue } from 'server/lib/logger';
 import hash from 'object-hash';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 import * as cli from 'server/lib/cli';
@@ -803,13 +803,30 @@ export default class DeployService extends BaseService {
       const id = deploy?.id;
       await this.db.models.Deploy.query().where({ id, runUUID }).patch(params);
       if (deploy.runUUID !== runUUID) {
-        getLogger().debug({ deployRunUUID: deploy.runUUID, providedRunUUID: runUUID }, 'runUUID mismatch');
+        getLogger().debug(`runUUID mismatch: deployRunUUID=${deploy.runUUID} providedRunUUID=${runUUID}`);
         return;
       }
 
       await deploy.$fetchGraph('build.pullRequest');
       build = deploy?.build;
       const pullRequest = build?.pullRequest;
+
+      const terminalStatuses = [
+        DeployStatus.READY,
+        DeployStatus.DEPLOYED,
+        DeployStatus.ERROR,
+        DeployStatus.BUILD_FAILED,
+        DeployStatus.DEPLOY_FAILED,
+        DeployStatus.TORN_DOWN,
+      ];
+      const isTerminalStatus = terminalStatuses.includes(params.status as DeployStatus);
+
+      if (isTerminalStatus && build?.githubDeployments) {
+        await deploy.$fetchGraph('[service, deployable]');
+        if (await this.shouldTriggerGithubDeployment(deploy)) {
+          await this.triggerGithubDeploymentUpdate(deploy);
+        }
+      }
 
       await this.db.services.ActivityStream.updatePullRequestActivityStream(
         build,
@@ -825,6 +842,43 @@ export default class DeployService extends BaseService {
     } catch (error) {
       getLogger().warn({ error }, 'ActivityFeed: update failed');
     }
+  }
+
+  private async shouldTriggerGithubDeployment(deploy: Deploy): Promise<boolean> {
+    if (!deploy?.active) {
+      getLogger().debug(`GitHub deployment skipped: deployId=${deploy.id} reason=inactive`);
+      return false;
+    }
+
+    const { service, deployable, build } = deploy;
+    const isFullYaml = build?.enableFullYaml;
+    const serviceType = isFullYaml ? deployable?.type : service?.type;
+    const validTypes: string[] = [DeployTypes.DOCKER, DeployTypes.GITHUB, DeployTypes.CODEFRESH, DeployTypes.HELM];
+
+    if (!serviceType || !validTypes.includes(serviceType)) {
+      getLogger().debug(`GitHub deployment skipped: deployId=${deploy.id} reason=type type=${serviceType}`);
+      return false;
+    }
+
+    const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
+    const isOrgHelmChart = orgChartName === deployable?.helm?.chart?.name;
+    const isPublicChart = serviceType === DeployTypes.HELM && (await determineChartType(deploy)) === ChartType.PUBLIC;
+    const isPublic = isFullYaml ? deployable?.public || isOrgHelmChart || isPublicChart : service?.public;
+
+    if (!isPublic) {
+      getLogger().debug(`GitHub deployment skipped: deployId=${deploy.id} reason=private`);
+      return false;
+    }
+
+    return true;
+  }
+
+  private async triggerGithubDeploymentUpdate(deploy: Deploy) {
+    await this.db.services.GithubService.githubDeploymentQueue
+      .add('deployment', { deployId: deploy.id, action: 'create', ...extractContextForQueue() })
+      .catch((error) =>
+        getLogger().warn(`GitHub deployment queue failed: deployId=${deploy.id} error=${error.message}`)
+      );
   }
 
   private async patchDeployWithTag({ tag, deploy, initTag, ecrDomain }) {
