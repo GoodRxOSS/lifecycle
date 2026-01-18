@@ -307,6 +307,29 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description The specific success response for
+         * PUT /api/v2/builds/{uuid}/services/{name}/redeploy
+         */
+        RedeployServiceSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string' },
+                    message: { type: 'string' },
+                  },
+                  required: ['status', 'message'],
+                },
+              },
+            },
+          ],
+        },
+
+        /**
          * @description Information about a deployment pod.
          */
         DeploymentPodInfo: {

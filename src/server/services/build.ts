@@ -202,6 +202,61 @@ export default class BuildService extends BaseService {
     return build;
   }
 
+  async redeploymentServiceFromBuild(buildUuid: string, serviceName: string) {
+    const build = await this.db.models.Build.query()
+      .findOne({
+        uuid: buildUuid,
+      })
+      .withGraphFetched('deploys.deployable');
+
+    if (!build) {
+      getLogger().debug(`Build not found for ${buildUuid}.`);
+      throw new Error(`Build not found for ${buildUuid}.`);
+    }
+
+    const buildId = build.id;
+
+    const deploy = build.deploys?.find((deploy) => deploy.deployable?.name === serviceName);
+
+    if (!deploy || !deploy.deployable) {
+      getLogger().debug(`Deployable ${serviceName} not found for ${buildUuid}.`);
+      throw new Error(`Deployable ${serviceName} not found for ${buildUuid}.`);
+    }
+
+    const githubRepositoryId = Number(deploy.deployable.repositoryId);
+
+    const runUUID = nanoid();
+
+    await this.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      buildId,
+      githubRepositoryId,
+      runUUID,
+      ...extractContextForQueue(),
+    });
+
+    getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: service redeploy queued service=${serviceName}`);
+
+    const deployService = new DeployService();
+
+    await deploy.$query().patchAndFetch({
+      runUUID,
+    });
+
+    await deployService.patchAndUpdateActivityFeed(
+      deploy,
+      {
+        status: DeployStatus.QUEUED,
+      },
+      runUUID,
+      githubRepositoryId
+    );
+
+    return {
+      status: 'success',
+      message: `Redeploy for service ${serviceName} in environment ${buildUuid} has been queued`,
+    };
+  }
+
   async validateLifecycleSchema(repo: string, branch: string): Promise<{ valid: boolean }> {
     const content = (await getYamlFileContentFromBranch(repo, branch)) as string;
     const parser = new YamlConfigParser();
