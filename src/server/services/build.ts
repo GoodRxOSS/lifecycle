@@ -19,6 +19,7 @@ import * as k8s from 'server/lib/kubernetes';
 import * as cli from 'server/lib/cli';
 import * as github from 'server/lib/github';
 import { uninstallHelmReleases } from 'server/lib/helm';
+import { ingressBannerSnippet } from 'server/lib/helm/utils';
 import { customAlphabet, nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
@@ -285,8 +286,21 @@ export default class BuildService extends BaseService {
    * @param deploy
    */
   private async ingressConfigurationForDeploy(deploy: Deploy): Promise<IngressConfiguration[]> {
-    await deploy.$fetchGraph('[build, service, deployable]');
+    await deploy.$fetchGraph('[build.[pullRequest], service, deployable]');
     const { build, service, deployable } = deploy;
+
+    if (!deployable) {
+      throw new Error(`Deployable not found for deploy ${deploy.uuid}`);
+    }
+
+    const getIngressAnnotations = (baseAnnotations: Record<string, any> | undefined): Record<string, any> => {
+      if (build?.enableFullYaml && deployable.envLens) {
+        const bannerSnippet = ingressBannerSnippet(deploy);
+        const bannerAnnotation = bannerSnippet.metadata?.annotations || {};
+        return { ...(baseAnnotations || {}), ...bannerAnnotation };
+      }
+      return baseAnnotations || {};
+    };
 
     if (build?.enableFullYaml) {
       if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
@@ -295,22 +309,22 @@ export default class BuildService extends BaseService {
             host: `${key}-${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
             deployUUID: `${key}-${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deploy.deployable.ipWhitelist,
-            ingressAnnotations: deploy.deployable.ingressAnnotations,
+            ipWhitelist: deployable.ipWhitelist,
+            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
             pathPortMapping: {
-              '/': parseInt(deploy.deployable.hostPortMapping[key], 10),
+              '/': parseInt(deployable.hostPortMapping[key], 10),
             },
           };
         });
-      } else if (deploy.deployable.pathPortMapping && Object.keys(deploy.deployable.pathPortMapping).length > 0) {
+      } else if (deployable.pathPortMapping && Object.keys(deployable.pathPortMapping).length > 0) {
         return [
           {
             host: `${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
             deployUUID: `${deploy.uuid}`,
             serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deploy.deployable.ipWhitelist,
-            ingressAnnotations: deploy.deployable.ingressAnnotations,
-            pathPortMapping: deploy.deployable.pathPortMapping,
+            ipWhitelist: deployable.ipWhitelist,
+            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
+            pathPortMapping: deployable.pathPortMapping,
           },
         ];
       } else {
@@ -319,10 +333,10 @@ export default class BuildService extends BaseService {
             host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
             deployUUID: deploy.uuid,
             serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deploy.deployable.ipWhitelist,
-            ingressAnnotations: deploy.deployable.ingressAnnotations,
+            ipWhitelist: deployable.ipWhitelist,
+            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
             pathPortMapping: {
-              '/': parseInt(deploy.deployable.port, 10),
+              '/': parseInt(deployable.port, 10),
             },
           },
         ];
@@ -422,11 +436,18 @@ export default class BuildService extends BaseService {
     }
   }
 
-  private async importYamlConfigFile(environment: Environment, build: Build) {
+  private async importYamlConfigFile(environment: Environment, build: Build, filterGithubRepositoryId?: number) {
     // Write the deployables here for now and not going to use them yet.
     try {
       const buildId = build?.id;
-      await this.db.services.Deployable.upsertDeployables(buildId, build.uuid, build.pullRequest, environment, build);
+      await this.db.services.Deployable.upsertDeployables(
+        buildId,
+        build.uuid,
+        build.pullRequest,
+        environment,
+        build,
+        filterGithubRepositoryId
+      );
 
       await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest);
     } catch (error) {
@@ -1272,9 +1293,7 @@ export default class BuildService extends BaseService {
         await build?.$fetchGraph('[pullRequest, environment]');
         await build.pullRequest.$fetchGraph('[repository]');
 
-        if (!githubRepositoryId) {
-          await this.importYamlConfigFile(build?.environment, build);
-        }
+        await this.importYamlConfigFile(build?.environment, build, githubRepositoryId);
 
         await this.db.services.BuildService.resolveAndDeployBuild(
           build,

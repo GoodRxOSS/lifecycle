@@ -80,6 +80,7 @@ export interface GithubService extends Service {
       readonly init?: InitDockerConfig;
     };
     readonly deployment?: DeploymentConfig;
+    readonly envLens?: boolean;
   };
 }
 
@@ -119,6 +120,7 @@ export interface DockerServiceConfig {
   readonly env?: Record<string, string>;
   readonly ports?: number[];
   readonly deployment?: DeploymentConfig;
+  readonly envLens?: boolean;
 }
 
 export interface CodefreshService extends Service {
@@ -909,6 +911,19 @@ export function getBuilder(service: Service): Builder {
       return helmService?.helm?.docker?.builder;
   }
   return {};
+}
+
+export function getEnvLens(service: Service): boolean {
+  switch (getDeployType(service)) {
+    case DeployTypes.GITHUB:
+      return (service as GithubService)?.github?.envLens ?? false;
+    case DeployTypes.DOCKER:
+      return (service as DockerService)?.docker?.envLens ?? false;
+    case DeployTypes.HELM:
+      return (service as unknown as HelmService)?.helm?.envLens ?? false;
+    default:
+      return false;
+  }
 }
 
 export async function getEcr(service: Service): Promise<string> {

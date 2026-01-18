@@ -160,6 +160,7 @@ describe('Deployable Service', () => {
           SOURCE: 'yaml',
           TOKEN1: 'abcdefghijk',
         },
+        envLens: false,
         port: '8080,8089,8888',
         initArguments:
           '-c%%SPLIT%%local%%SPLIT%%-i%%SPLIT%%./sysops/ansible/spinnaker_inventory.py%%SPLIT%%./sysops/ansible/playbooks/lifecycle.yaml',
@@ -323,6 +324,7 @@ describe('Deployable Service', () => {
           SOURCE: 'yaml',
           TOKEN1: 'abcdefghijk',
         },
+        envLens: false,
         port: '8080,8089,8888',
         initArguments:
           '-c%%SPLIT%%local%%SPLIT%%-i%%SPLIT%%./sysops/ansible/spinnaker_inventory.py%%SPLIT%%./sysops/ansible/playbooks/lifecycle.yaml',
