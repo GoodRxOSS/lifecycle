@@ -455,8 +455,16 @@ export default class GithubService extends Service {
 
     return withLogContext({ correlationId, sender, _ddTraceContext, deployUuid: String(deployId) }, async () => {
       const deploy = await this.db.models.Deploy.query().findById(deployId);
+      if (!deploy) {
+        getLogger({ stage: LogStage.DEPLOY_FAILED }).warn(
+          `GitHub deployment skipped: deployId=${deployId} reason=deploy_not_found`
+        );
+        return;
+      }
       try {
-        getLogger({ stage: LogStage.DEPLOY_STARTING }).debug(`GitHub deployment: ${action}`);
+        getLogger({ stage: LogStage.DEPLOY_STARTING }).debug(
+          `GitHub deployment: action=${action} deployId=${deployId}`
+        );
 
         switch (action) {
           case 'create': {
@@ -471,12 +479,14 @@ export default class GithubService extends Service {
             throw new Error(`Unknown action: ${action}`);
         }
 
-        getLogger({ stage: LogStage.DEPLOY_COMPLETE }).debug(`GitHub deployment: ${action} completed`);
-      } catch (error) {
-        getLogger({ stage: LogStage.DEPLOY_FAILED }).warn(
-          { error },
-          `Error processing GitHub deployment job=${job?.id} action=${action}`
+        getLogger({ stage: LogStage.DEPLOY_COMPLETE }).debug(
+          `GitHub deployment completed: action=${action} deployId=${deployId}`
         );
+      } catch (error) {
+        getLogger({ stage: LogStage.DEPLOY_FAILED }).error(
+          `GitHub deployment failed: job=${job?.id} action=${action} error=${error.message}`
+        );
+        throw error;
       }
     });
   };
