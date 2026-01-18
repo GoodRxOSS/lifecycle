@@ -39,7 +39,7 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     const isBot = sender?.includes('[bot]') === true;
     if (event === 'issue_comment' && isBot) {
-      tracer.scope().active()?.setTag('manual.drop', true);
+      tracer.scope?.()?.active?.()?.setTag('manual.drop', true);
       res.status(200).end();
       return;
     }
