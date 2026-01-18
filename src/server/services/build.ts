@@ -436,11 +436,18 @@ export default class BuildService extends BaseService {
     }
   }
 
-  private async importYamlConfigFile(environment: Environment, build: Build) {
+  private async importYamlConfigFile(environment: Environment, build: Build, filterGithubRepositoryId?: number) {
     // Write the deployables here for now and not going to use them yet.
     try {
       const buildId = build?.id;
-      await this.db.services.Deployable.upsertDeployables(buildId, build.uuid, build.pullRequest, environment, build);
+      await this.db.services.Deployable.upsertDeployables(
+        buildId,
+        build.uuid,
+        build.pullRequest,
+        environment,
+        build,
+        filterGithubRepositoryId
+      );
 
       await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest);
     } catch (error) {
@@ -1286,9 +1293,7 @@ export default class BuildService extends BaseService {
         await build?.$fetchGraph('[pullRequest, environment]');
         await build.pullRequest.$fetchGraph('[repository]');
 
-        if (!githubRepositoryId) {
-          await this.importYamlConfigFile(build?.environment, build);
-        }
+        await this.importYamlConfigFile(build?.environment, build, githubRepositoryId);
 
         await this.db.services.BuildService.resolveAndDeployBuild(
           build,

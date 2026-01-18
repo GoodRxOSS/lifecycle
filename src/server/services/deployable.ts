@@ -755,7 +755,8 @@ export default class DeployableService extends BaseService {
     buildId: number,
     buildUUID: string,
     pullRequest: PullRequest,
-    build?: Build
+    build?: Build,
+    filterGithubRepositoryId?: number
   ) {
     try {
       const attribution = async (
@@ -824,6 +825,13 @@ export default class DeployableService extends BaseService {
                     let deploy: Deploy;
                     // Service defined in remote repo. Need to fetch remote YAML
                     if (yamlEnvService?.repository != null) {
+                      // Skip remote dependency YAML fetches when filtering by specific repository
+                      if (filterGithubRepositoryId) {
+                        getLogger({ buildUUID, service: yamlEnvService.name }).debug(
+                          'Skipping remote YAML fetch for filtered deploy'
+                        );
+                        return;
+                      }
                       // If the dependency service does not have a branch name defined use 'main' as the default branch name.
                       branchName = yamlEnvService?.branch ?? 'main';
                       // Check if the deployable has a commentBranchName which is set in the lifecycle comment. If it does
@@ -986,7 +994,8 @@ export default class DeployableService extends BaseService {
     buildUUID: string,
     pullRequest: PullRequest,
     environment: Environment,
-    build?: Build
+    build?: Build,
+    filterGithubRepositoryId?: number
   ): Promise<Deployable[]> {
     // We are going to ingest all the database and yaml configuration and process in the memory before writes into the database
     let deployables: Deployable[];
@@ -1011,7 +1020,14 @@ export default class DeployableService extends BaseService {
 
         // Next read the YAML config file from the PR's repository and branch
         // Overwrite the db config exists in the YAML + any YAML only configurations
-        await this.updateOrCreateDeployableUsingYamlConfig(deployableServices, buildId, buildUUID, pullRequest, build);
+        await this.updateOrCreateDeployableUsingYamlConfig(
+          deployableServices,
+          buildId,
+          buildUUID,
+          pullRequest,
+          build,
+          filterGithubRepositoryId
+        );
 
         // Finally, Upsert the deployables into the database
         deployables = await this.upsertDeployablesWithDatabase(
