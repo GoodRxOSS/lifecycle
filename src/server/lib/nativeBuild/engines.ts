@@ -48,6 +48,7 @@ export interface NativeBuildOptions {
     requests?: Record<string, string>;
     limits?: Record<string, string>;
   };
+  secretRefs?: string[];
 }
 
 interface BuildEngine {
@@ -194,7 +195,8 @@ function createBuildContainer(
   envVars: Record<string, string>,
   resources: any,
   buildArgs: Record<string, string>,
-  ecrDomain: string
+  ecrDomain: string,
+  secretRefs?: string[]
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -223,7 +225,7 @@ function createBuildContainer(
     containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
   }
 
-  return {
+  const container: any = {
     name,
     image: engine.image,
     command: engine.command,
@@ -232,6 +234,17 @@ function createBuildContainer(
     volumeMounts,
     resources,
   };
+
+  if (secretRefs && secretRefs.length > 0) {
+    container.envFrom = secretRefs.map((secretName) => ({
+      secretRef: {
+        name: secretName,
+        optional: false,
+      },
+    }));
+  }
+
+  return container;
 }
 
 export async function buildWithEngine(
@@ -336,7 +349,8 @@ export async function buildWithEngine(
       envVars,
       resources,
       options.envVars,
-      options.ecrDomain
+      options.ecrDomain,
+      options.secretRefs
     )
   );
 
@@ -353,7 +367,8 @@ export async function buildWithEngine(
         envVars,
         resources,
         options.envVars,
-        options.ecrDomain
+        options.ecrDomain,
+        options.secretRefs
       )
     );
     getLogger().debug('Build: including init image');

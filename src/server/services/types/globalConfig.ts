@@ -38,6 +38,7 @@ export type GlobalConfig = {
   app_setup: AppSetup;
   labels: LabelsConfig;
   ttl_cleanup?: TTLCleanupConfig;
+  secretProviders?: SecretProvidersConfig;
 };
 
 export type AppSetup = {
@@ -158,4 +159,16 @@ export type TTLCleanupConfig = {
   checkIntervalMinutes: number;
   commentTemplate?: string;
   excludedRepositories: string[];
+};
+
+export type SecretProviderConfig = {
+  enabled: boolean;
+  clusterSecretStore: string;
+  refreshInterval: string;
+  allowedPrefixes?: string[];
+  secretSyncTimeout?: number;
+};
+
+export type SecretProvidersConfig = {
+  [provider: string]: SecretProviderConfig;
 };
