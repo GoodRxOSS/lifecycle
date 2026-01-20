@@ -21,14 +21,14 @@ import BuildService from 'server/services/build';
 
 /**
  * @openapi
- * /api/v2/builds/{uuid}/services/{name}/redeploy:
+ * /api/v2/builds/{uuid}/destroy:
  *   put:
- *     summary: Redeploy a service within an environment
+ *     summary: Tear down a build environment
  *     description: |
- *       Triggers a redeployment of a specific service within an environment. The service
- *       will be queued for deployment and its status will be updated accordingly.
+ *       Changes the status of all Deploys, Builds and Deployables associated with the specified
+ *       UUID to torn_down. This effectively marks the environment as deleted.
  *     tags:
- *       - Services
+ *       - Builds
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -36,21 +36,15 @@ import BuildService from 'server/services/build';
  *         schema:
  *           type: string
  *         description: The UUID of the environment
- *       - in: path
- *         name: name
- *         required: true
- *         schema:
- *           type: string
- *         description: The name of the service to redeploy
  *     responses:
  *       200:
- *         description: Service has been successfully queued for redeployment
+ *         description: Build has been successfully torn down
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RedeployServiceSuccessResponse'
+ *               $ref: '#/components/schemas/TearDownBuildSuccessResponse'
  *       404:
- *         description: Build or service not found
+ *         description: Build not found or is a static environment
  *         content:
  *           application/json:
  *             schema:
@@ -68,12 +62,12 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
-  const { uuid: buildUuid, name: serviceName } = params;
+const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+  const { uuid: buildUuid } = params;
 
   const buildService = new BuildService();
 
-  const response = await buildService.redeployServiceFromBuild(buildUuid, serviceName);
+  const response = await buildService.tearDownBuild(buildUuid);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);

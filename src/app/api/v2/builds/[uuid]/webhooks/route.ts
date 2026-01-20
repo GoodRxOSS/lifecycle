@@ -21,36 +21,30 @@ import BuildService from 'server/services/build';
 
 /**
  * @openapi
- * /api/v2/builds/{uuid}/services/{name}/redeploy:
- *   put:
- *     summary: Redeploy a service within an environment
+ * /api/v2/builds/{uuid}/webhooks:
+ *   post:
+ *     summary: Invoke webhooks for a build
  *     description: |
- *       Triggers a redeployment of a specific service within an environment. The service
- *       will be queued for deployment and its status will be updated accordingly.
+ *       Triggers the execution of configured webhooks for a specific build.
+ *       The webhooks must be defined in the build's webhooksYaml configuration.
  *     tags:
- *       - Services
+ *       - Builds
  *     parameters:
  *       - in: path
  *         name: uuid
  *         required: true
  *         schema:
  *           type: string
- *         description: The UUID of the environment
- *       - in: path
- *         name: name
- *         required: true
- *         schema:
- *           type: string
- *         description: The name of the service to redeploy
+ *         description: The UUID of the build
  *     responses:
  *       200:
- *         description: Service has been successfully queued for redeployment
+ *         description: Webhooks successfully queued
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RedeployServiceSuccessResponse'
+ *               $ref: '#/components/schemas/InvokeWebhooksSuccessResponse'
  *       404:
- *         description: Build or service not found
+ *         description: Build not found
  *         content:
  *           application/json:
  *             schema:
@@ -68,17 +62,19 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
-  const { uuid: buildUuid, name: serviceName } = params;
+const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+  const { uuid: buildUuid } = params;
 
   const buildService = new BuildService();
 
-  const response = await buildService.redeployServiceFromBuild(buildUuid, serviceName);
+  const response = await buildService.invokeWebhooksForBuild(buildUuid);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);
   } else if (response.status === 'not_found') {
     return errorResponse(response.message, { status: 404 }, req);
+  } else if (response.status === 'no_content') {
+    return successResponse(response, { status: 200 }, req);
   } else {
     return errorResponse(response.message, { status: 400 }, req);
   }

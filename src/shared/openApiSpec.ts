@@ -330,6 +330,82 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description The specific success response for
+         * PUT /api/v2/builds/{uuid}/redeploy
+         */
+        RedeployBuildSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string' },
+                    message: { type: 'string' },
+                  },
+                  required: ['status', 'message'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for
+         * PUT /api/v2/builds/{uuid}/destroy
+         */
+        TearDownBuildSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string' },
+                    message: { type: 'string' },
+                    namespacesUpdated: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/Deploy' },
+                    },
+                  },
+                  required: ['status', 'message', 'namespacesUpdated'],
+                },
+                required: ['data'],
+              },
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for
+         * POST /api/v2/builds/{uuid}/webhooks
+         */
+        InvokeWebhooksSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string' },
+                    message: { type: 'string' },
+                  },
+                  required: ['status', 'message'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description Information about a deployment pod.
          */
         DeploymentPodInfo: {

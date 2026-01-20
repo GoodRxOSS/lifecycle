@@ -21,36 +21,30 @@ import BuildService from 'server/services/build';
 
 /**
  * @openapi
- * /api/v2/builds/{uuid}/services/{name}/redeploy:
+ * /api/v2/builds/{uuid}/redeploy:
  *   put:
- *     summary: Redeploy a service within an environment
+ *     summary: Redeploy an entire build
  *     description: |
- *       Triggers a redeployment of a specific service within an environment. The service
+ *       Triggers a redeployment of an entire build. The build
  *       will be queued for deployment and its status will be updated accordingly.
  *     tags:
- *       - Services
+ *       - Builds
  *     parameters:
  *       - in: path
  *         name: uuid
  *         required: true
  *         schema:
  *           type: string
- *         description: The UUID of the environment
- *       - in: path
- *         name: name
- *         required: true
- *         schema:
- *           type: string
- *         description: The name of the service to redeploy
+ *         description: The UUID of the build
  *     responses:
  *       200:
- *         description: Service has been successfully queued for redeployment
+ *         description: Build has been successfully queued for redeployment
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RedeployServiceSuccessResponse'
+ *               $ref: '#/components/schemas/RedeployBuildSuccessResponse'
  *       404:
- *         description: Build or service not found
+ *         description: Build not found
  *         content:
  *           application/json:
  *             schema:
@@ -68,12 +62,12 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
-  const { uuid: buildUuid, name: serviceName } = params;
+const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+  const { uuid: buildUuid } = params;
 
   const buildService = new BuildService();
 
-  const response = await buildService.redeployServiceFromBuild(buildUuid, serviceName);
+  const response = await buildService.redeployBuild(buildUuid);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);
