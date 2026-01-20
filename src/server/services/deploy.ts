@@ -1108,6 +1108,7 @@ export default class DeployService extends BaseService {
             deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
             secretRefs: buildSecretNames,
+            secretEnvKeys: Array.from(secretEnvKeys),
           };
 
           if (!initDockerfilePath) {

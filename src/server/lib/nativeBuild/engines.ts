@@ -49,6 +49,7 @@ export interface NativeBuildOptions {
     limits?: Record<string, string>;
   };
   secretRefs?: string[];
+  secretEnvKeys?: string[];
 }
 
 interface BuildEngine {
@@ -69,6 +70,7 @@ interface BuildArgOptions {
   cacheRef: string;
   buildArgs: Record<string, string>;
   ecrDomain: string;
+  secretEnvKeys?: string[];
 }
 
 const ENGINES: Record<string, BuildEngine> = {
@@ -76,7 +78,7 @@ const ENGINES: Record<string, BuildEngine> = {
     name: 'buildkit',
     image: 'moby/buildkit:v0.12.0',
     command: ['/bin/sh', '-c'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain }) => {
+    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain, secretEnvKeys }) => {
       const buildctlArgs = [
         'build',
         '--frontend',
@@ -139,8 +141,21 @@ fi
 echo "Setting DOCKER_CONFIG..."
 export DOCKER_CONFIG=~/.docker
 
+# Build secret env vars as build args
+SECRET_BUILD_ARGS=""
+${
+  secretEnvKeys && secretEnvKeys.length > 0
+    ? secretEnvKeys
+        .map(
+          (key) =>
+            `if [ -n "\\$${key}" ]; then SECRET_BUILD_ARGS="\\$SECRET_BUILD_ARGS --opt build-arg:${key}=\\$${key}"; fi`
+        )
+        .join('\n')
+    : '# No secret env keys'
+}
+
 echo "Running buildctl..."
-buildctl ${buildctlArgs.join(' \\\n  ')}
+buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
 `;
 
       return [script.trim()];
@@ -196,7 +211,8 @@ function createBuildContainer(
   resources: any,
   buildArgs: Record<string, string>,
   ecrDomain: string,
-  secretRefs?: string[]
+  secretRefs?: string[],
+  secretEnvKeys?: string[]
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -205,6 +221,7 @@ function createBuildContainer(
     cacheRef,
     buildArgs,
     ecrDomain,
+    secretEnvKeys,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
@@ -350,7 +367,8 @@ export async function buildWithEngine(
       resources,
       options.envVars,
       options.ecrDomain,
-      options.secretRefs
+      options.secretRefs,
+      options.secretEnvKeys
     )
   );
 
@@ -368,7 +386,8 @@ export async function buildWithEngine(
         resources,
         options.envVars,
         options.ecrDomain,
-        options.secretRefs
+        options.secretRefs,
+        options.secretEnvKeys
       )
     );
     getLogger().debug('Build: including init image');
