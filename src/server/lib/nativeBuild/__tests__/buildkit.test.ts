@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { buildkitBuild, BuildkitBuildOptions } from '../engines';
+import { buildkitBuild, BuildkitBuildOptions, generateSecretArgsScript } from '../engines';
 import { shellPromise } from '../../shell';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
@@ -248,5 +248,34 @@ describe('buildkitBuild', () => {
     // Check annotations
     expect(fullCommand).toContain('lifecycle.io/dockerfile: "Dockerfile"');
     expect(fullCommand).toContain('lifecycle.io/ecr-repo: "test-repo"');
+  });
+});
+
+describe('generateSecretArgsScript', () => {
+  it('returns comment when no secret keys provided', () => {
+    expect(generateSecretArgsScript(undefined)).toBe('# No secret env keys');
+    expect(generateSecretArgsScript([])).toBe('# No secret env keys');
+  });
+
+  it('generates shell script for single secret key', () => {
+    const result = generateSecretArgsScript(['AWS_SECRET']);
+    expect(result).toBe(
+      '[ -n "$AWS_SECRET" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:AWS_SECRET=$AWS_SECRET"'
+    );
+  });
+
+  it('generates shell script for multiple secret keys', () => {
+    const result = generateSecretArgsScript(['SECRET_A', 'SECRET_B']);
+    const lines = result.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('SECRET_A');
+    expect(lines[1]).toContain('SECRET_B');
+  });
+
+  it('produces valid shell syntax', () => {
+    const result = generateSecretArgsScript(['MY_SECRET']);
+    expect(result).not.toContain('\\$');
+    expect(result).toContain('$MY_SECRET');
+    expect(result).toContain('--opt build-arg:MY_SECRET=');
   });
 });

@@ -73,6 +73,18 @@ interface BuildArgOptions {
   secretEnvKeys?: string[];
 }
 
+export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
+  if (!secretEnvKeys || secretEnvKeys.length === 0) {
+    return '# No secret env keys';
+  }
+
+  const lines = secretEnvKeys.map(
+    (key) => `[ -n "$${key}" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:${key}=$${key}"`
+  );
+
+  return lines.join('\n');
+}
+
 const ENGINES: Record<string, BuildEngine> = {
   buildkit: {
     name: 'buildkit',
@@ -143,16 +155,7 @@ export DOCKER_CONFIG=~/.docker
 
 # Build secret env vars as build args
 SECRET_BUILD_ARGS=""
-${
-  secretEnvKeys && secretEnvKeys.length > 0
-    ? secretEnvKeys
-        .map(
-          (key) =>
-            `if [ -n "\\$${key}" ]; then SECRET_BUILD_ARGS="\\$SECRET_BUILD_ARGS --opt build-arg:${key}=\\$${key}"; fi`
-        )
-        .join('\n')
-    : '# No secret env keys'
-}
+${generateSecretArgsScript(secretEnvKeys)}
 
 echo "Running buildctl..."
 buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
