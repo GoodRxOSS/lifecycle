@@ -1045,10 +1045,14 @@ export default class DeployService extends BaseService {
           getLogger().info(`Image: building engine=${deployable.builder.engine}`);
 
           let buildSecretNames: string[] = [];
+          let secretEnvKeys: Set<string> = new Set();
           const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
           const secretProviders = globalConfigs.secretProviders;
 
           if (secretProviders && deploy.env) {
+            const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
+            await ensureNamespaceExists(deploy.build.namespace);
+
             const secretProcessor = new SecretProcessor(secretProviders);
             const envToProcess = deploy.env as Record<string, string>;
 
@@ -1058,6 +1062,8 @@ export default class DeployService extends BaseService {
               namespace: deploy.build.namespace,
               buildUuid: deploy.uuid,
             });
+
+            secretEnvKeys = new Set(secretResult.secretRefs.map((ref) => ref.envKey));
 
             if (secretResult.warnings.length > 0) {
               getLogger().warn(
@@ -1087,11 +1093,19 @@ export default class DeployService extends BaseService {
             }
           }
 
+          const filteredEnvVars =
+            secretEnvKeys.size > 0
+              ? Object.fromEntries(
+                  Object.entries(buildOptions.envVars || {}).filter(([key]) => !secretEnvKeys.has(key))
+                )
+              : buildOptions.envVars;
+
           const nativeOptions = {
             ...buildOptions,
+            envVars: filteredEnvVars,
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
-            deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+            deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
             secretRefs: buildSecretNames,
           };
