@@ -26,12 +26,13 @@
     color: '#fff',
     borderRadius: '8px',
     fontSize: '18px',
-    zIndex: '1000',
+    zIndex: '2147483647',
     boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
     transition: 'all 0.2s ease',
     border: '1px solid rgba(255, 255, 255, 0.1)',
     userSelect: 'text',
     overflow: 'hidden',
+    pointerEvents: 'auto',
   };
 
   const TERMINAL_COLORS = {
@@ -50,17 +51,82 @@
   const LOG_BUTTON_ID = 'showLogsButton';
   const SEARCH_INPUT_ID = 'logSearchInput';
 
+  let shadowRoot = null;
   let logsModal = null;
   let evtSource = null;
   const state = {
     isHidden: true,
     terminalWasOpen: false,
     shouldShowBadge: false,
+    isCollapsed: false,
     badgePosition: {
       x: null,
       y: null,
     },
   };
+
+  function createShadowHost() {
+    const host = document.createElement('div');
+    host.id = 'lifecycle-banner-host';
+    host.style.cssText = `
+      position: fixed !important;
+      z-index: 2147483647 !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      pointer-events: none !important;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+    `;
+    document.body.appendChild(host);
+    shadowRoot = host.attachShadow({ mode: 'closed' });
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+    `;
+    shadowRoot.appendChild(style);
+
+    return shadowRoot;
+  }
+
+  function formatTimeRemaining(createdAt, ttlDays = 7) {
+    if (!createdAt) return null;
+
+    const created = new Date(createdAt);
+    const expiresAt = new Date(created.getTime() + ttlDays * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const remaining = expiresAt - now;
+
+    if (remaining <= 0) return 'Expired';
+
+    const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+
+    if (days > 0) return `${days}d ${hours}h`;
+
+    const minutes = Math.floor((remaining % (60 * 60 * 1000)) / (60 * 1000));
+    if (hours > 0) return `${hours}h ${minutes}m`;
+
+    return `${minutes}m`;
+  }
+
+  function getStatusColor(status) {
+    const statusLower = (status || '').toLowerCase();
+    if (statusLower === 'running' || statusLower === 'success') return '#4CAF50';
+    if (
+      statusLower === 'deploying' ||
+      statusLower === 'building' ||
+      statusLower === 'pending' ||
+      statusLower === 'queued'
+    )
+      return '#FFA726';
+    if (statusLower === 'failed' || statusLower === 'error') return '#FF5252';
+    return '#888';
+  }
 
   function loadState() {
     const hiddenState = localStorage.getItem('componentsHidden');
@@ -69,6 +135,7 @@
     state.isHidden = hiddenState === null ? true : hiddenState === 'true';
     state.shouldShowBadge = badgeVisibleState === null ? false : badgeVisibleState === 'true';
     state.terminalWasOpen = localStorage.getItem('terminalWasOpen') === 'true';
+    state.isCollapsed = localStorage.getItem('bannerCollapsed') === 'true';
 
     const savedPosition = localStorage.getItem('badgePosition');
     if (savedPosition) {
@@ -96,7 +163,7 @@
   }
 
   function toggleBadge(forceHide = false) {
-    let badge = document.getElementById(BADGE_ID);
+    let badge = shadowRoot.getElementById(BADGE_ID);
 
     if (forceHide) {
       if (badge) badge.style.display = 'none';
@@ -107,13 +174,13 @@
     if (!content) return;
 
     if (badge) {
-      badge.style.display = 'block';
+      badge.style.display = state.isCollapsed ? 'flex' : 'block';
       return;
     }
 
     badge = createBadge(content);
     addShowLogsButton(badge);
-    document.body.appendChild(badge);
+    shadowRoot.appendChild(badge);
     saveState();
   }
 
@@ -122,12 +189,45 @@
     localStorage.setItem('terminalWasOpen', state.terminalWasOpen);
     localStorage.setItem('badgeVisible', state.shouldShowBadge);
     localStorage.setItem('badgePosition', JSON.stringify(state.badgePosition));
+    localStorage.setItem('bannerCollapsed', state.isCollapsed);
   }
 
   function buildBadgeContent() {
-    if (!window.LFC_BANNER || !window.LFC_BANNER.length) return 'Test Content';
+    const status = window.LFC_DEPLOY_STATUS || '';
+    const statusColor = getStatusColor(status);
+    const statusLower = (status || '').toLowerCase();
+    const isPulsing =
+      statusLower === 'deploying' ||
+      statusLower === 'building' ||
+      statusLower === 'pending' ||
+      statusLower === 'queued';
 
-    return window.LFC_BANNER.filter((item) => item.value)
+    const statusIndicator = status
+      ? `
+      <div style="display: flex; align-items: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <span style="width: 10px; height: 10px; border-radius: 50%; background-color: ${statusColor}; margin-right: 8px; ${
+          isPulsing ? 'animation: pulse 1.5s infinite;' : ''
+        }"></span>
+        <span style="font-size: 14px; color: ${statusColor}; text-transform: capitalize;">${status}</span>
+      </div>
+    `
+      : '';
+
+    const ttlRemaining = formatTimeRemaining(window.LFC_CREATED_AT);
+    const ttlDisplay = ttlRemaining
+      ? `
+      <div style="margin: 4px 0; display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-size: 14px; color: #888;">Expires in:</span>
+        <span style="font-size: 14px; color: ${
+          ttlRemaining === 'Expired' ? '#FF5252' : '#FFA726'
+        };">${ttlRemaining}</span>
+      </div>
+    `
+      : '';
+
+    if (!window.LFC_BANNER || !window.LFC_BANNER.length) return statusIndicator + ttlDisplay + 'Test Content';
+
+    const bannerContent = window.LFC_BANNER.filter((item) => item.value)
       .map((item) => {
         const label = item.label;
         const value = item.url
@@ -139,6 +239,8 @@
                 </div>`;
       })
       .join('');
+
+    return statusIndicator + ttlDisplay + bannerContent;
   }
 
   function makeDraggable(badge) {
@@ -146,6 +248,7 @@
     let startX, startY, initialX, initialY;
 
     const dragHandle = document.createElement('div');
+    dragHandle.id = 'drag-handle';
     dragHandle.style.cssText = `
       width: 100%;
       height: 25px;
@@ -170,7 +273,8 @@
     badge.insertBefore(dragHandle, badge.firstChild);
 
     function handleMouseDown(e) {
-      if (e.target !== dragHandle && e.target !== dragIndicator) return;
+      const collapseBtn = badge.querySelector('#collapse-btn');
+      if (e.target !== dragHandle && e.target !== dragIndicator && e.target !== collapseBtn) return;
 
       isDragging = true;
       startX = e.clientX;
@@ -218,12 +322,88 @@
     document.addEventListener('mouseup', handleMouseUp);
   }
 
+  function addCollapseButton(badge, contentWrapper) {
+    const collapseBtn = document.createElement('button');
+    collapseBtn.id = 'collapse-btn';
+    collapseBtn.innerHTML = state.isCollapsed ? '&#9889;' : '&minus;';
+    Object.assign(collapseBtn.style, {
+      position: 'absolute',
+      top: '5px',
+      right: '5px',
+      width: '20px',
+      height: '20px',
+      backgroundColor: 'rgba(255, 255, 255, 0.1)',
+      border: 'none',
+      borderRadius: '4px',
+      color: '#fff',
+      cursor: 'pointer',
+      fontSize: '16px',
+      lineHeight: '1',
+      padding: '0',
+      zIndex: '10',
+    });
+
+    collapseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.isCollapsed = !state.isCollapsed;
+      updateBadgeCollapsedState(badge, contentWrapper);
+      saveState();
+    });
+
+    badge.appendChild(collapseBtn);
+  }
+
+  function updateBadgeCollapsedState(badge, contentWrapper) {
+    const collapseBtn = badge.querySelector('#collapse-btn');
+    const buttonContainer = shadowRoot.getElementById(`${LOG_BUTTON_ID}-container`);
+    const dragHandle = badge.querySelector('#drag-handle');
+
+    if (state.isCollapsed) {
+      contentWrapper.style.display = 'none';
+      if (buttonContainer) buttonContainer.style.display = 'none';
+      if (dragHandle) dragHandle.style.display = 'none';
+      badge.style.width = '50px';
+      badge.style.height = '50px';
+      badge.style.borderRadius = '50%';
+      badge.style.display = 'flex';
+      badge.style.alignItems = 'center';
+      badge.style.justifyContent = 'center';
+      badge.style.padding = '0';
+      collapseBtn.innerHTML = '&#9889;';
+      collapseBtn.style.position = 'static';
+      collapseBtn.style.width = '100%';
+      collapseBtn.style.height = '100%';
+      collapseBtn.style.fontSize = '24px';
+      collapseBtn.style.backgroundColor = 'transparent';
+      collapseBtn.style.borderRadius = '50%';
+    } else {
+      contentWrapper.style.display = 'block';
+      if (buttonContainer && !state.terminalWasOpen) buttonContainer.style.display = 'block';
+      if (dragHandle) dragHandle.style.display = 'block';
+      badge.style.width = '';
+      badge.style.height = '';
+      badge.style.borderRadius = '8px';
+      badge.style.display = 'block';
+      badge.style.alignItems = '';
+      badge.style.justifyContent = '';
+      badge.style.padding = '';
+      collapseBtn.innerHTML = '&minus;';
+      collapseBtn.style.position = 'absolute';
+      collapseBtn.style.width = '20px';
+      collapseBtn.style.height = '20px';
+      collapseBtn.style.fontSize = '16px';
+      collapseBtn.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+      collapseBtn.style.borderRadius = '4px';
+    }
+  }
+
   function createBadge(content) {
     const badge = document.createElement('div');
     badge.id = BADGE_ID;
     Object.assign(badge.style, BADGE_STYLES);
 
     const contentWrapper = document.createElement('div');
+    contentWrapper.id = 'badge-content-wrapper';
     contentWrapper.style.padding = '0 15px';
     contentWrapper.innerHTML = content;
     badge.appendChild(contentWrapper);
@@ -235,9 +415,16 @@
       badge.style.top = `${state.badgePosition.y}px`;
     }
 
+    addCollapseButton(badge, contentWrapper);
+
+    if (state.isCollapsed) {
+      updateBadgeCollapsedState(badge, contentWrapper);
+    }
+
     makeDraggable(badge);
     return badge;
   }
+
   function addShowLogsButton(badge) {
     const buttonContainer = document.createElement('div');
     buttonContainer.id = `${LOG_BUTTON_ID}-container`;
@@ -245,7 +432,7 @@
       padding: '8px 15px 15px 15px',
       borderTop: '1px solid rgba(255, 255, 255, 0.1)',
       marginTop: '10px',
-      display: state.terminalWasOpen ? 'none' : 'block',
+      display: state.terminalWasOpen || state.isCollapsed ? 'none' : 'block',
     });
 
     const btn = document.createElement('button');
@@ -286,10 +473,11 @@
       height: '400px',
       backgroundColor: TERMINAL_COLORS.bg,
       borderTop: `2px solid ${TERMINAL_COLORS.prompt}`,
-      zIndex: '2000',
+      zIndex: '2147483647',
       overflow: 'hidden',
       display: 'none',
       fontFamily: '"Fira Code", "Source Code Pro", monospace',
+      pointerEvents: 'auto',
     });
 
     const header = document.createElement('div');
@@ -338,8 +526,49 @@
     searchInput.placeholder = 'Filter logs...';
     searchContainer.appendChild(searchInput);
 
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy';
+    Object.assign(copyBtn.style, {
+      backgroundColor: '#3D3D3D',
+      border: 'none',
+      color: TERMINAL_COLORS.text,
+      padding: '5px 10px',
+      borderRadius: '4px',
+      marginLeft: '8px',
+      cursor: 'pointer',
+      fontSize: '14px',
+      height: '28px',
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      const contentDiv = shadowRoot.getElementById(LOG_MODAL_CONTENT_ID);
+      const logLines = Array.from(contentDiv.getElementsByClassName('log-line'))
+        .filter((line) => line.style.display !== 'none')
+        .map((line) => line.textContent)
+        .join('\n');
+
+      try {
+        await navigator.clipboard.writeText(logLines);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => {
+          copyBtn.textContent = 'Copy';
+        }, 2000);
+      } catch (err) {
+        console.error('Failed to copy logs:', err);
+        copyBtn.textContent = 'Failed';
+        setTimeout(() => {
+          copyBtn.textContent = 'Copy';
+        }, 2000);
+      }
+    });
+
+    copyBtn.addEventListener('mouseover', () => (copyBtn.style.backgroundColor = '#4D4D4D'));
+    copyBtn.addEventListener('mouseout', () => (copyBtn.style.backgroundColor = '#3D3D3D'));
+
+    searchContainer.appendChild(copyBtn);
+
     const closeBtn = document.createElement('button');
-    closeBtn.textContent = '✕';
+    closeBtn.textContent = '\u2715';
     Object.assign(closeBtn.style, {
       position: 'absolute',
       right: '10px',
@@ -412,7 +641,7 @@
       });
     });
 
-    document.body.appendChild(modal);
+    shadowRoot.appendChild(modal);
     return modal;
   }
 
@@ -439,7 +668,7 @@
     state.terminalWasOpen = true;
     saveState();
 
-    const contentDiv = document.getElementById(LOG_MODAL_CONTENT_ID);
+    const contentDiv = shadowRoot.getElementById(LOG_MODAL_CONTENT_ID);
     contentDiv.innerHTML = '';
 
     const url = `${getBaseUrl()}/api/v1/builds/${encodeURIComponent(UUID)}/services/${encodeURIComponent(
@@ -453,7 +682,7 @@
       logLine.innerHTML = colorizeLog(event.data);
       contentDiv.appendChild(logLine);
 
-      const searchTerm = document.getElementById(SEARCH_INPUT_ID).value.toLowerCase();
+      const searchTerm = shadowRoot.getElementById(SEARCH_INPUT_ID).value.toLowerCase();
       if (searchTerm) {
         logLine.style.display = event.data.toLowerCase().includes(searchTerm) ? 'block' : 'none';
       }
@@ -469,8 +698,8 @@
       state.terminalWasOpen = false;
       saveState();
 
-      const buttonContainer = document.getElementById(`${LOG_BUTTON_ID}-container`);
-      if (buttonContainer) buttonContainer.style.display = 'block';
+      const buttonContainer = shadowRoot.getElementById(`${LOG_BUTTON_ID}-container`);
+      if (buttonContainer && !state.isCollapsed) buttonContainer.style.display = 'block';
     }
     if (evtSource) {
       evtSource.close();
@@ -505,6 +734,7 @@
   }
 
   function initialize() {
+    createShadowHost();
     loadState();
     initShortcut();
 
@@ -517,6 +747,16 @@
         showLogsModal();
       }
     }
+
+    setInterval(() => {
+      const badge = shadowRoot?.getElementById(BADGE_ID);
+      if (badge && !state.isCollapsed) {
+        const contentWrapper = badge.querySelector('#badge-content-wrapper');
+        if (contentWrapper) {
+          contentWrapper.innerHTML = buildBadgeContent();
+        }
+      }
+    }, 60000);
   }
 
   if (document.readyState === 'loading') {

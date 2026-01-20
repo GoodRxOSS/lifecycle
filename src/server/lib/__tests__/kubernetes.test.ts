@@ -433,3 +433,47 @@ describe('Kubernetes Node Placement', () => {
     });
   });
 });
+
+describe('generateDeployManifest labels for envLens', () => {
+  it('should include app.kubernetes.io/instance label for log streaming compatibility', () => {
+    const build: any = {
+      uuid: 'test-build-uuid',
+      isStatic: false,
+      capacityType: 'ON_DEMAND',
+      enableFullYaml: true,
+    };
+
+    const deploy: any = {
+      uuid: 'test-deploy-uuid',
+      active: true,
+      replicaCount: 1,
+      dockerImage: 'test-image:latest',
+      env: {},
+      deployable: {
+        name: 'my-service',
+        port: '8080',
+        capacityType: 'ON_DEMAND',
+        memoryRequest: '512Mi',
+        memoryLimit: '1Gi',
+        cpuRequest: '250m',
+        cpuLimit: '500m',
+      },
+    };
+
+    const manifest = k8s.generateDeployManifest({
+      deploy,
+      build,
+      namespace: 'test-namespace',
+      serviceAccountName: 'default',
+    });
+
+    // generateDeployManifest returns multiple YAML documents (deployment + services)
+    const docs: any[] = yaml.loadAll(manifest);
+    const deployment = docs.find((d) => d?.kind === 'Deployment');
+
+    // The label should be serviceName-buildUUID to match Helm convention
+    // Log streaming uses: app.kubernetes.io/instance=${name}-${uuid}
+    expect(deployment.metadata.labels['app.kubernetes.io/instance']).toBe('my-service-test-build-uuid');
+    expect(deployment.spec.template.metadata.labels['app.kubernetes.io/instance']).toBe('my-service-test-build-uuid');
+  });
+});

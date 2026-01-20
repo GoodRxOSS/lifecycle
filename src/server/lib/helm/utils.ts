@@ -99,12 +99,17 @@ export function createBannerVars(options: BannerOptions[], deploy: Deploy): stri
 
   const uuid = deploy?.build?.uuid || '';
   const serviceName = deploy?.deployable?.name || '';
+  const deployStatus = deploy?.status || '';
+  const createdAt = deploy?.build?.createdAt || '';
 
   return [
     `window.LFC_BANNER = ${JSON.stringify(bannerItems)};`,
     `window.LFC_UUID = "${uuid}";`,
     `window.LFC_SERVICE_NAME = "${serviceName}";`,
     `window.LFC_BASE_URL = "${APP_HOST}";`,
+    `window.LFC_DEPLOY_STATUS = "${deployStatus}";`,
+    `window.LFC_CREATED_AT = "${createdAt}";`,
+    `window.LFC_DASHBOARD_URL = "${LIFECYCLE_UI_HOSTHAME_WITH_SCHEME}/build/${uuid}";`,
   ].join('\n');
 }
 
