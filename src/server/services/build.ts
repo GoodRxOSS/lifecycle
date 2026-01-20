@@ -45,6 +45,7 @@ import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
+import WebhookService from './webhook';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -201,6 +202,172 @@ export default class BuildService extends BaseService {
       });
 
     return build;
+  }
+
+  async redeployServiceFromBuild(buildUuid: string, serviceName: string) {
+    const build = await this.db.models.Build.query()
+      .findOne({
+        uuid: buildUuid,
+      })
+      .withGraphFetched('deploys.deployable');
+
+    if (!build) {
+      getLogger().debug(`Build not found for ${buildUuid}.`);
+      return {
+        status: 'not_found',
+        message: `Build not found for ${buildUuid}.`,
+      };
+    }
+
+    const buildId = build.id;
+
+    const deploy = build.deploys?.find((deploy) => deploy.deployable?.name === serviceName);
+
+    if (!deploy || !deploy.deployable) {
+      getLogger().debug(`Deployable ${serviceName} not found for ${buildUuid}.`);
+      throw new Error(`Deployable ${serviceName} not found for ${buildUuid}.`);
+    }
+
+    const githubRepositoryId = Number(deploy.deployable.repositoryId);
+
+    const runUUID = nanoid();
+
+    await this.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      buildId,
+      githubRepositoryId,
+      runUUID,
+      ...extractContextForQueue(),
+    });
+
+    getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: service redeploy queued service=${serviceName}`);
+
+    const deployService = new DeployService();
+
+    await deploy.$query().patchAndFetch({
+      runUUID,
+    });
+
+    await deployService.patchAndUpdateActivityFeed(
+      deploy,
+      {
+        status: DeployStatus.QUEUED,
+      },
+      runUUID,
+      githubRepositoryId
+    );
+
+    return {
+      status: 'success',
+      message: `Redeploy for service ${serviceName} in environment ${buildUuid} has been queued`,
+    };
+  }
+
+  async redeployBuild(buildUuid: string) {
+    const correlationId = `api-redeploy-${Date.now()}-${nanoid(8)}`;
+    return withLogContext({ correlationId, buildUuid }, async () => {
+      const build = await this.db.models.Build.query()
+        .findOne({ uuid: buildUuid })
+        .withGraphFetched('deploys.deployable');
+
+      if (!build) {
+        getLogger().debug(`Build not found for ${buildUuid}.`);
+        return {
+          status: 'not_found',
+          message: `Build not found for ${buildUuid}.`,
+        };
+      }
+
+      const buildId = build.id;
+
+      await this.resolveAndDeployBuildQueue.add('resolve-deploy', {
+        buildId,
+        runUUID: nanoid(),
+        correlationId,
+      });
+
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: redeploy queued');
+
+      return {
+        status: 'success',
+        message: `Redeploy for build ${buildUuid} has been queued`,
+      };
+    });
+  }
+
+  async tearDownBuild(uuid: string) {
+    return withLogContext({ buildUuid: uuid }, async () => {
+      const build = await this.db.models.Build.query()
+        .findOne({
+          uuid,
+        })
+        .withGraphFetched('[deploys]');
+
+      if (!build || build.isStatic) {
+        getLogger().debug('Build does not exist or is static environment');
+        return {
+          status: 'not_found',
+          message: `Build not found for ${uuid} or is static environment.`,
+        };
+      }
+
+      const deploysIds = build.deploys?.map((deploy) => deploy.id) ?? [];
+
+      await this.db.models.Build.query().findById(build.id).patch({
+        status: BuildStatus.TORN_DOWN,
+        statusMessage: 'Namespace was deleted successfully',
+      });
+
+      await this.db.models.Deploy.query()
+        .whereIn('id', deploysIds)
+        .patch({ status: DeployStatus.TORN_DOWN, statusMessage: 'Namespace was deleted successfully' });
+
+      const updatedDeploys = await this.db.models.Deploy.query()
+        .whereIn('id', deploysIds)
+        .select('id', 'uuid', 'status');
+
+      return {
+        status: 'success',
+        message: `Build ${uuid} has been torn down`,
+        namespacesUpdated: updatedDeploys,
+      };
+    });
+  }
+
+  async invokeWebhooksForBuild(uuid: string) {
+    const correlationId = `api-webhook-invoke-${Date.now()}-${nanoid(8)}`;
+
+    return withLogContext({ correlationId, buildUuid: uuid }, async () => {
+      const build = await this.db.models.Build.query().findOne({ uuid });
+
+      if (!build) {
+        getLogger().debug('Build not found');
+        return {
+          status: 'not_found',
+          message: `Build not found for ${uuid}.`,
+        };
+      }
+
+      if (!build.webhooksYaml) {
+        getLogger().debug('No webhooks found for build');
+        return {
+          status: 'no_content',
+          message: `No webhooks found for build ${uuid}.`,
+        };
+      }
+
+      const webhookService = new WebhookService();
+      await webhookService.webhookQueue.add('webhook', {
+        buildId: build.id,
+        correlationId,
+      });
+
+      getLogger({ stage: LogStage.WEBHOOK_PROCESSING }).info('Webhook invocation queued via API');
+
+      return {
+        status: 'success',
+        message: `Webhooks for build ${uuid} have been queued`,
+      };
+    });
   }
 
   async validateLifecycleSchema(repo: string, branch: string): Promise<{ valid: boolean }> {

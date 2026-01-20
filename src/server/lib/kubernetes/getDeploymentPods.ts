@@ -160,19 +160,38 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
     const namespace = `env-${uuid}`;
     const fullDeploymentName = `${deploymentName}-${uuid}`;
 
-    let deployment: k8s.V1Deployment;
+    const workloadSelector = `app.kubernetes.io/instance=${fullDeploymentName}`;
+    let matchLabels: Record<string, string> | undefined;
 
-    try {
-      const deployResp = await appsV1.readNamespacedDeployment(fullDeploymentName, namespace);
-      deployment = deployResp.body;
-    } catch (err: any) {
-      if (err?.statusCode === 404) {
-        return [];
+    // Try to find a Deployment using the label selector
+    const deployResp = await appsV1.listNamespacedDeployment(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      workloadSelector
+    );
+
+    if (deployResp.body.items.length > 0) {
+      matchLabels = deployResp.body.items[0].spec?.selector?.matchLabels;
+    } else {
+      //  if no Deployment found, try to find a StatefulSet
+      const stsResp = await appsV1.listNamespacedStatefulSet(
+        namespace,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        workloadSelector
+      );
+
+      if (stsResp.body.items.length > 0) {
+        matchLabels = stsResp.body.items[0].spec?.selector?.matchLabels;
       }
-      throw err;
     }
 
-    const matchLabels = deployment.spec?.selector?.matchLabels;
+    // If neither found or no labels to match, return empty
     if (!matchLabels || Object.keys(matchLabels).length === 0) {
       return [];
     }
@@ -209,7 +228,7 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
       };
     });
   } catch (error) {
-    getLogger().error({ error }, `K8s: failed to list deployment pods service=${deploymentName}`);
+    getLogger().error({ error }, `K8s: failed to list workload pods service=${deploymentName}`);
     throw error;
   }
 }
