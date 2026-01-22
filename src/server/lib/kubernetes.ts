@@ -30,6 +30,8 @@ import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
 import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 import { staticEnvTolerations } from './helm/constants';
+import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
+import { generateSecretName } from './kubernetes/externalSecret';
 
 interface VOLUME {
   name: string;
@@ -855,21 +857,47 @@ export function generateDeployManifests(
        * 1. It merges the deploy environment with the comment based environment.
        * 2. It then filters out any nested values, which aren't supported in Kubernetes.
        * 3. It then flattens out any nulls
+       * 4. Handles cloud secret references ({{aws:path:key}} or {{gcp:path:key}})
        */
-      const env: Array<Record<string, any>> = _.flatten(
-        Object.entries(
-          _.merge({ __NAMESPACE__: 'lifecycle' }, deploy.env || '{}', flattenObject(build.commentRuntimeEnv))
-        ).map(([key, value]) => {
-          // Filter out nested objects which aren't supported
-          if (_.isObject(value) === false) {
-            return {
-              name: key,
-              value,
-            };
-          } else {
-            return null;
-          }
-        })
+      const mergedEnv = _.merge(
+        { __NAMESPACE__: 'lifecycle' },
+        deploy.env || '{}',
+        flattenObject(build.commentRuntimeEnv)
+      );
+      const secretRefs = parseSecretRefsFromEnv(mergedEnv as Record<string, string>);
+      const secretRefMap = new Map<string, SecretRefWithEnvKey>();
+      for (const ref of secretRefs) {
+        secretRefMap.set(ref.envKey, ref);
+      }
+      const envServiceName = enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+
+      const env: Array<Record<string, any>> = _.compact(
+        _.flatten(
+          Object.entries(mergedEnv).map(([key, value]) => {
+            // Filter out nested objects which aren't supported
+            if (_.isObject(value) === false) {
+              const secretRef = secretRefMap.get(key);
+              if (secretRef && envServiceName) {
+                const secretName = generateSecretName(envServiceName, secretRef.provider);
+                return {
+                  name: key,
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: secretName,
+                      key: key,
+                    },
+                  },
+                };
+              }
+              return {
+                name: key,
+                value,
+              };
+            } else {
+              return null;
+            }
+          })
+        )
       );
 
       env.push(
@@ -997,12 +1025,36 @@ export function generateDeployManifests(
       ];
 
       if (deploy.initDockerImage) {
-        const initEnv: Array<Record<string, any>> = Object.entries(
-          _.merge({ __NAMESPACE__: 'lifecycle' }, deploy.initEnv || '{}', flattenObject(build.commentInitEnv))
-        ).map(([key, value]) => ({
-          name: key,
-          value,
-        }));
+        const initEnvMerged = _.merge(
+          { __NAMESPACE__: 'lifecycle' },
+          deploy.initEnv || '{}',
+          flattenObject(build.commentInitEnv)
+        );
+        const initSecretRefs = parseSecretRefsFromEnv(initEnvMerged as Record<string, string>);
+        const initSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+        for (const ref of initSecretRefs) {
+          initSecretRefMap.set(ref.envKey, ref);
+        }
+
+        const initEnv: Array<Record<string, any>> = Object.entries(initEnvMerged).map(([key, value]) => {
+          const initSecretRef = initSecretRefMap.get(key);
+          if (initSecretRef) {
+            const initSecretName = generateSecretName(envServiceName, initSecretRef.provider);
+            return {
+              name: key,
+              valueFrom: {
+                secretKeyRef: {
+                  name: initSecretName,
+                  key: key,
+                },
+              },
+            };
+          }
+          return {
+            name: key,
+            value,
+          };
+        });
         initEnv.push(
           {
             name: 'POD_IP',
@@ -1819,12 +1871,33 @@ function generateSingleDeploymentManifest({
       flattenObject(build.commentInitEnv)
     );
 
+    const initSecretRefs = parseSecretRefsFromEnv(initEnvObj as Record<string, string>);
+    const initSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+    for (const ref of initSecretRefs) {
+      initSecretRefMap.set(ref.envKey, ref);
+    }
+
     const initEnvArray: Array<Record<string, any>> = Object.entries(initEnvObj)
       .filter(([, value]) => !_.isObject(value))
-      .map(([key, value]) => ({
-        name: key,
-        value: String(value),
-      }));
+      .map(([key, value]) => {
+        const secretRef = initSecretRefMap.get(key);
+        if (secretRef) {
+          const secretRefName = generateSecretName(serviceName || 'service', secretRef.provider);
+          return {
+            name: key,
+            valueFrom: {
+              secretKeyRef: {
+                name: secretRefName,
+                key: key,
+              },
+            },
+          };
+        }
+        return {
+          name: key,
+          value: String(value),
+        };
+      });
 
     initEnvArray.push(
       {
@@ -1897,12 +1970,33 @@ function generateSingleDeploymentManifest({
 
   // Handle main container
   const mainEnvObj = _.merge({ __NAMESPACE__: 'lifecycle' }, envToUse, flattenObject(build.commentRuntimeEnv));
+  const mainSecretRefs = parseSecretRefsFromEnv(mainEnvObj as Record<string, string>);
+  const mainSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+  for (const ref of mainSecretRefs) {
+    mainSecretRefMap.set(ref.envKey, ref);
+  }
+
   const mainEnvArray: Array<Record<string, any>> = Object.entries(mainEnvObj)
     .filter(([, value]) => !_.isObject(value))
-    .map(([key, value]) => ({
-      name: key,
-      value: String(value),
-    }));
+    .map(([key, value]) => {
+      const secretRef = mainSecretRefMap.get(key);
+      if (secretRef) {
+        const secretRefName = generateSecretName(serviceName || 'service', secretRef.provider);
+        return {
+          name: key,
+          valueFrom: {
+            secretKeyRef: {
+              name: secretRefName,
+              key: key,
+            },
+          },
+        };
+      }
+      return {
+        name: key,
+        value: String(value),
+      };
+    });
 
   // Add Kubernetes field references for pod metadata
   mainEnvArray.push(
@@ -2103,6 +2197,7 @@ function generateSingleDeploymentManifest({
         lc_uuid: build.uuid,
         deploy_uuid: deploy.uuid,
         dd_name: `lifecycle-${build.uuid}`,
+        'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
         ...datadogLabels,
       },
     },
@@ -2127,6 +2222,7 @@ function generateSingleDeploymentManifest({
             lc_uuid: build.uuid,
             deploy_uuid: deploy.uuid,
             dd_name: `lifecycle-${build.uuid}`,
+            'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
             ...datadogLabels,
           },
         },

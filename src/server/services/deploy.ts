@@ -37,6 +37,7 @@ import { getLogs } from 'server/lib/codefresh';
 import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import { SecretProcessor } from 'server/services/secretProcessor';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -1043,12 +1044,71 @@ export default class DeployService extends BaseService {
         if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
           getLogger().info(`Image: building engine=${deployable.builder.engine}`);
 
+          let buildSecretNames: string[] = [];
+          let secretEnvKeys: Set<string> = new Set();
+          const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
+          const secretProviders = globalConfigs.secretProviders;
+
+          if (secretProviders && deploy.env) {
+            const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
+            await ensureNamespaceExists(deploy.build.namespace);
+
+            const secretProcessor = new SecretProcessor(secretProviders);
+            const envToProcess = deploy.env as Record<string, string>;
+
+            const secretResult = await secretProcessor.processEnvSecrets({
+              env: envToProcess,
+              serviceName: deployable.name,
+              namespace: deploy.build.namespace,
+              buildUuid: deploy.uuid,
+            });
+
+            secretEnvKeys = new Set(secretResult.secretRefs.map((ref) => ref.envKey));
+
+            if (secretResult.warnings.length > 0) {
+              getLogger().warn(
+                `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
+                  ', '
+                )}`
+              );
+            }
+
+            if (secretResult.secretNames.length > 0) {
+              getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+
+              const providerTimeouts = Object.values(secretProviders)
+                .map((p) => p.secretSyncTimeout)
+                .filter((t): t is number => t !== undefined);
+              const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+
+              try {
+                await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
+                buildSecretNames = secretResult.secretNames;
+                getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
+              } catch (error) {
+                getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
+                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+                return false;
+              }
+            }
+          }
+
+          const filteredEnvVars =
+            secretEnvKeys.size > 0
+              ? Object.fromEntries(
+                  Object.entries(buildOptions.envVars || {}).filter(([key]) => !secretEnvKeys.has(key))
+                )
+              : buildOptions.envVars;
+
           const nativeOptions = {
             ...buildOptions,
+            envVars: filteredEnvVars,
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
-            deployUuid: deploy.uuid, // Use the full deploy UUID which includes service name
+            deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
+            secretRefs: buildSecretNames,
+            secretEnvKeys: Array.from(secretEnvKeys),
           };
 
           if (!initDockerfilePath) {

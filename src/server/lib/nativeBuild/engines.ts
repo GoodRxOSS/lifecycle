@@ -48,6 +48,8 @@ export interface NativeBuildOptions {
     requests?: Record<string, string>;
     limits?: Record<string, string>;
   };
+  secretRefs?: string[];
+  secretEnvKeys?: string[];
 }
 
 interface BuildEngine {
@@ -68,6 +70,19 @@ interface BuildArgOptions {
   cacheRef: string;
   buildArgs: Record<string, string>;
   ecrDomain: string;
+  secretEnvKeys?: string[];
+}
+
+export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
+  if (!secretEnvKeys || secretEnvKeys.length === 0) {
+    return '# No secret env keys';
+  }
+
+  const lines = secretEnvKeys.map(
+    (key) => `[ -n "$${key}" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:${key}=$${key}"`
+  );
+
+  return lines.join('\n');
 }
 
 const ENGINES: Record<string, BuildEngine> = {
@@ -75,7 +90,7 @@ const ENGINES: Record<string, BuildEngine> = {
     name: 'buildkit',
     image: 'moby/buildkit:v0.12.0',
     command: ['/bin/sh', '-c'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain }) => {
+    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain, secretEnvKeys }) => {
       const buildctlArgs = [
         'build',
         '--frontend',
@@ -138,8 +153,12 @@ fi
 echo "Setting DOCKER_CONFIG..."
 export DOCKER_CONFIG=~/.docker
 
+# Build secret env vars as build args
+SECRET_BUILD_ARGS=""
+${generateSecretArgsScript(secretEnvKeys)}
+
 echo "Running buildctl..."
-buildctl ${buildctlArgs.join(' \\\n  ')}
+buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
 `;
 
       return [script.trim()];
@@ -194,7 +213,9 @@ function createBuildContainer(
   envVars: Record<string, string>,
   resources: any,
   buildArgs: Record<string, string>,
-  ecrDomain: string
+  ecrDomain: string,
+  secretRefs?: string[],
+  secretEnvKeys?: string[]
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -203,6 +224,7 @@ function createBuildContainer(
     cacheRef,
     buildArgs,
     ecrDomain,
+    secretEnvKeys,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
@@ -223,7 +245,7 @@ function createBuildContainer(
     containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
   }
 
-  return {
+  const container: any = {
     name,
     image: engine.image,
     command: engine.command,
@@ -232,6 +254,17 @@ function createBuildContainer(
     volumeMounts,
     resources,
   };
+
+  if (secretRefs && secretRefs.length > 0) {
+    container.envFrom = secretRefs.map((secretName) => ({
+      secretRef: {
+        name: secretName,
+        optional: false,
+      },
+    }));
+  }
+
+  return container;
 }
 
 export async function buildWithEngine(
@@ -336,7 +369,9 @@ export async function buildWithEngine(
       envVars,
       resources,
       options.envVars,
-      options.ecrDomain
+      options.ecrDomain,
+      options.secretRefs,
+      options.secretEnvKeys
     )
   );
 
@@ -353,7 +388,9 @@ export async function buildWithEngine(
         envVars,
         resources,
         options.envVars,
-        options.ecrDomain
+        options.ecrDomain,
+        options.secretRefs,
+        options.secretEnvKeys
       )
     );
     getLogger().debug('Build: including init image');
