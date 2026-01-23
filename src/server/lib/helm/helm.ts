@@ -33,6 +33,7 @@ import {
   deletePendingHelmReleaseStep,
   waitForInProgressDeploys,
 } from 'server/lib/codefresh/utils/generateCodefreshCmd';
+import { randomAlphanumeric } from '../random';
 
 const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
 
@@ -208,6 +209,8 @@ export const constructImageVersion = (imageName: string = '') => {
   if (imageNameParts?.length === 0) return imageNameWithoutPrefix;
   // filters out main, init, lfc
   const imageNameWithoutImageType = imageNameParts.filter((part) => !['main', 'init', 'lfc'].includes(part));
+  const jobId = randomAlphanumeric(4).toLowerCase();
+  imageNameWithoutImageType.unshift(jobId);
   return imageNameWithoutImageType.join('-');
 };
 
