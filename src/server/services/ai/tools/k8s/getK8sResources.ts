@@ -32,6 +32,19 @@ export class GetK8sResourcesTool extends BaseTool {
             type: 'string',
             description:
               'Resource type to list (e.g., "pods", "deployments", "services", "ingresses", "secrets", "configmaps", "jobs", "statefulsets", "events"). Accepts singular or plural forms.',
+            enum: [
+              'pods',
+              'deployments',
+              'services',
+              'ingresses',
+              'secrets',
+              'configmaps',
+              'jobs',
+              'statefulsets',
+              'daemonsets',
+              'replicasets',
+              'events',
+            ],
           },
           name: {
             type: 'string',

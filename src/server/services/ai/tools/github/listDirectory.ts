@@ -70,11 +70,15 @@ export class ListDirectoryTool extends BaseTool {
         path: item.path,
       }));
 
+      const filteredItems = items.filter(
+        (item: { name: string; type: string; path: string }) => !this.githubClient.isFileExcluded(item.path)
+      );
+
       const result = {
         success: true,
         path: directoryPath || '/',
-        items,
-        count: items.length,
+        items: filteredItems,
+        count: filteredItems.length,
       };
 
       return this.createSuccessResult(JSON.stringify(result));

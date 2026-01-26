@@ -699,6 +699,255 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           ],
         },
+
+        // ===================================================================
+        // AI Agent Config Schemas
+        // ===================================================================
+
+        AIAgentModelConfig: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            displayName: { type: 'string' },
+            enabled: { type: 'boolean' },
+            default: { type: 'boolean' },
+            maxTokens: { type: 'integer' },
+          },
+          required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],
+        },
+
+        AIAgentProviderConfig: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            enabled: { type: 'boolean' },
+            apiKeyEnvVar: { type: 'string' },
+            models: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AIAgentModelConfig' },
+            },
+          },
+          required: ['name', 'enabled', 'apiKeyEnvVar', 'models'],
+        },
+
+        AIAgentConfig: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            providers: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AIAgentProviderConfig' },
+            },
+            maxMessagesPerSession: { type: 'integer' },
+            sessionTTL: { type: 'integer' },
+            additiveRules: { type: 'array', items: { type: 'string' } },
+            systemPromptOverride: { type: 'string', maxLength: 50000 },
+            excludedTools: { type: 'array', items: { type: 'string' } },
+            excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['enabled', 'providers', 'maxMessagesPerSession', 'sessionTTL'],
+        },
+
+        AIAgentRepoOverride: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            maxMessagesPerSession: { type: 'integer' },
+            sessionTTL: { type: 'integer' },
+            additiveRules: { type: 'array', items: { type: 'string' } },
+            systemPromptOverride: { type: 'string', maxLength: 50000 },
+            excludedTools: { type: 'array', items: { type: 'string' } },
+            excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+          },
+        },
+
+        AIAgentRepoConfigEntry: {
+          type: 'object',
+          properties: {
+            repositoryFullName: { type: 'string' },
+            config: { $ref: '#/components/schemas/AIAgentRepoOverride' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+        },
+
+        GetGlobalAIAgentConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AIAgentConfig' },
+              },
+            },
+          ],
+        },
+
+        GetRepoAIAgentConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    repoFullName: { type: 'string' },
+                    config: { $ref: '#/components/schemas/AIAgentRepoOverride' },
+                  },
+                },
+              },
+            },
+          ],
+        },
+
+        GetEffectiveAIAgentConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    repoFullName: { type: 'string' },
+                    effectiveConfig: { $ref: '#/components/schemas/AIAgentConfig' },
+                  },
+                },
+              },
+            },
+          ],
+        },
+
+        ListRepoAIAgentConfigsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AIAgentRepoConfigEntry' },
+                },
+              },
+            },
+          ],
+        },
+
+        // ===================================================================
+        // AI Chat Schemas
+        // ===================================================================
+
+        AIModel: {
+          type: 'object',
+          properties: {
+            provider: { type: 'string' },
+            modelId: { type: 'string' },
+            displayName: { type: 'string' },
+            default: { type: 'boolean' },
+            maxTokens: { type: 'integer' },
+          },
+          required: ['provider', 'modelId', 'displayName', 'default', 'maxTokens'],
+        },
+
+        GetAIModelsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    models: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/AIModel' },
+                    },
+                  },
+                  required: ['models'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AIConfigStatus: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            provider: { type: 'string' },
+            configured: { type: 'boolean' },
+          },
+          required: ['enabled'],
+        },
+
+        GetAIConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AIConfigStatus' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ConversationMessage: {
+          type: 'object',
+          properties: {
+            role: { type: 'string', enum: ['user', 'assistant'] },
+            content: { type: 'string' },
+            timestamp: { type: 'integer' },
+            isSystemAction: { type: 'boolean' },
+          },
+          required: ['role', 'content', 'timestamp'],
+        },
+
+        GetAIMessagesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    messages: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/ConversationMessage' },
+                    },
+                    lastActivity: { type: 'integer', nullable: true },
+                  },
+                  required: ['messages'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        DeleteAISessionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    messagesCleared: { type: 'integer' },
+                  },
+                  required: ['success', 'messagesCleared'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
       },
     },
   },

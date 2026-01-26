@@ -54,6 +54,14 @@ export class GetFileTool extends BaseTool {
       const branch = args.branch as string;
       const filePath = args.file_path as string;
 
+      if (!this.githubClient.isFilePathAllowed(filePath, 'read')) {
+        return this.createErrorResult(
+          `File "${filePath}" is restricted by access control policy and cannot be read.`,
+          'FILE_ACCESS_DENIED',
+          false
+        );
+      }
+
       const octokit = await this.githubClient.getOctokit('ai-agent-get-file');
 
       const response = await octokit.request(`GET /repos/${owner}/${repo}/contents/${filePath}`, {

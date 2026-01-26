@@ -17,3 +17,4 @@
 export * from './provider';
 export * from './tool';
 export * from './stream';
+export * from './message';

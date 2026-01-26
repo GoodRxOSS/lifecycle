@@ -14,14 +14,29 @@
  * limitations under the License.
  */
 
-import { AI_AGENT_SYSTEM_PROMPT } from './systemPrompt';
+import { assembleBasePrompt, PROMPT_SECTIONS } from './sectionRegistry';
+
 import { DebugContext, DebugMessage } from '../../types/aiAgent';
+
+export interface McpToolInfo {
+  serverName: string;
+  serverSlug: string;
+  toolName: string;
+  qualifiedName: string;
+  description: string;
+}
 
 export interface PromptContext {
   provider: 'anthropic' | 'openai' | 'gemini';
   debugContext: DebugContext;
   conversationHistory: DebugMessage[];
   userMessage: string;
+  additiveRules?: string[];
+  systemPromptOverride?: string;
+  excludedTools?: string[];
+  excludedFilePatterns?: string[];
+  mcpTools?: McpToolInfo[];
+  excludeSections?: string[];
 }
 
 export interface BuiltPrompt {
@@ -29,17 +44,22 @@ export interface BuiltPrompt {
   messages: Array<{ role: string; content: string }>;
 }
 
-type ConversationMode = 'investigation' | 'fix' | 'verification' | 'general';
-
 export class AIAgentPromptBuilder {
-  private basePrompt = AI_AGENT_SYSTEM_PROMPT;
+  private basePrompt = assembleBasePrompt();
 
   public build(context: PromptContext): BuiltPrompt {
+    const excluded = context.excludeSections || [];
+    const registryExcludes = [...excluded.filter((id) => id !== 'safety')];
+    const base =
+      context.systemPromptOverride || (excluded.length > 0 ? assembleBasePrompt(registryExcludes) : this.basePrompt);
+
     const layers = [
-      this.basePrompt,
-      this.buildProviderAugmentation(context.provider),
-      this.buildConversationStateAugmentation(context),
-      this.buildEnvironmentContext(context.debugContext),
+      base,
+      this.buildGeminiAugmentation(context.provider),
+      this.buildMcpToolsLayer(context.mcpTools),
+      this.buildCustomRulesLayer(context),
+      this.buildAccessRestrictionsNotice(context),
+      excluded.includes('safety') ? '' : this.buildSafetyRulesLayer(),
     ];
 
     const systemPrompt = layers.filter(Boolean).join('\n');
@@ -48,7 +68,7 @@ export class AIAgentPromptBuilder {
     return { systemPrompt, messages };
   }
 
-  private buildProviderAugmentation(provider: string): string {
+  private buildGeminiAugmentation(provider: string): string {
     if (provider === 'gemini') {
       return `
 
@@ -60,22 +80,15 @@ export class AIAgentPromptBuilder {
 
 CRITICAL: You are using the Gemini model. Follow these specific instructions:
 
-1. **Execute Immediately - Do NOT Announce Intent:**
-   - WRONG - Do NOT do these: "I will check the deployment status"
-   - WRONG - Do NOT do these: "Let me get the logs"
-   - WRONG - Do NOT do these: "I am going to scale the resource"
-   - RIGHT - Do these instead: [Immediately call get_k8s_resources tool without saying anything]
-
-2. **Call Tools Directly - Do NOT Generate Code:**
+1. **Call Tools Directly - Do NOT Generate Code:**
    - WRONG - Do NOT do these: Generating Python code like "api.get_k8s_resources(...)"
    - WRONG - Do NOT do these: Showing pseudocode like "result = call_tool(...)"
    - WRONG - Do NOT do these: Writing JavaScript/TypeScript snippets
    - WRONG - Do NOT do these: Generating any programming language code
    - RIGHT - Do these instead: [Use the actual function calling mechanism your model provides]
 
-3. **Respect System Prompt - Do NOT Ignore Instructions:**
+2. **Respect System Prompt - Do NOT Ignore Instructions:**
    - All instructions in this prompt are MANDATORY
-   - If you announce instead of execute, you will be corrected
    - If you generate code instead of calling tools, you will fail
    - Tool calls are REQUIRED when actions are needed
 
@@ -100,108 +113,69 @@ NEVER:
     return '';
   }
 
-  private detectConversationMode(context: PromptContext): ConversationMode {
-    const message = context.userMessage.toLowerCase();
-
-    if (
-      message.match(/^(yes|fix it|do it|go ahead|please fix|apply.*fix|fix that)$/i) ||
-      message.includes('user consents to fix') ||
-      message.includes('apply the fix')
-    ) {
-      return 'fix';
+  private buildCustomRulesLayer(context: PromptContext): string {
+    if (!context.additiveRules || context.additiveRules.length === 0) {
+      return '';
     }
 
-    if (
-      message.match(/(did you|have you).*(scale|restart|patch|delete|commit|fix|update)/i) ||
-      message.match(/(are you sure|check again|verify|confirm)/i) ||
-      message.includes('use the tool') ||
-      message.includes('call the tool')
-    ) {
-      return 'verification';
-    }
-
-    if (message.match(/(why|what.*wrong|what.*fail|debug|investigate|check.*log|get.*log)/i)) {
-      return 'investigation';
-    }
-
-    return 'general';
+    const rules = context.additiveRules.map((rule) => `- ${rule}`).join('\n');
+    return `\n\n---\n\n# Custom Rules\n\n${rules}`;
   }
 
-  private buildConversationStateAugmentation(context: PromptContext): string {
-    const mode = this.detectConversationMode(context);
-
-    switch (mode) {
-      case 'fix':
-        return `
-
----
-
-# Current Mode: FIX APPLICATION
-
-The user has consented to apply a fix. Your immediate task:
-
-1. Identify which file needs modification (lifecycle.yaml or a referenced file)
-2. Call the appropriate get function to fetch current content
-3. Mentally determine the exact change needed
-4. Call the commit function with the complete corrected content
-5. Return the commit URL in your response
-
-DO NOT:
-- Ask for permission (you already have it)
-- Explain what you're going to do (just do it)
-- Generate code snippets or pseudocode
-- Fix anything other than what was just requested
-`;
-
-      case 'verification':
-        return `
-
----
-
-# Current Mode: VERIFICATION
-
-The user is asking you to verify state or confirm an action. Your task:
-
-1. Call verification tools to check current state:
-   - get_k8s_resources for runtime state
-   - get_lifecycle_config or get_referenced_file for configuration
-   - query_database for deployment records
-2. Report ACTUAL current state (not stale context)
-3. Answer truthfully - if you didn't perform an action, admit it
-
-DO NOT use stale context or assume state.
-`;
-
-      case 'investigation':
-        return `
-
----
-
-# Current Mode: INVESTIGATION
-
-The user is asking you to investigate an issue. Your task:
-
-1. Batch data collection (Step 1-2 of Debugging Workflow)
-   - Get all database context in one query
-   - Get all K8s resources in parallel
-2. Analyze patterns (Step 3)
-   - Identify common issues vs. unique issues
-   - Determine if you should ask user which service to investigate
-3. Execute targeted investigation (Step 4)
-   - Follow the 7-Step Investigation Pattern
-   - Compare DESIRED (config) vs ACTUAL (runtime) state
-4. Provide structured summary (Step 5)
-
-DO NOT:
-- Investigate services one-by-one before batching data
-- Commit fixes without user consent
-- Skip configuration file reading
-`;
-
-      case 'general':
-      default:
-        return '';
+  private buildAccessRestrictionsNotice(context: PromptContext): string {
+    const parts: string[] = [];
+    if (context.excludedTools && context.excludedTools.length > 0) {
+      parts.push(
+        `The following tools are NOT available to you: ${context.excludedTools.join(', ')}. Do not attempt to use them.`
+      );
     }
+    if (context.excludedFilePatterns && context.excludedFilePatterns.length > 0) {
+      parts.push(
+        `The following file patterns are restricted and you cannot access them: ${context.excludedFilePatterns.join(
+          ', '
+        )}. If a user asks about these files, explain they are restricted.`
+      );
+    }
+    if (parts.length === 0) return '';
+    return `\n\n---\n\n# Access Restrictions\n\n${parts.join('\n\n')}`;
+  }
+
+  private buildMcpToolsLayer(mcpTools?: McpToolInfo[]): string {
+    if (!mcpTools || mcpTools.length === 0) return '';
+
+    const byServer = new Map<string, McpToolInfo[]>();
+    for (const tool of mcpTools) {
+      const key = tool.serverName;
+      if (!byServer.has(key)) byServer.set(key, []);
+      byServer.get(key)!.push(tool);
+    }
+
+    const serverSections = Array.from(byServer.entries())
+      .map(([serverName, tools]) => {
+        const toolList = tools.map((t) => `- **${t.qualifiedName}**: ${t.description}`).join('\n');
+        return `### ${serverName}\n${toolList}`;
+      })
+      .join('\n\n');
+
+    return `
+
+---
+
+# External Tools (MCP)
+
+You have access to external tools from connected MCP servers. Use these tools when they can provide better or additional information beyond your built-in tools.
+
+${serverSections}
+
+**When to use MCP tools:**
+- Use them alongside built-in tools during investigation — they provide complementary data
+- If an MCP tool can answer the user's question directly, prefer it over manual investigation
+- MCP tool names are prefixed with \`mcp__<server>__\` — call them like any other tool
+- If an MCP tool fails, fall back to built-in tools`;
+  }
+
+  private buildSafetyRulesLayer(): string {
+    return '\n\n---\n\n' + PROMPT_SECTIONS.find((s) => s.id === 'safety')!.content;
   }
 
   private buildEnvironmentContext(debugContext: DebugContext): string {
@@ -215,8 +189,11 @@ DO NOT:
 
 Build UUID: ${debugContext.buildUuid}
 PR: #${lc.pullRequest.number || 'N/A'} - ${lc.pullRequest.title || 'N/A'}
+Author: ${lc.pullRequest.username || 'N/A'}
 Repository: ${lc.pullRequest.fullName}
 Branch: ${lc.pullRequest.branch}
+Base Branch: ${lc.pullRequest.baseBranch || 'N/A'}
+SHA: ${lc.pullRequest.latestCommit || lc.build.sha || 'N/A'}
 Build Status: ${lc.build.status}
 Namespace: ${lc.build.namespace}
 ${
@@ -259,13 +236,7 @@ ${
   debugContext.lifecycleYaml
     ? debugContext.lifecycleYaml.error
       ? `Could not fetch lifecycle.yaml: ${debugContext.lifecycleYaml.error}`
-      : `File: ${debugContext.lifecycleYaml.path}
-
-\`\`\`yaml
-${debugContext.lifecycleYaml.content}
-\`\`\`
-
-This is the source configuration for this environment. Check this for probe ports, resource limits, Dockerfile paths, etc.`
+      : `File: ${debugContext.lifecycleYaml.path}\n\n${debugContext.lifecycleYaml.content}`
     : 'lifecycle.yaml not available'
 }
 
@@ -285,12 +256,8 @@ ${debugContext.services
       content: m.content,
     }));
 
-    const contextSummary = this.generateContextSummary(context.debugContext);
-
-    let finalMessage = context.userMessage;
-    if (!context.userMessage.includes('[Current State]')) {
-      finalMessage = `${context.userMessage}\n\n[Current State]\n${contextSummary}`;
-    }
+    const envContext = this.buildEnvironmentContext(context.debugContext);
+    const finalMessage = `${envContext}\n\n${context.userMessage}`;
 
     messages.push({
       role: 'user',
@@ -298,14 +265,5 @@ ${debugContext.services
     });
 
     return messages;
-  }
-
-  private generateContextSummary(context: DebugContext): string {
-    const lc = context.lifecycleContext;
-    const criticalIssues = context.services.flatMap((s) => s.issues).filter((i) => i.severity === 'critical');
-    const prDisplay = lc.pullRequest.number ? `PR #${lc.pullRequest.number}` : `Build ${lc.build.uuid.slice(0, 8)}`;
-
-    return `${prDisplay} | Build: ${lc.build.status} | Namespace: ${context.namespace}
-Services: ${context.services.length} | Critical Issues: ${criticalIssues.length}`;
   }
 }

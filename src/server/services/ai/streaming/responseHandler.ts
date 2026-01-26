@@ -30,23 +30,29 @@ export class ResponseHandler {
   }
 
   handleChunk(text: string): void {
-    if (!this.isJsonResponse && this.isJsonStart(text)) {
+    if (!this.isJsonResponse && this.isJsonStart(this.textBuffer + text)) {
       this.isJsonResponse = true;
       getLogger().info(`AI: JSON response detected buildUuid=${this.buildUuid || 'none'}`);
       this.callbacks.onThinking('Generating structured report...');
+      // Include any buffered text that was part of the JSON start
+      if (this.textBuffer) {
+        this.jsonBuffer.append(this.textBuffer);
+        this.textBuffer = '';
+      }
       this.jsonBuffer.append(text);
+      this.callbacks.onTextChunk(text);
       return;
     }
 
     if (this.isJsonResponse) {
       this.jsonBuffer.append(text);
+      this.callbacks.onTextChunk(text);
 
       if (this.jsonBuffer.isComplete()) {
         getLogger().info(`AI: JSON response complete buildUuid=${this.buildUuid || 'none'}`);
         const parsed = this.jsonBuffer.parse();
         if (parsed) {
           getLogger().info(`AI: structured output parsed type=${parsed.type} buildUuid=${this.buildUuid || 'none'}`);
-          this.callbacks.onStructuredOutput(parsed);
         } else {
           getLogger().warn(`AI: JSON parse failed buildUuid=${this.buildUuid || 'none'}`);
         }
@@ -60,7 +66,7 @@ export class ResponseHandler {
 
   private isJsonStart(text: string): boolean {
     const trimmed = text.trim();
-    return trimmed.startsWith('{"type":') || trimmed.startsWith('{\n  "type":');
+    return trimmed.startsWith('{') && trimmed.includes('"type"');
   }
 
   getResult(): { response: string; isJson: boolean } {

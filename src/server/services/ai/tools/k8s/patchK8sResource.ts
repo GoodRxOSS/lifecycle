@@ -36,6 +36,7 @@ export class PatchK8sResourceTool extends BaseTool {
           operation: {
             type: 'string',
             description: 'Operation to perform: "patch", "scale", "restart", or "delete"',
+            enum: ['patch', 'scale', 'restart', 'delete'],
           },
           patch: {
             type: 'object',

@@ -31,6 +31,7 @@ export class QueryDatabaseTool extends BaseTool {
             type: 'string',
             description:
               'Table name: "builds" (environments), "deploys" (service deployments), "deployables" (service definitions), "pull_requests", "repositories", "environments"',
+            enum: ['builds', 'deploys', 'deployables', 'pull_requests', 'repositories', 'environments'],
           },
           filters: {
             type: 'object',
