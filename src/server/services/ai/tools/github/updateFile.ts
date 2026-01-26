@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../../types/tool';
+import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../../types/tool';
 import { GitHubClient } from '../shared/githubClient';
 
 export class UpdateFileTool extends BaseTool {
@@ -43,6 +43,19 @@ export class UpdateFileTool extends BaseTool {
       ToolSafetyLevel.DANGEROUS,
       'github'
     );
+  }
+
+  async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
+    const filePath = args.file_path as string;
+    const commitMessage = args.commit_message as string;
+    const repo = args.repository_name as string;
+    const branch = args.branch as string;
+    return {
+      title: 'Commit file change',
+      description: `Commit to ${repo}/${branch}: ${filePath}\n${commitMessage}`,
+      impact: 'This will commit changes to the repository.',
+      confirmButtonText: 'Commit',
+    };
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
@@ -106,7 +119,8 @@ export class UpdateFileTool extends BaseTool {
         commit_url: response.data.commit.html_url,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `${currentFileSha ? 'Updated' : 'Created'} ${filePath}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to commit changes', 'EXECUTION_ERROR');
     }

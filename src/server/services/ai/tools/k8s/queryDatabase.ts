@@ -31,21 +31,35 @@ export class QueryDatabaseTool extends BaseTool {
             type: 'string',
             description:
               'Table name: "builds" (environments), "deploys" (service deployments), "deployables" (service definitions), "pull_requests", "repositories", "environments"',
+            enum: ['builds', 'deploys', 'deployables', 'pull_requests', 'repositories', 'environments'],
           },
           filters: {
             type: 'object',
             description:
-              'WHERE conditions as key-value pairs. Example: {"uuid": "abc123", "status": "ERROR"}. Use "uuid" for builds/deploys, "id" for others.',
+              'WHERE conditions as key-value pairs. Deploy uuid format is "{serviceName}-{buildUuid}" (e.g., "vpii-events-broad-lab-080573"). Use SQL LIKE patterns with % for partial matching: {"uuid": "vpii-events-%"} finds all deploys for service vpii-events. Use "uuid" for builds/deploys, "id" for others. Only use actual table columns as keys.',
           },
           relations: {
             type: 'array',
             description:
-              'Relations to eager load. IMPORTANT: Only use relations valid for the table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository, service], deployables: [repository, deploys], pull_requests: [repository, builds], repositories: [pullRequests, deployables], environments: [builds]. Use dot notation for nested: "deploys.repository"',
+              'Relations to eager load (top-level only). Valid per table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository, service], deployables: [repository, deploys], pull_requests: [repository, builds], repositories: [pullRequests, deployables], environments: [builds]. Relations are returned as compact {id, name} objects.',
             items: { type: 'string' },
           },
           limit: {
             type: 'number',
-            description: 'Maximum number of records to return (default: 10, max: 100)',
+            description: 'Maximum number of records to return (default: 20, max: 100)',
+          },
+          select: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Columns to return (default: all). Invalid column names are silently ignored.',
+          },
+          orderBy: {
+            type: 'string',
+            description: 'Column and direction, e.g., "created_at:desc". Default: primary key descending.',
+          },
+          offset: {
+            type: 'number',
+            description: 'Records to skip for pagination. Use with limit.',
           },
         },
         required: ['table'],
@@ -65,20 +79,31 @@ export class QueryDatabaseTool extends BaseTool {
       const filters = args.filters as Record<string, any> | undefined;
       const relations = args.relations as string[] | undefined;
       const limit = args.limit as number | undefined;
+      const select = args.select as string[] | undefined;
+      const orderBy = args.orderBy as string | undefined;
+      const offset = args.offset as number | undefined;
 
-      const results = await this.databaseClient.queryTable(table, filters, relations, limit);
+      const { records, totalCount } = await this.databaseClient.queryTable({
+        table,
+        filters,
+        relations,
+        limit,
+        select,
+        orderBy,
+        offset,
+      });
 
-      const schema = this.databaseClient.getTableSchema(table);
-
-      const result = {
+      const agentContent = {
         success: true,
         table,
-        count: Array.isArray(results) ? results.length : 0,
-        records: results,
-        schema,
+        count: records.length,
+        totalCount,
+        records,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `Found ${records.length} ${table} (${totalCount} total)`;
+
+      return this.createSuccessResult(JSON.stringify(agentContent), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Database query failed', 'EXECUTION_ERROR');
     }

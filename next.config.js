@@ -24,6 +24,9 @@ module.exports = {
       '@octokit/auth-app',
       'dd-trace',
       'knex',
+      '@google/genai',
+      'google-auth-library',
+      'gaxios',
     ],
   },
   env: {

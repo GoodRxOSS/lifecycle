@@ -17,6 +17,38 @@
 import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel } from '../../types/tool';
 import { K8sClient } from '../shared/k8sClient';
+import { OutputLimiter } from '../outputLimiter';
+
+function stripAnsi(text: string): string {
+  return (
+    text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+  );
+}
+
+function deduplicateLines(lines: string[]): string[] {
+  const result: string[] = [];
+  let lastLine = '';
+  let count = 1;
+  for (const line of lines) {
+    if (line === lastLine) {
+      count++;
+    } else {
+      if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
+      else if (lastLine) result.push(lastLine);
+      lastLine = line;
+      count = 1;
+    }
+  }
+  if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
+  else if (lastLine) result.push(lastLine);
+  return result;
+}
 
 export class GetPodLogsTool extends BaseTool {
   static readonly Name = 'get_pod_logs';
@@ -30,7 +62,12 @@ export class GetPodLogsTool extends BaseTool {
           pod_name: { type: 'string', description: 'The pod name' },
           namespace: { type: 'string', description: 'The Kubernetes namespace' },
           container: { type: 'string', description: 'Optional specific container name' },
-          tail_lines: { type: 'number', description: 'Number of log lines to fetch (default: 100)' },
+          tail_lines: { type: 'number', description: 'Number of lines from the end of logs (default: 100)' },
+          head_lines: {
+            type: 'number',
+            description:
+              'Number of lines from the start of logs (default: 50). Combined with tail_lines for head+tail truncation.',
+          },
         },
         required: ['pod_name', 'namespace'],
       },
@@ -49,6 +86,7 @@ export class GetPodLogsTool extends BaseTool {
       const namespace = args.namespace as string;
       const container = args.container as string | undefined;
       const tailLines = (args.tail_lines as number) || 100;
+      const headLines = (args.head_lines as number) || 50;
 
       const response = await this.k8sClient.coreApi.readNamespacedPodLog(
         podName,
@@ -63,12 +101,32 @@ export class GetPodLogsTool extends BaseTool {
         tailLines
       );
 
+      const rawLines = response.body.split('\n');
+      const cleanLines = rawLines.map(stripAnsi);
+      const dedupedLines = deduplicateLines(cleanLines);
+
+      let finalLines: string[];
+      if (dedupedLines.length > headLines + tailLines) {
+        const omitted = dedupedLines.length - headLines - tailLines;
+        finalLines = [
+          ...dedupedLines.slice(0, headLines),
+          `... [${omitted} lines omitted of ${dedupedLines.length} total] ...`,
+          ...dedupedLines.slice(-tailLines),
+        ];
+      } else {
+        finalLines = dedupedLines;
+      }
+
+      const processedLogs = OutputLimiter.truncateLogOutput(finalLines.join('\n'), 30000, headLines, tailLines);
+
+      const displayContent = `Pod logs: ${finalLines.length} lines from ${podName} (${dedupedLines.length} total, head=${headLines} tail=${tailLines})`;
+
       const result = {
         success: true,
-        logs: response.body,
+        logs: processedLogs,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to fetch pod logs', 'EXECUTION_ERROR');
     }

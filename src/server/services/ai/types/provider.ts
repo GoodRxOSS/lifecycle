@@ -16,11 +16,7 @@
 
 import { Tool, ToolCall } from './tool';
 import { StreamCallbacks } from './stream';
-
-export interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-}
+import { ConversationMessage } from './message';
 
 export interface CompletionOptions {
   systemPrompt: string;
@@ -47,11 +43,16 @@ export interface ModelInfo {
 export interface LLMProvider {
   name: string;
 
-  streamCompletion(messages: Message[], options: CompletionOptions, signal?: AbortSignal): AsyncIterator<StreamChunk>;
+  streamCompletion(
+    messages: ConversationMessage[],
+    options: CompletionOptions,
+    signal?: AbortSignal
+  ): AsyncIterator<StreamChunk>;
 
   supportsTools(): boolean;
   getModelInfo(): ModelInfo;
   formatToolDefinition(tool: Tool): unknown;
   parseToolCall(response: unknown): ToolCall[];
   estimateTokens(text: string): number;
+  formatHistory(messages: ConversationMessage[]): unknown[];
 }

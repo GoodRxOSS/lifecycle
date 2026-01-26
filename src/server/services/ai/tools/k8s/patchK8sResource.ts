@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../../types/tool';
+import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../../types/tool';
 import { K8sClient } from '../shared/k8sClient';
 
 export class PatchK8sResourceTool extends BaseTool {
@@ -36,6 +36,7 @@ export class PatchK8sResourceTool extends BaseTool {
           operation: {
             type: 'string',
             description: 'Operation to perform: "patch", "scale", "restart", or "delete"',
+            enum: ['patch', 'scale', 'restart', 'delete'],
           },
           patch: {
             type: 'object',
@@ -52,6 +53,19 @@ export class PatchK8sResourceTool extends BaseTool {
       ToolSafetyLevel.DANGEROUS,
       'k8s'
     );
+  }
+
+  async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
+    const resourceType = args.resource_type as string;
+    const name = args.name as string;
+    const namespace = args.namespace as string;
+    const operation = args.operation as string;
+    return {
+      title: `${operation} Kubernetes resource`,
+      description: `${operation} ${resourceType}/${name} in namespace ${namespace}`,
+      impact: 'This will modify a live Kubernetes resource.',
+      confirmButtonText: `${operation.charAt(0).toUpperCase() + operation.slice(1)}`,
+    };
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
@@ -102,7 +116,8 @@ export class PatchK8sResourceTool extends BaseTool {
           );
       }
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `${normalizedOp} ${normalizedType}/${name} in ${namespace}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to modify resource', 'EXECUTION_ERROR');
     }

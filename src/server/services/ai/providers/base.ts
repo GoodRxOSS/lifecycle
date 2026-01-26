@@ -14,14 +14,16 @@
  * limitations under the License.
  */
 
-import { LLMProvider, ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
+import { LLMProvider, ModelInfo, CompletionOptions, StreamChunk } from '../types/provider';
+import { ConversationMessage } from '../types/message';
 import { Tool, ToolCall } from '../types/tool';
+import { countTokens } from '../prompts/tokenCounter';
 
 export abstract class BaseLLMProvider implements LLMProvider {
   abstract name: string;
 
   abstract streamCompletion(
-    messages: Message[],
+    messages: ConversationMessage[],
     options: CompletionOptions,
     signal?: AbortSignal
   ): AsyncIterator<StreamChunk>;
@@ -30,13 +32,10 @@ export abstract class BaseLLMProvider implements LLMProvider {
   abstract getModelInfo(): ModelInfo;
   abstract formatToolDefinition(tool: Tool): unknown;
   abstract parseToolCall(response: unknown): ToolCall[];
+  abstract formatHistory(messages: ConversationMessage[]): unknown[];
 
   estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
-  }
-
-  protected buildMessages(messages: Message[], systemPrompt: string): Message[] {
-    return [{ role: 'system' as const, content: systemPrompt }, ...messages];
+    return countTokens(text);
   }
 
   protected validateApiKey(apiKey: string | undefined, providerName: string): string {

@@ -22,13 +22,16 @@
     "prepare": "husky install",
     "generate:jsonschemas": "tsx ./scripts/generateSchemas.ts generatejson",
     "generate:yamls": "tsx ./scripts/generateSchemas.ts generateyaml",
-    "generate:schemas": "pnpm run generate:jsonschemas && pnpm run generate:yamls"
+    "generate:schemas": "pnpm run generate:jsonschemas && pnpm run generate:yamls",
+    "eval:baseline": "ts-node eval/baseline/captureBaseline.ts",
+    "eval:compare": "ts-node eval/compare.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.65.0",
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^1.38.0",
     "@heroui/react": "^2.8.5",
     "@kubernetes/client-node": "^0.22.3",
+    "@modelcontextprotocol/sdk": "^1.25.3",
     "@octokit/auth-app": "^6.0.2",
     "@octokit/core": "^5.0.2",
     "@octokit/webhooks": "^12.0.1",
@@ -37,6 +40,7 @@
     "axios": "^0.30.0",
     "bcryptjs": "^3.0.2",
     "bullmq": "5.56.8",
+    "cockatiel": "^3.2.1",
     "commander": "^7.1.0",
     "connection-string": "^3.1.0",
     "dagre": "^0.8.5",
@@ -51,6 +55,7 @@
     "isomorphic-unfetch": "^3.0.0",
     "jose": "^6.1.0",
     "js-cookie": "^2.2.1",
+    "js-tiktoken": "^1.0.21",
     "js-yaml": "^4.1.0",
     "jsonschema": "^1.4.0",
     "jsonwebtoken": "^8.5.1",
@@ -66,15 +71,20 @@
     "objection": "^3.0.1",
     "openai": "^6.1.0",
     "p-queue": "^6.6.2",
+    "partial-json": "^0.1.7",
     "pg": "^8.11.0",
+    "picomatch": "^4.0.3",
     "pino": "^8.16.2",
     "pino-caller": "^3.4.0",
     "psl": "^1.8.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
+    "react-shiki": "^0.9.1",
     "react-syntax-highlighter": "^15.6.6",
     "redlock": "^4.2.0",
+    "rehype-raw": "^7.0.0",
+    "remark-gfm": "^4.0.1",
     "seedrandom": "^3.0.5",
     "shelljs": "^0.8.5",
     "swagger-jsdoc": "^6.2.8",
@@ -104,6 +114,7 @@
     "@types/mustache": "^4.1.1",
     "@types/node": "^12.0.12",
     "@types/object-hash": "^1.3.1",
+    "@types/picomatch": "^4.0.2",
     "@types/psl": "^1.1.0",
     "@types/react": "^16.9.12",
     "@types/redlock": "^4.0.1",
@@ -129,6 +140,7 @@
     "pino-pretty": "^10.0.0",
     "postcss": "^8.5.6",
     "prettier": "2.8.3",
+    "promptfoo": "^0.120.17",
     "tailwindcss": "^3.4.1",
     "ts-node": "^10.9.1",
     "tsc-alias": "^1.8.15",
@@ -202,7 +214,8 @@
     "overrides": [
       {
         "files": [
-          "*.ts"
+          "*.ts",
+          "*.tsx"
         ],
         "rules": {
           "no-undef": "off",
@@ -213,7 +226,8 @@
               "varsIgnorePattern": "^_"
             }
           ],
-          "no-unused-vars": "off"
+          "no-unused-vars": "off",
+          "no-dupe-class-members": "off"
         }
       }
     ],

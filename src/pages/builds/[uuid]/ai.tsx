@@ -16,8 +16,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
-import { AIAgentChat } from '../../../components/ai-agent/AIAgentChat';
+import { ChatContainer } from '../../../components/ai-agent/ChatContainer';
 import { Spinner } from '@heroui/react';
+import { getApiPaths, fetchApi } from '../../../components/ai-agent/config';
 
 export default function AIAgentPage() {
   const router = useRouter();
@@ -33,8 +34,7 @@ export default function AIAgentPage() {
 
   const checkFeatureEnabled = async () => {
     try {
-      const response = await fetch('/api/v1/ai/config');
-      const data = await response.json();
+      const data = await fetchApi<{ enabled: boolean }>(getApiPaths().config as string);
       setFeatureEnabled(data.enabled);
     } catch (error) {
       setFeatureEnabled(false);
@@ -64,7 +64,7 @@ export default function AIAgentPage() {
 
   return (
     <div className="h-screen">
-      <AIAgentChat buildUuid={uuid as string} />
+      <ChatContainer buildUuid={uuid as string} />
     </div>
   );
 }

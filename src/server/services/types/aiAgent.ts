@@ -288,4 +288,8 @@ export interface AIAgentConfig {
   providers: ProviderConfig[];
   maxMessagesPerSession: number;
   sessionTTL: number;
+  additiveRules?: string[];
+  systemPromptOverride?: string;
+  excludedTools?: string[];
+  excludedFilePatterns?: string[];
 }

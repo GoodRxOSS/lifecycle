@@ -27,8 +27,12 @@ import {
   K8sEvent,
 } from '../../types/aiAgent';
 import { GitHubClient } from '../tools/shared/githubClient';
+import { getLogger } from 'server/lib/logger';
 
 export default class AIAgentContextService extends BaseService {
+  private static defaultBranchCache: Map<string, { data: string; expiry: number }> = new Map();
+  private static DEFAULT_BRANCH_CACHE_TTL_MS = 86400000;
+
   async gatherFullContext(buildUuid: string): Promise<DebugContext> {
     const warnings: ContextWarning[] = [];
     const errors: ContextError[] = [];
@@ -43,12 +47,15 @@ export default class AIAgentContextService extends BaseService {
       throw new Error(`Build not found: ${buildUuid}`);
     }
 
+    const githubClient = new GitHubClient();
+    const octokit = await githubClient.getOctokit('ai-agent-context-gatherer');
+
     let lifecycleContext;
     let kubernetesServices;
     let lifecycleYaml;
 
     try {
-      lifecycleContext = await this.gatherLifecycleContext(build);
+      lifecycleContext = await this.gatherLifecycleContext(build, octokit);
     } catch (error) {
       errors.push({
         source: 'lifecycle',
@@ -71,15 +78,12 @@ export default class AIAgentContextService extends BaseService {
       kubernetesServices = [];
     }
 
-    // Fetch lifecycle.yaml or lifecycle.yml from GitHub
     try {
-      const githubClient = new GitHubClient();
       const fullName = build.pullRequest.fullName;
       const branch = build.pullRequest.branchName;
 
       if (fullName && branch) {
         const [owner, repo] = fullName.split('/');
-        const octokit = await githubClient.getOctokit('ai-agent-context-gatherer');
 
         const possiblePaths = ['lifecycle.yaml', 'lifecycle.yml'];
         let response;
@@ -136,7 +140,11 @@ export default class AIAgentContextService extends BaseService {
     };
   }
 
-  private async gatherLifecycleContext(build: any): Promise<LifecycleContext> {
+  private async gatherLifecycleContext(build: any, octokit: any): Promise<LifecycleContext> {
+    const fullName = build.pullRequest.fullName;
+    const [owner, repo] = fullName ? fullName.split('/') : [];
+    const defaultBranch = owner && repo ? await this.getDefaultBranch(owner, repo, octokit) : 'main';
+
     return {
       build: {
         uuid: build.uuid,
@@ -157,7 +165,7 @@ export default class AIAgentContextService extends BaseService {
         title: build.pullRequest.title,
         username: build.pullRequest.githubLogin,
         branch: build.pullRequest.branchName,
-        baseBranch: 'main', // TODO: Get from repository default branch
+        baseBranch: defaultBranch,
         status: build.pullRequest.status,
         url: `https://github.com/${build.pullRequest.fullName}/pull/${build.pullRequest.pullRequestNumber}`,
         latestCommit: build.pullRequest.latestCommit,
@@ -184,10 +192,6 @@ export default class AIAgentContextService extends BaseService {
         builderEngine: deploy.deployable?.builder?.engine,
         helmChart: deploy.deployable?.helm?.chart,
         repositoryId: deploy.deployable?.repositoryId,
-        env: deploy.env || {},
-        initEnv: deploy.initEnv || {},
-        createdAt: deploy.createdAt,
-        updatedAt: deploy.updatedAt,
       })),
       repository: {
         name: build.pullRequest.repository.name,
@@ -196,6 +200,44 @@ export default class AIAgentContextService extends BaseService {
       },
     };
   }
+
+  private async getDefaultBranch(owner: string, repo: string, octokit: any): Promise<string> {
+    const fullName = `${owner}/${repo}`.toLowerCase();
+
+    try {
+      const now = Date.now();
+      const memoryCached = AIAgentContextService.defaultBranchCache.get(fullName);
+      if (memoryCached && now < memoryCached.expiry) {
+        return memoryCached.data;
+      }
+
+      const redisKey = `default_branch:${fullName}`;
+      const redisValue = await this.redis.get(redisKey);
+      if (redisValue) {
+        AIAgentContextService.defaultBranchCache.set(fullName, {
+          data: redisValue,
+          expiry: now + AIAgentContextService.DEFAULT_BRANCH_CACHE_TTL_MS,
+        });
+        return redisValue;
+      }
+
+      const response = await octokit.request('GET /repos/{owner}/{repo}', { owner, repo });
+      const defaultBranch = response.data.default_branch;
+
+      await this.redis.set(redisKey, defaultBranch, 'EX', 86400);
+      AIAgentContextService.defaultBranchCache.set(fullName, {
+        data: defaultBranch,
+        expiry: now + AIAgentContextService.DEFAULT_BRANCH_CACHE_TTL_MS,
+      });
+
+      return defaultBranch;
+    } catch (error) {
+      getLogger().warn(`AIAgentContext: failed to fetch default branch repo=${fullName} error=${error}`);
+      return 'main';
+    }
+  }
+
+  private static FAILED_DEPLOY_STATUSES = new Set(['BUILD_FAILED', 'DEPLOY_FAILED', 'ERROR']);
 
   private async gatherKubernetesInfo(
     build: any,
@@ -206,16 +248,44 @@ export default class AIAgentContextService extends BaseService {
     const services: ServiceDebugInfo[] = [];
 
     for (const deploy of build.deploys || []) {
-      try {
-        const serviceInfo = await this.gatherServiceDebugInfo(deploy, namespace, warnings);
-        services.push(serviceInfo);
-      } catch (error) {
-        const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid;
-        errors.push({
-          source: 'kubernetes',
-          message: `Failed to gather info for service ${serviceName}`,
-          error: error.message,
-          recoverable: true,
+      const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid;
+      const isFailed = AIAgentContextService.FAILED_DEPLOY_STATUSES.has(deploy.status);
+
+      if (isFailed) {
+        try {
+          const serviceInfo = await this.gatherServiceDebugInfo(deploy, namespace, warnings);
+          services.push(serviceInfo);
+        } catch (error) {
+          errors.push({
+            source: 'kubernetes',
+            message: `Failed to gather info for service ${serviceName}`,
+            error: error.message,
+            recoverable: true,
+          });
+        }
+      } else {
+        services.push({
+          name: serviceName,
+          type: deploy.deployable?.type || deploy.type,
+          status: this.determineServiceStatus(deploy, []),
+          deployInfo: {
+            uuid: deploy.uuid,
+            serviceName,
+            status: deploy.status,
+            statusMessage: deploy.statusMessage,
+            type: deploy.deployable?.type || deploy.type,
+            dockerImage: deploy.dockerImage,
+            branch: deploy.branch,
+            repoName: deploy.repoName,
+            buildNumber: deploy.buildNumber,
+            env: deploy.env,
+            initEnv: deploy.initEnv,
+            createdAt: deploy.createdAt,
+            updatedAt: deploy.updatedAt,
+          },
+          pods: [],
+          events: [],
+          issues: [],
         });
       }
     }
