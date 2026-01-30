@@ -81,6 +81,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       metadata: 'read',
       pull_requests: 'write',
       statuses: 'read',
+      emails: 'read',
     },
     default_events: [
       'issues',
