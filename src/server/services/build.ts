@@ -371,11 +371,16 @@ export default class BuildService extends BaseService {
   }
 
   async validateLifecycleSchema(repo: string, branch: string): Promise<{ valid: boolean }> {
-    const content = (await getYamlFileContentFromBranch(repo, branch)) as string;
-    const parser = new YamlConfigParser();
-    const config = parser.parseYamlConfigFromString(content);
-    const isValid = new YamlConfigValidator().validate(config?.version, config);
-    return { valid: isValid };
+    try {
+      const content = (await getYamlFileContentFromBranch(repo, branch)) as string;
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(content);
+      const isValid = new YamlConfigValidator().validate(config?.version, config);
+      return { valid: isValid };
+    } catch (error) {
+      getLogger().error({ error }, `Build: ${repo}/${branch} lifecycle schema validation failed`);
+      return { valid: false };
+    }
   }
 
   /**
