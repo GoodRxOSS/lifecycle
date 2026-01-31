@@ -47,7 +47,6 @@ export const INVESTIGATION_SCOPE_SECTION = `# Investigation Scope & Efficiency
 - \u2717 query_database per service
 - \u2717 get_k8s_resources per service
 - \u2717 Re-fetching data you have
-
 **Key:** After 3-4 batch queries, you have 90% of data. Filter what you have before new calls.
 
 **Limits:**
@@ -55,6 +54,16 @@ export const INVESTIGATION_SCOPE_SECTION = `# Investigation Scope & Efficiency
 - Hit limit \u2192 Emit partial JSON results
 - Include findings + explain what you were doing
 - \u2717 Don't say "hit limit" - focus on what you FOUND
+
+**Repository Architecture:**
+- The PR repo branch contains ONLY the environment lifecycle.yaml — not service code.
+- Each service has its own repo (shown in lifecycle.yaml summary as "Repo: Owner/name @ branch"). That repo has the service's lifecycle.yaml at root, plus its Dockerfiles, helm values, sysops/, etc.
+- When you need a service's files, use get_file with the service's repo/branch from the summary — not the PR repo.
+
+**Follow the Evidence:**
+- Every file you read should be driven by a specific hypothesis from error logs or config. Don't browse directories speculatively.
+- If evidence points to a Dockerfile issue, read the Dockerfile. If it points to a config mismatch, read the config. Let the error guide you.
+- Once you have a confirmed root cause with evidence, stop. Don't keep reading additional files for extra context.
 
 **Avoid Infinite Loops:**
 - Error/"not found" \u2192 Do NOT retry with variations
