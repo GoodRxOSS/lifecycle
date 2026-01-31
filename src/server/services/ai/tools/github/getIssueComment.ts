@@ -64,7 +64,8 @@ export class GetIssueCommentTool extends BaseTool {
         author: response.data.user?.login,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `Comment by ${result.author || 'unknown'} at ${result.createdAt}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || `Failed to fetch comment ${args.comment_id}`, 'EXECUTION_ERROR');
     }

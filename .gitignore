@@ -30,3 +30,9 @@ helm/environments/**/secrets.yaml
 CLAUDE.md
 llm-docs/
 llm-specs/
+
+# GSD planning docs
+.planning/
+
+# Promptfoo evaluation directory
+eval/

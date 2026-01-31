@@ -14,26 +14,28 @@
  * limitations under the License.
  */
 
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import { GoogleGenAI, type Candidate, type Content, type FunctionCall, type FunctionDeclaration } from '@google/genai';
 import { BaseLLMProvider } from './base';
-import { ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
+import { ModelInfo, CompletionOptions, StreamChunk } from '../types/provider';
+import { ConversationMessage, TextPart, ToolCallPart, ToolResultPart } from '../types/message';
 import { Tool, ToolCall } from '../types/tool';
 import { getLogger } from 'server/lib/logger';
+import { ErrorCategory } from '../errors';
 
 export class GeminiProvider extends BaseLLMProvider {
   name = 'gemini';
-  private client: GoogleGenerativeAI;
+  private client: GoogleGenAI;
   private modelId: string;
 
   constructor(modelId?: string, apiKey?: string) {
     super();
     this.modelId = modelId || 'gemini-2.5-flash';
     const key = this.validateApiKey(apiKey, 'Gemini');
-    this.client = new GoogleGenerativeAI(key);
+    this.client = new GoogleGenAI({ apiKey: key });
   }
 
   async *streamCompletion(
-    messages: Message[],
+    messages: ConversationMessage[],
     options: CompletionOptions,
     signal?: AbortSignal
   ): AsyncIterator<StreamChunk> {
@@ -41,94 +43,74 @@ export class GeminiProvider extends BaseLLMProvider {
       throw new Error('Request aborted');
     }
 
-    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as any[] | undefined;
+    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as FunctionDeclaration[] | undefined;
 
-    const model = this.client.getGenerativeModel({
+    if (tools) {
+      getLogger().info(`GeminiProvider: sending toolCount=${tools.length} tools=${tools.map((t) => t.name).join(',')}`);
+    }
+
+    const history = this.formatHistory(messages.slice(0, -1)) as Content[];
+
+    const isThinkingModel = this.modelId.includes('2.5') || this.modelId.includes('3.');
+
+    const chat = this.client.chats.create({
       model: this.modelId,
-      systemInstruction: options.systemPrompt,
-      tools: tools ? [{ functionDeclarations: tools }] : undefined,
-      generationConfig: {
+      config: {
+        systemInstruction: options.systemPrompt,
+        tools: tools ? [{ functionDeclarations: tools }] : undefined,
         temperature: options.temperature || 0.1,
         topP: 0.95,
-        topK: 20,
+        ...(isThinkingModel ? {} : { topK: 40 }),
         maxOutputTokens: options.maxTokens || 65536,
       },
+      history,
     });
 
-    const history =
-      messages.length > 1
-        ? messages.slice(0, -1).flatMap((m) => {
-            if (m.role === 'assistant' && m.content.trim().startsWith('[{') && m.content.includes('"toolCall"')) {
-              try {
-                const toolResults = JSON.parse(m.content);
-                if (Array.isArray(toolResults) && toolResults.length > 0 && toolResults[0].toolCall) {
-                  const messages: any[] = [];
-                  for (const tr of toolResults) {
-                    const toolName = tr.toolCall.name.startsWith('default_api:')
-                      ? tr.toolCall.name
-                      : `default_api:${tr.toolCall.name}`;
+    const lastMsg = messages[messages.length - 1];
+    const toolResultParts = lastMsg?.parts.filter((p): p is ToolResultPart => p.type === 'tool_result') || [];
 
-                    messages.push({
-                      role: 'model' as const,
-                      parts: [{ functionCall: { name: toolName, args: tr.toolCall.arguments } }],
-                    });
-
-                    let responseContent: string;
-                    if (tr.result.success) {
-                      responseContent = tr.result.agentContent || JSON.stringify(tr.result);
-                      if (typeof responseContent === 'object') {
-                        responseContent = JSON.stringify(responseContent);
-                      }
-                      try {
-                        JSON.parse(responseContent);
-                      } catch (e: any) {
-                        getLogger().warn(
-                          `GeminiProvider: tool response not valid JSON, sanitizing preview=${responseContent.substring(
-                            0,
-                            100
-                          )}`
-                        );
-                        responseContent = JSON.stringify({ content: responseContent });
-                      }
-                    } else {
-                      responseContent = JSON.stringify({
-                        error: tr.result.error?.message || 'Tool execution failed',
-                        success: false,
-                      });
-                    }
-
-                    const response = { content: responseContent };
-
-                    messages.push({
-                      role: 'function' as const,
-                      parts: [{ functionResponse: { name: toolName, response } }],
-                    });
-                  }
-                  return messages;
-                }
-              } catch (e: any) {
-                getLogger().warn(`GeminiProvider: failed to parse tool results error=${e.message}`);
-              }
+    let message: string | Array<{ functionResponse: { name: string; response: Record<string, unknown> } }>;
+    if (toolResultParts.length > 0) {
+      message = toolResultParts.map((part) => {
+        let responseObj: Record<string, unknown>;
+        if (part.result.success) {
+          const raw = part.result.agentContent || JSON.stringify(part.result);
+          try {
+            responseObj = JSON.parse(raw);
+            if (Array.isArray(responseObj)) {
+              responseObj = { items: responseObj };
             }
-            return [
-              {
-                role: m.role === 'assistant' ? ('model' as const) : ('user' as const),
-                parts: [{ text: m.content }],
-              },
-            ];
-          })
-        : [];
-
-    const chat = model.startChat({ history });
-
-    const currentMessage = messages[messages.length - 1]?.content || '';
-    const result = await chat.sendMessageStream(currentMessage);
+          } catch {
+            responseObj = { content: raw };
+          }
+        } else {
+          responseObj = {
+            error: part.result.error?.message || 'Tool execution failed',
+            success: false,
+          };
+        }
+        return {
+          functionResponse: {
+            name: part.name,
+            response: responseObj,
+          },
+        };
+      });
+    } else {
+      message = lastMsg
+        ? lastMsg.parts
+            .filter((p): p is TextPart => p.type === 'text')
+            .map((p) => p.content)
+            .join(' ')
+        : '';
+    }
+    const stream = await chat.sendMessageStream({ message });
 
     let accumulatedText = '';
-    const functionCalls: any[] = [];
-    let lastCandidate: any = null;
+    const functionCalls: Array<FunctionCall & { thoughtSignature?: string }> = [];
+    let lastCandidate: Candidate | null = null;
 
-    for await (const chunk of result.stream) {
+    for await (const chunk of stream) {
       if (signal?.aborted) {
         throw new Error('Request aborted');
       }
@@ -157,40 +139,42 @@ export class GeminiProvider extends BaseLLMProvider {
           }
 
           if ('functionCall' in part && part.functionCall) {
-            functionCalls.push(part.functionCall);
+            functionCalls.push({
+              ...part.functionCall,
+              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+            });
           }
         }
       }
     }
 
-    const response = await result.response;
+    if (lastCandidate?.finishReason === 'MALFORMED_FUNCTION_CALL') {
+      const error: Error & { category?: ErrorCategory; retryable?: boolean } = new Error(
+        'Gemini generated a malformed function call. This is a transient model error.'
+      );
+      error.category = ErrorCategory.TRANSIENT;
+      error.retryable = true;
+      throw error;
+    }
 
     if (accumulatedText.length === 0 && functionCalls.length === 0) {
-      let _responseText = 'N/A';
-      try {
-        _responseText = (response as any).text();
-      } catch (e: any) {
-        _responseText = `Error getting text: ${e.message}`;
-      }
-      getLogger().error(
-        `GeminiProvider: empty response finishReason=${lastCandidate?.finishReason} promptFeedback=${JSON.stringify(
-          (response as any).promptFeedback
-        )}`
-      );
-      getLogger().error(
-        `GeminiProvider: debug info responseKeys=${Object.keys(response).join(',')} candidatesCount=${
-          (response as any).candidates?.length || 0
-        }`
-      );
+      getLogger().error(`GeminiProvider: empty response finishReason=${lastCandidate?.finishReason}`);
 
-      throw new Error(
+      const error = new Error(
         `Gemini returned an empty response. This may be due to: ` +
           `(1) The system prompt being too large (${options.systemPrompt?.length || 0} chars), ` +
           `(2) Too many tools (${options.tools?.length || 0}), or ` +
           `(3) Incompatible tool definitions. ` +
-          `finishReason: ${lastCandidate?.finishReason}, ` +
-          `promptFeedback: ${JSON.stringify((response as any).promptFeedback)}`
+          `finishReason: ${lastCandidate?.finishReason}`
       );
+      const categorizedError: Error & { category?: ErrorCategory; retryable?: boolean } = error;
+      if (lastCandidate?.finishReason === 'STOP') {
+        categorizedError.category = ErrorCategory.AMBIGUOUS;
+      } else {
+        categorizedError.category = ErrorCategory.TRANSIENT;
+      }
+      categorizedError.retryable = true;
+      throw categorizedError;
     }
 
     if (functionCalls.length > 0) {
@@ -200,6 +184,66 @@ export class GeminiProvider extends BaseLLMProvider {
         toolCalls,
       };
     }
+  }
+
+  formatHistory(messages: ConversationMessage[]): unknown[] {
+    const history: unknown[] = [];
+
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        continue;
+      }
+
+      const toolCallParts = msg.parts.filter((p): p is ToolCallPart => p.type === 'tool_call');
+      const toolResultParts = msg.parts.filter((p): p is ToolResultPart => p.type === 'tool_result');
+
+      if (toolCallParts.length > 0) {
+        history.push({
+          role: 'model' as const,
+          parts: toolCallParts.map((part) => ({
+            functionCall: { name: part.name, args: part.arguments },
+            ...(part.metadata?.thoughtSignature ? { thoughtSignature: part.metadata.thoughtSignature as string } : {}),
+          })),
+        });
+      } else if (toolResultParts.length > 0) {
+        const responseParts = toolResultParts.map((part) => {
+          let responseObj: Record<string, unknown>;
+          if (part.result.success) {
+            const raw = part.result.agentContent || JSON.stringify(part.result);
+            try {
+              responseObj = JSON.parse(raw);
+              if (Array.isArray(responseObj)) {
+                responseObj = { items: responseObj };
+              }
+            } catch {
+              responseObj = { content: raw };
+            }
+          } else {
+            responseObj = {
+              error: part.result.error?.message || 'Tool execution failed',
+              success: false,
+            };
+          }
+          return { functionResponse: { name: part.name, response: responseObj } };
+        });
+        history.push({
+          role: 'user' as const,
+          parts: responseParts,
+        });
+      } else {
+        const textContent = msg.parts
+          .filter((p): p is TextPart => p.type === 'text')
+          .map((p) => p.content)
+          .join(' ');
+
+        history.push({
+          role: msg.role === 'assistant' ? ('model' as const) : ('user' as const),
+          parts: [{ text: textContent }],
+        });
+      }
+    }
+
+    return history;
   }
 
   supportsTools(): boolean {
@@ -217,8 +261,8 @@ export class GeminiProvider extends BaseLLMProvider {
     return {
       name: tool.name,
       description: tool.description,
-      parameters: {
-        type: SchemaType.OBJECT,
+      parametersJsonSchema: {
+        type: 'object',
         properties: tool.parameters.properties || {},
         required: tool.parameters.required || [],
       },
@@ -230,14 +274,15 @@ export class GeminiProvider extends BaseLLMProvider {
       return [];
     }
 
-    return content.map((fc: any) => {
-      let name = fc.name;
+    return content.map((fc: FunctionCall & { thoughtSignature?: string }) => {
+      let name = fc.name || '';
       if (name.startsWith('default_api:')) {
         name = name.substring('default_api:'.length);
       }
       return {
         name,
-        arguments: fc.args,
+        arguments: fc.args || {},
+        ...(fc.thoughtSignature ? { metadata: { thoughtSignature: fc.thoughtSignature } } : {}),
       };
     });
   }

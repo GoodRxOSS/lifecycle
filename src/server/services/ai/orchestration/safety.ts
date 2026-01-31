@@ -18,6 +18,7 @@ import JsonSchema from 'jsonschema';
 import { Tool, ToolResult, ToolSafetyLevel } from '../types/tool';
 import { StreamCallbacks } from '../types/stream';
 import { getLogger } from 'server/lib/logger';
+import { OutputLimiter } from '../tools/outputLimiter';
 
 export class ToolSafetyManager {
   private requireConfirmation: boolean;
@@ -85,6 +86,10 @@ export class ToolSafetyManager {
 
     try {
       const result = await this.withTimeout(tool.execute(args, signal), 30000);
+
+      if (result.success && result.agentContent) {
+        result.agentContent = OutputLimiter.truncate(result.agentContent);
+      }
 
       this.logToolExecution(tool.name, args, result, buildUuid);
 

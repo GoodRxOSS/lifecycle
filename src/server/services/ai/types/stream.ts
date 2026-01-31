@@ -20,26 +20,22 @@ export interface ActivityEvent {
   type: 'tool_call' | 'thinking' | 'processing' | 'error';
   message: string;
   details?: unknown;
+  toolCallId?: string;
   timestamp: number;
-}
-
-export interface StructuredData {
-  type: string;
-  [key: string]: unknown;
 }
 
 export interface StreamCallbacks {
   onTextChunk(text: string): void;
   onThinking(message: string, details?: unknown): void;
-  onToolCall(tool: string, args: unknown): void;
+  onToolCall(tool: string, args: unknown, toolCallId?: string): void;
   onToolResult(
     result: ToolResult,
     toolName: string,
     toolArgs: unknown,
     toolDurationMs?: number,
-    totalDurationMs?: number
+    totalDurationMs?: number,
+    toolCallId?: string
   ): void;
-  onStructuredOutput(data: StructuredData): void;
   onError(error: ToolResult['error']): void;
   onActivity(activity: ActivityEvent): void;
   onToolConfirmation?(details: ConfirmationDetails): Promise<boolean>;

@@ -15,10 +15,12 @@
  */
 
 import { createOctokitClient } from 'server/lib/github/client';
+import picomatch from 'picomatch';
 
 export class GitHubClient {
   private allowedBranch: string | null = null;
   private referencedFiles: Set<string> = new Set();
+  private excludedFilePatterns: string[] = [];
 
   setAllowedBranch(branch: string) {
     this.allowedBranch = branch;
@@ -28,11 +30,24 @@ export class GitHubClient {
     this.referencedFiles = new Set(files.map((f) => f.toLowerCase()));
   }
 
+  setExcludedFilePatterns(patterns: string[]): void {
+    this.excludedFilePatterns = patterns;
+  }
+
+  isFileExcluded(filePath: string): boolean {
+    if (this.excludedFilePatterns.length === 0) return false;
+    return picomatch.isMatch(filePath, this.excludedFilePatterns, { dot: true, nocase: true });
+  }
+
   getAllowedBranch(): string | null {
     return this.allowedBranch;
   }
 
   isFilePathAllowed(filePath: string, mode: 'read' | 'write'): boolean {
+    if (this.isFileExcluded(filePath)) {
+      return false;
+    }
+
     if (mode === 'read') {
       return true;
     }

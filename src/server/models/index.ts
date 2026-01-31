@@ -27,6 +27,7 @@ import Deployable from './Deployable';
 import BotUser from './BotUser';
 import GlobalConfig from './GlobalConfig';
 import WebhookInvocations from './WebhookInvocations';
+import AIAgentRepoConfig from './AIAgentRepoConfig';
 
 export interface IModels {
   Build: typeof Build;
@@ -42,6 +43,7 @@ export interface IModels {
   BotUser: typeof BotUser;
   GlobalConfig: typeof GlobalConfig;
   WebhookInvocations: typeof WebhookInvocations;
+  AIAgentRepoConfig: typeof AIAgentRepoConfig;
 }
 
 export {
@@ -58,4 +60,5 @@ export {
   BotUser,
   GlobalConfig,
   WebhookInvocations,
+  AIAgentRepoConfig,
 };

@@ -36,6 +36,7 @@ export class PatchK8sResourceTool extends BaseTool {
           operation: {
             type: 'string',
             description: 'Operation to perform: "patch", "scale", "restart", or "delete"',
+            enum: ['patch', 'scale', 'restart', 'delete'],
           },
           patch: {
             type: 'object',
@@ -102,7 +103,8 @@ export class PatchK8sResourceTool extends BaseTool {
           );
       }
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `${normalizedOp} ${normalizedType}/${name} in ${namespace}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to modify resource', 'EXECUTION_ERROR');
     }

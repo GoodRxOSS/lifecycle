@@ -17,6 +17,26 @@
 import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel } from '../../types/tool';
 import { getLogs } from 'server/lib/codefresh';
+import { OutputLimiter } from '../outputLimiter';
+
+function deduplicateLines(lines: string[]): string[] {
+  const result: string[] = [];
+  let lastLine = '';
+  let count = 1;
+  for (const line of lines) {
+    if (line === lastLine) {
+      count++;
+    } else {
+      if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
+      else if (lastLine) result.push(lastLine);
+      lastLine = line;
+      count = 1;
+    }
+  }
+  if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
+  else if (lastLine) result.push(lastLine);
+  return result;
+}
 
 export class GetCodefreshLogsTool extends BaseTool {
   static readonly Name = 'get_codefresh_logs';
@@ -39,7 +59,7 @@ export class GetCodefreshLogsTool extends BaseTool {
           lines: {
             type: 'number',
             description:
-              'Number of lines to fetch from the end of logs (default: 1000). Use more if you need additional context.',
+              'Number of lines to fetch from the end of logs (default: 500). Use more if you need additional context.',
           },
         },
         required: ['pipeline_id'],
@@ -63,7 +83,7 @@ export class GetCodefreshLogsTool extends BaseTool {
         return this.createErrorResult('Pipeline ID is required', 'INVALID_PARAMETERS');
       }
 
-      const maxLines = lines || 1000;
+      const maxLines = lines || 500;
 
       const logs = await getLogs(pipelineId);
 
@@ -71,29 +91,39 @@ export class GetCodefreshLogsTool extends BaseTool {
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
         // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        // eslint-disable-next-line no-control-regex
         .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
       const logLines = sanitizedLogs.split('\n');
       const totalLines = logLines.length;
+      const dedupedLines = deduplicateLines(logLines);
 
       let returnedLogs: string;
-      if (totalLines > maxLines) {
-        const lastLines = logLines.slice(-maxLines);
+      const returnedLineCount = Math.min(dedupedLines.length, maxLines);
+      if (dedupedLines.length > maxLines) {
+        const lastLines = dedupedLines.slice(-maxLines);
         returnedLogs = lastLines.join('\n');
       } else {
-        returnedLogs = sanitizedLogs;
+        returnedLogs = dedupedLines.join('\n');
       }
+
+      const truncatedLogs = OutputLimiter.truncateLogOutput(returnedLogs, 30000, 50, 100);
+
+      const displayContent = `Codefresh logs: ${returnedLineCount} of ${totalLines} lines`;
 
       const result = {
         success: true,
-        logs: returnedLogs,
+        logs: truncatedLogs,
         pipelineId,
         serviceName: serviceName || undefined,
         totalLines,
-        returnedLines: Math.min(totalLines, maxLines),
+        returnedLines: returnedLineCount,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to fetch Codefresh logs', 'EXECUTION_ERROR');
     }

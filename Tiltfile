@@ -142,6 +142,8 @@ helm_set_args = [
     'keycloak.companyIdp.userInfoUrl=https://{}/realms/company/protocol/openid-connect/userinfo'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.userInfoUrl=http://localhost:8080/realms/company/protocol/openid-connect/userinfo',
     'keycloak.companyIdp.jwksUrl=https://{}/realms/company/protocol/openid-connect/certs'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.jwksUrl=http://localhost:8080/realms/company/protocol/openid-connect/certs',
     'keycloak.companyIdp.issuer=https://{}/realms/company'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.issuer=http://localhost:8080/realms/company',
+    'secrets.aiApiKey={}'.format(os.getenv("AI_API_KEY", "")),
+    'secrets.geminiApiKey={}'.format(os.getenv("GEMINI_API_KEY", "")),
 ]
 
 lifecycle_deployment = decode_yaml_stream(helm(
