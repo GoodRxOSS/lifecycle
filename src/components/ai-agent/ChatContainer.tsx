@@ -44,6 +44,7 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
     activityLogs,
     evidenceItems,
     error,
+    setError,
     mounted,
     sendMessage,
     handleSubmit,
@@ -97,7 +98,7 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
         />
       </CardHeader>
 
-      <ErrorBanner error={error} onRetry={retryLastMessage} />
+      <ErrorBanner error={error} onRetry={retryLastMessage} onDismiss={() => setError(null)} />
 
       <CardBody className="flex-1 overflow-hidden p-0 bg-white shadow-none border-0">
         <div ref={scrollContainerRef} className="h-full overflow-y-auto p-8">

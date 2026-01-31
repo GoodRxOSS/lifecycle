@@ -31,6 +31,8 @@ jest.mock('../../resilience', () => ({
 
 jest.mock('../../errors', () => ({
   RetryBudget: jest.requireActual('../../errors/retryBudget').RetryBudget,
+  ErrorCategory: jest.requireActual('../../errors/classification').ErrorCategory,
+  createClassifiedError: jest.requireActual('../../errors/providerErrors').createClassifiedError,
 }));
 
 import { ToolOrchestrator } from '../orchestrator';

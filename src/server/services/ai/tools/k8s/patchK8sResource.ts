@@ -103,7 +103,8 @@ export class PatchK8sResourceTool extends BaseTool {
           );
       }
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `${normalizedOp} ${normalizedType}/${name} in ${namespace}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to modify resource', 'EXECUTION_ERROR');
     }

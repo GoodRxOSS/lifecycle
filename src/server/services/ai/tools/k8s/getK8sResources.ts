@@ -484,6 +484,33 @@ export class GetK8sResourcesTool extends BaseTool {
         .join('\n')}`;
     }
 
-    return JSON.stringify(result, null, 2);
+    if (resourceType === 'pod' && result.pod) {
+      return `Pod: ${result.pod.name} (${result.pod.phase})`;
+    }
+
+    if (resourceType === 'deployment' && result.deployment) {
+      return `Deployment: ${result.deployment.name} (${result.deployment.replicas.ready}/${result.deployment.replicas.desired} ready)`;
+    }
+
+    const listKeys: Record<string, string> = {
+      deployments: 'deployments',
+      services: 'services',
+      ingresses: 'ingresses',
+      secrets: 'secrets',
+      configmaps: 'configmaps',
+      jobs: 'jobs',
+      statefulsets: 'statefulsets',
+      daemonsets: 'daemonsets',
+      replicasets: 'replicasets',
+      events: 'events',
+    };
+
+    const pluralType = resourceType + 's';
+    const key = listKeys[pluralType];
+    if (key && Array.isArray(result[key])) {
+      return `Found ${result[key].length} ${pluralType}`;
+    }
+
+    return `K8s ${resourceType} result`;
   }
 }

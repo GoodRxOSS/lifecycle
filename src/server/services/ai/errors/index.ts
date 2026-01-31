@@ -22,5 +22,8 @@ export {
   classifyGeminiError,
   classifyError,
   createClassifiedError,
+  extractRetryAfter,
 } from './providerErrors';
 export { RetryBudget } from './retryBudget';
+export { getUserErrorMessage, getSuggestedAction, isAuthError } from './userMessages';
+export type { ErrorContext } from './userMessages';

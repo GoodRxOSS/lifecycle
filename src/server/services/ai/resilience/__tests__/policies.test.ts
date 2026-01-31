@@ -33,6 +33,7 @@ jest.mock('../../errors', () => ({
   isRetryable: jest.requireActual('../../errors/classification').isRetryable,
   RetryBudget: jest.requireActual('../../errors/retryBudget').RetryBudget,
   ErrorCategory: jest.requireActual('../../errors/classification').ErrorCategory,
+  extractRetryAfter: jest.requireActual('../../errors/providerErrors').extractRetryAfter,
 }));
 
 import { createProviderPolicy } from '../policies';

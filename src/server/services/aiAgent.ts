@@ -192,7 +192,7 @@ export default class AIAgentService extends BaseService {
     if (result.displayContent?.content) {
       const content = result.displayContent.content;
       if (typeof content === 'string' && content.length <= 100) {
-        return content;
+        return `✓ ${content}`;
       }
     }
 

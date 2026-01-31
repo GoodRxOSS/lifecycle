@@ -24,7 +24,8 @@ import AIAgentConfigService from 'server/services/aiAgentConfig';
 import { getLogger, withLogContext } from 'server/lib/logger';
 import { extractJsonFromResponse } from 'server/services/ai/utils/jsonExtraction';
 import { sanitizeForJson } from 'server/services/ai/utils/sanitize';
-import { isRateLimitError } from 'server/services/ai/errors/classification';
+import { createClassifiedError, ErrorCategory, getUserErrorMessage, getSuggestedAction, isAuthError } from 'server/services/ai/errors';
+import { isBrokenCircuitError } from 'cockatiel';
 import type { AIChatSSEEvent, SSEErrorEvent } from 'shared/types/aiChat';
 
 export const dynamic = 'force-dynamic';
@@ -127,7 +128,15 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
       const aiAgentConfig = await aiAgentConfigService.getEffectiveConfig();
 
       if (!aiAgentConfig?.enabled) {
-        sendEvent({ error: 'AI Agent is not enabled', code: 'AI_AGENT_DISABLED' });
+        sendEvent({
+          error: true,
+          userMessage: 'AI Agent is not enabled',
+          category: 'deterministic',
+          suggestedAction: 'check-config',
+          retryAfter: null,
+          modelName: 'AI model',
+          code: 'AI_AGENT_DISABLED',
+        });
         return;
       }
 
@@ -154,7 +163,15 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           context = await aiAgentContextService.gatherFullContext(buildUuid);
         } catch (error: any) {
           getLogger().error({ error }, 'AI: context gather failed');
-          sendEvent({ error: `Build not found: ${error.message}`, code: 'CONTEXT_ERROR' });
+          sendEvent({
+            error: true,
+            userMessage: `Build not found: ${error.message}`,
+            category: 'deterministic',
+            suggestedAction: null,
+            retryAfter: null,
+            modelName: 'AI model',
+            code: 'CONTEXT_ERROR',
+          });
           return;
         }
 
@@ -168,7 +185,15 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           }
         } catch (error: any) {
           getLogger().error({ error }, 'AI: init failed');
-          sendEvent({ error: error.message, code: 'LLM_INIT_ERROR' });
+          sendEvent({
+            error: true,
+            userMessage: error.message,
+            category: 'deterministic',
+            suggestedAction: 'check-config',
+            retryAfter: null,
+            modelName: modelId || 'AI model',
+            code: 'LLM_INIT_ERROR',
+          });
           return;
         }
 
@@ -245,17 +270,34 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           }
         } catch (error: any) {
           getLogger().error({ error }, 'AI: query failed');
+          const currentModel = modelId || 'AI model';
 
-          if (isRateLimitError(error)) {
+          if (isBrokenCircuitError(error)) {
+            const ctx = { modelName: currentModel, providerName: provider || 'unknown' };
             sendEvent({
-              error:
-                'Rate limit exceeded. Please wait a moment and try again. The AI service is currently handling many requests.',
-              code: 'RATE_LIMIT_EXCEEDED',
-              retryAfter: 60,
+              error: true,
+              userMessage: getUserErrorMessage(ErrorCategory.TRANSIENT, ctx),
+              category: 'transient',
+              suggestedAction: 'switch-model',
+              retryAfter: null,
+              modelName: currentModel,
+              code: 'CIRCUIT_BREAKER_OPEN',
             });
           } else {
+            const classified = createClassifiedError(provider || 'unknown', error);
+            const ctx = {
+              modelName: currentModel,
+              providerName: classified.providerName,
+              retryAfter: classified.retryAfter,
+              isAuthError: isAuthError(error),
+            };
             sendEvent({
-              error: error?.message || error?.toString() || 'AI service error',
+              error: true,
+              userMessage: getUserErrorMessage(classified.category, ctx),
+              category: classified.category as SSEErrorEvent['category'],
+              suggestedAction: getSuggestedAction(classified.category, ctx.isAuthError),
+              retryAfter: classified.retryAfter ?? null,
+              modelName: currentModel,
               code: 'LLM_API_ERROR',
             });
           }
@@ -279,7 +321,14 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
       });
     } catch (error: any) {
       getLogger().error({ error }, 'AI: chat request failed');
-      sendEvent({ error: error?.message || 'Internal error' });
+      sendEvent({
+        error: true,
+        userMessage: error?.message || 'Internal error',
+        category: 'ambiguous',
+        suggestedAction: 'retry',
+        retryAfter: null,
+        modelName: 'AI model',
+      });
     } finally {
       try {
         await writer.close();

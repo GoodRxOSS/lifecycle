@@ -106,7 +106,8 @@ export class UpdateFileTool extends BaseTool {
         commit_url: response.data.commit.html_url,
       };
 
-      return this.createSuccessResult(JSON.stringify(result));
+      const displayContent = `${currentFileSha ? 'Updated' : 'Created'} ${filePath}`;
+      return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to commit changes', 'EXECUTION_ERROR');
     }

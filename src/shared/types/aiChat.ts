@@ -87,9 +87,13 @@ export interface EvidenceResourceEvent {
 export type AIChatEvidenceEvent = EvidenceFileEvent | EvidenceCommitEvent | EvidenceResourceEvent;
 
 export interface SSEErrorEvent {
-  error: string;
+  error: true;
+  userMessage: string;
+  category: 'rate-limited' | 'transient' | 'deterministic' | 'ambiguous';
+  suggestedAction: 'retry' | 'switch-model' | 'check-config' | null;
+  retryAfter: number | null;
+  modelName: string;
   code?: string;
-  retryAfter?: number;
 }
 
 export type AIChatActivityEvent = ToolCallEvent | ProcessingEvent | ThinkingEvent | ActivityErrorEvent;

@@ -19,6 +19,36 @@ import Anthropic from '@anthropic-ai/sdk';
 import { ApiError as GeminiApiError } from '@google/genai';
 import { ErrorCategory, ClassifiedError, isRetryable } from './classification';
 
+const MAX_RETRY_AFTER_SECONDS = 300;
+
+export function extractRetryAfter(error: unknown): number | null {
+  const err = error as any;
+  let raw: string | undefined;
+
+  if (err?.headers?.['retry-after'] != null) {
+    raw = String(err.headers['retry-after']);
+  } else if (typeof err?.headers?.get === 'function') {
+    const val = err.headers.get('retry-after');
+    if (val != null) raw = String(val);
+  }
+
+  if (raw == null) return null;
+
+  const seconds = Number(raw);
+  if (!isNaN(seconds) && seconds >= 0) {
+    return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
+  }
+
+  const date = Date.parse(raw);
+  if (!isNaN(date)) {
+    const delta = Math.ceil((date - Date.now()) / 1000);
+    if (delta > 0) return Math.min(delta, MAX_RETRY_AFTER_SECONDS);
+    return 0;
+  }
+
+  return null;
+}
+
 export function classifyOpenAIError(error: unknown): ErrorCategory {
   if (error instanceof OpenAI.RateLimitError) return ErrorCategory.RATE_LIMITED;
   if (error instanceof OpenAI.InternalServerError) return ErrorCategory.TRANSIENT;
@@ -81,5 +111,6 @@ export function createClassifiedError(providerName: string, error: unknown): Cla
     providerName,
     httpStatus: (error as any)?.status ?? (error as any)?.statusCode,
     finishReason: (error as any)?.finishReason,
+    retryAfter: extractRetryAfter(error),
   };
 }

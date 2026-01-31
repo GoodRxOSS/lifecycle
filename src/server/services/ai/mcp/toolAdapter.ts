@@ -18,6 +18,7 @@ import { Tool, ToolResult, ToolSafetyLevel, ToolCategory, JSONSchema } from '../
 import { McpCachedTool, McpToolAnnotations, ResolvedMcpServer, MCP_ERROR_CODES } from './types';
 import { McpClientManager } from './client';
 import { getLogger } from 'server/lib/logger';
+import { OutputLimiter } from '../tools/outputLimiter';
 
 function mapAnnotationsToSafetyLevel(annotations?: McpToolAnnotations): ToolSafetyLevel {
   if (!annotations) return ToolSafetyLevel.CAUTIOUS;
@@ -135,7 +136,7 @@ export class MCPToolAdapter implements Tool {
 
       return {
         success: true,
-        agentContent: textContent,
+        agentContent: OutputLimiter.truncate(textContent),
       };
     } catch (error) {
       const classified = classifyMcpError(error);

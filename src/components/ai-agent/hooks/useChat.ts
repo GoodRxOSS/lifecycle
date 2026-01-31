@@ -18,6 +18,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { DebugMessage, ActivityLog, EvidenceItem, ModelOption, ServiceInvestigationResult } from '../types';
 import { getApiPaths, fetchApi } from '../config';
 
+export interface ChatError {
+  userMessage: string;
+  category: 'rate-limited' | 'transient' | 'deterministic' | 'ambiguous';
+  suggestedAction: 'retry' | 'switch-model' | 'check-config' | null;
+  retryAfter: number | null;
+  modelName: string;
+}
+
 interface UseChatOptions {
   buildUuid: string;
   selectedModel: ModelOption | null;
@@ -32,15 +40,16 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
   const [streamingContent, setStreamingContent] = useState('');
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ChatError | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
-  const [failedMessage, setFailedMessage] = useState<string | null>(null);
+  const [_failedMessage, setFailedMessage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isAtBottomRef = useRef(true);
   const bufferRef = useRef('');
   const rafIdRef = useRef<number | null>(null);
+  const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flushBuffer = useCallback(() => {
     rafIdRef.current = null;
@@ -86,6 +95,10 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
       rafIdRef.current = null;
     }
     setError(null);
+    if (autoRetryTimerRef.current !== null) {
+      clearTimeout(autoRetryTimerRef.current);
+      autoRetryTimerRef.current = null;
+    }
 
     setMessages((prev) => [...prev, { role: 'user', content: message, timestamp: Date.now(), isSystemAction }]);
 
@@ -143,7 +156,8 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                 const matchingIndex = collectedActivities.findIndex(
                   (a) =>
                     a.status === 'pending' &&
-                    (a.message === resultMessage ||
+                    ((data.toolCallId && a.toolCallId && data.toolCallId === a.toolCallId) ||
+                      a.message === resultMessage ||
                       a.message.toLowerCase() === resultMessage.toLowerCase() ||
                       resultMessage.toLowerCase().includes(a.message.toLowerCase()))
                 );
@@ -235,11 +249,27 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                   rafIdRef.current = null;
                 }
                 bufferRef.current = '';
-                const errorMsg =
-                  data.code === 'RATE_LIMIT_EXCEEDED'
-                    ? `${data.error} (Please wait ${data.retryAfter || 60} seconds)`
-                    : data.error;
-                setError(errorMsg);
+
+                let chatError: ChatError;
+                if (data.error === true) {
+                  chatError = {
+                    userMessage: data.userMessage || 'An error occurred.',
+                    category: data.category || 'ambiguous',
+                    suggestedAction: data.suggestedAction ?? 'retry',
+                    retryAfter: data.retryAfter ?? null,
+                    modelName: data.modelName || '',
+                  };
+                } else {
+                  chatError = {
+                    userMessage: data.error,
+                    category: data.code === 'RATE_LIMIT_EXCEEDED' ? 'rate-limited' : 'ambiguous',
+                    suggestedAction: 'retry',
+                    retryAfter: data.retryAfter || null,
+                    modelName: '',
+                  };
+                }
+
+                setError(chatError);
                 setFailedMessage(message);
                 setMessages((prev) => {
                   const updated = [...prev];
@@ -281,7 +311,13 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
         setStreamingContent('');
         return;
       }
-      setError('Network error. Please try again.');
+      setError({
+        userMessage: 'Network error. Please try again.',
+        category: 'ambiguous',
+        suggestedAction: 'retry',
+        retryAfter: null,
+        modelName: '',
+      });
       setFailedMessage(message);
       setMessages((prev) => {
         const updated = [...prev];
@@ -332,14 +368,20 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     sendMessage(fixMessage, true);
   };
 
-  const retryLastMessage = () => {
-    if (!failedMessage || loading) return;
-    const retryMsg = failedMessage;
-    setError(null);
-    setFailedMessage(null);
-    setMessages((prev) => prev.slice(0, -1));
-    sendMessage(retryMsg);
-  };
+  const retryLastMessage = useCallback(() => {
+    setFailedMessage((currentFailed) => {
+      if (!currentFailed) return null;
+      setError(null);
+      if (autoRetryTimerRef.current !== null) {
+        clearTimeout(autoRetryTimerRef.current);
+        autoRetryTimerRef.current = null;
+      }
+      setMessages((prev) => prev.slice(0, -1));
+      sendMessage(currentFailed);
+      return null;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stopGeneration = () => {
     abortControllerRef.current?.abort();
@@ -398,6 +440,21 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (error && error.category === 'rate-limited' && error.retryAfter && error.retryAfter > 0) {
+      autoRetryTimerRef.current = setTimeout(() => {
+        autoRetryTimerRef.current = null;
+        retryLastMessage();
+      }, error.retryAfter * 1000);
+    }
+    return () => {
+      if (autoRetryTimerRef.current !== null) {
+        clearTimeout(autoRetryTimerRef.current);
+        autoRetryTimerRef.current = null;
+      }
+    };
+  }, [error, retryLastMessage]);
 
   return {
     messages,

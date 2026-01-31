@@ -58,7 +58,7 @@ describe('GetFileTool', () => {
     expect(data.sha).toBe('abc123');
     expect(data.content).toContain('1:');
     expect(data.content).toContain('hello world');
-    expect(data.rawContent).toBe(fileContent);
+    expect(data.rawContent).toBeUndefined();
   });
 
   it('returns error for access denied', async () => {

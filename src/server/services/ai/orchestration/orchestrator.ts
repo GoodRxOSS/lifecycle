@@ -22,8 +22,10 @@ import { ToolRegistry } from '../tools/registry';
 import { ToolSafetyManager } from './safety';
 import { LoopDetector } from './loopProtection';
 import { getLogger } from 'server/lib/logger';
-import { RetryBudget } from '../errors';
+import { RetryBudget, createClassifiedError, ErrorCategory } from '../errors';
+import type { ClassifiedError } from '../errors';
 import { createProviderPolicy } from '../resilience';
+import { isBrokenCircuitError } from 'cockatiel';
 import { ConversationMessage, ToolCallPart, ToolResultPart } from '../types/message';
 
 export interface OrchestrationResult {
@@ -31,6 +33,7 @@ export interface OrchestrationResult {
   response?: string;
   error?: string;
   cancelled?: boolean;
+  classifiedError?: ClassifiedError;
   metrics: {
     iterations: number;
     toolCalls: number;
@@ -92,6 +95,25 @@ export class ToolOrchestrator {
           }
         });
       } catch (error: any) {
+        if (isBrokenCircuitError(error)) {
+          getLogger().warn(
+            `AI: circuit breaker rejected request provider=${provider.name} buildUuid=${buildUuid || 'none'}`
+          );
+          const classified: ClassifiedError = {
+            category: ErrorCategory.TRANSIENT,
+            original: error instanceof Error ? error : new Error(String(error)),
+            retryable: true,
+            providerName: provider.name,
+            retryAfter: null,
+          };
+          return {
+            success: false,
+            error: 'Provider circuit breaker is open',
+            classifiedError: classified,
+            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          };
+        }
+
         const hasPartialResults = fullResponse.length > 0 || chunks.length > 0;
 
         if (hasPartialResults) {
@@ -104,6 +126,7 @@ export class ToolOrchestrator {
             success: true,
             response: fullResponse || 'The response was interrupted. Here is what was generated before the error.',
             error: `Stream interrupted: ${error.message}`,
+            classifiedError: createClassifiedError(provider.name, error),
             metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
           };
         }
@@ -114,6 +137,7 @@ export class ToolOrchestrator {
         return {
           success: false,
           error: error.message || 'Provider error',
+          classifiedError: createClassifiedError(provider.name, error),
           metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
         };
       }

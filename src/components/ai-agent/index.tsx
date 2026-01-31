@@ -25,4 +25,5 @@ export { StructuredResponse } from './StructuredResponse';
 export { MessageBubble } from './MessageBubble';
 export { MessageList } from './MessageList';
 export { useChat } from './hooks/useChat';
+export type { ChatError } from './hooks/useChat';
 export { useChatModels } from './hooks/useChatModels';

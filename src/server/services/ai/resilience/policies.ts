@@ -14,10 +14,60 @@
  * limitations under the License.
  */
 
-import { retry, handleWhen, wrap, ExponentialBackoff } from 'cockatiel';
-import { isRetryable, classifyError, RetryBudget } from '../errors';
+import {
+  retry,
+  handleWhen,
+  wrap,
+  ExponentialBackoff,
+  type IBackoffFactory,
+  type IBackoff,
+  type IRetryBackoffContext,
+} from 'cockatiel';
+import { isRetryable, classifyError, RetryBudget, extractRetryAfter } from '../errors';
 import { getProviderCircuitBreaker } from './circuitState';
 import { getLogger } from 'server/lib/logger';
+
+class RetryAfterBackoffInstance implements IBackoff<IRetryBackoffContext<unknown>> {
+  readonly duration: number;
+  private readonly fallback: IBackoff<unknown>;
+
+  constructor(duration: number, fallback: IBackoff<unknown>) {
+    this.duration = duration;
+    this.fallback = fallback;
+  }
+
+  next(context: IRetryBackoffContext<unknown>): IBackoff<IRetryBackoffContext<unknown>> {
+    const error = 'error' in context.result ? context.result.error : undefined;
+    const retryAfterSeconds = error != null ? extractRetryAfter(error) : null;
+    const nextFallback = this.fallback.next(context as any);
+    if (retryAfterSeconds != null && retryAfterSeconds > 0) {
+      return new RetryAfterBackoffInstance(retryAfterSeconds * 1000, nextFallback);
+    }
+    return new RetryAfterBackoffInstance(nextFallback.duration, nextFallback);
+  }
+}
+
+export class RetryAfterBackoff implements IBackoffFactory<IRetryBackoffContext<unknown>> {
+  private readonly fallbackFactory: ExponentialBackoff<unknown>;
+
+  constructor(fallbackOptions?: { initialDelay?: number; maxDelay?: number; exponent?: number }) {
+    this.fallbackFactory = new ExponentialBackoff({
+      initialDelay: fallbackOptions?.initialDelay ?? 500,
+      maxDelay: fallbackOptions?.maxDelay ?? 10_000,
+      exponent: fallbackOptions?.exponent ?? 2,
+    });
+  }
+
+  next(context: IRetryBackoffContext<unknown>): IBackoff<IRetryBackoffContext<unknown>> {
+    const error = 'error' in context.result ? context.result.error : undefined;
+    const retryAfterSeconds = error != null ? extractRetryAfter(error) : null;
+    const fallbackBackoff = this.fallbackFactory.next(context as any);
+    if (retryAfterSeconds != null && retryAfterSeconds > 0) {
+      return new RetryAfterBackoffInstance(retryAfterSeconds * 1000, fallbackBackoff);
+    }
+    return new RetryAfterBackoffInstance(fallbackBackoff.duration, fallbackBackoff);
+  }
+}
 
 export function createProviderPolicy(providerName: string, retryBudget: RetryBudget) {
   const shouldHandle = handleWhen((err) => {
@@ -27,7 +77,7 @@ export function createProviderPolicy(providerName: string, retryBudget: RetryBud
 
   const retryPolicy = retry(shouldHandle, {
     maxAttempts: 3,
-    backoff: new ExponentialBackoff({ initialDelay: 500, maxDelay: 10_000, exponent: 2 }),
+    backoff: new RetryAfterBackoff({ initialDelay: 500, maxDelay: 10_000, exponent: 2 }),
   });
 
   retryPolicy.onRetry((reason) => {

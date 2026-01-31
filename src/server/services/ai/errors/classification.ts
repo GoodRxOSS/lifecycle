@@ -28,6 +28,7 @@ export interface ClassifiedError {
   providerName: string;
   httpStatus?: number;
   finishReason?: string;
+  retryAfter?: number | null;
 }
 
 export function isRetryable(category: ErrorCategory): boolean {
