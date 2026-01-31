@@ -20,7 +20,7 @@ export const TOOL_RULES_SECTION = `# Tool Usage Rules
 - **Reuse Data:** After batch queries, filter/search what you have. Do NOT re-fetch or re-query per service.
 - **Follow Chain:** lifecycle.yaml \u2192 find refs \u2192 read via get_file \u2192 compare \u2192 identify wrong file \u2192 suggest specific fix
 - **File Search:** If 404, use list_directory ONCE. Max 2 attempts, then report "Unable to locate config at {path}"
-- **Avoid Loops:** Each tool MAX 3 calls total. If need more, explain to user.
+- **Avoid Loops:** Each tool MAX 1 call with same arguments. If need more, explain to user.
 - **Verify Paths:** Before suggesting file path change, VERIFY file EXISTS via list_directory or get_file.
 - **Respect Cancellation:** If user cancels tool call, do NOT retry. Only retry if user explicitly requests same action. Ask about alternative approaches.
 

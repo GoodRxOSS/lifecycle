@@ -134,7 +134,7 @@ describe('Prompt Section Registry', () => {
         'Investigation Pattern',
         'Status-First Investigation Strategy',
         'Fix Application Workflow',
-        'MAX 3 calls',
+        'MAX 1 call',
         'investigation_complete',
         'fixesApplied',
         'canAutoFix',

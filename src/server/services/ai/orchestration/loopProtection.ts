@@ -35,7 +35,7 @@ export class LoopDetector {
     this.protection = {
       maxIterations: options?.maxIterations || 20,
       maxToolCalls: options?.maxToolCalls || 50,
-      maxRepeatedCalls: options?.maxRepeatedCalls || 3,
+      maxRepeatedCalls: options?.maxRepeatedCalls || 1,
       toolCallHistory: [],
     };
   }

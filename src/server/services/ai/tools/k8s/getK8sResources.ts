@@ -153,25 +153,47 @@ export class GetK8sResourcesTool extends BaseTool {
       labelSelector
     );
 
+    const allPods = response.body.items.map((pod) => ({
+      name: pod.metadata?.name,
+      phase: pod.status?.phase,
+      ready: pod.status?.containerStatuses
+        ? `${pod.status.containerStatuses.filter((c) => c.ready).length}/${pod.status.containerStatuses.length}`
+        : '0/0',
+      restarts: pod.status?.containerStatuses
+        ? pod.status.containerStatuses.reduce((sum, c) => sum + c.restartCount, 0)
+        : 0,
+      age: pod.metadata?.creationTimestamp,
+      containers: pod.status?.containerStatuses?.map((c) => ({
+        name: c.name,
+        ready: c.ready,
+        state: Object.keys(c.state || {})[0],
+        restarts: c.restartCount,
+      })),
+    }));
+
+    const isUnhealthy = (pod: any) =>
+      pod.phase !== 'Running' ||
+      pod.restarts > 5 ||
+      pod.containers?.some((c: any) => !c.ready || (c.state !== 'running' && c.state !== undefined));
+
+    const unhealthy = allPods.filter(isUnhealthy);
+    const healthy = allPods.filter((p) => !isUnhealthy(p));
+
+    if (allPods.length > 50) {
+      return {
+        success: true,
+        total: allPods.length,
+        unhealthyCount: unhealthy.length,
+        healthyCount: healthy.length,
+        unhealthyPods: unhealthy,
+        healthyPods: healthy.map((p) => ({ name: p.name, phase: p.phase, ready: p.ready })),
+        note: `${allPods.length} pods total. ${unhealthy.length} unhealthy shown with full detail. ${healthy.length} healthy shown as summary. Use label_selector to narrow results or get_pod_logs for specific pods.`,
+      };
+    }
+
     return {
       success: true,
-      pods: response.body.items.map((pod) => ({
-        name: pod.metadata?.name,
-        phase: pod.status?.phase,
-        ready: pod.status?.containerStatuses
-          ? `${pod.status.containerStatuses.filter((c) => c.ready).length}/${pod.status.containerStatuses.length}`
-          : '0/0',
-        restarts: pod.status?.containerStatuses
-          ? pod.status.containerStatuses.reduce((sum, c) => sum + c.restartCount, 0)
-          : 0,
-        age: pod.metadata?.creationTimestamp,
-        containers: pod.status?.containerStatuses?.map((c) => ({
-          name: c.name,
-          ready: c.ready,
-          state: Object.keys(c.state || {})[0],
-          restarts: c.restartCount,
-        })),
-      })),
+      pods: allPods,
     };
   }
 
@@ -226,17 +248,36 @@ export class GetK8sResourcesTool extends BaseTool {
   private async listDeployments(namespace: string): Promise<any> {
     const response = await this.k8sClient.appsApi.listNamespacedDeployment(namespace);
 
+    const allDeployments = response.body.items.map((deployment) => ({
+      name: deployment.metadata?.name,
+      replicas: {
+        desired: deployment.spec?.replicas || 0,
+        ready: deployment.status?.readyReplicas || 0,
+        available: deployment.status?.availableReplicas || 0,
+      },
+      age: deployment.metadata?.creationTimestamp,
+    }));
+
+    const isUnhealthy = (d: any) => d.replicas.ready < d.replicas.desired || d.replicas.available < d.replicas.desired;
+
+    const unhealthy = allDeployments.filter(isUnhealthy);
+    const healthy = allDeployments.filter((d) => !isUnhealthy(d));
+
+    if (allDeployments.length > 50) {
+      return {
+        success: true,
+        total: allDeployments.length,
+        unhealthyCount: unhealthy.length,
+        healthyCount: healthy.length,
+        unhealthyDeployments: unhealthy,
+        healthyDeployments: healthy.map((d) => ({ name: d.name, ready: `${d.replicas.ready}/${d.replicas.desired}` })),
+        note: `${allDeployments.length} deployments total. ${unhealthy.length} unhealthy shown with full detail. ${healthy.length} healthy shown as summary.`,
+      };
+    }
+
     return {
       success: true,
-      deployments: response.body.items.map((deployment) => ({
-        name: deployment.metadata?.name,
-        replicas: {
-          desired: deployment.spec?.replicas || 0,
-          ready: deployment.status?.readyReplicas || 0,
-          available: deployment.status?.availableReplicas || 0,
-        },
-        age: deployment.metadata?.creationTimestamp,
-      })),
+      deployments: allDeployments,
     };
   }
 
@@ -454,30 +495,51 @@ export class GetK8sResourcesTool extends BaseTool {
       fieldSelector
     );
 
+    const allEvents = response.body.items
+      .sort((a, b) => {
+        const aTime = new Date(a.lastTimestamp || a.eventTime || 0).getTime();
+        const bTime = new Date(b.lastTimestamp || b.eventTime || 0).getTime();
+        return bTime - aTime;
+      })
+      .map((event) => ({
+        type: event.type,
+        reason: event.reason,
+        message: event.message,
+        count: event.count,
+        involvedObject: {
+          kind: event.involvedObject?.kind,
+          name: event.involvedObject?.name,
+        },
+        lastTimestamp: event.lastTimestamp || event.eventTime,
+      }));
+
+    const warnings = allEvents.filter((e) => e.type === 'Warning');
+    const normal = allEvents.filter((e) => e.type !== 'Warning');
+
     return {
       success: true,
-      events: response.body.items
-        .sort((a, b) => {
-          const aTime = new Date(a.lastTimestamp || a.eventTime || 0).getTime();
-          const bTime = new Date(b.lastTimestamp || b.eventTime || 0).getTime();
-          return bTime - aTime;
-        })
-        .slice(0, 50)
-        .map((event) => ({
-          type: event.type,
-          reason: event.reason,
-          message: event.message,
-          count: event.count,
-          involvedObject: {
-            kind: event.involvedObject?.kind,
-            name: event.involvedObject?.name,
-          },
-          lastTimestamp: event.lastTimestamp || event.eventTime,
-        })),
+      total: allEvents.length,
+      warningCount: warnings.length,
+      normalCount: normal.length,
+      warnings: warnings.slice(0, 50),
+      recentNormal: normal.slice(0, 10),
+      note: `${allEvents.length} events total. ${warnings.length} warnings shown first (up to 50), then ${Math.min(
+        normal.length,
+        10
+      )} recent normal events.`,
     };
   }
 
   private formatDisplay(resourceType: string, result: any): string {
+    if (resourceType === 'pod' && result.total && result.unhealthyPods) {
+      const unhealthyList = result.unhealthyPods
+        .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
+        .join('\n');
+      return `${result.total} pods (${result.unhealthyCount} unhealthy, ${result.healthyCount} healthy)${
+        unhealthyList ? `\nUnhealthy:\n${unhealthyList}` : ''
+      }`;
+    }
+
     if (resourceType === 'pod' && result.pods) {
       return `Found ${result.pods.length} pods:\n${result.pods
         .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
@@ -488,8 +550,21 @@ export class GetK8sResourcesTool extends BaseTool {
       return `Pod: ${result.pod.name} (${result.pod.phase})`;
     }
 
+    if (resourceType === 'deployment' && result.total && result.unhealthyDeployments) {
+      const unhealthyList = result.unhealthyDeployments
+        .map((d: any) => `  - ${d.name}: ${d.replicas.ready}/${d.replicas.desired} ready`)
+        .join('\n');
+      return `${result.total} deployments (${result.unhealthyCount} unhealthy, ${result.healthyCount} healthy)${
+        unhealthyList ? `\nUnhealthy:\n${unhealthyList}` : ''
+      }`;
+    }
+
     if (resourceType === 'deployment' && result.deployment) {
       return `Deployment: ${result.deployment.name} (${result.deployment.replicas.ready}/${result.deployment.replicas.desired} ready)`;
+    }
+
+    if (resourceType === 'event' && result.total != null) {
+      return `${result.total} events (${result.warningCount} warnings, ${result.normalCount} normal)`;
     }
 
     const listKeys: Record<string, string> = {

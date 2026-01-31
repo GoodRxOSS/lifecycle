@@ -34,7 +34,8 @@ If injected context shows a clear issue (e.g., BUILD_FAILED on a specific servic
 Do NOT fetch all services. Do NOT batch-query the entire database.
 
 ## Step 3: Query Database Only When Needed
-Only call query_database when injected context is insufficient. Use minimal SELECT columns (status, error fields).
+The injected context already contains ALL service statuses from the database. Do NOT call query_database to re-fetch deploy statuses — you already have them.
+Only call query_database when you need data NOT in injected context (e.g., historical builds, specific deploy error details, environment config).
 Never query all tables upfront — query the specific table relevant to the issue.
 
 ## Step 4: Check K8s Only for Deploy Issues
@@ -113,8 +114,11 @@ JSON — output ONLY valid JSON (no markdown, no conversational text):
 # Efficiency
 
 - Hard limit: 20 tool calls per turn. Hit limit → emit partial results.
-- Each tool MAX 3 calls. Error/not found → move on, do not retry.
+- Each tool MAX 1 call with same arguments. Error/not found → move on, do not retry.
 - Stuck → output what you know + ask user.
+- **K8s: ONE call per resource type.** Fetch all pods/deployments/events in the namespace with a single get_k8s_resources call (no label_selector), then find specific services in the results. NEVER call get_k8s_resources per-service — that wastes tool calls on a 230-service environment.
+- **Logs: ONE call per pod.** If get_pod_logs fails for a pod, do not retry the same pod. Move on.
+- **Never re-fetch data you already have.** If you fetched pods in this turn, use those results — don't call get_k8s_resources for pods again.
 
 ## Handling Truncated Data
 

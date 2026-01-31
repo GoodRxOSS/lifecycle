@@ -60,7 +60,7 @@ export const INVESTIGATION_SCOPE_SECTION = `# Investigation Scope & Efficiency
 - Error/"not found" \u2192 Do NOT retry with variations
 - list_directory fails \u2192 Directory doesn't exist, stop
 - Empty get_k8s_resources \u2192 Resources don't exist, stop
-- Each tool MAX 3 calls total
+- Each tool MAX 1 call with same arguments
 - "Too many times" error \u2192 STOP that tool, summarize
 - get_file fails \u2192 Check lifecycle.yaml for typos first
 - Max 2 attempts per file \u2192 Report where looked, stop

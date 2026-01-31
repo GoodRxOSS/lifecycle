@@ -22,7 +22,7 @@ describe('LoopDetector', () => {
     const p = d.getProtection();
     expect(p.maxIterations).toBe(20);
     expect(p.maxToolCalls).toBe(50);
-    expect(p.maxRepeatedCalls).toBe(3);
+    expect(p.maxRepeatedCalls).toBe(1);
   });
 
   it('accepts custom options', () => {
