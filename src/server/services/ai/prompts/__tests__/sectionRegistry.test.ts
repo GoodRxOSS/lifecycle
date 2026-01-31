@@ -81,10 +81,9 @@ describe('Prompt Section Registry', () => {
 
     it('assembled prompt contains all critical sections', () => {
       const assembled = assembleBasePrompt();
-      expect(assembled).toContain('Debugging Workflow');
+      expect(assembled).toContain('Investigation Pattern');
       expect(assembled).toContain('Fix Application Workflow');
-      expect(assembled).toContain('Batch Fetch Database');
-      expect(assembled).toContain('Batch > Individual');
+      expect(assembled).toContain('Status-First Investigation Strategy');
       expect(assembled).toContain('investigation_complete');
       expect(assembled).toContain('Verification Protocol');
       expect(assembled).toContain('Avoid Loops');
@@ -133,11 +132,8 @@ describe('Prompt Section Registry', () => {
       const assembled = assembleBasePrompt();
       const requiredPhrases = [
         'Investigation Pattern',
-        'Debugging Workflow',
+        'Status-First Investigation Strategy',
         'Fix Application Workflow',
-        'Batch Fetch Database',
-        'Batch Fetch Kubernetes',
-        'Batch > Individual',
         'MAX 3 calls',
         'investigation_complete',
         'fixesApplied',
