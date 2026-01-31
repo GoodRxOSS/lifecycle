@@ -241,6 +241,8 @@ export default class AIAgentContextService extends BaseService {
     }
   }
 
+  private static FAILED_DEPLOY_STATUSES = new Set(['BUILD_FAILED', 'DEPLOY_FAILED', 'ERROR']);
+
   private async gatherKubernetesInfo(
     build: any,
     warnings: ContextWarning[],
@@ -250,16 +252,44 @@ export default class AIAgentContextService extends BaseService {
     const services: ServiceDebugInfo[] = [];
 
     for (const deploy of build.deploys || []) {
-      try {
-        const serviceInfo = await this.gatherServiceDebugInfo(deploy, namespace, warnings);
-        services.push(serviceInfo);
-      } catch (error) {
-        const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid;
-        errors.push({
-          source: 'kubernetes',
-          message: `Failed to gather info for service ${serviceName}`,
-          error: error.message,
-          recoverable: true,
+      const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid;
+      const isFailed = AIAgentContextService.FAILED_DEPLOY_STATUSES.has(deploy.status);
+
+      if (isFailed) {
+        try {
+          const serviceInfo = await this.gatherServiceDebugInfo(deploy, namespace, warnings);
+          services.push(serviceInfo);
+        } catch (error) {
+          errors.push({
+            source: 'kubernetes',
+            message: `Failed to gather info for service ${serviceName}`,
+            error: error.message,
+            recoverable: true,
+          });
+        }
+      } else {
+        services.push({
+          name: serviceName,
+          type: deploy.deployable?.type || deploy.type,
+          status: this.determineServiceStatus(deploy, []),
+          deployInfo: {
+            uuid: deploy.uuid,
+            serviceName,
+            status: deploy.status,
+            statusMessage: deploy.statusMessage,
+            type: deploy.deployable?.type || deploy.type,
+            dockerImage: deploy.dockerImage,
+            branch: deploy.branch,
+            repoName: deploy.repoName,
+            buildNumber: deploy.buildNumber,
+            env: deploy.env,
+            initEnv: deploy.initEnv,
+            createdAt: deploy.createdAt,
+            updatedAt: deploy.updatedAt,
+          },
+          pods: [],
+          events: [],
+          issues: [],
         });
       }
     }

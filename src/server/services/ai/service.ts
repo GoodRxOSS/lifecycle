@@ -243,6 +243,10 @@ export class AIAgentCore {
         }`
       );
 
+      if (!result.success && result.classifiedError) {
+        throw result.classifiedError.original;
+      }
+
       return {
         response: result.response || result.error || finalResult.response,
         isJson: finalResult.isJson,

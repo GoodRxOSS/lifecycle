@@ -16,7 +16,8 @@
 
 import { assembleBasePrompt, PROMPT_SECTIONS } from './sectionRegistry';
 
-import { DebugContext, DebugMessage } from '../../types/aiAgent';
+import { DebugContext, DebugMessage, ServiceDebugInfo } from '../../types/aiAgent';
+import { summarizeLifecycleYaml } from '../context/contextSummarizer';
 
 export interface McpToolInfo {
   serverName: string;
@@ -178,8 +179,129 @@ ${serverSections}
     return '\n\n---\n\n' + PROMPT_SECTIONS.find((s) => s.id === 'safety')!.content;
   }
 
+  private static FAILED_DEPLOY_STATUSES = new Set(['BUILD_FAILED', 'DEPLOY_FAILED', 'ERROR']);
+
+  private isFailingService(deploy: any, serviceDebug?: ServiceDebugInfo): boolean {
+    if (AIAgentPromptBuilder.FAILED_DEPLOY_STATUSES.has(deploy.status)) return true;
+    if (serviceDebug?.status === 'failed') return true;
+    if (serviceDebug?.issues && serviceDebug.issues.length > 0) return true;
+    return false;
+  }
+
+  private renderFailingService(d: any, serviceDebug?: ServiceDebugInfo): string {
+    let info = `- ${d.serviceName}: ${d.status}${d.statusMessage ? ` - ${d.statusMessage}` : ''}`;
+    info += `\n  Type: ${d.type}`;
+    if (d.builderEngine) info += ` | Builder: ${d.builderEngine}`;
+    if (d.helmChart) info += ` | Chart: ${d.helmChart}`;
+
+    if (d.buildPipelineId) {
+      info += `\n  Build: Codefresh (buildPipelineId: ${d.buildPipelineId})`;
+    } else if (d.builderEngine) {
+      info += `\n  Build: Native/${d.builderEngine} (label_selector="lc-service=${d.serviceName}")`;
+    }
+
+    if (d.deployPipelineId) {
+      info += `\n  Deploy: Codefresh (deployPipelineId: ${d.deployPipelineId})`;
+    } else {
+      info += `\n  Deploy: Native/Helm (label_selector="lc-service=${d.serviceName}")`;
+    }
+
+    info += `\n  Image: ${d.dockerImage || 'N/A'}`;
+
+    if (serviceDebug) {
+      const podCount = serviceDebug.pods.length;
+      const readyPods = serviceDebug.pods.filter(
+        (p) => p.phase === 'Running' && p.containerStatuses.every((c: any) => c.ready)
+      ).length;
+      if (podCount > 0) {
+        info += `\n  K8s: ${readyPods}/${podCount} pods ready`;
+      }
+      if (serviceDebug.issues.length > 0) {
+        info += `\n  Issues: ${serviceDebug.issues.map((i) => i.title).join('; ')}`;
+      }
+      if (serviceDebug.events.length > 0) {
+        const warningEvents = serviceDebug.events.filter((e) => e.type === 'Warning');
+        if (warningEvents.length > 0) {
+          info += `\n  Events: ${warningEvents
+            .slice(0, 3)
+            .map((e) => `${e.reason}: ${e.message}`)
+            .join('; ')}`;
+        }
+      }
+    }
+
+    return info;
+  }
+
   private buildEnvironmentContext(debugContext: DebugContext): string {
     const lc = debugContext.lifecycleContext;
+    const servicesByName = new Map<string, ServiceDebugInfo>();
+    for (const s of debugContext.services) {
+      servicesByName.set(s.name, s);
+    }
+
+    const failingDeploys: any[] = [];
+    const healthyDeploys: any[] = [];
+    for (const d of lc.deploys) {
+      const serviceDebug = servicesByName.get(d.serviceName);
+      if (this.isFailingService(d, serviceDebug)) {
+        failingDeploys.push(d);
+      } else {
+        healthyDeploys.push(d);
+      }
+    }
+
+    let servicesSection = `SERVICES (${lc.deploys.length} total, ${failingDeploys.length} failing):`;
+
+    if (failingDeploys.length > 0) {
+      servicesSection += '\n\nFAILING:';
+      for (const d of failingDeploys) {
+        const serviceDebug = servicesByName.get(d.serviceName);
+        servicesSection += '\n' + this.renderFailingService(d, serviceDebug);
+      }
+    }
+
+    if (healthyDeploys.length > 0) {
+      servicesSection += `\n\nHEALTHY (${healthyDeploys.length}): ${healthyDeploys
+        .map((d) => d.serviceName)
+        .join(', ')}`;
+    }
+
+    let lifecycleYamlSection: string;
+    if (!debugContext.lifecycleYaml) {
+      lifecycleYamlSection = 'lifecycle.yaml not available';
+    } else if (debugContext.lifecycleYaml.error) {
+      lifecycleYamlSection = `Could not fetch lifecycle.yaml: ${debugContext.lifecycleYaml.error}`;
+    } else if (debugContext.lifecycleYaml.content) {
+      const summary = summarizeLifecycleYaml(debugContext.lifecycleYaml.content);
+      if (summary.parsed) {
+        lifecycleYamlSection = `${summary.text}\n[Use get_file("lifecycle.yaml") for full configuration]`;
+      } else {
+        const lines = debugContext.lifecycleYaml.content.split('\n');
+        const truncated = lines.slice(0, 200).join('\n');
+        lifecycleYamlSection = `${truncated}${
+          lines.length > 200
+            ? `\n... (${
+                lines.length - 200
+              } more lines truncated)\n[Use get_file("lifecycle.yaml") for full configuration]`
+            : ''
+        }`;
+      }
+    } else {
+      lifecycleYamlSection = 'lifecycle.yaml is empty';
+    }
+
+    const failingServices = debugContext.services.filter((s) => s.status === 'failed' || s.issues.length > 0);
+    let k8sSection = '';
+    if (failingServices.length > 0) {
+      k8sSection = `\nINITIAL K8S STATE (STALE - call tools for current state):\n${failingServices
+        .map((s) => {
+          const issues = s.issues.length > 0 ? ` | ${s.issues.length} issues` : '';
+          const pods = s.pods.length > 0 ? ` | ${s.pods.length} pods` : '';
+          return `- ${s.name}: ${s.status}${pods}${issues}`;
+        })
+        .join('\n')}`;
+    }
 
     return `
 
@@ -202,52 +324,11 @@ ${
     : 'PR Comment ID: Not available'
 }
 
-SERVICES (${lc.deploys.length}):
-${lc.deploys
-  .map((d) => {
-    let info = `- ${d.serviceName}: ${d.status}${d.statusMessage ? ` - ${d.statusMessage}` : ''}`;
-    info += `\n  Type: ${d.type}`;
-    if (d.builderEngine) {
-      info += `\n  Builder Engine: ${d.builderEngine}`;
-    }
-    if (d.helmChart) {
-      info += `\n  Helm Chart: ${d.helmChart}`;
-    }
+${servicesSection}
 
-    if (d.buildPipelineId) {
-      info += `\n  Build: Codefresh (buildPipelineId: ${d.buildPipelineId})`;
-    } else if (d.builderEngine) {
-      info += `\n  Build: Native/${d.builderEngine} (use label_selector="lc-service=${d.serviceName}")`;
-    }
-
-    if (d.deployPipelineId) {
-      info += `\n  Deploy: Codefresh (deployPipelineId: ${d.deployPipelineId})`;
-    } else {
-      info += `\n  Deploy: Native/Helm (use label_selector="lc-service=${d.serviceName}")`;
-    }
-
-    info += `\n  Image: ${d.dockerImage || 'N/A'}`;
-    return info;
-  })
-  .join('\n')}
-
-===== LIFECYCLE.YAML CONFIGURATION =====
-${
-  debugContext.lifecycleYaml
-    ? debugContext.lifecycleYaml.error
-      ? `Could not fetch lifecycle.yaml: ${debugContext.lifecycleYaml.error}`
-      : `File: ${debugContext.lifecycleYaml.path}\n\n${debugContext.lifecycleYaml.content}`
-    : 'lifecycle.yaml not available'
-}
-
-INITIAL K8S STATE (STALE - call tools for current state):
-${debugContext.services
-  .map((s) => {
-    const issues = s.issues.length > 0 ? ` | ${s.issues.length} issues` : '';
-    const pods = s.pods.length > 0 ? ` | ${s.pods.length} pods` : '';
-    return `- ${s.name}: ${s.status}${pods}${issues}`;
-  })
-  .join('\n')}`;
+===== LIFECYCLE.YAML SUMMARY =====
+${lifecycleYamlSection}
+${k8sSection}`;
   }
 
   private buildMessages(context: PromptContext): Array<{ role: string; content: string }> {
