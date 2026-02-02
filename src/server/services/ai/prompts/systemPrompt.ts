@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-import { assembleBasePrompt, PROMPT_SECTIONS } from './sectionRegistry';
-
-export const AI_AGENT_SYSTEM_PROMPT = assembleBasePrompt();
+import { PROMPT_SECTIONS } from './sectionRegistry';
 
 export const AI_AGENT_SAFETY_RULES = PROMPT_SECTIONS.find((s) => s.id === 'safety')!.content;

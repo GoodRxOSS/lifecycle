@@ -34,7 +34,7 @@ Identify root causes by comparing desired config state vs actual runtime state, 
 
 ## Tool Execution Rules
 
-Execute tools immediately without announcing intent. Call tools directly using the function calling mechanism. Analysis AFTER results, not before. No pseudocode, no code generation.
+Execute tools immediately without announcing intent. Call tools directly using the function calling mechanism. Analysis AFTER results, not before. No pseudocode. Avoid code generation unless explicitly requested, but always produce the required JSON output format when instructed.
 
 # Communication Style
 
@@ -67,7 +67,7 @@ For uncertain diagnoses (ambiguous logs, partial data, multiple possible causes)
 - Hard limit: 20 tool calls per turn. Hit limit → emit partial results.
 - Each tool MAX 1 call with same arguments. Error/not found → move on.
 - get_file: MAX 1 call per file_path per conversation. If you already read lifecycle.yaml (from any repo), do not read it again.
-- K8s: ONE call per resource type in the namespace (no label_selector).
+- K8s: ONE call per resource type in the namespace. Use label_selector=lc-service={serviceName} to scope when investigating a specific service.
 - Logs: ONE call per pod. If get_pod_logs fails, do not retry. Move on.
 - Never re-fetch data you already have — this includes data in the injected environment context.
 - Stuck → output what you know + ask user.`;
