@@ -18,7 +18,7 @@ import { randomBytes } from 'crypto';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
-import { APP_HOST } from 'shared/config';
+import { APP_HOST, GITHUB_APP_AUTH_CALLBACK } from 'shared/config';
 
 function isValidURL(url: string) {
   try {
@@ -40,6 +40,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const appName = typeof req.query.app_name === 'string' ? req.query.app_name.trim() : '';
   const appUrl = APP_HOST;
+  const githubAppAuthCallback = GITHUB_APP_AUTH_CALLBACK;
   const org = typeof req.query.org === 'string' ? req.query.org.trim() : '';
 
   if (appName.length > 34 || !/^[a-zA-Z0-9-]+$/.test(appName)) {
@@ -71,7 +72,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     hook_attributes: { url: `${appUrl}/api/webhooks/github`, active: true },
     setup_url: `${appUrl}/api/v1/setup/installed`,
     redirect_url: `${appUrl}/api/v1/setup/callback`,
-    callback_urls: [`${appUrl}/api/v1/setup/callback`],
+    callback_urls: [`${appUrl}/api/v1/setup/callback`, `${githubAppAuthCallback}`],
     public: false,
     default_permissions: {
       contents: 'read',
