@@ -18,14 +18,6 @@ set -e
 cd /app
 
 # check and error if required env vars are not set
-required_vars=(
-  GITHUB_APP_ID
-  GITHUB_CLIENT_ID
-  GITHUB_APP_INSTALLATION_ID
-  GITHUB_PRIVATE_KEY
-  GITHUB_CLIENT_SECRET
-  GITHUB_WEBHOOK_SECRET
-)
 
 db_configured=false
 if [ -n "$APP_DB_HOST" ] && [ -n "$APP_DB_USER" ] && [ -n "$APP_DB_PASSWORD" ] && [ -n "$APP_DB_NAME" ]; then
@@ -52,12 +44,6 @@ fi
 if [ "$redis_configured" = false ]; then
   missing+=("REDIS_URL or APP_REDIS_* variables")
 fi
-
-for v in "${required_vars[@]}"; do
-  if [ -z "${!v}" ]; then
-    missing+=("$v")
-  fi
-done
 
 if [ ${#missing[@]} -ne 0 ]; then
   echo >&2
