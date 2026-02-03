@@ -17,6 +17,7 @@
 import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel } from '../../types/tool';
 import { K8sClient } from '../shared/k8sClient';
+import { OutputLimiter } from '../outputLimiter';
 
 export class GetK8sResourcesTool extends BaseTool {
   static readonly Name = 'get_k8s_resources';
@@ -32,6 +33,19 @@ export class GetK8sResourcesTool extends BaseTool {
             type: 'string',
             description:
               'Resource type to list (e.g., "pods", "deployments", "services", "ingresses", "secrets", "configmaps", "jobs", "statefulsets", "events"). Accepts singular or plural forms.',
+            enum: [
+              'pods',
+              'deployments',
+              'services',
+              'ingresses',
+              'secrets',
+              'configmaps',
+              'jobs',
+              'statefulsets',
+              'daemonsets',
+              'replicasets',
+              'events',
+            ],
           },
           name: {
             type: 'string',
@@ -124,7 +138,9 @@ export class GetK8sResourcesTool extends BaseTool {
       }
 
       const displayContent = this.formatDisplay(normalizedType, result);
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      const serialized = JSON.stringify(result);
+      const agentContent = OutputLimiter.truncateJsonSafely(serialized);
+      return this.createSuccessResult(agentContent, displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Unknown error', 'EXECUTION_ERROR');
     }
@@ -140,25 +156,47 @@ export class GetK8sResourcesTool extends BaseTool {
       labelSelector
     );
 
+    const allPods = response.body.items.map((pod) => ({
+      name: pod.metadata?.name,
+      phase: pod.status?.phase,
+      ready: pod.status?.containerStatuses
+        ? `${pod.status.containerStatuses.filter((c) => c.ready).length}/${pod.status.containerStatuses.length}`
+        : '0/0',
+      restarts: pod.status?.containerStatuses
+        ? pod.status.containerStatuses.reduce((sum, c) => sum + c.restartCount, 0)
+        : 0,
+      age: pod.metadata?.creationTimestamp,
+      containers: pod.status?.containerStatuses?.map((c) => ({
+        name: c.name,
+        ready: c.ready,
+        state: Object.keys(c.state || {})[0],
+        restarts: c.restartCount,
+      })),
+    }));
+
+    const isUnhealthy = (pod: any) =>
+      pod.phase !== 'Running' ||
+      pod.restarts > 5 ||
+      pod.containers?.some((c: any) => !c.ready || (c.state !== 'running' && c.state !== undefined));
+
+    const unhealthy = allPods.filter(isUnhealthy);
+    const healthy = allPods.filter((p) => !isUnhealthy(p));
+
+    if (allPods.length > 50) {
+      return {
+        success: true,
+        total: allPods.length,
+        unhealthyCount: unhealthy.length,
+        healthyCount: healthy.length,
+        unhealthyPods: unhealthy,
+        healthyPods: healthy.map((p) => ({ name: p.name, phase: p.phase, ready: p.ready })),
+        note: `${allPods.length} pods total. ${unhealthy.length} unhealthy shown with full detail. ${healthy.length} healthy shown as summary. Use label_selector to narrow results or get_pod_logs for specific pods.`,
+      };
+    }
+
     return {
       success: true,
-      pods: response.body.items.map((pod) => ({
-        name: pod.metadata?.name,
-        phase: pod.status?.phase,
-        ready: pod.status?.containerStatuses
-          ? `${pod.status.containerStatuses.filter((c) => c.ready).length}/${pod.status.containerStatuses.length}`
-          : '0/0',
-        restarts: pod.status?.containerStatuses
-          ? pod.status.containerStatuses.reduce((sum, c) => sum + c.restartCount, 0)
-          : 0,
-        age: pod.metadata?.creationTimestamp,
-        containers: pod.status?.containerStatuses?.map((c) => ({
-          name: c.name,
-          ready: c.ready,
-          state: Object.keys(c.state || {})[0],
-          restarts: c.restartCount,
-        })),
-      })),
+      pods: allPods,
     };
   }
 
@@ -213,17 +251,36 @@ export class GetK8sResourcesTool extends BaseTool {
   private async listDeployments(namespace: string): Promise<any> {
     const response = await this.k8sClient.appsApi.listNamespacedDeployment(namespace);
 
+    const allDeployments = response.body.items.map((deployment) => ({
+      name: deployment.metadata?.name,
+      replicas: {
+        desired: deployment.spec?.replicas || 0,
+        ready: deployment.status?.readyReplicas || 0,
+        available: deployment.status?.availableReplicas || 0,
+      },
+      age: deployment.metadata?.creationTimestamp,
+    }));
+
+    const isUnhealthy = (d: any) => d.replicas.ready < d.replicas.desired || d.replicas.available < d.replicas.desired;
+
+    const unhealthy = allDeployments.filter(isUnhealthy);
+    const healthy = allDeployments.filter((d) => !isUnhealthy(d));
+
+    if (allDeployments.length > 50) {
+      return {
+        success: true,
+        total: allDeployments.length,
+        unhealthyCount: unhealthy.length,
+        healthyCount: healthy.length,
+        unhealthyDeployments: unhealthy,
+        healthyDeployments: healthy.map((d) => ({ name: d.name, ready: `${d.replicas.ready}/${d.replicas.desired}` })),
+        note: `${allDeployments.length} deployments total. ${unhealthy.length} unhealthy shown with full detail. ${healthy.length} healthy shown as summary.`,
+      };
+    }
+
     return {
       success: true,
-      deployments: response.body.items.map((deployment) => ({
-        name: deployment.metadata?.name,
-        replicas: {
-          desired: deployment.spec?.replicas || 0,
-          ready: deployment.status?.readyReplicas || 0,
-          available: deployment.status?.availableReplicas || 0,
-        },
-        age: deployment.metadata?.creationTimestamp,
-      })),
+      deployments: allDeployments,
     };
   }
 
@@ -237,21 +294,32 @@ export class GetK8sResourcesTool extends BaseTool {
       labelSelector
     );
 
+    const allServices = response.body.items.map((svc) => ({
+      name: svc.metadata?.name,
+      type: svc.spec?.type,
+      clusterIP: svc.spec?.clusterIP,
+      ports: svc.spec?.ports?.map((p) => ({
+        name: p.name,
+        port: p.port,
+        targetPort: p.targetPort,
+        protocol: p.protocol,
+      })),
+      selector: svc.spec?.selector,
+    }));
+
+    if (allServices.length > 50) {
+      return {
+        success: true,
+        total: allServices.length,
+        services: allServices.map((s) => ({ name: s.name, type: s.type, ports: s.ports?.map((p: any) => p.port) })),
+        note: `${allServices.length} services total. Showing summary. Use label_selector to narrow results.`,
+      };
+    }
+
     return {
       success: true,
-      services: response.body.items.map((svc) => ({
-        name: svc.metadata?.name,
-        type: svc.spec?.type,
-        clusterIP: svc.spec?.clusterIP,
-        ports: svc.spec?.ports?.map((p) => ({
-          name: p.name,
-          port: p.port,
-          targetPort: p.targetPort,
-          protocol: p.protocol,
-        })),
-        selector: svc.spec?.selector,
-      })),
-      count: response.body.items.length,
+      services: allServices,
+      count: allServices.length,
     };
   }
 
@@ -348,6 +416,22 @@ export class GetK8sResourcesTool extends BaseTool {
       return timeB - timeA;
     });
 
+    if (jobs.length > 50) {
+      const failed = jobs.filter((j) => j.failed > 0);
+      const active = jobs.filter((j) => j.active > 0);
+      const recent = jobs.slice(0, 20);
+      return {
+        success: true,
+        total: jobs.length,
+        failedCount: failed.length,
+        activeCount: active.length,
+        failedJobs: failed.slice(0, 20),
+        activeJobs: active,
+        recentJobs: recent,
+        note: `${jobs.length} jobs total. ${failed.length} failed, ${active.length} active. Use label_selector to narrow results.`,
+      };
+    }
+
     return {
       success: true,
       jobs,
@@ -441,36 +525,97 @@ export class GetK8sResourcesTool extends BaseTool {
       fieldSelector
     );
 
+    const allEvents = response.body.items
+      .sort((a, b) => {
+        const aTime = new Date(a.lastTimestamp || a.eventTime || 0).getTime();
+        const bTime = new Date(b.lastTimestamp || b.eventTime || 0).getTime();
+        return bTime - aTime;
+      })
+      .map((event) => ({
+        type: event.type,
+        reason: event.reason,
+        message: event.message,
+        count: event.count,
+        involvedObject: {
+          kind: event.involvedObject?.kind,
+          name: event.involvedObject?.name,
+        },
+        lastTimestamp: event.lastTimestamp || event.eventTime,
+      }));
+
+    const warnings = allEvents.filter((e) => e.type === 'Warning');
+    const normal = allEvents.filter((e) => e.type !== 'Warning');
+
     return {
       success: true,
-      events: response.body.items
-        .sort((a, b) => {
-          const aTime = new Date(a.lastTimestamp || a.eventTime || 0).getTime();
-          const bTime = new Date(b.lastTimestamp || b.eventTime || 0).getTime();
-          return bTime - aTime;
-        })
-        .slice(0, 50)
-        .map((event) => ({
-          type: event.type,
-          reason: event.reason,
-          message: event.message,
-          count: event.count,
-          involvedObject: {
-            kind: event.involvedObject?.kind,
-            name: event.involvedObject?.name,
-          },
-          lastTimestamp: event.lastTimestamp || event.eventTime,
-        })),
+      total: allEvents.length,
+      warningCount: warnings.length,
+      normalCount: normal.length,
+      warnings: warnings.slice(0, 50),
+      recentNormal: normal.slice(0, 10),
+      note: `${allEvents.length} events total. ${warnings.length} warnings shown first (up to 50), then ${Math.min(
+        normal.length,
+        10
+      )} recent normal events.`,
     };
   }
 
   private formatDisplay(resourceType: string, result: any): string {
+    if (resourceType === 'pod' && result.total && result.unhealthyPods) {
+      const unhealthyList = result.unhealthyPods
+        .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
+        .join('\n');
+      return `${result.total} pods (${result.unhealthyCount} unhealthy, ${result.healthyCount} healthy)${
+        unhealthyList ? `\nUnhealthy:\n${unhealthyList}` : ''
+      }`;
+    }
+
     if (resourceType === 'pod' && result.pods) {
       return `Found ${result.pods.length} pods:\n${result.pods
         .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
         .join('\n')}`;
     }
 
-    return JSON.stringify(result, null, 2);
+    if (resourceType === 'pod' && result.pod) {
+      return `Pod: ${result.pod.name} (${result.pod.phase})`;
+    }
+
+    if (resourceType === 'deployment' && result.total && result.unhealthyDeployments) {
+      const unhealthyList = result.unhealthyDeployments
+        .map((d: any) => `  - ${d.name}: ${d.replicas.ready}/${d.replicas.desired} ready`)
+        .join('\n');
+      return `${result.total} deployments (${result.unhealthyCount} unhealthy, ${result.healthyCount} healthy)${
+        unhealthyList ? `\nUnhealthy:\n${unhealthyList}` : ''
+      }`;
+    }
+
+    if (resourceType === 'deployment' && result.deployment) {
+      return `Deployment: ${result.deployment.name} (${result.deployment.replicas.ready}/${result.deployment.replicas.desired} ready)`;
+    }
+
+    if (resourceType === 'event' && result.total != null) {
+      return `${result.total} events (${result.warningCount} warnings, ${result.normalCount} normal)`;
+    }
+
+    const listKeys: Record<string, string> = {
+      deployments: 'deployments',
+      services: 'services',
+      ingresses: 'ingresses',
+      secrets: 'secrets',
+      configmaps: 'configmaps',
+      jobs: 'jobs',
+      statefulsets: 'statefulsets',
+      daemonsets: 'daemonsets',
+      replicasets: 'replicasets',
+      events: 'events',
+    };
+
+    const pluralType = resourceType + 's';
+    const key = listKeys[pluralType];
+    if (key && Array.isArray(result[key])) {
+      return `Found ${result[key].length} ${pluralType}`;
+    }
+
+    return `K8s ${resourceType} result`;
   }
 }

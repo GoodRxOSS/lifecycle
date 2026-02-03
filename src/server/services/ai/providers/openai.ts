@@ -15,9 +15,21 @@
  */
 
 import OpenAI from 'openai';
+import { type ChatCompletionMessageParam, type ChatCompletionTool } from 'openai/resources/chat/completions';
 import { BaseLLMProvider } from './base';
-import { ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
+import { ModelInfo, CompletionOptions, StreamChunk } from '../types/provider';
+import { ConversationMessage, TextPart, ToolCallPart, ToolResultPart } from '../types/message';
 import { Tool, ToolCall } from '../types/tool';
+import { ErrorCategory } from '../errors';
+
+interface AccumulatedToolCall {
+  id?: string;
+  type?: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
 
 export class OpenAIProvider extends BaseLLMProvider {
   name = 'openai';
@@ -32,7 +44,7 @@ export class OpenAIProvider extends BaseLLMProvider {
   }
 
   async *streamCompletion(
-    messages: Message[],
+    messages: ConversationMessage[],
     options: CompletionOptions,
     signal?: AbortSignal
   ): AsyncIterator<StreamChunk> {
@@ -42,13 +54,10 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     const openaiMessages = [
       { role: 'system' as const, content: options.systemPrompt },
-      ...messages.map((m) => ({
-        role: m.role as 'user' | 'assistant' | 'system',
-        content: m.content,
-      })),
+      ...(this.formatHistory(messages) as ChatCompletionMessageParam[]),
     ];
 
-    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as any[] | undefined;
+    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as ChatCompletionTool[] | undefined;
 
     const stream = await this.client.chat.completions.create({
       model: this.modelId,
@@ -58,7 +67,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       tools: tools || undefined,
     });
 
-    let accumulatedToolCalls: any[] = [];
+    let accumulatedToolCalls: AccumulatedToolCall[] = [];
 
     for await (const chunk of stream) {
       if (signal?.aborted) {
@@ -106,6 +115,44 @@ export class OpenAIProvider extends BaseLLMProvider {
     }
   }
 
+  formatHistory(messages: ConversationMessage[]): unknown[] {
+    const result: unknown[] = [];
+
+    for (const msg of messages) {
+      const toolCallParts = msg.parts.filter((p): p is ToolCallPart => p.type === 'tool_call');
+      const toolResultParts = msg.parts.filter((p): p is ToolResultPart => p.type === 'tool_result');
+      const textParts = msg.parts.filter((p): p is TextPart => p.type === 'text');
+
+      if (msg.role === 'system') {
+        const textContent = textParts.map((p) => p.content).join(' ');
+        result.push({ role: 'system' as const, content: textContent });
+      } else if (toolCallParts.length > 0) {
+        result.push({
+          role: 'assistant' as const,
+          content: null,
+          tool_calls: toolCallParts.map((p) => ({
+            id: p.toolCallId,
+            type: 'function',
+            function: { name: p.name, arguments: JSON.stringify(p.arguments) },
+          })),
+        });
+      } else if (toolResultParts.length > 0) {
+        for (const p of toolResultParts) {
+          result.push({
+            role: 'tool' as const,
+            tool_call_id: p.toolCallId,
+            content: p.result.agentContent || JSON.stringify(p.result),
+          });
+        }
+      } else {
+        const textContent = textParts.map((p) => p.content).join(' ');
+        result.push({ role: msg.role as 'user' | 'assistant', content: textContent });
+      }
+    }
+
+    return result;
+  }
+
   supportsTools(): boolean {
     return true;
   }
@@ -133,10 +180,23 @@ export class OpenAIProvider extends BaseLLMProvider {
       return [];
     }
 
-    return content.map((tc: any) => ({
-      name: tc.function.name,
-      arguments: JSON.parse(tc.function.arguments),
-      id: tc.id,
-    }));
+    return content.map((tc: AccumulatedToolCall) => {
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(tc.function.arguments);
+      } catch (parseError) {
+        const error: Error & { category?: ErrorCategory; retryable?: boolean } = new Error(
+          `OpenAI returned malformed tool call arguments for ${tc.function.name}: ${parseError}`
+        );
+        error.category = ErrorCategory.TRANSIENT;
+        error.retryable = true;
+        throw error;
+      }
+      return {
+        name: tc.function.name,
+        arguments: args,
+        id: tc.id,
+      };
+    });
   }
 }

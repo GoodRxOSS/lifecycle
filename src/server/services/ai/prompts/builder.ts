@@ -14,14 +14,30 @@
  * limitations under the License.
  */
 
-import { AI_AGENT_SYSTEM_PROMPT } from './systemPrompt';
-import { DebugContext, DebugMessage } from '../../types/aiAgent';
+import { assembleBasePrompt, PROMPT_SECTIONS } from './sectionRegistry';
+
+import { DebugContext, DebugMessage, ServiceDebugInfo } from '../../types/aiAgent';
+import { summarizeLifecycleYaml } from '../context/contextSummarizer';
+
+export interface McpToolInfo {
+  serverName: string;
+  serverSlug: string;
+  toolName: string;
+  qualifiedName: string;
+  description: string;
+}
 
 export interface PromptContext {
   provider: 'anthropic' | 'openai' | 'gemini';
   debugContext: DebugContext;
   conversationHistory: DebugMessage[];
   userMessage: string;
+  additiveRules?: string[];
+  systemPromptOverride?: string;
+  excludedTools?: string[];
+  excludedFilePatterns?: string[];
+  mcpTools?: McpToolInfo[];
+  excludeSections?: string[];
 }
 
 export interface BuiltPrompt {
@@ -29,17 +45,21 @@ export interface BuiltPrompt {
   messages: Array<{ role: string; content: string }>;
 }
 
-type ConversationMode = 'investigation' | 'fix' | 'verification' | 'general';
-
 export class AIAgentPromptBuilder {
-  private basePrompt = AI_AGENT_SYSTEM_PROMPT;
+  private basePrompt = assembleBasePrompt();
 
   public build(context: PromptContext): BuiltPrompt {
+    const excluded = context.excludeSections || [];
+    const registryExcludes = [...excluded.filter((id) => id !== 'safety')];
+    const base =
+      context.systemPromptOverride || (excluded.length > 0 ? assembleBasePrompt(registryExcludes) : this.basePrompt);
+
     const layers = [
-      this.basePrompt,
-      this.buildProviderAugmentation(context.provider),
-      this.buildConversationStateAugmentation(context),
-      this.buildEnvironmentContext(context.debugContext),
+      base,
+      this.buildMcpToolsLayer(context.mcpTools),
+      this.buildCustomRulesLayer(context),
+      this.buildAccessRestrictionsNotice(context),
+      excluded.includes('safety') ? '' : this.buildSafetyRulesLayer(),
     ];
 
     const systemPrompt = layers.filter(Boolean).join('\n');
@@ -48,235 +68,234 @@ export class AIAgentPromptBuilder {
     return { systemPrompt, messages };
   }
 
-  private buildProviderAugmentation(provider: string): string {
-    if (provider === 'gemini') {
-      return `
-
----
-
-# Gemini-Specific Instructions
-
-## Tool Usage Behavior
-
-CRITICAL: You are using the Gemini model. Follow these specific instructions:
-
-1. **Execute Immediately - Do NOT Announce Intent:**
-   - WRONG - Do NOT do these: "I will check the deployment status"
-   - WRONG - Do NOT do these: "Let me get the logs"
-   - WRONG - Do NOT do these: "I am going to scale the resource"
-   - RIGHT - Do these instead: [Immediately call get_k8s_resources tool without saying anything]
-
-2. **Call Tools Directly - Do NOT Generate Code:**
-   - WRONG - Do NOT do these: Generating Python code like "api.get_k8s_resources(...)"
-   - WRONG - Do NOT do these: Showing pseudocode like "result = call_tool(...)"
-   - WRONG - Do NOT do these: Writing JavaScript/TypeScript snippets
-   - WRONG - Do NOT do these: Generating any programming language code
-   - RIGHT - Do these instead: [Use the actual function calling mechanism your model provides]
-
-3. **Respect System Prompt - Do NOT Ignore Instructions:**
-   - All instructions in this prompt are MANDATORY
-   - If you announce instead of execute, you will be corrected
-   - If you generate code instead of calling tools, you will fail
-   - Tool calls are REQUIRED when actions are needed
-
-## Fix Workflow Specific
-
-When user confirms a fix (phrases: "yes", "fix it", "do it", "go ahead", "apply the fix", "user consents to fix"):
-
-1. Call get_lifecycle_config or get_referenced_file (based on which file needs fixing)
-2. Mentally process the content to identify the exact change needed
-3. Call commit_lifecycle_fix or update_referenced_file with the complete corrected content
-4. Wait for success response with commit_url
-5. Output the fix summary with the commit URL
-
-NEVER:
-- Generate Python/JavaScript code snippets
-- Show code like "lines = content.split('\\n')" or "lines[41] = ..."
-- Claim you fixed something without calling the commit function
-- Apply a different fix than what the user just requested
-`;
+  private buildCustomRulesLayer(context: PromptContext): string {
+    if (!context.additiveRules || context.additiveRules.length === 0) {
+      return '';
     }
 
-    return '';
+    const rules = context.additiveRules.map((rule) => `- ${rule}`).join('\n');
+    return `\n\n---\n\n# Custom Rules\n\n${rules}`;
   }
 
-  private detectConversationMode(context: PromptContext): ConversationMode {
-    const message = context.userMessage.toLowerCase();
-
-    if (
-      message.match(/^(yes|fix it|do it|go ahead|please fix|apply.*fix|fix that)$/i) ||
-      message.includes('user consents to fix') ||
-      message.includes('apply the fix')
-    ) {
-      return 'fix';
+  private buildAccessRestrictionsNotice(context: PromptContext): string {
+    const parts: string[] = [];
+    if (context.excludedTools && context.excludedTools.length > 0) {
+      parts.push(
+        `The following tools are NOT available to you: ${context.excludedTools.join(', ')}. Do not attempt to use them.`
+      );
     }
-
-    if (
-      message.match(/(did you|have you).*(scale|restart|patch|delete|commit|fix|update)/i) ||
-      message.match(/(are you sure|check again|verify|confirm)/i) ||
-      message.includes('use the tool') ||
-      message.includes('call the tool')
-    ) {
-      return 'verification';
+    if (context.excludedFilePatterns && context.excludedFilePatterns.length > 0) {
+      parts.push(
+        `The following file patterns are restricted and you cannot access them: ${context.excludedFilePatterns.join(
+          ', '
+        )}. If a user asks about these files, explain they are restricted.`
+      );
     }
-
-    if (message.match(/(why|what.*wrong|what.*fail|debug|investigate|check.*log|get.*log)/i)) {
-      return 'investigation';
-    }
-
-    return 'general';
+    if (parts.length === 0) return '';
+    return `\n\n---\n\n# Access Restrictions\n\n${parts.join('\n\n')}`;
   }
 
-  private buildConversationStateAugmentation(context: PromptContext): string {
-    const mode = this.detectConversationMode(context);
+  private buildMcpToolsLayer(mcpTools?: McpToolInfo[]): string {
+    if (!mcpTools || mcpTools.length === 0) return '';
 
-    switch (mode) {
-      case 'fix':
-        return `
-
----
-
-# Current Mode: FIX APPLICATION
-
-The user has consented to apply a fix. Your immediate task:
-
-1. Identify which file needs modification (lifecycle.yaml or a referenced file)
-2. Call the appropriate get function to fetch current content
-3. Mentally determine the exact change needed
-4. Call the commit function with the complete corrected content
-5. Return the commit URL in your response
-
-DO NOT:
-- Ask for permission (you already have it)
-- Explain what you're going to do (just do it)
-- Generate code snippets or pseudocode
-- Fix anything other than what was just requested
-`;
-
-      case 'verification':
-        return `
-
----
-
-# Current Mode: VERIFICATION
-
-The user is asking you to verify state or confirm an action. Your task:
-
-1. Call verification tools to check current state:
-   - get_k8s_resources for runtime state
-   - get_lifecycle_config or get_referenced_file for configuration
-   - query_database for deployment records
-2. Report ACTUAL current state (not stale context)
-3. Answer truthfully - if you didn't perform an action, admit it
-
-DO NOT use stale context or assume state.
-`;
-
-      case 'investigation':
-        return `
-
----
-
-# Current Mode: INVESTIGATION
-
-The user is asking you to investigate an issue. Your task:
-
-1. Batch data collection (Step 1-2 of Debugging Workflow)
-   - Get all database context in one query
-   - Get all K8s resources in parallel
-2. Analyze patterns (Step 3)
-   - Identify common issues vs. unique issues
-   - Determine if you should ask user which service to investigate
-3. Execute targeted investigation (Step 4)
-   - Follow the 7-Step Investigation Pattern
-   - Compare DESIRED (config) vs ACTUAL (runtime) state
-4. Provide structured summary (Step 5)
-
-DO NOT:
-- Investigate services one-by-one before batching data
-- Commit fixes without user consent
-- Skip configuration file reading
-`;
-
-      case 'general':
-      default:
-        return '';
+    const byServer = new Map<string, McpToolInfo[]>();
+    for (const tool of mcpTools) {
+      const key = tool.serverName;
+      if (!byServer.has(key)) byServer.set(key, []);
+      byServer.get(key)!.push(tool);
     }
-  }
 
-  private buildEnvironmentContext(debugContext: DebugContext): string {
-    const lc = debugContext.lifecycleContext;
+    const serverSections = Array.from(byServer.entries())
+      .map(([serverName, tools]) => {
+        const toolList = tools.map((t) => `- **${t.qualifiedName}**: ${t.description}`).join('\n');
+        return `### ${serverName}\n${toolList}`;
+      })
+      .join('\n\n');
 
     return `
 
 ---
 
-# Current Environment Context
+# External Tools (MCP)
 
-Build UUID: ${debugContext.buildUuid}
-PR: #${lc.pullRequest.number || 'N/A'} - ${lc.pullRequest.title || 'N/A'}
-Repository: ${lc.pullRequest.fullName}
-Branch: ${lc.pullRequest.branch}
-Build Status: ${lc.build.status}
-Namespace: ${lc.build.namespace}
+You have access to external tools from connected MCP servers. Use these tools when they can provide better or additional information beyond your built-in tools.
+
+${serverSections}
+
+**When to use MCP tools:**
+- Use them alongside built-in tools during investigation — they provide complementary data
+- If an MCP tool can answer the user's question directly, prefer it over manual investigation
+- MCP tool names are prefixed with \`mcp__<server>__\` — call them like any other tool
+- If an MCP tool fails, fall back to built-in tools`;
+  }
+
+  private buildSafetyRulesLayer(): string {
+    return '\n\n---\n\n' + PROMPT_SECTIONS.find((s) => s.id === 'safety')!.content;
+  }
+
+  private static FAILED_DEPLOY_STATUSES = new Set(['BUILD_FAILED', 'DEPLOY_FAILED', 'ERROR']);
+
+  private isFailingService(deploy: any, serviceDebug?: ServiceDebugInfo): boolean {
+    if (AIAgentPromptBuilder.FAILED_DEPLOY_STATUSES.has(deploy.status)) return true;
+    if (serviceDebug?.status === 'failed') return true;
+    if (serviceDebug?.issues && serviceDebug.issues.length > 0) return true;
+    return false;
+  }
+
+  private renderFailingService(d: any, serviceDebug?: ServiceDebugInfo): string {
+    let info = `- ${d.serviceName}: ${d.status}${d.statusMessage ? ` - ${d.statusMessage}` : ''}`;
+    info += `\n  Type: ${d.type}`;
+    if (d.builderEngine) info += ` | Builder: ${d.builderEngine}`;
+    if (d.helmChart) info += ` | Chart: ${d.helmChart}`;
+
+    if (d.buildPipelineId) {
+      info += `\n  Build: Codefresh (buildPipelineId: ${d.buildPipelineId})`;
+    } else if (d.builderEngine) {
+      info += `\n  Build: Native/${d.builderEngine} (label_selector="lc-service=${d.serviceName}")`;
+    }
+
+    if (d.deployPipelineId) {
+      info += `\n  Deploy: Codefresh (deployPipelineId: ${d.deployPipelineId})`;
+    } else {
+      info += `\n  Deploy: Native/Helm (label_selector="lc-service=${d.serviceName}")`;
+    }
+
+    info += `\n  Image: ${d.dockerImage || 'N/A'}`;
+
+    if (serviceDebug) {
+      const podCount = serviceDebug.pods.length;
+      const readyPods = serviceDebug.pods.filter(
+        (p) => p.phase === 'Running' && p.containerStatuses.every((c: any) => c.ready)
+      ).length;
+      if (podCount > 0) {
+        info += `\n  K8s: ${readyPods}/${podCount} pods ready`;
+      }
+      if (serviceDebug.issues.length > 0) {
+        info += `\n  Issues: ${serviceDebug.issues.map((i) => i.title).join('; ')}`;
+      }
+      if (serviceDebug.events.length > 0) {
+        const warningEvents = serviceDebug.events.filter((e) => e.type === 'Warning');
+        if (warningEvents.length > 0) {
+          info += `\n  Events: ${warningEvents
+            .slice(0, 3)
+            .map((e) => `${e.reason}: ${e.message}`)
+            .join('; ')}`;
+        }
+      }
+    }
+
+    return info;
+  }
+
+  private renderRepoGroup(failing: any[], healthy: any[], servicesByName: Map<string, ServiceDebugInfo>): string {
+    let section = '';
+    if (failing.length > 0) {
+      section += '\nFAILING:';
+      for (const d of failing) {
+        section += '\n' + this.renderFailingService(d, servicesByName.get(d.serviceName));
+      }
+    }
+    if (healthy.length > 30) {
+      section += `\n\nHEALTHY: ${healthy.length} services (use query_database on deploys table to list specific services)`;
+    } else if (healthy.length > 0) {
+      section += `\n\nHEALTHY (${healthy.length}): ${healthy.map((d) => d.serviceName).join(', ')}`;
+    }
+    return section;
+  }
+
+  private buildEnvironmentContext(debugContext: DebugContext): string {
+    const lc = debugContext.lifecycleContext;
+    const servicesByName = new Map<string, ServiceDebugInfo>();
+    for (const s of debugContext.services) {
+      servicesByName.set(s.name, s);
+    }
+
+    const failingDeploys: any[] = [];
+    const healthyDeploys: any[] = [];
+    for (const d of lc.deploys) {
+      const serviceDebug = servicesByName.get(d.serviceName);
+      if (this.isFailingService(d, serviceDebug)) {
+        failingDeploys.push(d);
+      } else {
+        healthyDeploys.push(d);
+      }
+    }
+
+    const repoNames = new Set<string>();
+    for (const d of lc.deploys) {
+      repoNames.add(d.repoName || lc.pullRequest.fullName);
+    }
+    const isMultiRepo = repoNames.size > 1;
+
+    let servicesSection = `## Services (${lc.deploys.length} total, ${failingDeploys.length} failing)`;
+
+    if (isMultiRepo) {
+      const repoGroups = new Map<string, { failing: any[]; healthy: any[] }>();
+      for (const d of [...failingDeploys, ...healthyDeploys]) {
+        const repo = d.repoName || lc.pullRequest.fullName;
+        if (!repoGroups.has(repo)) repoGroups.set(repo, { failing: [], healthy: [] });
+        const group = repoGroups.get(repo)!;
+        if (failingDeploys.includes(d)) {
+          group.failing.push(d);
+        } else {
+          group.healthy.push(d);
+        }
+      }
+      for (const [repo, group] of repoGroups) {
+        servicesSection += `\n\n### ${repo}`;
+        servicesSection += this.renderRepoGroup(group.failing, group.healthy, servicesByName);
+      }
+    } else {
+      servicesSection += this.renderRepoGroup(failingDeploys, healthyDeploys, servicesByName);
+    }
+
+    let lifecycleYamlSection: string;
+    if (!debugContext.lifecycleYaml) {
+      lifecycleYamlSection = 'lifecycle.yaml not available';
+    } else if (debugContext.lifecycleYaml.error) {
+      lifecycleYamlSection = `Could not fetch lifecycle.yaml: ${debugContext.lifecycleYaml.error}`;
+    } else if (debugContext.lifecycleYaml.content) {
+      const summary = summarizeLifecycleYaml(debugContext.lifecycleYaml.content);
+      if (summary.parsed) {
+        lifecycleYamlSection = `${summary.text}\n[Use get_file("lifecycle.yaml") for full configuration]`;
+      } else {
+        const lines = debugContext.lifecycleYaml.content.split('\n');
+        const truncated = lines.slice(0, 200).join('\n');
+        lifecycleYamlSection = `${truncated}${
+          lines.length > 200
+            ? `\n... (${
+                lines.length - 200
+              } more lines truncated)\n[Use get_file("lifecycle.yaml") for full configuration]`
+            : ''
+        }`;
+      }
+    } else {
+      lifecycleYamlSection = 'lifecycle.yaml is empty';
+    }
+
+    const gatheredAt =
+      debugContext.gatheredAt instanceof Date ? debugContext.gatheredAt.toISOString() : String(debugContext.gatheredAt);
+
+    return `
+
+---
+
+# Environment State (gathered: ${gatheredAt})
+
+Build: ${debugContext.buildUuid} | Status: ${lc.build.status} | Namespace: ${lc.build.namespace}
+PR: #${lc.pullRequest.number || 'N/A'} "${lc.pullRequest.title || 'N/A'}" by ${lc.pullRequest.username || 'N/A'}
+Repo: ${lc.pullRequest.fullName} @ ${lc.pullRequest.branch} (base: ${lc.pullRequest.baseBranch || 'N/A'})
+SHA: ${lc.pullRequest.latestCommit || lc.build.sha || 'N/A'}
 ${
   lc.pullRequest.commentId
     ? `PR Comment ID: ${lc.pullRequest.commentId} (use get_pr_comment to see enabled services)`
     : 'PR Comment ID: Not available'
 }
 
-SERVICES (${lc.deploys.length}):
-${lc.deploys
-  .map((d) => {
-    let info = `- ${d.serviceName}: ${d.status}${d.statusMessage ? ` - ${d.statusMessage}` : ''}`;
-    info += `\n  Type: ${d.type}`;
-    if (d.builderEngine) {
-      info += `\n  Builder Engine: ${d.builderEngine}`;
-    }
-    if (d.helmChart) {
-      info += `\n  Helm Chart: ${d.helmChart}`;
-    }
+${servicesSection}
 
-    if (d.buildPipelineId) {
-      info += `\n  Build: Codefresh (buildPipelineId: ${d.buildPipelineId})`;
-    } else if (d.builderEngine) {
-      info += `\n  Build: Native/${d.builderEngine} (use label_selector="lc-service=${d.serviceName}")`;
-    }
-
-    if (d.deployPipelineId) {
-      info += `\n  Deploy: Codefresh (deployPipelineId: ${d.deployPipelineId})`;
-    } else {
-      info += `\n  Deploy: Native/Helm (use label_selector="lc-service=${d.serviceName}")`;
-    }
-
-    info += `\n  Image: ${d.dockerImage || 'N/A'}`;
-    return info;
-  })
-  .join('\n')}
-
-===== LIFECYCLE.YAML CONFIGURATION =====
-${
-  debugContext.lifecycleYaml
-    ? debugContext.lifecycleYaml.error
-      ? `Could not fetch lifecycle.yaml: ${debugContext.lifecycleYaml.error}`
-      : `File: ${debugContext.lifecycleYaml.path}
-
-\`\`\`yaml
-${debugContext.lifecycleYaml.content}
-\`\`\`
-
-This is the source configuration for this environment. Check this for probe ports, resource limits, Dockerfile paths, etc.`
-    : 'lifecycle.yaml not available'
-}
-
-INITIAL K8S STATE (STALE - call tools for current state):
-${debugContext.services
-  .map((s) => {
-    const issues = s.issues.length > 0 ? ` | ${s.issues.length} issues` : '';
-    const pods = s.pods.length > 0 ? ` | ${s.pods.length} pods` : '';
-    return `- ${s.name}: ${s.status}${pods}${issues}`;
-  })
-  .join('\n')}`;
+## Configuration (lifecycle.yaml)
+${lifecycleYamlSection}`;
   }
 
   private buildMessages(context: PromptContext): Array<{ role: string; content: string }> {
@@ -285,12 +304,8 @@ ${debugContext.services
       content: m.content,
     }));
 
-    const contextSummary = this.generateContextSummary(context.debugContext);
-
-    let finalMessage = context.userMessage;
-    if (!context.userMessage.includes('[Current State]')) {
-      finalMessage = `${context.userMessage}\n\n[Current State]\n${contextSummary}`;
-    }
+    const envContext = this.buildEnvironmentContext(context.debugContext);
+    const finalMessage = `${envContext}\n\n${context.userMessage}`;
 
     messages.push({
       role: 'user',
@@ -298,14 +313,5 @@ ${debugContext.services
     });
 
     return messages;
-  }
-
-  private generateContextSummary(context: DebugContext): string {
-    const lc = context.lifecycleContext;
-    const criticalIssues = context.services.flatMap((s) => s.issues).filter((i) => i.severity === 'critical');
-    const prDisplay = lc.pullRequest.number ? `PR #${lc.pullRequest.number}` : `Build ${lc.build.uuid.slice(0, 8)}`;
-
-    return `${prDisplay} | Build: ${lc.build.status} | Namespace: ${context.namespace}
-Services: ${context.services.length} | Critical Issues: ${criticalIssues.length}`;
   }
 }

@@ -2156,11 +2156,11 @@ function generateSingleDeploymentManifest({
 
   // Add probes
   if (enableFullYaml) {
-    if (deploy.deployable?.livenessProbe) {
-      mainContainer.livenessProbe = JSON.parse(deploy.deployable.livenessProbe);
-    }
-    if (deploy.deployable?.readinessProbe) {
-      mainContainer.readinessProbe = JSON.parse(deploy.deployable.readinessProbe);
+    if (deploy.deployable?.readinessHttpGetPort || deploy.deployable?.readinessTcpSocketPort) {
+      mainContainer.readinessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+      mainContainer.livenessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+      // Restarts a pod only after 10 minutes of being granted readiness time
+      mainContainer.livenessProbe.initialDelaySeconds = 600;
     }
   } else {
     if (deploy.service?.livenessProbe) {

@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
-import { LLMProvider, Message } from './types/provider';
+import { LLMProvider } from './types/provider';
+import { ConversationMessage, textMessage, extractTextFromParts } from './types/message';
 import { ProviderFactory, ProviderType } from './providers/factory';
 import { ToolRegistry } from './tools/registry';
 import { ToolOrchestrator } from './orchestration/orchestrator';
+import { maskObservations } from './orchestration/observationMasker';
 import { ToolSafetyManager } from './orchestration/safety';
 import { ConversationManager } from './conversation/manager';
 import { StreamCallbacks } from './types/stream';
@@ -40,6 +42,10 @@ import {
 } from './tools';
 import { DebugContext, DebugMessage } from '../types/aiAgent';
 import { getLogger } from 'server/lib/logger';
+import { createMcpTools } from './mcp/toolAdapter';
+import { McpConfigService } from './mcp/config';
+import { McpToolInfo } from './prompts/builder';
+import { ResolvedMcpServer } from './mcp/types';
 
 export interface AIAgentConfig {
   provider: ProviderType;
@@ -48,6 +54,10 @@ export interface AIAgentConfig {
   redis: any;
   requireToolConfirmation?: boolean;
   mode?: 'investigate' | 'fix';
+  additiveRules?: string[];
+  systemPromptOverride?: string;
+  excludedTools?: string[];
+  excludedFilePatterns?: string[];
 }
 
 export interface ProcessQueryResult {
@@ -67,6 +77,13 @@ export class AIAgentCore {
   private promptBuilder: AIAgentPromptBuilder;
   private conversationManager: ConversationManager;
   private mode: 'investigate' | 'fix';
+  private additiveRules?: string[];
+  private systemPromptOverride?: string;
+  private excludedTools?: string[];
+  private excludedFilePatterns?: string[];
+
+  private mcpToolsLoaded = false;
+  private mcpToolInfos: McpToolInfo[] = [];
 
   private k8sClient: K8sClient;
   private databaseClient: DatabaseClient;
@@ -82,6 +99,10 @@ export class AIAgentCore {
       modelId: config.modelId,
     });
     this.mode = config.mode || 'investigate';
+    this.additiveRules = config.additiveRules;
+    this.systemPromptOverride = config.systemPromptOverride;
+    this.excludedTools = config.excludedTools;
+    this.excludedFilePatterns = config.excludedFilePatterns;
 
     this.toolRegistry = new ToolRegistry();
     this.registerAllTools();
@@ -102,6 +123,33 @@ export class AIAgentCore {
   ): Promise<ProcessQueryResult> {
     const startTime = Date.now();
 
+    if (!this.mcpToolsLoaded) {
+      this.mcpToolsLoaded = true;
+      try {
+        const repoFullName = context.lifecycleContext?.pullRequest?.fullName;
+        if (repoFullName) {
+          const mcpConfig = new McpConfigService();
+          const servers = await mcpConfig.resolveServersForRepo(repoFullName);
+          let mcpTools = createMcpTools(servers);
+          if (this.excludedTools && this.excludedTools.length > 0) {
+            mcpTools = mcpTools.filter((tool) => !this.excludedTools!.includes(tool.name));
+          }
+          for (const tool of mcpTools) {
+            this.toolRegistry.register(tool);
+          }
+          this.mcpToolInfos = this.buildMcpToolInfos(servers);
+          if (mcpTools.length > 0) {
+            getLogger().info(`AIAgentCore: registered MCP tools count=${mcpTools.length} repo=${repoFullName}`);
+          }
+        }
+      } catch (err) {
+        getLogger().warn(
+          'AIAgentCore: MCP tool resolution failed, continuing with built-in tools only: error=' +
+            (err instanceof Error ? err.message : String(err))
+        );
+      }
+    }
+
     try {
       if (context.lifecycleContext.pullRequest.branch) {
         this.githubClient.setAllowedBranch(context.lifecycleContext.pullRequest.branch);
@@ -114,10 +162,21 @@ export class AIAgentCore {
         this.githubClient.setReferencedFiles(referencedFiles);
       }
 
-      const messages: Message[] = conversationHistory.map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }));
+      if (this.excludedFilePatterns && this.excludedFilePatterns.length > 0) {
+        this.githubClient.setExcludedFilePatterns(this.excludedFilePatterns);
+      }
+
+      const messages: ConversationMessage[] = conversationHistory.map((m) =>
+        textMessage(m.role as 'user' | 'assistant', m.content)
+      );
+
+      const maskResult = maskObservations(messages);
+      if (maskResult.masked) {
+        getLogger().info(
+          `AIAgentCore: observation masking applied maskedParts=${maskResult.stats.maskedParts} savedTokens=${maskResult.stats.savedTokens} buildUuid=${context.buildUuid}`
+        );
+        messages.splice(0, messages.length, ...maskResult.messages);
+      }
 
       if (await this.conversationManager.shouldCompress(messages)) {
         getLogger().info(
@@ -125,10 +184,7 @@ export class AIAgentCore {
         );
         const state = await this.conversationManager.compress(messages, this.provider, context.buildUuid);
         messages.splice(0, messages.length - 1);
-        messages.unshift({
-          role: 'user',
-          content: this.conversationManager.buildPromptFromState(state),
-        });
+        messages.unshift(textMessage('user', this.conversationManager.buildPromptFromState(state)));
         getLogger().info(
           `AIAgentCore: conversation compressed toMessageCount=${messages.length} buildUuid=${context.buildUuid}`
         );
@@ -136,7 +192,7 @@ export class AIAgentCore {
 
       const conversationHistoryForBuilder: DebugMessage[] = messages.map((m) => ({
         role: m.role as 'user' | 'assistant',
-        content: m.content,
+        content: extractTextFromParts(m.parts),
         timestamp: Date.now(),
       }));
 
@@ -145,6 +201,11 @@ export class AIAgentCore {
         debugContext: context,
         conversationHistory: conversationHistoryForBuilder,
         userMessage,
+        additiveRules: this.additiveRules,
+        systemPromptOverride: this.systemPromptOverride,
+        excludedTools: this.excludedTools,
+        excludedFilePatterns: this.excludedFilePatterns,
+        mcpTools: this.mcpToolInfos,
       });
 
       const responseHandler = new ResponseHandler(callbacks, context.buildUuid);
@@ -156,10 +217,9 @@ export class AIAgentCore {
         },
       };
 
-      const messagesForOrchestrator: Message[] = prompt.messages.map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }));
+      const messagesForOrchestrator: ConversationMessage[] = prompt.messages.map((m) =>
+        textMessage(m.role as 'user' | 'assistant', m.content)
+      );
 
       const result = await this.orchestrator.executeToolLoop(
         this.provider,
@@ -182,6 +242,10 @@ export class AIAgentCore {
           context.buildUuid
         }`
       );
+
+      if (!result.success && result.classifiedError) {
+        throw result.classifiedError.original;
+      }
 
       return {
         response: result.response || result.error || finalResult.response,
@@ -224,6 +288,10 @@ export class AIAgentCore {
       allTools = allTools.filter((tool) => !writingToolNames.includes(tool.name));
     }
 
+    if (this.excludedTools && this.excludedTools.length > 0) {
+      allTools = allTools.filter((tool) => !this.excludedTools!.includes(tool.name));
+    }
+
     this.toolRegistry.registerMultiple(allTools);
   }
 
@@ -233,5 +301,21 @@ export class AIAgentCore {
 
   getModelInfo() {
     return this.provider.getModelInfo();
+  }
+
+  private buildMcpToolInfos(servers: ResolvedMcpServer[]): McpToolInfo[] {
+    const infos: McpToolInfo[] = [];
+    for (const server of servers) {
+      for (const tool of server.cachedTools) {
+        infos.push({
+          serverName: server.name,
+          serverSlug: server.slug,
+          toolName: tool.name,
+          qualifiedName: `mcp__${server.slug}__${tool.name}`,
+          description: tool.description || tool.name,
+        });
+      }
+    }
+    return infos;
   }
 }

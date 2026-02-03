@@ -17,6 +17,7 @@
 import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel } from '../../types/tool';
 import { GitHubClient } from '../shared/githubClient';
+import { OutputLimiter } from '../outputLimiter';
 
 export class GetFileTool extends BaseTool {
   static readonly Name = 'get_file';
@@ -54,6 +55,14 @@ export class GetFileTool extends BaseTool {
       const branch = args.branch as string;
       const filePath = args.file_path as string;
 
+      if (!this.githubClient.isFilePathAllowed(filePath, 'read')) {
+        return this.createErrorResult(
+          `File "${filePath}" is restricted by access control policy and cannot be read.`,
+          'FILE_ACCESS_DENIED',
+          false
+        );
+      }
+
       const octokit = await this.githubClient.getOctokit('ai-agent-get-file');
 
       const response = await octokit.request(`GET /repos/${owner}/${repo}/contents/${filePath}`, {
@@ -74,11 +83,11 @@ export class GetFileTool extends BaseTool {
           success: true,
           path: filePath,
           content: numberedContent,
-          rawContent: content,
           sha: response.data.sha,
         };
 
-        return this.createSuccessResult(JSON.stringify(result));
+        const displayContent = `File: ${filePath} (${lines.length} lines)`;
+        return this.createSuccessResult(OutputLimiter.truncate(JSON.stringify(result), 25000), displayContent);
       }
 
       return this.createErrorResult(`${filePath} is not a file or does not exist`, 'FILE_NOT_FOUND');

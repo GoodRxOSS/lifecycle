@@ -35,7 +35,7 @@ export class LoopDetector {
     this.protection = {
       maxIterations: options?.maxIterations || 20,
       maxToolCalls: options?.maxToolCalls || 50,
-      maxRepeatedCalls: options?.maxRepeatedCalls || 3,
+      maxRepeatedCalls: options?.maxRepeatedCalls || 1,
       toolCallHistory: [],
     };
   }
@@ -59,11 +59,26 @@ export class LoopDetector {
         return false;
       }
 
-      return JSON.stringify(record.args) === JSON.stringify(args);
+      if (JSON.stringify(record.args) === JSON.stringify(args)) {
+        return true;
+      }
+
+      if (toolName === 'get_file' && args.file_path && record.args.file_path === args.file_path) {
+        return true;
+      }
+
+      return false;
     }).length;
   }
 
   getLoopHint(toolName: string, args: Record<string, unknown>): string {
+    if (toolName === 'get_file') {
+      return (
+        `You already read ${args.file_path || 'this file'}. ` +
+        'Use the content from the previous result instead of re-fetching.'
+      );
+    }
+
     if (toolName === 'get_k8s_resources' && !args.name) {
       return (
         'You keep searching for resources with the same criteria. ' +

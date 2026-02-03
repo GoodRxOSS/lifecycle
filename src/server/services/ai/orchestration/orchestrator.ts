@@ -14,19 +14,26 @@
  * limitations under the License.
  */
 
-import { LLMProvider, Message, StreamChunk } from '../types/provider';
+import crypto from 'crypto';
+import { LLMProvider, StreamChunk } from '../types/provider';
 import { Tool, ToolCall } from '../types/tool';
 import { StreamCallbacks } from '../types/stream';
 import { ToolRegistry } from '../tools/registry';
 import { ToolSafetyManager } from './safety';
 import { LoopDetector } from './loopProtection';
 import { getLogger } from 'server/lib/logger';
+import { RetryBudget, createClassifiedError, ErrorCategory } from '../errors';
+import type { ClassifiedError } from '../errors';
+import { createProviderPolicy } from '../resilience';
+import { isBrokenCircuitError } from 'cockatiel';
+import { ConversationMessage, ToolCallPart, ToolResultPart } from '../types/message';
 
 export interface OrchestrationResult {
   success: boolean;
   response?: string;
   error?: string;
   cancelled?: boolean;
+  classifiedError?: ClassifiedError;
   metrics: {
     iterations: number;
     toolCalls: number;
@@ -44,7 +51,7 @@ export class ToolOrchestrator {
   async executeToolLoop(
     provider: LLMProvider,
     systemPrompt: string,
-    messages: Message[],
+    messages: ConversationMessage[],
     tools: Tool[],
     callbacks: StreamCallbacks,
     signal: AbortSignal,
@@ -57,6 +64,9 @@ export class ToolOrchestrator {
     const protection = this.loopDetector.getProtection();
 
     this.loopDetector.reset();
+
+    const retryBudget = new RetryBudget(10);
+    const policy = createProviderPolicy(provider.name, retryBudget);
 
     while (iteration < protection.maxIterations) {
       if (signal.aborted) {
@@ -73,19 +83,61 @@ export class ToolOrchestrator {
       const iterationStartTime = Date.now();
       const chunks: StreamChunk[] = [];
       try {
-        for await (const chunk of provider.streamCompletion(messages, { systemPrompt, tools, callbacks }, signal)) {
-          chunks.push(chunk);
+        await policy.execute(async () => {
+          chunks.length = 0;
+          for await (const chunk of provider.streamCompletion(messages, { systemPrompt, tools, callbacks }, signal)) {
+            chunks.push(chunk);
 
-          if (chunk.type === 'text' && chunk.content) {
-            fullResponse += chunk.content;
-            callbacks.onTextChunk(chunk.content);
+            if (chunk.type === 'text' && chunk.content) {
+              fullResponse += chunk.content;
+              callbacks.onTextChunk(chunk.content);
+            }
           }
-        }
+        });
       } catch (error: any) {
-        getLogger().error({ error }, `AI: stream error buildUuid=${buildUuid || 'none'}`);
+        if (isBrokenCircuitError(error)) {
+          getLogger().warn(
+            `AI: circuit breaker rejected request provider=${provider.name} buildUuid=${buildUuid || 'none'}`
+          );
+          const classified: ClassifiedError = {
+            category: ErrorCategory.TRANSIENT,
+            original: error instanceof Error ? error : new Error(String(error)),
+            retryable: true,
+            providerName: provider.name,
+            retryAfter: null,
+          };
+          return {
+            success: false,
+            error: 'Provider circuit breaker is open',
+            classifiedError: classified,
+            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          };
+        }
+
+        const hasPartialResults = fullResponse.length > 0 || chunks.length > 0;
+
+        if (hasPartialResults) {
+          getLogger().warn(
+            `AI: stream error with partial results, preserving partialTextLen=${fullResponse.length} chunkCount=${
+              chunks.length
+            } buildUuid=${buildUuid || 'none'} error=${error.message}`
+          );
+          return {
+            success: true,
+            response: fullResponse || 'The response was interrupted. Here is what was generated before the error.',
+            error: `Stream interrupted: ${error.message}`,
+            classifiedError: createClassifiedError(provider.name, error),
+            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          };
+        }
+
+        getLogger().error(
+          `AI: stream error buildUuid=${buildUuid || 'none'} error=${error.message} budgetUsed=${retryBudget.used}`
+        );
         return {
           success: false,
           error: error.message || 'Provider error',
+          classifiedError: createClassifiedError(provider.name, error),
           metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
         };
       }
@@ -117,19 +169,24 @@ export class ToolOrchestrator {
         };
       }
 
-      const toolResults: any[] = [];
-      let isFirstTool = true;
+      const toolCallParts: ToolCallPart[] = toolCalls.map((tc) => ({
+        type: 'tool_call' as const,
+        toolCallId: tc.id || crypto.randomBytes(16).toString('hex'),
+        name: tc.name,
+        arguments: tc.arguments,
+        ...(tc.metadata ? { metadata: tc.metadata } : {}),
+      }));
 
-      for (const toolCall of toolCalls) {
-        if (signal.aborted) {
-          return {
-            success: false,
-            error: 'Operation cancelled during tool execution',
-            cancelled: true,
-            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
-          };
-        }
+      messages.push({
+        role: 'assistant',
+        parts: toolCallParts,
+      });
 
+      const toolResultParts: ToolResultPart[] = new Array(toolCalls.length);
+
+      const loopDetectedIndices = new Set<number>();
+      for (let i = 0; i < toolCalls.length; i++) {
+        const toolCall = toolCalls[i];
         const repeatCount = this.loopDetector.countRepeatedCalls(toolCall.name, toolCall.arguments, iteration);
 
         if (repeatCount >= protection.maxRepeatedCalls) {
@@ -145,46 +202,108 @@ export class ToolOrchestrator {
             },
           };
 
-          toolResults.push({
-            toolCall,
+          toolResultParts[i] = {
+            type: 'tool_result' as const,
+            toolCallId: toolCallParts[i].toolCallId,
+            name: toolCall.name,
             result: loopError,
-          });
+          };
 
-          const totalDuration = isFirstTool ? llmThinkTime : 0;
-          callbacks.onToolResult(loopError, toolCall.name, toolCall.arguments, 0, totalDuration);
-          isFirstTool = false;
+          const totalDuration = i === 0 ? llmThinkTime : 0;
+          callbacks.onToolResult(
+            loopError,
+            toolCall.name,
+            toolCall.arguments,
+            0,
+            totalDuration,
+            toolCallParts[i].toolCallId
+          );
 
           console.warn(`[Loop Detection] ${toolCall.name} called ${repeatCount} times`, {
             args: toolCall.arguments,
             iteration,
           });
 
-          continue;
+          loopDetectedIndices.add(i);
         }
+      }
 
-        this.loopDetector.recordCall(toolCall.name, toolCall.arguments, iteration);
+      const executeIndices = toolCalls.map((_, i) => i).filter((i) => !loopDetectedIndices.has(i));
 
-        callbacks.onToolCall(toolCall.name, toolCall.arguments);
+      for (const i of executeIndices) {
+        this.loopDetector.recordCall(toolCalls[i].name, toolCalls[i].arguments, iteration);
+        callbacks.onToolCall(toolCalls[i].name, toolCalls[i].arguments, toolCallParts[i].toolCallId);
+      }
 
-        const toolStartTime = Date.now();
-        const result = await this.safetyManager.safeExecute(
-          this.toolRegistry.get(toolCall.name)!,
-          toolCall.arguments,
-          callbacks,
-          signal,
-          buildUuid
-        );
-        const toolDuration = Date.now() - toolStartTime;
-        const totalDuration = isFirstTool ? llmThinkTime + toolDuration : toolDuration;
-        isFirstTool = false;
+      const settled = await Promise.allSettled(
+        executeIndices.map(async (i) => {
+          if (signal.aborted) {
+            return {
+              index: i,
+              result: {
+                success: false,
+                error: { message: 'Operation cancelled during tool execution', code: 'CANCELLED', recoverable: false },
+              },
+              toolDuration: 0,
+            };
+          }
+          const toolStartTime = Date.now();
+          const result = await this.safetyManager.safeExecute(
+            this.toolRegistry.get(toolCalls[i].name)!,
+            toolCalls[i].arguments,
+            callbacks,
+            signal,
+            buildUuid
+          );
+          const toolDuration = Date.now() - toolStartTime;
+          return { index: i, result, toolDuration };
+        })
+      );
 
-        toolResults.push({ toolCall, result });
-        callbacks.onToolResult(result, toolCall.name, toolCall.arguments, toolDuration, totalDuration);
+      for (const entry of settled) {
+        if (entry.status === 'fulfilled') {
+          const { index, result, toolDuration } = entry.value;
+          const totalDuration = index === 0 && !loopDetectedIndices.has(0) ? llmThinkTime + toolDuration : toolDuration;
+          toolResultParts[index] = {
+            type: 'tool_result' as const,
+            toolCallId: toolCallParts[index].toolCallId,
+            name: toolCalls[index].name,
+            result,
+          };
+          callbacks.onToolResult(
+            result,
+            toolCalls[index].name,
+            toolCalls[index].arguments,
+            toolDuration,
+            totalDuration,
+            toolCallParts[index].toolCallId
+          );
+        } else {
+          const idx = executeIndices[settled.indexOf(entry)];
+          const errorResult = {
+            success: false,
+            error: { message: entry.reason?.message || 'Unknown error', code: 'EXECUTION_ERROR', recoverable: true },
+          };
+          toolResultParts[idx] = {
+            type: 'tool_result' as const,
+            toolCallId: toolCallParts[idx].toolCallId,
+            name: toolCalls[idx].name,
+            result: errorResult,
+          };
+          callbacks.onToolResult(
+            errorResult,
+            toolCalls[idx].name,
+            toolCalls[idx].arguments,
+            0,
+            idx === 0 ? llmThinkTime : 0,
+            toolCallParts[idx].toolCallId
+          );
+        }
       }
 
       messages.push({
-        role: 'assistant',
-        content: JSON.stringify(toolResults),
+        role: 'user',
+        parts: toolResultParts,
       });
     }
 

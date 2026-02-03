@@ -15,8 +15,14 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import {
+  type MessageParam,
+  type Tool as AnthropicTool,
+  type ToolUseBlock,
+} from '@anthropic-ai/sdk/resources/messages/messages';
 import { BaseLLMProvider } from './base';
-import { ModelInfo, CompletionOptions, StreamChunk, Message } from '../types/provider';
+import { ModelInfo, CompletionOptions, StreamChunk } from '../types/provider';
+import { ConversationMessage, TextPart, ToolCallPart, ToolResultPart } from '../types/message';
 import { Tool, ToolCall } from '../types/tool';
 
 export class AnthropicProvider extends BaseLLMProvider {
@@ -32,7 +38,7 @@ export class AnthropicProvider extends BaseLLMProvider {
   }
 
   async *streamCompletion(
-    messages: Message[],
+    messages: ConversationMessage[],
     options: CompletionOptions,
     signal?: AbortSignal
   ): AsyncIterator<StreamChunk> {
@@ -40,17 +46,16 @@ export class AnthropicProvider extends BaseLLMProvider {
       throw new Error('Request aborted');
     }
 
-    const anthropicMessages = messages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }));
+    const anthropicMessages = this.formatHistory(messages) as MessageParam[];
 
-    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as any[] | undefined;
+    const tools = options.tools?.map((t) => this.formatToolDefinition(t)) as AnthropicTool[] | undefined;
 
     const response = await this.client.messages.create({
       model: this.modelId,
       max_tokens: options.maxTokens || 4096,
-      system: options.systemPrompt,
+      system: options.systemPrompt
+        ? [{ type: 'text' as const, text: options.systemPrompt, cache_control: { type: 'ephemeral' as const } }]
+        : undefined,
       messages: anthropicMessages,
       tools: tools || [],
     });
@@ -74,6 +79,46 @@ export class AnthropicProvider extends BaseLLMProvider {
         toolCalls,
       };
     }
+  }
+
+  formatHistory(messages: ConversationMessage[]): unknown[] {
+    const result: unknown[] = [];
+
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        continue;
+      }
+
+      const toolCallParts = msg.parts.filter((p): p is ToolCallPart => p.type === 'tool_call');
+      const toolResultParts = msg.parts.filter((p): p is ToolResultPart => p.type === 'tool_result');
+      const textParts = msg.parts.filter((p): p is TextPart => p.type === 'text');
+
+      if (toolCallParts.length > 0) {
+        result.push({
+          role: 'assistant' as const,
+          content: toolCallParts.map((p) => ({
+            type: 'tool_use',
+            id: p.toolCallId,
+            name: p.name,
+            input: p.arguments,
+          })),
+        });
+      } else if (toolResultParts.length > 0) {
+        result.push({
+          role: 'user' as const,
+          content: toolResultParts.map((p) => ({
+            type: 'tool_result',
+            tool_use_id: p.toolCallId,
+            content: p.result.agentContent || JSON.stringify(p.result),
+          })),
+        });
+      } else {
+        const textContent = textParts.map((p) => p.content).join(' ');
+        result.push({ role: msg.role as 'user' | 'assistant', content: textContent });
+      }
+    }
+
+    return result;
   }
 
   supportsTools(): boolean {
@@ -101,10 +146,10 @@ export class AnthropicProvider extends BaseLLMProvider {
     }
 
     return content
-      .filter((c: any) => c.type === 'tool_use')
-      .map((c: any) => ({
+      .filter((c: ToolUseBlock) => c.type === 'tool_use')
+      .map((c: ToolUseBlock) => ({
         name: c.name,
-        arguments: c.input,
+        arguments: c.input as Record<string, unknown>,
         id: c.id,
       }));
   }

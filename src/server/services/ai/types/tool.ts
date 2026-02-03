@@ -20,12 +20,13 @@ export enum ToolSafetyLevel {
   DANGEROUS = 'dangerous',
 }
 
-export type ToolCategory = 'k8s' | 'github' | 'codefresh' | 'database';
+export type ToolCategory = 'k8s' | 'github' | 'codefresh' | 'database' | 'mcp';
 
 export interface ToolCall {
   name: string;
   arguments: Record<string, unknown>;
   id?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TextDisplay {
