@@ -68,9 +68,9 @@ export const LIFECYCLE_UI_HOSTHAME_WITH_SCHEME = getServerRuntimeConfig(
   'REPLACE_ME_WITH_UI_URL',
 );
 
-export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID');
-export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID');
-export const GITHUB_CLIENT_SECRET = getServerRuntimeConfig('GITHUB_CLIENT_SECRET');
+export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID', 'YOUR_VALUE_HERE');
+export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID', 'YOUR_VALUE_HERE');
+export const GITHUB_CLIENT_SECRET = getServerRuntimeConfig('GITHUB_CLIENT_SECRET', 'YOUR_VALUE_HERE');
 
 export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
 
@@ -84,10 +84,10 @@ export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
 export const APP_REDIS_PASSWORD = getServerRuntimeConfig('APP_REDIS_PASSWORD', '');
 export const APP_REDIS_TLS = getServerRuntimeConfig('APP_REDIS_TLS', 'false');
 
-export const GITHUB_PRIVATE_KEY = getServerRuntimeConfig('GITHUB_PRIVATE_KEY')
+export const GITHUB_PRIVATE_KEY = getServerRuntimeConfig('GITHUB_PRIVATE_KEY', 'YOUR_VALUE_HERE')
   .replace(/\\n/g, '\n')
   .replace(/\\k/g, '\n');
-export const GITHUB_WEBHOOK_SECRET = getServerRuntimeConfig('GITHUB_WEBHOOK_SECRET');
+export const GITHUB_WEBHOOK_SECRET = getServerRuntimeConfig('GITHUB_WEBHOOK_SECRET', 'YOUR_VALUE_HERE');
 
 export const JOB_VERSION = getServerRuntimeConfig('JOB_VERSION', 'default');
 
@@ -121,7 +121,7 @@ export const QUEUE_NAMES = {
   LABEL: `label_${JOB_VERSION}`,
 } as const;
 
-export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID');
+export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');
 
 export const GITHUB_APP_AUTH_CALLBACK = getServerRuntimeConfig(
   'GITHUB_APP_AUTH_CALLBACK',
