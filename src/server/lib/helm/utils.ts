@@ -20,7 +20,7 @@ import Database from 'server/database';
 import mustache from 'mustache';
 import { HYPHEN_REPLACEMENT, HYPHEN_REPLACEMENT_REGEX } from 'shared/constants';
 import { NodeAffinity, Toleration } from './types';
-import { LIFECYCLE_UI_HOSTHAME_WITH_SCHEME, APP_HOST } from 'shared/config';
+import { LIFECYCLE_UI_URL, APP_HOST } from 'shared/config';
 
 export const renderTemplate = async (build: Build, values: string[] = []): Promise<string[]> => {
   const db = build.$knex();
@@ -109,7 +109,7 @@ export function createBannerVars(options: BannerOptions[], deploy: Deploy): stri
     `window.LFC_BASE_URL = "${APP_HOST}";`,
     `window.LFC_DEPLOY_STATUS = "${deployStatus}";`,
     `window.LFC_CREATED_AT = "${createdAt}";`,
-    `window.LFC_DASHBOARD_URL = "${LIFECYCLE_UI_HOSTHAME_WITH_SCHEME}/build/${uuid}";`,
+    `window.LFC_DASHBOARD_URL = "${LIFECYCLE_UI_URL}/build/${uuid}";`,
   ].join('\n');
 }
 
@@ -123,7 +123,7 @@ export function ingressBannerSnippet(deploy: Deploy) {
       {
         label: 'UUID',
         value: uuid || '',
-        url: `${LIFECYCLE_UI_HOSTHAME_WITH_SCHEME}/build/${uuid}`,
+        url: `${LIFECYCLE_UI_URL}/build/${uuid}`,
       },
       {
         label: 'PR Owner',
