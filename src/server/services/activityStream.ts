@@ -394,7 +394,7 @@ export default class ActivityStream extends BaseService {
     const isStatic = build?.isStatic ?? false;
     const labels = pullRequest?.labels || [];
     const hasStatusComment = await hasStatusCommentLabel(labels);
-    const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled();
+    const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled(fullName);
     const isShowingStatusComment = isStatic || hasStatusComment || isDefaultStatusEnabled;
     if (!buildId) {
       getLogger().error(`Build: id not found repo=${fullName}/${branchName}`);
@@ -419,7 +419,7 @@ export default class ActivityStream extends BaseService {
       }
 
       if (updateStatus || updateMissionControl) {
-        const isControlEnabled = await isControlCommentsEnabled();
+        const isControlEnabled = await isControlCommentsEnabled(fullName);
         if (isControlEnabled) {
           await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
             getLogger().warn(

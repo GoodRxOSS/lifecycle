@@ -18,6 +18,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GithubPullRequestActions, PullRequestStatus, FallbackLabels } from 'shared/constants';
 import GlobalConfigService from 'server/services/globalConfig';
+import { CommentToggleConfig } from 'server/services/types/globalConfig';
 import { GenerateDeployTagOptions, WaitUntilOptions, EnableKillswitchOptions } from 'server/lib/types';
 
 import { getLogger } from 'server/lib/logger';
@@ -198,11 +199,6 @@ export const isStaging = () => {
   return ENVIRONMENT === 'staging';
 };
 
-/**
- * Check if PR has any deploy labels from configuration
- * @param labels Array of PR labels
- * @returns Promise<boolean> True if PR has deploy label
- */
 export const hasDeployLabel = async (labels: string[]): Promise<boolean> => {
   if (!labels || labels.length === 0) return false;
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
@@ -210,11 +206,6 @@ export const hasDeployLabel = async (labels: string[]): Promise<boolean> => {
   return deployLabels.some((deployLabel) => labels.includes(deployLabel));
 };
 
-/**
- * Check if PR has any disabled labels fr m configuration
- * @param labels Array of PR labels
- * @returns Promise<boolean> True if PR has disabled label
- */
 export const hasDisabledLabel = async (labels: string[]): Promise<boolean> => {
   if (!labels || labels.length === 0) return false;
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
@@ -222,11 +213,6 @@ export const hasDisabledLabel = async (labels: string[]): Promise<boolean> => {
   return disabledLabels.some((disabledLabel) => labels.includes(disabledLabel));
 };
 
-/**
- * Check if PR has any status comment labels from configuration
- * @param labels Array of PR labels
- * @returns Promise<boolean> True if PR has status comment label
- */
 export const hasStatusCommentLabel = async (labels: string[]): Promise<boolean> => {
   if (!labels || labels.length === 0) return false;
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
@@ -234,59 +220,43 @@ export const hasStatusCommentLabel = async (labels: string[]): Promise<boolean> 
   return statusCommentLabels.some((statusLabel) => labels.includes(statusLabel));
 };
 
-/**
- * Get the first deploy label from configuration for user-facing messages
- * @returns Promise<string> First deploy label from config
- */
 export const getDeployLabel = async (): Promise<string> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig?.deploy?.[0] || FallbackLabels.DEPLOY;
 };
 
-/**
- * Get the first disabled label from configuration for user-facing messages
- * @returns Promise<string> First disabled label from config
- */
 export const getDisabledLabel = async (): Promise<string> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig?.disabled?.[0] || FallbackLabels.DISABLED;
 };
 
-/**
- * Get the first keep label from configuration for user-facing messages
- * @returns Promise<string> First keep label from config
- */
 export const getKeepLabel = async (): Promise<string> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig?.keep?.[0] || FallbackLabels.KEEP;
 };
 
-/**
- * Get the first status comment label from configuration for user-facing messages
- * @returns Promise<string> First status comment label from config
- */
 export const getStatusCommentLabel = async (): Promise<string> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig?.statusComments?.[0] || FallbackLabels.STATUS_COMMENTS;
 };
 
-/**
- * Check if status comments should be enabled by default
- * @returns Promise<boolean> True if status comments are enabled by default
- */
-export const isDefaultStatusCommentsEnabled = async (): Promise<boolean> => {
+function resolveCommentToggle(config: CommentToggleConfig | undefined, repoFullName?: string): boolean {
+  if (!config) return true;
+  if (repoFullName && config.overrides?.[repoFullName] !== undefined) {
+    return config.overrides[repoFullName];
+  }
+  return config.enabled ?? true;
+}
+
+export const isDefaultStatusCommentsEnabled = async (repoFullName?: string): Promise<boolean> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
-  return labelsConfig.defaultStatusComments ?? true;
+  return resolveCommentToggle(labelsConfig.defaultStatusComments, repoFullName);
 };
 
-/**
- * Check if control comments should be enabled
- * @returns Promise<boolean> True if control comments are enabled (defaults to true if not configured)
- */
-export const isControlCommentsEnabled = async (): Promise<boolean> => {
+export const isControlCommentsEnabled = async (repoFullName?: string): Promise<boolean> => {
   try {
     const labelsConfig = await GlobalConfigService.getInstance().getLabels();
-    return labelsConfig.defaultControlComments ?? true;
+    return resolveCommentToggle(labelsConfig.defaultControlComments, repoFullName);
   } catch (error) {
     getLogger().warn(`Config: error retrieving control comments config error=${error}`);
     return true;
