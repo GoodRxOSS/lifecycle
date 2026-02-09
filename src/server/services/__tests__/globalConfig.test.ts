@@ -91,8 +91,8 @@ describe('GlobalConfigService', () => {
         deploy: ['lifecycle-deploy!', 'custom-deploy!'],
         disabled: ['lifecycle-disabled!', 'no-deploy!'],
         statusComments: ['lifecycle-status-comments!', 'show-status!'],
-        defaultStatusComments: true,
-        defaultControlComments: true,
+        defaultStatusComments: { enabled: true, overrides: {} },
+        defaultControlComments: { enabled: true, overrides: {} },
       };
 
       const mockGetAllConfigs = jest.spyOn(service, 'getAllConfigs').mockResolvedValueOnce({
@@ -119,8 +119,8 @@ describe('GlobalConfigService', () => {
         disabled: ['lifecycle-disabled!'],
         keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
-        defaultStatusComments: true,
-        defaultControlComments: true,
+        defaultStatusComments: { enabled: true, overrides: {} },
+        defaultControlComments: { enabled: true, overrides: {} },
       });
       expect(mockGetAllConfigs).toHaveBeenCalled();
 
@@ -137,8 +137,8 @@ describe('GlobalConfigService', () => {
         disabled: ['lifecycle-disabled!'],
         keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
-        defaultStatusComments: true,
-        defaultControlComments: true,
+        defaultStatusComments: { enabled: true, overrides: {} },
+        defaultControlComments: { enabled: true, overrides: {} },
       });
       expect(mockGetAllConfigs).toHaveBeenCalled();
 

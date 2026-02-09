@@ -143,13 +143,18 @@ export type ResourceRequirements = {
   limits?: Record<string, string>;
 };
 
+export type CommentToggleConfig = {
+  enabled: boolean;
+  overrides?: Record<string, boolean>;
+};
+
 export type LabelsConfig = {
   deploy: string[];
   disabled: string[];
   keep: string[];
   statusComments: string[];
-  defaultStatusComments: boolean;
-  defaultControlComments: boolean;
+  defaultStatusComments: CommentToggleConfig;
+  defaultControlComments: CommentToggleConfig;
 };
 
 export type TTLCleanupConfig = {

@@ -132,10 +132,6 @@ export default class GlobalConfigService extends BaseService {
     return Boolean(features[name]);
   }
 
-  /**
-   * Retrieves labels configuration from global config with fallback defaults
-   * @returns Promise<LabelsConfig> The labels configuration
-   */
   async getLabels(): Promise<LabelsConfig> {
     try {
       const { labels } = await this.getAllConfigs();
@@ -143,14 +139,13 @@ export default class GlobalConfigService extends BaseService {
       return labels;
     } catch (error) {
       getLogger().error({ error }, 'Config: labels fetch failed using=defaults');
-      // Return fallback defaults on error
       return {
         deploy: ['lifecycle-deploy!'],
         disabled: ['lifecycle-disabled!'],
         keep: ['lifecycle-keep!'],
         statusComments: ['lifecycle-status-comments!'],
-        defaultStatusComments: true,
-        defaultControlComments: true,
+        defaultStatusComments: { enabled: true, overrides: {} },
+        defaultControlComments: { enabled: true, overrides: {} },
       };
     }
   }
