@@ -555,6 +555,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             ecr: { type: 'string', example: '123456789012.dkr.ecr.us-west-2.amazonaws.com/myapp' },
             grpc: { type: 'boolean', example: true },
+            hostPortMapping: { type: 'object', example: { '80': 8080 } },
           },
           required: ['name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr'],
         },

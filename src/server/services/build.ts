@@ -195,7 +195,7 @@ export default class BuildService extends BaseService {
         );
       })
       .modifyGraph('deploys.deployable', (b) => {
-        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr', 'grpc');
+        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr', 'grpc', 'hostPortMapping');
       })
       .modifyGraph('deploys.repository', (b) => {
         b.select('fullName');
