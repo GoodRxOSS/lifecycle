@@ -122,7 +122,7 @@ components:
           value: '250'
         - name: GITHUB_API_REQUEST_INTERVAL
           value: '10000'
-        - name: LIFECYCLE_UI_HOSTHAME_WITH_SCHEME
+        - name: LIFECYCLE_UI_URL
           value: 'http://localhost:8000'
         - name: DD_TRACE_ENABLED
           value: 'false'

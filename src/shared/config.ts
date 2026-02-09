@@ -63,10 +63,7 @@ export const APP_DB_PASSWORD = getServerRuntimeConfig('APP_DB_PASSWORD', 'lifecy
 export const APP_DB_NAME = getServerRuntimeConfig('APP_DB_NAME', '');
 export const APP_DB_SSL = getServerRuntimeConfig('APP_DB_SSL', '');
 
-export const LIFECYCLE_UI_HOSTHAME_WITH_SCHEME = getServerRuntimeConfig(
-  'LIFECYCLE_UI_HOSTHAME_WITH_SCHEME',
-  'REPLACE_ME_WITH_UI_URL',
-);
+export const LIFECYCLE_UI_URL = getServerRuntimeConfig('LIFECYCLE_UI_URL', '');
 
 export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID', 'YOUR_VALUE_HERE');
 export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID', 'YOUR_VALUE_HERE');
@@ -125,7 +122,7 @@ export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INS
 
 export const GITHUB_APP_AUTH_CALLBACK = getServerRuntimeConfig(
   'GITHUB_APP_AUTH_CALLBACK',
-  'http://localhost/realms/lifecycle/broker/github/endpoint',
+  'http://localhost/realms/lifecycle/broker/github/endpoint'
 );
 
 export const APP_AUTH = {

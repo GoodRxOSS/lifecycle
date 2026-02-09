@@ -18,7 +18,7 @@ import BaseService from './_service';
 import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
-import { APP_HOST, QUEUE_NAMES } from 'shared/config';
+import { APP_HOST, QUEUE_NAMES, LIFECYCLE_UI_URL } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
@@ -684,6 +684,9 @@ export default class ActivityStream extends BaseService {
         metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
       }
       message = `### 💻✨ Your environment ${deployStatus}.\n`;
+      if (LIFECYCLE_UI_URL) {
+        message += `View details [here](${LIFECYCLE_UI_URL}/build/${uuid})\n`;
+      }
       if (!hasDeployLabelPresent && !isBot && isPending && isOpen) {
         message += await createDeployMessage();
       }
@@ -772,10 +775,9 @@ export default class ActivityStream extends BaseService {
   private async generateStatusCommentForBuild(build: Build, deploys: Deploy[], pullRequest: PullRequest) {
     let message = '';
 
-    const nextStepsList = [
-      '### Next steps:\n\n',
-      '- Review the [Lifecycle UI](${LIFECYCLE_UI_HOSTHAME_WITH_SCHEME}/build/${build.uuid})\n',
-    ].reduce((acc, curr) => acc + curr, '');
+    const nextStepsList = LIFECYCLE_UI_URL
+      ? `### Next steps:\n\n- Review the [Lifecycle UI](${LIFECYCLE_UI_URL}/build/${build.uuid})\n`
+      : '';
     const isBot = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
     const isBuilding = [BuildStatus.BUILDING, BuildStatus.BUILT].includes(build.status as BuildStatus);
     const isDeploying = build.status === BuildStatus.DEPLOYING;
