@@ -29,6 +29,48 @@ function redactHeaders(config: any): any {
   return { ...config, headers: redacted };
 }
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers/{slug}:
+ *   get:
+ *     summary: Get an MCP server config by slug
+ *     description: Returns a single MCP server configuration. Header values are redacted in the response.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: getMcpServerConfig
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The MCP server config slug
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           default: global
+ *         description: Scope to look up the config in (e.g. "global" or a repository full name).
+ *     responses:
+ *       '200':
+ *         description: MCP server configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetMcpServerConfigSuccessResponse'
+ *       '404':
+ *         description: MCP server config not found for the given slug and scope
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
@@ -50,6 +92,63 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
   return successResponse(result, { status: 200 }, req);
 };
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers/{slug}:
+ *   put:
+ *     summary: Update an MCP server config
+ *     description: >
+ *       Updates an existing MCP server configuration. If url or headers are
+ *       changed, server connectivity is re-validated before persisting.
+ *       Header values are redacted in the response.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: updateMcpServerConfig
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The MCP server config slug
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           default: global
+ *         description: Scope to look up the config in (e.g. "global" or a repository full name).
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateMcpServerConfigRequest'
+ *     responses:
+ *       '200':
+ *         description: Updated MCP server configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetMcpServerConfigSuccessResponse'
+ *       '404':
+ *         description: MCP server config not found for the given slug and scope
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '422':
+ *         description: MCP server connectivity validation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
@@ -78,6 +177,44 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
   }
 };
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers/{slug}:
+ *   delete:
+ *     summary: Delete an MCP server config
+ *     description: Soft-deletes an MCP server configuration by slug and scope.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: deleteMcpServerConfig
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The MCP server config slug
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           default: global
+ *         description: Scope to look up the config in (e.g. "global" or a repository full name).
+ *     responses:
+ *       '204':
+ *         description: MCP server config deleted (no response body)
+ *       '404':
+ *         description: MCP server config not found for the given slug and scope
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
