@@ -949,6 +949,146 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           ],
         },
+
+        // ===================================================================
+        // MCP Server Config Schemas
+        // ===================================================================
+
+        McpCachedTool: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            inputSchema: { type: 'object' },
+            annotations: {
+              type: 'object',
+              properties: {
+                readOnlyHint: { type: 'boolean' },
+                destructiveHint: { type: 'boolean' },
+                openWorldHint: { type: 'boolean' },
+              },
+            },
+          },
+          required: ['name', 'inputSchema'],
+        },
+
+        McpServerConfig: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            slug: {
+              type: 'string',
+              description: 'Unique identifier (lowercase alphanumeric and hyphens, max 100 chars).',
+              example: 'my-mcp-server',
+            },
+            name: { type: 'string', example: 'My MCP Server' },
+            description: { type: 'string', nullable: true },
+            url: { type: 'string', example: 'https://mcp.example.com/sse' },
+            scope: { type: 'string', example: 'global' },
+            headers: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+              description: 'Header values are redacted to "******" in responses.',
+            },
+            envVars: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+            enabled: { type: 'boolean' },
+            timeout: { type: 'integer', example: 30000 },
+            cachedTools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpCachedTool' },
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'slug', 'name', 'url', 'scope', 'headers', 'envVars', 'enabled', 'timeout', 'cachedTools'],
+        },
+
+        CreateMcpServerConfigRequest: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string', example: 'my-mcp-server' },
+            name: { type: 'string', example: 'My MCP Server' },
+            url: { type: 'string', example: 'https://mcp.example.com/sse' },
+            scope: { type: 'string', default: 'global' },
+            description: { type: 'string' },
+            headers: { type: 'object', additionalProperties: { type: 'string' } },
+            envVars: { type: 'object', additionalProperties: { type: 'string' } },
+            enabled: { type: 'boolean', default: true },
+            timeout: { type: 'integer', default: 30000 },
+          },
+          required: ['slug', 'name', 'url'],
+        },
+
+        UpdateMcpServerConfigRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            url: { type: 'string' },
+            headers: { type: 'object', additionalProperties: { type: 'string' } },
+            envVars: { type: 'object', additionalProperties: { type: 'string' } },
+            enabled: { type: 'boolean' },
+            timeout: { type: 'integer' },
+          },
+        },
+
+        GetMcpServerConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/McpServerConfig' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ListMcpServerConfigsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/McpServerConfig' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        McpServerHealthResult: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string' },
+            name: { type: 'string' },
+            reachable: { type: 'boolean' },
+            toolCount: { type: 'integer' },
+            latencyMs: { type: 'integer' },
+            error: { type: 'string', nullable: true },
+            cacheRefreshed: { type: 'boolean' },
+          },
+          required: ['slug', 'name', 'reachable', 'toolCount', 'latencyMs', 'error', 'cacheRefreshed'],
+        },
+
+        GetMcpServerHealthResponse: {
+          type: 'object',
+          properties: {
+            healthy: { type: 'boolean' },
+            servers: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpServerHealthResult' },
+            },
+          },
+          required: ['healthy', 'servers'],
+        },
       },
     },
   },

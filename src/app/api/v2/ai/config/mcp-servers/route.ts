@@ -29,6 +29,36 @@ function redactHeaders(config: any): any {
   return { ...config, headers: redacted };
 }
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers:
+ *   get:
+ *     summary: List MCP server configs
+ *     description: Returns all MCP server configurations for the given scope. Header values are redacted in responses.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: listMcpServerConfigs
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           default: global
+ *         description: Scope to filter by (e.g. "global" or a repository full name).
+ *     responses:
+ *       '200':
+ *         description: List of MCP server configurations
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListMcpServerConfigsSuccessResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (req: NextRequest) => {
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
   const service = new McpConfigService();
@@ -37,6 +67,58 @@ const getHandler = async (req: NextRequest) => {
   return successResponse(redacted, { status: 200 }, req);
 };
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers:
+ *   post:
+ *     summary: Create an MCP server config
+ *     description: >
+ *       Creates a new MCP server configuration. Validates the slug format
+ *       (lowercase alphanumeric/hyphens, max 100 chars), checks slug uniqueness
+ *       within the scope, and validates server connectivity before persisting.
+ *       Cached tools are populated from the connectivity check.
+ *       Header values are redacted in the response.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: createMcpServerConfig
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateMcpServerConfigRequest'
+ *     responses:
+ *       '201':
+ *         description: MCP server config created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetMcpServerConfigSuccessResponse'
+ *       '400':
+ *         description: Missing required fields (slug, name, url)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '409':
+ *         description: A config with this slug already exists in the given scope
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '422':
+ *         description: Invalid slug format or MCP server connectivity validation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const postHandler = async (req: NextRequest) => {
   const body = await req.json();
   const { slug, name, url } = body;

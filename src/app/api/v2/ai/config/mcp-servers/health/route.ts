@@ -113,6 +113,33 @@ async function checkServerHealth(config: McpServerConfig): Promise<ServerHealthR
   }
 }
 
+/**
+ * @openapi
+ * /api/v2/ai/config/mcp-servers/health:
+ *   get:
+ *     summary: Check health of all enabled MCP servers
+ *     description: >
+ *       Connects to every enabled MCP server config (across all scopes),
+ *       lists their tools, and reports reachability. If the tool list has
+ *       changed since the last check, the cached tools are refreshed in the
+ *       database. The response is NOT wrapped in the standard API envelope.
+ *     tags:
+ *       - MCP Server Config
+ *     operationId: getMcpServerHealth
+ *     responses:
+ *       '200':
+ *         description: Health check results for all enabled MCP servers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetMcpServerHealthResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (_req: NextRequest) => {
   const allConfigs = await McpServerConfig.query().where({ enabled: true }).whereNull('deletedAt');
 
