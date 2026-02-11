@@ -146,7 +146,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         return;
       }
 
-      const { message, clearHistory, provider, modelId, isSystemAction } = body;
+      const { message, clearHistory, provider, modelId, isSystemAction, mode: requestedMode } = body;
 
       getLogger().info(
         `AI: v2 chat request received provider=${provider} modelId=${modelId} hasProvider=${!!provider} hasModelId=${!!modelId}`
@@ -207,8 +207,10 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         let isJsonResponse = false;
         let totalInvestigationTimeMs = 0;
         try {
-          const mode = await llmService.classifyUserIntent(message, conversationHistory);
-          getLogger().info(`AI: classified user intent mode=${mode}`);
+          const mode = requestedMode === 'fix' ? 'fix' : 'investigate';
+          getLogger().info(`AI: using mode=${mode} (requestedMode=${requestedMode})`);
+
+          const onToolConfirmation = mode === 'fix' ? async () => true : undefined;
 
           const result = await llmService.processQueryStream(
             message,
@@ -223,7 +225,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
             (evidenceEvent) => {
               sendEvent(evidenceEvent);
             },
-            undefined,
+            onToolConfirmation,
             mode
           );
 

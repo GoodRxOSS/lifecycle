@@ -80,8 +80,12 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     }
   };
 
-  const sendMessage = async (message: string, isSystemAction: boolean = false) => {
+  const sendMessage = async (
+    message: string,
+    options: { isSystemAction?: boolean; mode?: 'investigate' | 'fix' } = {}
+  ) => {
     if (!message.trim()) return;
+    const { isSystemAction = false, mode } = options;
 
     setInput('');
     setLoading(true);
@@ -103,6 +107,9 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     setMessages((prev) => [...prev, { role: 'user', content: message, timestamp: Date.now(), isSystemAction }]);
 
     const requestBody: any = { buildUuid, message, isSystemAction };
+    if (mode) {
+      requestBody.mode = mode;
+    }
     if (selectedModel) {
       requestBody.provider = selectedModel.provider;
       requestBody.modelId = selectedModel.modelId;
@@ -365,7 +372,7 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     fixMessage +=
       '\n\n[Use the get_lifecycle_config and commit_lifecycle_fix tools to apply the fix you identified earlier.]';
 
-    sendMessage(fixMessage, true);
+    sendMessage(fixMessage, { isSystemAction: true, mode: 'fix' });
   };
 
   const retryLastMessage = useCallback(() => {
