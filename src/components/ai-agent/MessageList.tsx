@@ -18,7 +18,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Spinner, Button } from '@heroui/react';
 import { MessageBubble } from './MessageBubble';
 import { ActivityPanel } from './ActivityPanel';
-import type { DebugMessage, ActivityLog, EvidenceItem, ServiceInvestigationResult } from './types';
+import type { DebugMessage, ActivityLog, EvidenceItem, ServiceInvestigationResult, DebugToolData, DebugContextData, DebugMetrics } from './types';
 
 interface MessageListProps {
   messages: DebugMessage[];
@@ -33,6 +33,10 @@ interface MessageListProps {
   onAtBottomChange?: (isAtBottom: boolean) => void;
   followUpSuggestions?: string[];
   onSelectSuggestion?: (suggestion: string) => void;
+  xrayMode?: boolean;
+  debugContext?: DebugContextData | null;
+  debugMetrics?: DebugMetrics | null;
+  debugToolDataMap?: Map<string, DebugToolData>;
 }
 
 export function MessageList({
@@ -48,6 +52,10 @@ export function MessageList({
   onAtBottomChange,
   followUpSuggestions,
   onSelectSuggestion,
+  xrayMode,
+  debugContext,
+  debugMetrics,
+  debugToolDataMap,
 }: MessageListProps) {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [, setLocalIsAtBottom] = useState(true);
@@ -71,14 +79,21 @@ export function MessageList({
 
   return (
     <div className="max-w-5xl mx-auto w-full px-8 pb-32">
-      {messages.map((msg) => (
-        <MessageBubble
-          key={`${msg.role}-${msg.timestamp}`}
-          message={msg}
-          onAutoFix={onAutoFix}
-          loading={loading}
-        />
-      ))}
+      {messages.map((msg, idx) => {
+        const isLastAssistant = msg.role === 'assistant' && idx === messages.length - 1;
+        return (
+          <MessageBubble
+            key={`${msg.role}-${msg.timestamp}`}
+            message={msg}
+            onAutoFix={onAutoFix}
+            loading={loading}
+            xrayMode={xrayMode}
+            debugContext={isLastAssistant ? debugContext : undefined}
+            debugMetrics={isLastAssistant ? debugMetrics : undefined}
+            debugToolDataMap={isLastAssistant ? debugToolDataMap : undefined}
+          />
+        );
+      })}
 
       {streaming && streamingContent && (
         <MessageBubble
@@ -89,6 +104,10 @@ export function MessageList({
           evidenceItems={evidenceItems}
           onAutoFix={onAutoFix}
           loading={loading}
+          xrayMode={xrayMode}
+          debugContext={debugContext}
+          debugMetrics={debugMetrics}
+          debugToolDataMap={debugToolDataMap}
         />
       )}
 
@@ -109,7 +128,7 @@ export function MessageList({
           </div>
           {activityLogs.length > 0 && (
             <div className="ai-message-content">
-              <ActivityPanel activities={activityLogs} />
+              <ActivityPanel activities={activityLogs} xrayMode={xrayMode} debugToolDataMap={debugToolDataMap} />
             </div>
           )}
         </div>

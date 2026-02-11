@@ -217,7 +217,8 @@ export default class AIAgentService extends BaseService {
       impact: string;
       confirmButtonText: string;
     }) => Promise<boolean>,
-    mode?: 'investigate' | 'fix'
+    mode?: 'investigate' | 'fix',
+    onDebugEvent?: (event: any) => void
   ): Promise<{ response: string; isJson: boolean; totalInvestigationTimeMs: number }> {
     const effectiveMode = mode || 'investigate';
 
@@ -238,12 +239,14 @@ export default class AIAgentService extends BaseService {
     const callbacks: StreamCallbacks = {
       onTextChunk: (text) => onChunk(text),
       onThinking: (message) => onActivity?.({ type: 'thinking', message }),
-      onToolCall: (tool, args, toolCallId) =>
+      onToolCall: (tool, args, toolCallId) => {
         onActivity?.({
           type: 'tool_call',
           message: this.generateToolActivityMessage(tool, args),
           toolCallId,
-        }),
+        });
+        onDebugEvent?.({ type: 'debug_tool_call', toolCallId, toolName: tool, toolArgs: args });
+      },
       onToolResult: (result, toolName, toolArgs, toolDurationMs, totalDurationMs, toolCallId) => {
         const argsRecord = toolArgs as Record<string, unknown>;
         onActivity?.({
@@ -259,6 +262,7 @@ export default class AIAgentService extends BaseService {
           toolCallId,
           resultPreview: generateResultPreview(toolName, argsRecord, result),
         });
+        onDebugEvent?.({ type: 'debug_tool_result', toolCallId, toolName, toolResult: result, toolDurationMs });
         if (onEvidence) {
           try {
             const evidenceEvents = extractEvidence(toolName, argsRecord, result, {
@@ -285,7 +289,8 @@ export default class AIAgentService extends BaseService {
       context,
       conversationHistory,
       callbacks,
-      abortController.signal
+      abortController.signal,
+      onDebugEvent
     );
 
     return {

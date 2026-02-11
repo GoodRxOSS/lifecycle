@@ -15,7 +15,16 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { DebugMessage, ActivityLog, EvidenceItem, ModelOption, ServiceInvestigationResult } from '../types';
+import type {
+  DebugMessage,
+  ActivityLog,
+  EvidenceItem,
+  ModelOption,
+  ServiceInvestigationResult,
+  DebugToolData,
+  DebugContextData,
+  DebugMetrics,
+} from '../types';
 import { getApiPaths, fetchApi } from '../config';
 
 export interface ChatError {
@@ -43,6 +52,9 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
   const [error, setError] = useState<ChatError | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [_failedMessage, setFailedMessage] = useState<string | null>(null);
+  const [debugContext, setDebugContext] = useState<DebugContextData | null>(null);
+  const [debugMetrics, setDebugMetrics] = useState<DebugMetrics | null>(null);
+  const debugToolDataMapRef = useRef<Map<string, DebugToolData>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -93,6 +105,9 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     setStreamingContent('');
     setActivityLogs([]);
     setEvidenceItems([]);
+    setDebugContext(null);
+    setDebugMetrics(null);
+    debugToolDataMapRef.current = new Map();
     bufferRef.current = '';
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
@@ -114,10 +129,11 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
       requestBody.provider = selectedModel.provider;
       requestBody.modelId = selectedModel.modelId;
     }
-
     let accumulatedContent = '';
     const collectedActivities: ActivityLog[] = [];
     const collectedEvidence: EvidenceItem[] = [];
+    let localDebugContext: DebugContextData | null = null;
+    let localDebugMetrics: DebugMetrics | null = null;
     let receivedCompleteJson = false;
 
     const controller = new AbortController();
@@ -202,6 +218,41 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
               ) {
                 collectedEvidence.push(data as EvidenceItem);
                 setEvidenceItems([...collectedEvidence]);
+              } else if (data.type === 'debug_context') {
+                localDebugContext = {
+                  systemPrompt: data.systemPrompt,
+                  maskingStats: data.maskingStats,
+                  provider: data.provider,
+                  modelId: data.modelId,
+                };
+                setDebugContext(localDebugContext);
+              } else if (data.type === 'debug_tool_call') {
+                debugToolDataMapRef.current.set(data.toolCallId, {
+                  toolCallId: data.toolCallId,
+                  toolName: data.toolName,
+                  toolArgs: data.toolArgs,
+                });
+              } else if (data.type === 'debug_tool_result') {
+                const existing = debugToolDataMapRef.current.get(data.toolCallId);
+                if (existing) {
+                  existing.toolResult = data.toolResult;
+                  existing.toolDurationMs = data.toolDurationMs;
+                } else {
+                  debugToolDataMapRef.current.set(data.toolCallId, {
+                    toolCallId: data.toolCallId,
+                    toolName: data.toolName,
+                    toolArgs: {},
+                    toolResult: data.toolResult,
+                    toolDurationMs: data.toolDurationMs,
+                  });
+                }
+              } else if (data.type === 'debug_metrics') {
+                localDebugMetrics = {
+                  iterations: data.iterations,
+                  totalToolCalls: data.totalToolCalls,
+                  totalDurationMs: data.totalDurationMs,
+                };
+                setDebugMetrics(localDebugMetrics);
               } else if (data.type === 'chunk') {
                 accumulatedContent += data.content;
                 bufferRef.current = accumulatedContent;
@@ -215,6 +266,8 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                 }
                 console.log('[ChatContainer] Received complete JSON from backend');
                 receivedCompleteJson = true;
+                const debugToolData =
+                  debugToolDataMapRef.current.size > 0 ? Array.from(debugToolDataMapRef.current.values()) : undefined;
                 setMessages((prev) => [
                   ...prev,
                   {
@@ -224,6 +277,9 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                     activityHistory: collectedActivities.length > 0 ? collectedActivities : undefined,
                     evidenceItems: collectedEvidence.length > 0 ? collectedEvidence : undefined,
                     totalInvestigationTimeMs: data.totalInvestigationTimeMs,
+                    debugContext: localDebugContext ?? undefined,
+                    debugToolData,
+                    debugMetrics: localDebugMetrics ?? undefined,
                   },
                 ]);
                 setStreaming(false);
@@ -235,6 +291,8 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                   rafIdRef.current = null;
                 }
                 if (!receivedCompleteJson && accumulatedContent.trim()) {
+                  const debugToolDataComplete =
+                    debugToolDataMapRef.current.size > 0 ? Array.from(debugToolDataMapRef.current.values()) : undefined;
                   setMessages((prev) => [
                     ...prev,
                     {
@@ -244,6 +302,9 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                       activityHistory: collectedActivities.length > 0 ? collectedActivities : undefined,
                       evidenceItems: collectedEvidence.length > 0 ? collectedEvidence : undefined,
                       totalInvestigationTimeMs: data.totalInvestigationTimeMs,
+                      debugContext: localDebugContext ?? undefined,
+                      debugToolData: debugToolDataComplete,
+                      debugMetrics: localDebugMetrics ?? undefined,
                     },
                   ]);
                 }
@@ -487,5 +548,8 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
     scrollToBottom,
     messagesEndRef,
     inputRef,
+    debugContext,
+    debugMetrics,
+    debugToolDataMapRef,
   };
 }

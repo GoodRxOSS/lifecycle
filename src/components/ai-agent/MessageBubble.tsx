@@ -20,8 +20,9 @@ import { parseStructuredResponse, extractJsonContent } from './utils';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { StructuredResponse } from './StructuredResponse';
 import { ActivityPanel } from './ActivityPanel';
-import type { DebugMessage, ActivityLog, EvidenceItem, ServiceInvestigationResult, StructuredDebugResponse } from './types';
+import type { DebugMessage, ActivityLog, EvidenceItem, ServiceInvestigationResult, StructuredDebugResponse, DebugToolData, DebugContextData, DebugMetrics } from './types';
 import { useProgressiveJson } from './hooks/useProgressiveJson';
+import { XrayContextPanel } from './XrayPanel';
 
 interface RepositoryContext {
   owner: string;
@@ -38,6 +39,10 @@ interface MessageBubbleProps {
   onAutoFix: (service: ServiceInvestigationResult) => void;
   loading: boolean;
   repositoryContext?: RepositoryContext;
+  xrayMode?: boolean;
+  debugContext?: DebugContextData | null;
+  debugMetrics?: DebugMetrics | null;
+  debugToolDataMap?: Map<string, DebugToolData>;
 }
 
 function renderSimpleFallbackService(service: any) {
@@ -246,7 +251,7 @@ function renderMessage(
   return <MarkdownRenderer content={content} repositoryContext={derivedRepoContext || repositoryContext} />;
 }
 
-export const MessageBubble = React.memo(function MessageBubble({ message, isStreaming, streamingContent, activityLogs, evidenceItems, onAutoFix, loading, repositoryContext }: MessageBubbleProps) {
+export const MessageBubble = React.memo(function MessageBubble({ message, isStreaming, streamingContent, activityLogs, evidenceItems, onAutoFix, loading, repositoryContext, xrayMode, debugContext, debugMetrics, debugToolDataMap }: MessageBubbleProps) {
   const [highlightedToolCallId, setHighlightedToolCallId] = useState<string | null>(null);
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -279,8 +284,11 @@ export const MessageBubble = React.memo(function MessageBubble({ message, isStre
     return (
       <div className="message-fade-in mb-6 w-[80%]">
         <div className="ai-message-content">
+          {xrayMode && debugContext && (
+            <XrayContextPanel debugContext={debugContext} debugMetrics={debugMetrics} />
+          )}
           {activityLogs && activityLogs.length > 0 && (
-            <ActivityPanel activities={activityLogs} highlightedToolCallId={highlightedToolCallId} />
+            <ActivityPanel activities={activityLogs} highlightedToolCallId={highlightedToolCallId} xrayMode={xrayMode} debugToolDataMap={debugToolDataMap} />
           )}
           {renderMessage(content, true, onAutoFix, loading, repositoryContext, progressiveResult, evidenceItems, handleHighlightActivity)}
           <span className="typing-cursor">&#x258A;</span>
@@ -328,11 +336,25 @@ export const MessageBubble = React.memo(function MessageBubble({ message, isStre
     );
   }
 
+  const effectiveDebugContext = debugContext || message.debugContext || null;
+  const effectiveDebugMetrics = debugMetrics || message.debugMetrics || null;
+  const effectiveDebugToolDataMap = (debugToolDataMap && debugToolDataMap.size > 0) ? debugToolDataMap : (() => {
+    if (!message.debugToolData || message.debugToolData.length === 0) return undefined;
+    const map = new Map<string, DebugToolData>();
+    for (const td of message.debugToolData) {
+      map.set(td.toolCallId, td);
+    }
+    return map;
+  })();
+
   return (
     <div className="message-fade-in mb-6 w-[80%]">
       <div className="ai-message-content">
+        {xrayMode && effectiveDebugContext && (
+          <XrayContextPanel debugContext={effectiveDebugContext} debugMetrics={effectiveDebugMetrics} />
+        )}
         {message.activityHistory && (
-          <ActivityPanel activities={message.activityHistory} totalInvestigationTimeMs={message.totalInvestigationTimeMs} highlightedToolCallId={highlightedToolCallId} />
+          <ActivityPanel activities={message.activityHistory} totalInvestigationTimeMs={message.totalInvestigationTimeMs} highlightedToolCallId={highlightedToolCallId} xrayMode={xrayMode} debugToolDataMap={effectiveDebugToolDataMap} />
         )}
         {renderMessage(message.content, false, onAutoFix, loading, repositoryContext, undefined, message.evidenceItems, handleHighlightActivity)}
         {message.stopped && <div className="mt-2 text-xs text-gray-400 italic">Generation stopped</div>}

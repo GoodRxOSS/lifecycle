@@ -17,15 +17,17 @@
 import React, { useRef, useEffect } from 'react';
 import { Accordion, AccordionItem, Chip, Spinner } from '@heroui/react';
 import { formatDuration } from './utils';
-import type { ActivityLog } from './types';
+import type { ActivityLog, DebugToolData } from './types';
 
 interface ActivityPanelProps {
   activities: ActivityLog[];
   totalInvestigationTimeMs?: number;
   highlightedToolCallId?: string | null;
+  xrayMode?: boolean;
+  debugToolDataMap?: Map<string, DebugToolData>;
 }
 
-export function ActivityPanel({ activities, totalInvestigationTimeMs, highlightedToolCallId }: ActivityPanelProps) {
+export function ActivityPanel({ activities, totalInvestigationTimeMs, highlightedToolCallId, xrayMode, debugToolDataMap }: ActivityPanelProps) {
   const highlightRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -161,6 +163,35 @@ export function ActivityPanel({ activities, totalInvestigationTimeMs, highlighte
                       {activity.resultPreview}
                     </div>
                   )}
+                  {xrayMode && activity.toolCallId && debugToolDataMap?.get(activity.toolCallId) && (() => {
+                    const toolData = debugToolDataMap.get(activity.toolCallId)!;
+                    return (
+                      <div className="ml-6 mt-1 mb-1 border-l-2 border-amber-400 pl-2">
+                        <details className="text-[10px]">
+                          <summary className="text-amber-600 cursor-pointer select-none font-medium hover:text-amber-700">
+                            INPUT: {toolData.toolName}
+                          </summary>
+                          <div className="mt-1 rounded bg-gray-900" style={{ maxHeight: 192, overflowY: 'auto' }}>
+                            <pre className="p-2 text-green-300 text-[10px] font-mono whitespace-pre-wrap break-words m-0">
+                              {JSON.stringify(toolData.toolArgs, null, 2)}
+                            </pre>
+                          </div>
+                        </details>
+                        {toolData.toolResult !== undefined && (
+                          <details className="text-[10px] mt-1">
+                            <summary className="text-amber-600 cursor-pointer select-none font-medium hover:text-amber-700">
+                              OUTPUT{toolData.toolDurationMs ? ` (${toolData.toolDurationMs}ms)` : ''}
+                            </summary>
+                            <div className="mt-1 rounded bg-gray-900" style={{ maxHeight: 192, overflowY: 'auto' }}>
+                              <pre className="p-2 text-cyan-300 text-[10px] font-mono whitespace-pre-wrap break-words m-0">
+                                {JSON.stringify(toolData.toolResult, null, 2)}
+                              </pre>
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}

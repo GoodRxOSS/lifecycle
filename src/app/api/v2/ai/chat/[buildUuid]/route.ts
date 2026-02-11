@@ -120,6 +120,17 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
     writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => {});
   };
 
+  const MAX_STORED_JSON_LENGTH = 8000;
+  const truncateForStorage = (value: unknown): unknown => {
+    try {
+      const json = JSON.stringify(value);
+      if (json.length <= MAX_STORED_JSON_LENGTH) return value;
+      return { _truncated: true, preview: json.slice(0, MAX_STORED_JSON_LENGTH), originalLength: json.length };
+    } catch {
+      return { _truncated: true, preview: '[non-serializable]', originalLength: 0 };
+    }
+  };
+
   req.signal.addEventListener('abort', () => {
     try {
       writer.close();
@@ -206,6 +217,27 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         let aiResponse = '';
         let isJsonResponse = false;
         let totalInvestigationTimeMs = 0;
+        const collectedActivities: Array<{
+          type: string;
+          message: string;
+          status?: 'pending' | 'completed' | 'failed';
+          details?: { toolDurationMs?: number; totalDurationMs?: number };
+          toolCallId?: string;
+          resultPreview?: string;
+        }> = [];
+        const collectedEvidence: Array<Record<string, unknown>> = [];
+        let collectedDebugContext: any = null;
+        const collectedDebugToolData = new Map<
+          string,
+          {
+            toolCallId: string;
+            toolName: string;
+            toolArgs: Record<string, unknown>;
+            toolResult?: unknown;
+            toolDurationMs?: number;
+          }
+        >();
+        let collectedDebugMetrics: any = null;
         try {
           const mode = requestedMode === 'fix' ? 'fix' : 'investigate';
           getLogger().info(`AI: using mode=${mode} (requestedMode=${requestedMode})`);
@@ -221,12 +253,93 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
             },
             (activity) => {
               sendEvent(activity as AIChatSSEEvent);
+              if (activity.type === 'tool_call') {
+                collectedActivities.push({
+                  type: activity.type,
+                  message: activity.message,
+                  status: 'pending',
+                  toolCallId: activity.toolCallId,
+                });
+              } else if (activity.type === 'processing') {
+                const isFailed = !activity.message.startsWith('\u2713');
+                const matchIdx = collectedActivities.findIndex(
+                  (a) => a.status === 'pending' && activity.toolCallId && a.toolCallId === activity.toolCallId
+                );
+                if (matchIdx !== -1) {
+                  collectedActivities[matchIdx] = {
+                    ...collectedActivities[matchIdx],
+                    message: activity.message,
+                    status: isFailed ? 'failed' : 'completed',
+                    details: activity.details,
+                    toolCallId: activity.toolCallId,
+                    resultPreview: activity.resultPreview,
+                  };
+                } else {
+                  collectedActivities.push({
+                    type: activity.type,
+                    message: activity.message,
+                    status: isFailed ? 'failed' : 'completed',
+                    details: activity.details,
+                    toolCallId: activity.toolCallId,
+                    resultPreview: activity.resultPreview,
+                  });
+                }
+              } else {
+                collectedActivities.push({ type: activity.type, message: activity.message });
+              }
             },
             (evidenceEvent) => {
               sendEvent(evidenceEvent);
+              collectedEvidence.push(evidenceEvent as unknown as Record<string, unknown>);
             },
             onToolConfirmation,
-            mode
+            mode,
+            (event: AIChatSSEEvent) => {
+              try {
+                sendEvent(event);
+              } catch {
+                /* SSE send must not block collection */
+              }
+              try {
+                const e = event as any;
+                if (e.type === 'debug_context') {
+                  collectedDebugContext = {
+                    systemPrompt: e.systemPrompt,
+                    maskingStats: e.maskingStats,
+                    provider: e.provider,
+                    modelId: e.modelId,
+                  };
+                } else if (e.type === 'debug_tool_call') {
+                  collectedDebugToolData.set(e.toolCallId, {
+                    toolCallId: e.toolCallId,
+                    toolName: e.toolName,
+                    toolArgs: e.toolArgs,
+                  });
+                } else if (e.type === 'debug_tool_result') {
+                  const existing = collectedDebugToolData.get(e.toolCallId);
+                  if (existing) {
+                    existing.toolResult = e.toolResult;
+                    existing.toolDurationMs = e.toolDurationMs;
+                  } else {
+                    collectedDebugToolData.set(e.toolCallId, {
+                      toolCallId: e.toolCallId,
+                      toolName: e.toolName,
+                      toolArgs: {},
+                      toolResult: e.toolResult,
+                      toolDurationMs: e.toolDurationMs,
+                    });
+                  }
+                } else if (e.type === 'debug_metrics') {
+                  collectedDebugMetrics = {
+                    iterations: e.iterations,
+                    totalToolCalls: e.totalToolCalls,
+                    totalDurationMs: e.totalDurationMs,
+                  };
+                }
+              } catch {
+                /* debug collection must never disrupt the stream */
+              }
+            }
           );
 
           aiResponse = result.response;
@@ -323,6 +436,19 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           role: 'assistant',
           content: aiResponse,
           timestamp: Date.now(),
+          activityHistory: collectedActivities.length > 0 ? collectedActivities : undefined,
+          evidenceItems: collectedEvidence.length > 0 ? collectedEvidence : undefined,
+          totalInvestigationTimeMs,
+          debugContext: collectedDebugContext || undefined,
+          debugToolData:
+            collectedDebugToolData.size > 0
+              ? Array.from(collectedDebugToolData.values()).map((td) => ({
+                  ...td,
+                  toolArgs: truncateForStorage(td.toolArgs),
+                  toolResult: td.toolResult !== undefined ? truncateForStorage(td.toolResult) : undefined,
+                }))
+              : undefined,
+          debugMetrics: collectedDebugMetrics || undefined,
         });
 
         sendEvent({ type: 'complete', totalInvestigationTimeMs });
