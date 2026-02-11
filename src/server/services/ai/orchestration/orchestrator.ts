@@ -235,6 +235,12 @@ export class ToolOrchestrator {
         callbacks.onToolCall(toolCalls[i].name, toolCalls[i].arguments, toolCallParts[i].toolCallId);
       }
 
+      getLogger().info(
+        `AI: executing tools=[${executeIndices
+          .map((i) => toolCalls[i].name)
+          .join(',')}] iteration=${iteration} buildUuid=${buildUuid || 'none'}`
+      );
+
       const settled = await Promise.allSettled(
         executeIndices.map(async (i) => {
           if (signal.aborted) {
@@ -278,6 +284,19 @@ export class ToolOrchestrator {
             totalDuration,
             toolCallParts[index].toolCallId
           );
+          if (!result.success) {
+            getLogger().warn(
+              `AI: tool failed tool=${toolCalls[index].name} error=${result.error?.message} code=${
+                result.error?.code
+              } duration=${toolDuration}ms buildUuid=${buildUuid || 'none'}`
+            );
+          } else {
+            getLogger().info(
+              `AI: tool completed tool=${toolCalls[index].name} success=true duration=${toolDuration}ms buildUuid=${
+                buildUuid || 'none'
+              }`
+            );
+          }
         } else {
           const idx = executeIndices[settled.indexOf(entry)];
           const errorResult = {
@@ -297,6 +316,11 @@ export class ToolOrchestrator {
             0,
             idx === 0 ? llmThinkTime : 0,
             toolCallParts[idx].toolCallId
+          );
+          getLogger().error(
+            `AI: tool crashed tool=${toolCalls[idx].name} error=${entry.reason?.message} buildUuid=${
+              buildUuid || 'none'
+            }`
           );
         }
       }

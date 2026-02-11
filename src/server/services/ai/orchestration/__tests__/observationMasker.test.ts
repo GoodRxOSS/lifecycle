@@ -86,7 +86,7 @@ describe('maskObservations', () => {
     const oldToolResult = result.messages[2];
     expect(oldToolResult.parts[0].type).toBe('tool_result');
     const oldPart = oldToolResult.parts[0] as any;
-    expect(oldPart.result.agentContent).toBe('[Tool output omitted for brevity]');
+    expect(oldPart.result.agentContent).toBe('[get_k8s_resources output omitted — re-call tool if needed]');
 
     const recentToolResult = result.messages[6];
     expect(recentToolResult.parts[0].type).toBe('tool_result');
@@ -115,7 +115,7 @@ describe('maskObservations', () => {
 
     const oldToolResultMsg = result.messages[1];
     const oldPart = oldToolResultMsg.parts[0] as any;
-    expect(oldPart.result.agentContent).toBe('[Tool output omitted for brevity]');
+    expect(oldPart.result.agentContent).toBe('[tool_0 output omitted — re-call tool if needed]');
   });
 
   it('should never mask error results', () => {
@@ -139,7 +139,7 @@ describe('maskObservations', () => {
 
     const oldSuccessResult = result.messages[3];
     const oldSuccessPart = oldSuccessResult.parts[0] as any;
-    expect(oldSuccessPart.result.agentContent).toBe('[Tool output omitted for brevity]');
+    expect(oldSuccessPart.result.agentContent).toBe('[get_k8s_resources output omitted — re-call tool if needed]');
   });
 
   it('should not mutate the original messages array', () => {
@@ -160,7 +160,10 @@ describe('maskObservations', () => {
   it('should return accurate stats', () => {
     const messages: ConversationMessage[] = [
       buildToolCallMessage('get_k8s_resources', { kind: 'pods' }),
-      buildToolResultMessage('get_k8s_resources', 'a]long-result-that-will-be-masked-away'),
+      buildToolResultMessage(
+        'get_k8s_resources',
+        'pod-1 Running\npod-2 Running\npod-3 CrashLoopBackOff\npod-4 Pending\npod-5 Running\npod-6 ImagePullBackOff'
+      ),
       buildToolCallMessage('get_pod_logs', { pod: 'pod-1' }),
       buildToolResultMessage('get_pod_logs', 'recent log'),
     ];
@@ -215,7 +218,7 @@ describe('maskObservations', () => {
     for (let i = 0; i < 3; i++) {
       const msg = result.messages[i * 2 + 1];
       const part = msg.parts[0] as any;
-      expect(part.result.agentContent).toBe('[Tool output omitted for brevity]');
+      expect(part.result.agentContent).toBe(`[tool_${i} output omitted — re-call tool if needed]`);
     }
 
     for (let i = 3; i < 6; i++) {
@@ -248,7 +251,7 @@ describe('maskObservations', () => {
     expect(errorPart.result.success).toBe(false);
 
     const oldSuccessPart = result.messages[3].parts[0] as any;
-    expect(oldSuccessPart.result.agentContent).toBe('[Tool output omitted for brevity]');
+    expect(oldSuccessPart.result.agentContent).toBe('[tool_2 output omitted — re-call tool if needed]');
   });
 
   it('masks at exact threshold boundary (uses strict less-than)', () => {
@@ -313,7 +316,7 @@ describe('maskObservations', () => {
 
     const oldToolResult = result.messages[2];
     const toolResultPart = oldToolResult.parts[0] as any;
-    expect(toolResultPart.result.agentContent).toBe('[Tool output omitted for brevity]');
+    expect(toolResultPart.result.agentContent).toBe('[get_k8s_resources output omitted — re-call tool if needed]');
 
     const preservedReasoning = result.messages[3];
     expect(preservedReasoning.parts[0].type).toBe('text');

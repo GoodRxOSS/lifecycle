@@ -170,6 +170,25 @@ ${serverSections}
       if (podCount > 0) {
         info += `\n  K8s: ${readyPods}/${podCount} pods ready`;
       }
+
+      for (const pod of serviceDebug.pods) {
+        for (const cs of pod.containerStatuses) {
+          const waitReason = cs.state?.waiting?.reason;
+          const termReason = cs.lastState?.terminated?.reason;
+          const parts: string[] = [];
+          if (waitReason) parts.push(waitReason);
+          if (termReason) parts.push(`last: ${termReason}`);
+          if (cs.restartCount > 0) parts.push(`restarts: ${cs.restartCount}`);
+          if (parts.length > 0) {
+            info += `\n  Container ${cs.name}: ${parts.join(', ')}`;
+          }
+        }
+        const unschedulable = pod.conditions.find((c: any) => c.type === 'PodScheduled' && c.status === 'False');
+        if (unschedulable) {
+          info += `\n  Scheduling: ${unschedulable.message || 'cannot be scheduled'}`;
+        }
+      }
+
       if (serviceDebug.issues.length > 0) {
         info += `\n  Issues: ${serviceDebug.issues.map((i) => i.title).join('; ')}`;
       }
@@ -180,6 +199,17 @@ ${serverSections}
             .slice(0, 3)
             .map((e) => `${e.reason}: ${e.message}`)
             .join('; ')}`;
+        }
+      }
+
+      if (serviceDebug.pods.length > 0) {
+        const logsSource = serviceDebug.pods.find((p) => p.recentLogs) || serviceDebug.pods[0];
+        if (logsSource?.recentLogs) {
+          const logLines = logsSource.recentLogs.split('\n').filter(Boolean);
+          const tail = logLines.slice(-15).join('\n');
+          if (tail) {
+            info += `\n  Recent logs (${logsSource.name}, last ${Math.min(logLines.length, 15)} lines):\n${tail}`;
+          }
         }
       }
     }
