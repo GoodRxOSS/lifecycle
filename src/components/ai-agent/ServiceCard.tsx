@@ -212,10 +212,18 @@ export function ServiceCard({
       </CardHeader>
       {expanded && (
         <CardBody className="p-6 space-y-6">
-          <div>
+          <div className="space-y-3">
+            <h5 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Root Cause</h5>
             <p className="text-base text-gray-800 leading-relaxed font-medium">{service.issue}</p>
+            {(service.errorSource || service.errorSourceDetail) && (
+              <p className="text-sm text-gray-600">
+                {service.errorSource && <><span className="font-semibold">Source:</span> {service.errorSource}</>}
+                {service.errorSource && service.errorSourceDetail && ' — '}
+                {service.errorSourceDetail}
+              </p>
+            )}
             {service.filePath && (
-              <div className="mt-2">
+              <div>
                 {renderFileLink(service.filePath, repository, service.lineNumber, service.lineNumberEnd)}
               </div>
             )}
@@ -224,30 +232,21 @@ export function ServiceCard({
           {service.keyError && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h5 className="text-base font-bold text-danger">Error Details</h5>
+                <h5 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Error Output</h5>
                 <Button
                   size="sm"
                   variant="light"
                   onClick={() => setShowDetails(!showDetails)}
                   className="text-xs"
                 >
-                  {showDetails ? 'Hide' : 'Show'} details
+                  {showDetails ? 'Hide' : 'Show'} raw output
                 </Button>
               </div>
-              {showDetails && (
-                <>
-                  {service.errorSource && (
-                    <div className="text-sm text-gray-700">
-                      <span className="font-semibold">Source:</span> {service.errorSource}
-                    </div>
-                  )}
-                  <div className="bg-danger-50 border-l-4 border-danger p-4 rounded-lg">
-                    <pre className="text-sm text-danger-900 overflow-x-auto m-0 leading-relaxed font-mono whitespace-pre-wrap">
-                      {service.keyError}
-                    </pre>
-                  </div>
-                </>
-              )}
+              <div className="bg-danger-50 border-l-4 border-danger p-4 rounded-lg">
+                <pre className="text-sm text-danger-900 overflow-x-auto m-0 leading-relaxed font-mono whitespace-pre-wrap">
+                  {showDetails ? service.keyError : service.keyError.length > 200 ? service.keyError.slice(0, 200) + '...' : service.keyError}
+                </pre>
+              </div>
             </div>
           )}
 

@@ -156,10 +156,11 @@ export class ToolSafetyManager {
   }
 
   private logToolExecution(name: string, args: Record<string, unknown>, result: ToolResult, buildUuid?: string): void {
-    if (!result.success && !result.error?.recoverable) {
-      getLogger().error(
-        `AI: non-recoverable tool error tool=${name} error=${result.error?.message} errorCode=${
-          result.error?.code
+    if (!result.success) {
+      const level = result.error?.recoverable ? 'warn' : 'error';
+      getLogger()[level](
+        `AI: tool error tool=${name} error=${result.error?.message} code=${result.error?.code} recoverable=${
+          result.error?.recoverable
         } buildUuid=${buildUuid || 'none'}`
       );
     }

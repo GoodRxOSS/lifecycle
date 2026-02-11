@@ -27,6 +27,40 @@ export interface DebugMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  isSystemAction?: boolean;
+  activityHistory?: Array<{
+    type: string;
+    message: string;
+    status?: 'pending' | 'completed' | 'failed';
+    details?: { toolDurationMs?: number; totalDurationMs?: number };
+    toolCallId?: string;
+    resultPreview?: string;
+  }>;
+  evidenceItems?: Array<Record<string, unknown>>;
+  totalInvestigationTimeMs?: number;
+  debugContext?: {
+    systemPrompt: string;
+    maskingStats: {
+      totalTokensBefore: number;
+      totalTokensAfter: number;
+      maskedParts: number;
+      savedTokens: number;
+    } | null;
+    provider: string;
+    modelId: string;
+  };
+  debugToolData?: Array<{
+    toolCallId: string;
+    toolName: string;
+    toolArgs: Record<string, unknown>;
+    toolResult?: unknown;
+    toolDurationMs?: number;
+  }>;
+  debugMetrics?: {
+    iterations: number;
+    totalToolCalls: number;
+    totalDurationMs: number;
+  };
 }
 
 export interface DebugContext {

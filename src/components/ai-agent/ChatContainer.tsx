@@ -18,6 +18,7 @@ import React, { useRef, useCallback, useState, useMemo } from 'react';
 import { Card, CardHeader, CardBody, Button, Spinner } from '@heroui/react';
 import { useChat } from './hooks/useChat';
 import { useChatModels } from './hooks/useChatModels';
+import { useXrayMode } from './hooks/useXrayMode';
 import { ModelSelector } from './ModelSelector';
 import { ErrorBanner } from './ErrorBanner';
 import { ChatInput } from './ChatInput';
@@ -33,6 +34,7 @@ interface ChatContainerProps {
 
 export function ChatContainer({ buildUuid }: ChatContainerProps) {
   const { availableModels, selectedModel, handleModelChange } = useChatModels();
+  const { xrayMode, handleLabelClick } = useXrayMode();
   const {
     messages,
     input,
@@ -57,6 +59,9 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
     scrollToBottom,
     messagesEndRef,
     inputRef,
+    debugContext,
+    debugMetrics,
+    debugToolDataMapRef,
   } = useChat({ buildUuid, selectedModel });
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -95,6 +100,8 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
           onClearHistory={handleClearHistory}
           loading={loading}
           hasMessages={messages.length > 0}
+          onLabelClick={handleLabelClick}
+          xrayMode={xrayMode}
         />
       </CardHeader>
 
@@ -147,6 +154,10 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
             onAtBottomChange={handleAtBottomChange}
             followUpSuggestions={followUpSuggestions}
             onSelectSuggestion={sendMessage}
+            xrayMode={xrayMode}
+            debugContext={debugContext}
+            debugMetrics={debugMetrics}
+            debugToolDataMap={debugToolDataMapRef.current}
           />
 
           {showJumpToBottom && (

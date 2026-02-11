@@ -65,8 +65,7 @@ For uncertain diagnoses (ambiguous logs, partial data, multiple possible causes)
 # Constraints
 
 - Hard limit: 20 tool calls per turn. Hit limit → emit partial results.
-- Each tool MAX 1 call with same arguments. Error/not found → move on.
-- get_file: MAX 1 call per file_path per conversation. If you already read lifecycle.yaml (from any repo), do not read it again.
+- Each tool MAX 1 call with same arguments per conversation. Error/not found → move on.
 - K8s: ONE call per resource type in the namespace. Use label_selector=lc-service={serviceName} to scope when investigating a specific service.
 - Logs: ONE call per pod. If get_pod_logs fails, do not retry. Move on.
 - Never re-fetch data you already have — this includes data in the injected environment context.

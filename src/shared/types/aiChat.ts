@@ -97,10 +97,62 @@ export interface SSEErrorEvent {
   code?: string;
 }
 
+export interface DebugContextEvent {
+  type: 'debug_context';
+  systemPrompt: string;
+  maskingStats: {
+    totalTokensBefore: number;
+    totalTokensAfter: number;
+    maskedParts: number;
+    savedTokens: number;
+  } | null;
+  provider: string;
+  modelId: string;
+}
+
+export interface DebugToolCallEvent {
+  type: 'debug_tool_call';
+  toolCallId: string;
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+}
+
+export interface DebugToolResultEvent {
+  type: 'debug_tool_result';
+  toolCallId: string;
+  toolName: string;
+  toolResult: unknown;
+  toolDurationMs?: number;
+}
+
+export interface DebugMetricsEvent {
+  type: 'debug_metrics';
+  iterations: number;
+  totalToolCalls: number;
+  totalDurationMs: number;
+}
+
+export type AIChatDebugEvent = DebugContextEvent | DebugToolCallEvent | DebugToolResultEvent | DebugMetricsEvent;
+
 export type AIChatActivityEvent = ToolCallEvent | ProcessingEvent | ThinkingEvent | ActivityErrorEvent;
 
-export type AIChatSSEEvent = ChunkEvent | CompleteEvent | CompleteJsonEvent | AIChatActivityEvent | AIChatEvidenceEvent;
+export type AIChatSSEEvent =
+  | ChunkEvent
+  | CompleteEvent
+  | CompleteJsonEvent
+  | AIChatActivityEvent
+  | AIChatEvidenceEvent
+  | AIChatDebugEvent;
 
 export function isEvidenceEvent(event: AIChatSSEEvent): event is AIChatEvidenceEvent {
   return event.type === 'evidence_file' || event.type === 'evidence_commit' || event.type === 'evidence_resource';
+}
+
+export function isDebugEvent(event: AIChatSSEEvent): event is AIChatDebugEvent {
+  return (
+    event.type === 'debug_context' ||
+    event.type === 'debug_tool_call' ||
+    event.type === 'debug_tool_result' ||
+    event.type === 'debug_metrics'
+  );
 }

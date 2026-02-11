@@ -19,7 +19,7 @@ import AIAgentConfigService from './aiAgentConfig';
 import { AIAgentCore } from './ai/service';
 import { DebugContext, DebugMessage, StructuredDebugResponse } from './types/aiAgent';
 import { StreamCallbacks } from './ai/types/stream';
-import { ProviderType, ProviderFactory } from './ai/providers/factory';
+import { ProviderType } from './ai/providers/factory';
 import {
   GetK8sResourcesTool,
   GetPodLogsTool,
@@ -31,7 +31,6 @@ import {
   PatchK8sResourceTool,
   GetIssueCommentTool,
 } from './ai/tools';
-import { textMessage } from './ai/types/message';
 import { getLogger } from 'server/lib/logger';
 import type { AIChatEvidenceEvent } from 'shared/types/aiChat';
 import { extractEvidence, generateResultPreview } from './ai/evidence/extractor';
@@ -199,76 +198,6 @@ export default class AIAgentService extends BaseService {
     return `✓ ${this.generateToolActivityMessage(toolName, toolArgs)}`;
   }
 
-  async classifyUserIntent(userMessage: string, conversationHistory: DebugMessage[]): Promise<'investigate' | 'fix'> {
-    try {
-      const provider = ProviderFactory.create({ provider: this.provider });
-
-      const conversationContext =
-        conversationHistory.length > 0
-          ? conversationHistory
-              .filter((m) => {
-                if (m.role === 'assistant' && m.content.trim().startsWith('[{') && m.content.includes('"toolCall"')) {
-                  return false;
-                }
-                return true;
-              })
-              .slice(-4)
-              .map((m) => {
-                const content = m.content.length > 200 ? m.content.substring(0, 200) + '...' : m.content;
-                return `${m.role}: ${content}`;
-              })
-              .join('\n\n')
-          : 'No previous conversation';
-
-      const classificationPrompt = `You are analyzing user intent in a debugging conversation. Based on the conversation history and the user's latest message, determine if they want to:
-- INVESTIGATE: Understand, analyze, or get information about an issue
-- FIX: Apply changes, commit fixes, or make modifications to code/resources
-
-Conversation history:
-${conversationContext}
-
-Latest user message:
-${userMessage}
-
-Rules:
-- If the user is asking questions, requesting explanations, or wants to understand something: respond INVESTIGATE
-- If the user is REPORTING a failure or issue (e.g., "I see X failed", "X is broken", "X is not working", "deploy failed"): respond INVESTIGATE. Reporting a problem is NOT the same as requesting a fix.
-- If the user is confirming they want changes applied, asking to commit, or requesting fixes to be made: respond FIX
-- Consider the full conversation context - if you previously suggested a fix and the user is now approving it, respond FIX
-- Phrases like "yes", "do it", "go ahead", "apply that", "commit it", "fix it" in response to a proposed solution indicate FIX
-- Questions like "why", "how", "what", "show me", "explain" indicate INVESTIGATE
-- Default to INVESTIGATE when uncertain. Only classify as FIX when the user explicitly and unambiguously requests changes.
-
-Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
-
-      let response = '';
-
-      for await (const chunk of provider.streamCompletion(
-        [textMessage('user', classificationPrompt)],
-        {
-          systemPrompt: 'You are a precise intent classifier. Respond only with INVESTIGATE or FIX.',
-          temperature: 0.1,
-        },
-        new AbortController().signal
-      )) {
-        if (chunk.type === 'text' && chunk.content) {
-          response += chunk.content;
-        }
-      }
-
-      const classification = response.trim().toUpperCase();
-
-      if (classification.includes('FIX')) {
-        return 'fix';
-      } else {
-        return 'investigate';
-      }
-    } catch (error: any) {
-      getLogger().error({ error }, 'AI: classifyUserIntent failed');
-      return 'investigate';
-    }
-  }
-
   async processQueryStream(
     userMessage: string,
     context: DebugContext,
@@ -288,7 +217,8 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
       impact: string;
       confirmButtonText: string;
     }) => Promise<boolean>,
-    mode?: 'investigate' | 'fix'
+    mode?: 'investigate' | 'fix',
+    onDebugEvent?: (event: any) => void
   ): Promise<{ response: string; isJson: boolean; totalInvestigationTimeMs: number }> {
     const effectiveMode = mode || 'investigate';
 
@@ -309,12 +239,14 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
     const callbacks: StreamCallbacks = {
       onTextChunk: (text) => onChunk(text),
       onThinking: (message) => onActivity?.({ type: 'thinking', message }),
-      onToolCall: (tool, args, toolCallId) =>
+      onToolCall: (tool, args, toolCallId) => {
         onActivity?.({
           type: 'tool_call',
           message: this.generateToolActivityMessage(tool, args),
           toolCallId,
-        }),
+        });
+        onDebugEvent?.({ type: 'debug_tool_call', toolCallId, toolName: tool, toolArgs: args });
+      },
       onToolResult: (result, toolName, toolArgs, toolDurationMs, totalDurationMs, toolCallId) => {
         const argsRecord = toolArgs as Record<string, unknown>;
         onActivity?.({
@@ -330,6 +262,7 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
           toolCallId,
           resultPreview: generateResultPreview(toolName, argsRecord, result),
         });
+        onDebugEvent?.({ type: 'debug_tool_result', toolCallId, toolName, toolResult: result, toolDurationMs });
         if (onEvidence) {
           try {
             const evidenceEvents = extractEvidence(toolName, argsRecord, result, {
@@ -356,7 +289,8 @@ Respond with ONLY the word INVESTIGATE or FIX, nothing else.`;
       context,
       conversationHistory,
       callbacks,
-      abortController.signal
+      abortController.signal,
+      onDebugEvent
     );
 
     return {

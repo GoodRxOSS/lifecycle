@@ -478,7 +478,7 @@ export default class AIAgentContextService extends BaseService {
         `involvedObject.name=${podName}`
       );
 
-      return eventsResponse.body.items.slice(-10).map((event) => ({
+      return eventsResponse.body.items.slice(-5).map((event) => ({
         type: event.type,
         reason: event.reason,
         message: event.message,
@@ -500,7 +500,7 @@ export default class AIAgentContextService extends BaseService {
           const name = event.involvedObject?.name || '';
           return name.includes(serviceName);
         })
-        .slice(-20)
+        .slice(-5)
         .map((event) => ({
           type: event.type,
           reason: event.reason,

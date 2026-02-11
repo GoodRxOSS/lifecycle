@@ -119,7 +119,8 @@ export class AIAgentCore {
     context: DebugContext,
     conversationHistory: DebugMessage[],
     callbacks: StreamCallbacks,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onDebugContext?: (event: any) => void
   ): Promise<ProcessQueryResult> {
     const startTime = Date.now();
 
@@ -208,6 +209,14 @@ export class AIAgentCore {
         mcpTools: this.mcpToolInfos,
       });
 
+      onDebugContext?.({
+        type: 'debug_context',
+        systemPrompt: prompt.systemPrompt,
+        maskingStats: maskResult.masked ? maskResult.stats : null,
+        provider: this.provider.name,
+        modelId: this.provider.getModelInfo()?.model || '',
+      });
+
       const responseHandler = new ResponseHandler(callbacks, context.buildUuid);
 
       const enhancedCallbacks: StreamCallbacks = {
@@ -234,6 +243,13 @@ export class AIAgentCore {
       const finalResult = responseHandler.getResult();
 
       const duration = Date.now() - startTime;
+
+      onDebugContext?.({
+        type: 'debug_metrics',
+        iterations: result.metrics.iterations,
+        totalToolCalls: result.metrics.toolCalls,
+        totalDurationMs: duration,
+      });
 
       getLogger().info(
         `AIAgentCore: query processing ${result.success ? 'completed' : 'failed'} iterations=${

@@ -20,7 +20,6 @@ import { countTokens } from '../prompts/tokenCounter';
 export interface MaskingOptions {
   recencyWindow: number;
   tokenThreshold: number;
-  placeholder: string;
 }
 
 export interface MaskingStats {
@@ -45,7 +44,6 @@ export interface MaskingResult {
 const DEFAULT_OPTIONS: MaskingOptions = {
   recencyWindow: 3,
   tokenThreshold: 25000,
-  placeholder: '[Tool output omitted for brevity]',
 };
 
 function estimatePartTokens(part: MessagePart): number {
@@ -86,14 +84,18 @@ function findProtectedBoundary(messages: ConversationMessage[], windowSize: numb
   return 0;
 }
 
-function maskToolResultsInMessage(msg: ConversationMessage, placeholder: string): ConversationMessage {
+function buildPlaceholder(part: ToolResultPart): string {
+  return `[${part.name} output omitted — re-call tool if needed]`;
+}
+
+function maskToolResultsInMessage(msg: ConversationMessage): ConversationMessage {
   const newParts = msg.parts.map((part): MessagePart => {
     if (part.type === 'tool_result' && part.result.success !== false) {
       return {
         ...part,
         result: {
           ...part.result,
-          agentContent: placeholder,
+          agentContent: buildPlaceholder(part),
         },
       } as ToolResultPart;
     }
@@ -132,7 +134,7 @@ export function maskObservations(messages: ConversationMessage[], options?: Part
       return msg;
     }
 
-    const masked = maskToolResultsInMessage(msg, opts.placeholder);
+    const masked = maskToolResultsInMessage(msg);
     for (let j = 0; j < msg.parts.length; j++) {
       const origPart = msg.parts[j];
       const newPart = masked.parts[j];

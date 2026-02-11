@@ -54,6 +54,9 @@ export interface DebugMessage {
   activityHistory?: ActivityLog[];
   evidenceItems?: EvidenceItem[];
   totalInvestigationTimeMs?: number;
+  debugContext?: DebugContextData;
+  debugToolData?: DebugToolData[];
+  debugMetrics?: DebugMetrics;
 }
 
 export interface FileChange {
@@ -100,4 +103,30 @@ export interface ModelOption {
   displayName: string;
   default: boolean;
   maxTokens: number;
+}
+
+export interface DebugToolData {
+  toolCallId: string;
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+  toolResult?: unknown;
+  toolDurationMs?: number;
+}
+
+export interface DebugContextData {
+  systemPrompt: string;
+  maskingStats: {
+    totalTokensBefore: number;
+    totalTokensAfter: number;
+    maskedParts: number;
+    savedTokens: number;
+  } | null;
+  provider: string;
+  modelId: string;
+}
+
+export interface DebugMetrics {
+  iterations: number;
+  totalToolCalls: number;
+  totalDurationMs: number;
 }

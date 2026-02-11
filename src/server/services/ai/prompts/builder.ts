@@ -170,6 +170,25 @@ ${serverSections}
       if (podCount > 0) {
         info += `\n  K8s: ${readyPods}/${podCount} pods ready`;
       }
+
+      for (const pod of serviceDebug.pods) {
+        for (const cs of pod.containerStatuses) {
+          const waitReason = cs.state?.waiting?.reason;
+          const termReason = cs.lastState?.terminated?.reason;
+          const parts: string[] = [];
+          if (waitReason) parts.push(waitReason);
+          if (termReason) parts.push(`last: ${termReason}`);
+          if (cs.restartCount > 0) parts.push(`restarts: ${cs.restartCount}`);
+          if (parts.length > 0) {
+            info += `\n  Container ${cs.name}: ${parts.join(', ')}`;
+          }
+        }
+        const unschedulable = pod.conditions.find((c: any) => c.type === 'PodScheduled' && c.status === 'False');
+        if (unschedulable) {
+          info += `\n  Scheduling: ${unschedulable.message || 'cannot be scheduled'}`;
+        }
+      }
+
       if (serviceDebug.issues.length > 0) {
         info += `\n  Issues: ${serviceDebug.issues.map((i) => i.title).join('; ')}`;
       }
@@ -180,6 +199,17 @@ ${serverSections}
             .slice(0, 3)
             .map((e) => `${e.reason}: ${e.message}`)
             .join('; ')}`;
+        }
+      }
+
+      if (serviceDebug.pods.length > 0) {
+        const logsSource = serviceDebug.pods.find((p) => p.recentLogs) || serviceDebug.pods[0];
+        if (logsSource?.recentLogs) {
+          const logLines = logsSource.recentLogs.split('\n').filter(Boolean);
+          const tail = logLines.slice(-15).join('\n');
+          if (tail) {
+            info += `\n  Recent logs (${logsSource.name}, last ${Math.min(logLines.length, 15)} lines):\n${tail}`;
+          }
         }
       }
     }
@@ -201,6 +231,56 @@ ${serverSections}
       section += `\n\nHEALTHY (${healthy.length}): ${healthy.map((d) => d.serviceName).join(', ')}`;
     }
     return section;
+  }
+
+  private buildDependencyGraphSummary(dependencyGraph: Record<string, any>, failingServiceNames: Set<string>): string {
+    if (!dependencyGraph || failingServiceNames.size === 0) return '';
+
+    const edges: Array<{ source: string; target: string }> = dependencyGraph.edges;
+    if (!Array.isArray(edges) || edges.length === 0) return '';
+
+    const dependsOn = new Map<string, Set<string>>();
+    const requiredBy = new Map<string, Set<string>>();
+
+    for (const edge of edges) {
+      if (edge.source === edge.target) continue;
+      if (!dependsOn.has(edge.source)) dependsOn.set(edge.source, new Set());
+      dependsOn.get(edge.source)!.add(edge.target);
+      if (!requiredBy.has(edge.target)) requiredBy.set(edge.target, new Set());
+      requiredBy.get(edge.target)!.add(edge.source);
+    }
+
+    const lines: string[] = [];
+
+    for (const name of failingServiceNames) {
+      const deps = dependsOn.get(name);
+      const consumers = requiredBy.get(name);
+      if (!deps && !consumers) continue;
+
+      if (deps && deps.size > 0) {
+        const failingDeps = [...deps].filter((d) => failingServiceNames.has(d));
+        if (failingDeps.length > 0) {
+          lines.push(`${name} depends on (ALSO FAILING): ${failingDeps.join(', ')}`);
+          const healthyDeps = [...deps].filter((d) => !failingServiceNames.has(d));
+          if (healthyDeps.length > 0) {
+            lines.push(`${name} depends on (healthy): ${healthyDeps.join(', ')}`);
+          }
+        } else {
+          lines.push(`${name} depends on: ${[...deps].join(', ')}`);
+        }
+      }
+      if (consumers && consumers.size > 0) {
+        lines.push(`${name} is required by: ${[...consumers].join(', ')}`);
+      }
+    }
+
+    if (lines.length === 0) return '';
+
+    return `\n\n## Service Dependencies (${
+      failingServiceNames.size
+    } failing services)\n\nUse this dependency information to identify root causes. If a failing service depends on another failing service, investigate the dependency first.\n\n${lines.join(
+      '\n'
+    )}`;
   }
 
   private buildEnvironmentContext(debugContext: DebugContext): string {
@@ -249,6 +329,9 @@ ${serverSections}
       servicesSection += this.renderRepoGroup(failingDeploys, healthyDeploys, servicesByName);
     }
 
+    const failingServiceNames = new Set(failingDeploys.map((d: any) => d.serviceName));
+    const dependencySummary = this.buildDependencyGraphSummary(lc.build.dependencyGraph, failingServiceNames);
+
     let lifecycleYamlSection: string;
     if (!debugContext.lifecycleYaml) {
       lifecycleYamlSection = 'lifecycle.yaml not available';
@@ -292,7 +375,7 @@ ${
     : 'PR Comment ID: Not available'
 }
 
-${servicesSection}
+${servicesSection}${dependencySummary}
 
 ## Configuration (lifecycle.yaml)
 ${lifecycleYamlSection}`;

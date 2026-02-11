@@ -25,6 +25,8 @@ interface ModelSelectorProps {
   onClearHistory: () => void;
   loading: boolean;
   hasMessages: boolean;
+  onLabelClick?: () => void;
+  xrayMode?: boolean;
 }
 
 export function ModelSelector({
@@ -34,13 +36,25 @@ export function ModelSelector({
   onClearHistory,
   loading,
   hasMessages,
+  onLabelClick,
+  xrayMode,
 }: ModelSelectorProps) {
   return (
     <>
       <div className="flex items-center gap-2">
         {availableModels.length > 0 && (
           <Select
-            label="Model"
+            label={
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onLabelClick?.();
+                }}
+                className="cursor-default select-none"
+              >
+                Model{xrayMode && <span className="ml-1 text-amber-500 animate-pulse">[X-RAY]</span>}
+              </span>
+            }
             labelPlacement="outside-left"
             size="sm"
             className="w-60"

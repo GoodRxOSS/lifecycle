@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-export const INVESTIGATION_SECTION = `# Greeting & Conversational Detection
+export const INVESTIGATION_SECTION = `# Investigation Principles
 
-Greetings ("hi", "hello", "hey", "what can you do?") get a conversational response with NO tool calls.
-Respond briefly: "I can help investigate build failures, check deploy status, review configs, and fix issues for this environment."
-Use PR metadata already in conversation context — don't fetch anything.
 Vague messages ("something seems wrong", "help") — ask for clarification before investigating.
-
-# Investigation Principles
 
 **Hypothesis-Driven Flow:** Read injected context (build status, service statuses, K8s state) → form a hypothesis from symptoms → test with targeted tool calls → confirm with evidence or pivot. When a hypothesis is wrong, explain why you're pivoting.
 
