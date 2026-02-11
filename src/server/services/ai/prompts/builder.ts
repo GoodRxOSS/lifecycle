@@ -203,6 +203,56 @@ ${serverSections}
     return section;
   }
 
+  private buildDependencyGraphSummary(dependencyGraph: Record<string, any>, failingServiceNames: Set<string>): string {
+    if (!dependencyGraph || failingServiceNames.size === 0) return '';
+
+    const edges: Array<{ source: string; target: string }> = dependencyGraph.edges;
+    if (!Array.isArray(edges) || edges.length === 0) return '';
+
+    const dependsOn = new Map<string, Set<string>>();
+    const requiredBy = new Map<string, Set<string>>();
+
+    for (const edge of edges) {
+      if (edge.source === edge.target) continue;
+      if (!dependsOn.has(edge.source)) dependsOn.set(edge.source, new Set());
+      dependsOn.get(edge.source)!.add(edge.target);
+      if (!requiredBy.has(edge.target)) requiredBy.set(edge.target, new Set());
+      requiredBy.get(edge.target)!.add(edge.source);
+    }
+
+    const lines: string[] = [];
+
+    for (const name of failingServiceNames) {
+      const deps = dependsOn.get(name);
+      const consumers = requiredBy.get(name);
+      if (!deps && !consumers) continue;
+
+      if (deps && deps.size > 0) {
+        const failingDeps = [...deps].filter((d) => failingServiceNames.has(d));
+        if (failingDeps.length > 0) {
+          lines.push(`${name} depends on (ALSO FAILING): ${failingDeps.join(', ')}`);
+          const healthyDeps = [...deps].filter((d) => !failingServiceNames.has(d));
+          if (healthyDeps.length > 0) {
+            lines.push(`${name} depends on (healthy): ${healthyDeps.join(', ')}`);
+          }
+        } else {
+          lines.push(`${name} depends on: ${[...deps].join(', ')}`);
+        }
+      }
+      if (consumers && consumers.size > 0) {
+        lines.push(`${name} is required by: ${[...consumers].join(', ')}`);
+      }
+    }
+
+    if (lines.length === 0) return '';
+
+    return `\n\n## Service Dependencies (${
+      failingServiceNames.size
+    } failing services)\n\nUse this dependency information to identify root causes. If a failing service depends on another failing service, investigate the dependency first.\n\n${lines.join(
+      '\n'
+    )}`;
+  }
+
   private buildEnvironmentContext(debugContext: DebugContext): string {
     const lc = debugContext.lifecycleContext;
     const servicesByName = new Map<string, ServiceDebugInfo>();
@@ -249,6 +299,9 @@ ${serverSections}
       servicesSection += this.renderRepoGroup(failingDeploys, healthyDeploys, servicesByName);
     }
 
+    const failingServiceNames = new Set(failingDeploys.map((d: any) => d.serviceName));
+    const dependencySummary = this.buildDependencyGraphSummary(lc.build.dependencyGraph, failingServiceNames);
+
     let lifecycleYamlSection: string;
     if (!debugContext.lifecycleYaml) {
       lifecycleYamlSection = 'lifecycle.yaml not available';
@@ -292,7 +345,7 @@ ${
     : 'PR Comment ID: Not available'
 }
 
-${servicesSection}
+${servicesSection}${dependencySummary}
 
 ## Configuration (lifecycle.yaml)
 ${lifecycleYamlSection}`;
