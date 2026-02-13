@@ -106,27 +106,7 @@ function containerState(cs?: k8s.V1ContainerStatus): { state: ContainerState; re
 }
 
 function extractContainers(pod: k8s.V1Pod): ContainerInfo[] {
-  const specContainers = pod.spec?.containers ?? [];
-  const statusContainers = pod.status?.containerStatuses ?? [];
-  const statusByName = new Map(statusContainers.map((cs) => [cs.name, cs]));
-
   const containers: ContainerInfo[] = [];
-
-  // Regular containers
-  for (const c of specContainers) {
-    const cs = statusByName.get(c.name);
-    const { state, reason } = containerState(cs);
-
-    containers.push({
-      name: c.name,
-      image: c.image,
-      ready: cs?.ready ?? false,
-      restarts: cs?.restartCount ?? 0,
-      state,
-      reason,
-      isInit: false,
-    });
-  }
 
   // Init containers
   const initSpec = pod.spec?.initContainers ?? [];
@@ -145,6 +125,26 @@ function extractContainers(pod: k8s.V1Pod): ContainerInfo[] {
       state,
       reason,
       isInit: true,
+    });
+  }
+
+  const specContainers = pod.spec?.containers ?? [];
+  const statusContainers = pod.status?.containerStatuses ?? [];
+  const statusByName = new Map(statusContainers.map((cs) => [cs.name, cs]));
+
+  // Regular containers
+  for (const c of specContainers) {
+    const cs = statusByName.get(c.name);
+    const { state, reason } = containerState(cs);
+
+    containers.push({
+      name: c.name,
+      image: c.image,
+      ready: cs?.ready ?? false,
+      restarts: cs?.restartCount ?? 0,
+      state,
+      reason,
+      isInit: false,
     });
   }
 
