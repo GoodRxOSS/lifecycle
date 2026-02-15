@@ -109,7 +109,6 @@ export default class AIAgentConfigService extends BaseService {
     if (repoOverride.systemPromptOverride !== undefined) {
       result.systemPromptOverride = repoOverride.systemPromptOverride;
     }
-
     const arrayFields: (keyof AIAgentRepoOverride)[] = ['additiveRules', 'excludedTools', 'excludedFilePatterns'];
 
     for (const field of arrayFields) {

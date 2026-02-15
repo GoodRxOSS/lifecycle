@@ -109,6 +109,7 @@ export class GeminiProvider extends BaseLLMProvider {
     let accumulatedText = '';
     const functionCalls: Array<FunctionCall & { thoughtSignature?: string }> = [];
     let lastCandidate: Candidate | null = null;
+    let lastRawChunk: any = null;
 
     for await (const chunk of stream) {
       if (signal?.aborted) {
@@ -121,6 +122,7 @@ export class GeminiProvider extends BaseLLMProvider {
       }
 
       lastCandidate = candidate;
+      lastRawChunk = chunk;
 
       if (candidate.finishReason === 'STOP' && (!candidate.content?.parts || candidate.content.parts.length === 0)) {
         getLogger().error(
@@ -182,6 +184,16 @@ export class GeminiProvider extends BaseLLMProvider {
       yield {
         type: 'tool_call',
         toolCalls,
+      };
+    }
+
+    if (lastRawChunk?.usageMetadata) {
+      yield {
+        type: 'text',
+        usage: {
+          inputTokens: lastRawChunk.usageMetadata.promptTokenCount || 0,
+          outputTokens: lastRawChunk.usageMetadata.candidatesTokenCount || 0,
+        },
       };
     }
   }

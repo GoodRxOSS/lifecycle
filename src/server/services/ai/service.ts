@@ -58,6 +58,10 @@ export interface AIAgentConfig {
   systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
+  modelPricing?: {
+    inputCostPerMillion: number;
+    outputCostPerMillion: number;
+  };
 }
 
 export interface ProcessQueryResult {
@@ -67,6 +71,8 @@ export interface ProcessQueryResult {
     iterations: number;
     toolCalls: number;
     duration: number;
+    inputTokens: number;
+    outputTokens: number;
   };
 }
 
@@ -81,6 +87,7 @@ export class AIAgentCore {
   private systemPromptOverride?: string;
   private excludedTools?: string[];
   private excludedFilePatterns?: string[];
+  private modelPricing?: { inputCostPerMillion: number; outputCostPerMillion: number };
 
   private mcpToolsLoaded = false;
   private mcpToolInfos: McpToolInfo[] = [];
@@ -103,6 +110,7 @@ export class AIAgentCore {
     this.systemPromptOverride = config.systemPromptOverride;
     this.excludedTools = config.excludedTools;
     this.excludedFilePatterns = config.excludedFilePatterns;
+    this.modelPricing = config.modelPricing;
 
     this.toolRegistry = new ToolRegistry();
     this.registerAllTools();
@@ -249,6 +257,14 @@ export class AIAgentCore {
         iterations: result.metrics.iterations,
         totalToolCalls: result.metrics.toolCalls,
         totalDurationMs: duration,
+        inputTokens: result.metrics.inputTokens,
+        outputTokens: result.metrics.outputTokens,
+        ...(this.modelPricing
+          ? {
+              inputCostPerMillion: this.modelPricing.inputCostPerMillion,
+              outputCostPerMillion: this.modelPricing.outputCostPerMillion,
+            }
+          : {}),
       });
 
       getLogger().info(

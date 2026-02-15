@@ -18,6 +18,42 @@ import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../../types/tool';
 import { GitHubClient } from '../shared/githubClient';
 
+export function validateDiff(
+  oldContent: string,
+  newContent: string
+): { valid: boolean; error?: string; linesRemoved: number; linesChanged: number } {
+  const oldLines = oldContent.split('\n');
+  const newLines = newContent.split('\n');
+  const linesRemoved = Math.max(0, oldLines.length - newLines.length);
+
+  let linesChanged = 0;
+  const minLen = Math.min(oldLines.length, newLines.length);
+  for (let i = 0; i < minLen; i++) {
+    if (oldLines[i] !== newLines[i]) linesChanged++;
+  }
+  linesChanged += Math.abs(oldLines.length - newLines.length);
+
+  if (linesRemoved > 3) {
+    return {
+      valid: false,
+      linesRemoved,
+      linesChanged,
+      error: `SAFETY ERROR: Your update removes ${linesRemoved} lines from the original file. Only modify the specific lines needed for the fix. Use the exact content from get_file as your starting point, change only the targeted lines, and resubmit.`,
+    };
+  }
+
+  if (linesChanged > 10) {
+    return {
+      valid: false,
+      linesRemoved,
+      linesChanged,
+      error: `SAFETY ERROR: Your update changes ${linesChanged} lines. This exceeds the expected scope for a targeted fix. Use the exact content from get_file as your starting point, change only the targeted lines, and resubmit.`,
+    };
+  }
+
+  return { valid: true, linesRemoved, linesChanged };
+}
+
 export class UpdateFileTool extends BaseTool {
   static readonly Name = 'update_file';
 
@@ -92,6 +128,7 @@ export class UpdateFileTool extends BaseTool {
       const octokit = await this.githubClient.getOctokit('ai-agent-update-file');
 
       let currentFileSha: string | undefined;
+      let currentFileContent: string | undefined;
       try {
         const currentFile = await octokit.request(`GET /repos/${owner}/${repo}/contents/${filePath}`, {
           ref: branch,
@@ -99,11 +136,21 @@ export class UpdateFileTool extends BaseTool {
         if (currentFile.data && 'sha' in currentFile.data) {
           currentFileSha = currentFile.data.sha;
         }
+        if (currentFile.data && 'content' in currentFile.data) {
+          currentFileContent = Buffer.from(currentFile.data.content as string, 'base64').toString('utf-8');
+        }
       } catch (error) {
         currentFileSha = undefined;
       }
 
       const contentToCommit = newContent.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+
+      if (currentFileContent) {
+        const diffResult = validateDiff(currentFileContent, contentToCommit);
+        if (!diffResult.valid) {
+          return this.createErrorResult(diffResult.error!, 'DIFF_VALIDATION_FAILED', false);
+        }
+      }
 
       const response = await octokit.request(`PUT /repos/${owner}/${repo}/contents/${filePath}`, {
         message: `[Lifecycle AI] ${commitMessage}`,

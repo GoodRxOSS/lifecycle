@@ -14,9 +14,15 @@
  * limitations under the License.
  */
 
-export function transformProviderModels(
-  providers: any[]
-): Array<{ provider: string; modelId: string; displayName: string; default: boolean; maxTokens: number }> {
+export function transformProviderModels(providers: any[]): Array<{
+  provider: string;
+  modelId: string;
+  displayName: string;
+  default: boolean;
+  maxTokens: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
+}> {
   return providers
     .filter((provider: any) => provider.enabled)
     .flatMap((provider: any) => {
@@ -32,6 +38,8 @@ export function transformProviderModels(
           displayName: model.displayName,
           default: model.default || false,
           maxTokens: model.maxTokens,
+          ...(model.inputCostPerMillion != null ? { inputCostPerMillion: model.inputCostPerMillion } : {}),
+          ...(model.outputCostPerMillion != null ? { outputCostPerMillion: model.outputCostPerMillion } : {}),
         }));
     });
 }

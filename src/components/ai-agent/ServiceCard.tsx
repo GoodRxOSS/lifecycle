@@ -222,7 +222,7 @@ export function ServiceCard({
                 {service.errorSourceDetail}
               </p>
             )}
-            {service.filePath && (
+            {service.filePath && !(service.files && service.files.some((f) => f.path === service.filePath)) && (
               <div>
                 {renderFileLink(service.filePath, repository, service.lineNumber, service.lineNumberEnd)}
               </div>
@@ -233,14 +233,16 @@ export function ServiceCard({
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <h5 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Error Output</h5>
-                <Button
-                  size="sm"
-                  variant="light"
-                  onClick={() => setShowDetails(!showDetails)}
-                  className="text-xs"
-                >
-                  {showDetails ? 'Hide' : 'Show'} raw output
-                </Button>
+                {service.keyError.length > 200 && (
+                  <Button
+                    size="sm"
+                    variant="light"
+                    onClick={() => setShowDetails(!showDetails)}
+                    className="text-xs"
+                  >
+                    {showDetails ? 'Hide' : 'Show'} raw output
+                  </Button>
+                )}
               </div>
               <div className="bg-danger-50 border-l-4 border-danger p-4 rounded-lg">
                 <pre className="text-sm text-danger-900 overflow-x-auto m-0 leading-relaxed font-mono whitespace-pre-wrap">

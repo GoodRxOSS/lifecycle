@@ -26,6 +26,11 @@ export interface CompletionOptions {
   temperature?: number;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export type StreamChunkType = 'text' | 'tool_call' | 'thinking' | 'error';
 
 export interface StreamChunk {
@@ -33,6 +38,7 @@ export interface StreamChunk {
   content?: string;
   toolCalls?: ToolCall[];
   metadata?: Record<string, unknown>;
+  usage?: TokenUsage;
 }
 
 export interface ModelInfo {

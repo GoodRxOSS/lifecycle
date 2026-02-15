@@ -36,7 +36,7 @@ export class QueryDatabaseTool extends BaseTool {
           filters: {
             type: 'object',
             description:
-              'WHERE conditions as key-value pairs. Deploy uuid format is "{serviceName}-{buildUuid}" (e.g., "vpii-events-broad-lab-080573"). Use SQL LIKE patterns with % for partial matching: {"uuid": "vpii-events-%"} finds all deploys for service vpii-events. Use "uuid" for builds/deploys, "id" for others. Only use actual table columns as keys.',
+              'WHERE conditions as key-value pairs. Deploy uuid format is "{serviceName}-{buildUuid}" (e.g., "vpii-events-broad-lab-080573"). Use SQL LIKE patterns with % for partial matching: {"uuid": "vpii-events-%"} finds all deploys for service vpii-events. Use "uuid" for builds/deploys, "id" for others. Only use actual table columns as keys. IMPORTANT: To find all deploys for a build, query the builds table with relations: ["deploys"], e.g., {"table": "builds", "filters": {"uuid": "my-build-uuid"}, "relations": ["deploys"]}. Do NOT filter deploys by buildId — it is a numeric FK, not the build UUID string.',
           },
           relations: {
             type: 'array',

@@ -79,6 +79,16 @@ export class AnthropicProvider extends BaseLLMProvider {
         toolCalls,
       };
     }
+
+    if (response.usage) {
+      yield {
+        type: 'text',
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+        },
+      };
+    }
   }
 
   formatHistory(messages: ConversationMessage[]): unknown[] {

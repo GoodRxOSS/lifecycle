@@ -367,6 +367,7 @@ ${serverSections}
 
 Build: ${debugContext.buildUuid} | Status: ${lc.build.status} | Namespace: ${lc.build.namespace}
 PR: #${lc.pullRequest.number || 'N/A'} "${lc.pullRequest.title || 'N/A'}" by ${lc.pullRequest.username || 'N/A'}
+Labels: ${lc.pullRequest.labels?.length ? lc.pullRequest.labels.join(', ') : 'none'}
 Repo: ${lc.pullRequest.fullName} @ ${lc.pullRequest.branch} (base: ${lc.pullRequest.baseBranch || 'N/A'})
 SHA: ${lc.pullRequest.latestCommit || lc.build.sha || 'N/A'}
 ${
