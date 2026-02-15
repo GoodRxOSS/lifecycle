@@ -34,7 +34,12 @@ function redactHeaders(config: any): any {
  * /api/v2/ai/config/mcp-servers:
  *   get:
  *     summary: List MCP server configs
- *     description: Returns all MCP server configurations for the given scope. Header values are redacted in responses.
+ *     description: >
+ *       Returns all MCP server configurations for the given scope. Header values are
+ *       redacted to "******" in responses for security. Each config includes its
+ *       cachedTools array, which is populated during creation and refreshed by the
+ *       health endpoint. Use scope "global" (default) for org-wide servers or pass
+ *       a repository full name (e.g. "goodrx/lifecycle") for repo-scoped servers.
  *     tags:
  *       - MCP Server Config
  *     operationId: listMcpServerConfigs
@@ -44,10 +49,13 @@ function redactHeaders(config: any): any {
  *         schema:
  *           type: string
  *           default: global
- *         description: Scope to filter by (e.g. "global" or a repository full name).
+ *         description: >
+ *           Scope to filter by. Use "global" for org-wide configs or a repository
+ *           full name (e.g. "goodrx/lifecycle") for repo-scoped configs.
+ *         example: global
  *     responses:
  *       '200':
- *         description: List of MCP server configurations
+ *         description: List of MCP server configurations (header values redacted)
  *         content:
  *           application/json:
  *             schema:

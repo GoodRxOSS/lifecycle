@@ -333,4 +333,13 @@ export interface AIAgentConfig {
   systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
+  maxIterations?: number;
+  maxToolCalls?: number;
+  maxRepeatedCalls?: number;
+  compressionThreshold?: number;
+  observationMaskingRecencyWindow?: number;
+  observationMaskingTokenThreshold?: number;
+  toolExecutionTimeout?: number;
+  toolOutputMaxChars?: number;
+  retryBudget?: number;
 }

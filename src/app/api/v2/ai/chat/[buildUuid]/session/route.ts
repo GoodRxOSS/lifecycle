@@ -25,7 +25,11 @@ import AIAgentConversationService from 'server/services/ai/conversation/storage'
  * /api/v2/ai/chat/{buildUuid}/session:
  *   delete:
  *     summary: Clear conversation session
- *     description: Clears all conversation messages for a given build UUID.
+ *     description: >
+ *       Deletes all conversation messages for a given build UUID and resets the session.
+ *       Sessions are stored in Redis and expire automatically after the configured
+ *       sessionTTL (default 3600 seconds). Use this endpoint to force-clear a session
+ *       before its TTL, for example when starting a fresh investigation.
  *     tags:
  *       - AI Chat
  *     operationId: deleteAIChatSession
@@ -36,6 +40,7 @@ import AIAgentConversationService from 'server/services/ai/conversation/storage'
  *         schema:
  *           type: string
  *         description: The UUID of the build whose session to clear.
+ *         example: white-poetry-596195
  *     responses:
  *       '200':
  *         description: Session cleared successfully

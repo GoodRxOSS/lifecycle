@@ -26,13 +26,17 @@ import { transformProviderModels } from 'server/services/ai/utils/modelTransform
  * /api/v2/ai/models:
  *   get:
  *     summary: Get available AI models
- *     description: Returns a list of enabled AI models from the effective configuration.
+ *     description: >
+ *       Returns a list of enabled AI models from the effective configuration.
+ *       Each model entry includes the provider, model ID, display name, max tokens,
+ *       and whether it is the default. Returns an empty array if the AI agent is disabled.
+ *       Use this endpoint to populate a model-picker in the UI before calling the chat endpoint.
  *     tags:
  *       - AI Chat
  *     operationId: getAIModels
  *     responses:
  *       '200':
- *         description: List of available AI models
+ *         description: List of available AI models. Empty array when AI is disabled.
  *         content:
  *           application/json:
  *             schema:

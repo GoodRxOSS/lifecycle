@@ -56,9 +56,8 @@ describe('GetFileTool', () => {
     const data = JSON.parse(result.agentContent);
     expect(data.path).toBe('src/index.ts');
     expect(data.sha).toBe('abc123');
-    expect(data.content).toContain('1:');
-    expect(data.content).toContain('hello world');
-    expect(data.rawContent).toBeUndefined();
+    expect(data.content).toBe('hello world\nsecond line');
+    expect(data.totalLines).toBe(2);
   });
 
   it('returns error for access denied', async () => {

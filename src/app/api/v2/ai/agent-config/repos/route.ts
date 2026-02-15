@@ -25,7 +25,11 @@ import AIAgentConfigService from 'server/services/aiAgentConfig';
  * /api/v2/ai/agent-config/repos:
  *   get:
  *     summary: List all repository AI agent config overrides
- *     description: Returns an array of all repository-level AI agent configuration overrides.
+ *     description: >
+ *       Returns an array of all repository-level AI agent configuration overrides.
+ *       These are partial configs that override specific fields of the global config.
+ *       To see the fully merged config for a specific repo, use the /effective endpoint instead.
+ *       Soft-deleted overrides are excluded from the response.
  *     tags:
  *       - AI Agent Config
  *     operationId: listRepoAIAgentConfigs

@@ -18,6 +18,10 @@ import { StreamCallbacks } from '../types/stream';
 import { JSONBuffer } from './jsonBuffer';
 import { getLogger } from 'server/lib/logger';
 
+function stripCodeFence(text: string): string {
+  return text.replace(/```(?:json)?\s*\n?/g, '').replace(/\n?\s*```/g, '');
+}
+
 export class ResponseHandler {
   private jsonBuffer: JSONBuffer;
   private isJsonResponse: boolean = false;
@@ -34,12 +38,13 @@ export class ResponseHandler {
       this.isJsonResponse = true;
       getLogger().info(`AI: JSON response detected buildUuid=${this.buildUuid || 'none'}`);
       this.callbacks.onThinking('Generating structured report...');
-      // Include any buffered text that was part of the JSON start
-      if (this.textBuffer) {
-        this.jsonBuffer.append(this.textBuffer);
-        this.textBuffer = '';
-      }
-      this.jsonBuffer.append(text);
+      // Strip fences and preamble, then buffer only the JSON portion
+      const combined = this.textBuffer + text;
+      const stripped = stripCodeFence(combined);
+      const jsonIdx = stripped.indexOf('{');
+      const jsonContent = jsonIdx >= 0 ? stripped.substring(jsonIdx) : stripped;
+      this.textBuffer = '';
+      this.jsonBuffer.append(jsonContent);
       this.callbacks.onTextChunk(text);
       return;
     }
@@ -66,13 +71,22 @@ export class ResponseHandler {
 
   private isJsonStart(text: string): boolean {
     const trimmed = text.trim();
-    return trimmed.startsWith('{') && trimmed.includes('"type"');
+    // Direct JSON start
+    if (trimmed.startsWith('{') && trimmed.includes('"type"')) return true;
+    // Markdown-fenced JSON: ```json\n{ or ```\n{
+    if (/```(?:json)?\s*\n?\s*\{/.test(trimmed) && trimmed.includes('"type"')) return true;
+    // Preamble text followed by fenced JSON containing "type"
+    const stripped = stripCodeFence(trimmed);
+    const braceIdx = stripped.indexOf('{');
+    if (braceIdx >= 0 && stripped.includes('"type"')) return true;
+    return false;
   }
 
   getResult(): { response: string; isJson: boolean } {
     if (this.isJsonResponse) {
+      const content = stripCodeFence(this.jsonBuffer.getContent()).trim();
       return {
-        response: this.jsonBuffer.getContent(),
+        response: content,
         isJson: true,
       };
     }

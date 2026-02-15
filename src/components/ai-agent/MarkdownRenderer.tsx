@@ -104,8 +104,8 @@ function CodeHighlight({
       <ShikiHighlighter
         language={language}
         theme="one-dark-pro"
-        addDefaultStyles={false}
-        showLineNumbers={highlightLines.length > 0}
+        addDefaultStyles={true}
+        showLineNumbers={true}
         startingLineNumber={startingLineNumber}
         transformers={highlightLines.length > 0 ? [createLineHighlightTransformer(highlightLines)] : undefined}
       >

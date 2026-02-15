@@ -124,6 +124,15 @@ export default class AIAgentService extends BaseService {
       excludedTools: aiAgentConfig.excludedTools,
       excludedFilePatterns: aiAgentConfig.excludedFilePatterns,
       modelPricing: this.modelPricing,
+      maxIterations: aiAgentConfig.maxIterations,
+      maxToolCalls: aiAgentConfig.maxToolCalls,
+      maxRepeatedCalls: aiAgentConfig.maxRepeatedCalls,
+      compressionThreshold: aiAgentConfig.compressionThreshold,
+      observationMaskingRecencyWindow: aiAgentConfig.observationMaskingRecencyWindow,
+      observationMaskingTokenThreshold: aiAgentConfig.observationMaskingTokenThreshold,
+      toolExecutionTimeout: aiAgentConfig.toolExecutionTimeout,
+      toolOutputMaxChars: aiAgentConfig.toolOutputMaxChars,
+      retryBudget: aiAgentConfig.retryBudget,
     });
   }
 

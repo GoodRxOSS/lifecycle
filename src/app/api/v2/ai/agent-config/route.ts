@@ -27,7 +27,11 @@ import { aiAgentConfigSchema } from 'server/lib/validation/aiAgentConfigSchemas'
  * /api/v2/ai/agent-config:
  *   get:
  *     summary: Get global AI agent configuration
- *     description: Returns the current global AI agent configuration from the database.
+ *     description: >
+ *       Returns the current global AI agent configuration. This is the base configuration
+ *       that applies to all repositories unless overridden by a per-repository config.
+ *       The response includes provider settings, model definitions, session limits,
+ *       tool exclusions, and performance tuning parameters.
  *     tags:
  *       - AI Agent Config
  *     operationId: getGlobalAIAgentConfig
@@ -57,7 +61,12 @@ const getHandler = async (req: NextRequest) => {
  * /api/v2/ai/agent-config:
  *   put:
  *     summary: Update global AI agent configuration
- *     description: Validates and updates the global AI agent configuration.
+ *     description: >
+ *       Validates and replaces the global AI agent configuration. The full AIAgentConfig
+ *       object must be provided (this is a full replacement, not a patch). Validation
+ *       enforces limits on systemPromptOverride length (max 50,000 chars), excludedFilePatterns
+ *       count, and prevents exclusion of core tools. The updated configuration is returned.
+ *       Changes take effect immediately and invalidate cached effective configs.
  *     tags:
  *       - AI Agent Config
  *     operationId: updateGlobalAIAgentConfig
@@ -75,7 +84,10 @@ const getHandler = async (req: NextRequest) => {
  *             schema:
  *               $ref: '#/components/schemas/GetGlobalAIAgentConfigSuccessResponse'
  *       '400':
- *         description: Validation error
+ *         description: >
+ *           Validation error. Possible reasons: JSON schema violation,
+ *           systemPromptOverride exceeds maximum length, excluded tool is a core tool,
+ *           invalid exclusion pattern.
  *         content:
  *           application/json:
  *             schema:

@@ -9,7 +9,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
       version: '2.0.0',
       description: 'API documentation for lifecycle',
     },
+    security: [{ BearerAuth: [] }],
     components: {
+      securitySchemes: {
+        BearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          description:
+            'JWT token issued by a Keycloak identity provider. ' +
+            'Pass it in the Authorization header as "Bearer <token>". ' +
+            'Authentication is only enforced when the ENABLE_AUTH environment variable is set to "true". ' +
+            'When disabled, all requests are allowed without a token.',
+        },
+      },
       schemas: {
         // ===================================================================
         // Core Reusable Schemas
@@ -708,11 +721,23 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AIAgentModelConfig: {
           type: 'object',
           properties: {
-            id: { type: 'string' },
-            displayName: { type: 'string' },
+            id: {
+              type: 'string',
+              description: 'Model identifier used in API calls.',
+              example: 'claude-sonnet-4-20250514',
+            },
+            displayName: { type: 'string', example: 'Claude Sonnet' },
             enabled: { type: 'boolean' },
-            default: { type: 'boolean' },
-            maxTokens: { type: 'integer' },
+            default: { type: 'boolean', description: 'Whether this is the default model for the provider.' },
+            maxTokens: { type: 'integer', description: 'Maximum output tokens for this model.', example: 8192 },
+            inputCostPerMillion: {
+              type: 'number',
+              description: 'Cost per million input tokens (USD). Used for UI cost display.',
+            },
+            outputCostPerMillion: {
+              type: 'number',
+              description: 'Cost per million output tokens (USD). Used for UI cost display.',
+            },
           },
           required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],
         },
@@ -745,6 +770,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+            maxIterations: { type: 'integer', description: 'Maximum orchestration loop iterations' },
+            maxToolCalls: { type: 'integer', description: 'Maximum total tool calls per query' },
+            maxRepeatedCalls: {
+              type: 'integer',
+              description: 'Maximum repeated calls with same arguments before loop detection',
+            },
+            compressionThreshold: {
+              type: 'integer',
+              description: 'Token count threshold before conversation history is compressed',
+            },
+            observationMaskingRecencyWindow: {
+              type: 'integer',
+              description: 'Number of recent tool results to preserve when masking observations',
+            },
+            observationMaskingTokenThreshold: {
+              type: 'integer',
+              description: 'Token count threshold before observation masking activates',
+            },
+            toolExecutionTimeout: { type: 'integer', description: 'Tool execution timeout in milliseconds' },
+            toolOutputMaxChars: { type: 'integer', description: 'Maximum characters in tool output before truncation' },
+            retryBudget: { type: 'integer', description: 'Maximum retry attempts per query on provider errors' },
           },
           required: ['enabled', 'providers', 'maxMessagesPerSession', 'sessionTTL'],
         },
@@ -841,12 +887,19 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         AIModel: {
           type: 'object',
+          description: 'An available AI model returned by the models endpoint.',
           properties: {
-            provider: { type: 'string' },
-            modelId: { type: 'string' },
-            displayName: { type: 'string' },
-            default: { type: 'boolean' },
-            maxTokens: { type: 'integer' },
+            provider: { type: 'string', description: 'The LLM provider name.', example: 'anthropic' },
+            modelId: {
+              type: 'string',
+              description: 'The model ID to pass to the chat endpoint.',
+              example: 'claude-sonnet-4-20250514',
+            },
+            displayName: { type: 'string', example: 'Claude Sonnet' },
+            default: { type: 'boolean', description: 'Whether this is the default model.' },
+            maxTokens: { type: 'integer', example: 8192 },
+            inputCostPerMillion: { type: 'number', description: 'Cost per million input tokens (USD).' },
+            outputCostPerMillion: { type: 'number', description: 'Cost per million output tokens (USD).' },
           },
           required: ['provider', 'modelId', 'displayName', 'default', 'maxTokens'],
         },
@@ -898,13 +951,105 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         ConversationMessage: {
           type: 'object',
+          description: 'A single message in the conversation history.',
           properties: {
-            role: { type: 'string', enum: ['user', 'assistant'] },
-            content: { type: 'string' },
-            timestamp: { type: 'integer' },
-            isSystemAction: { type: 'boolean' },
+            role: { type: 'string', enum: ['user', 'assistant', 'system'] },
+            content: { type: 'string', description: 'The message text or JSON string for structured responses.' },
+            timestamp: { type: 'integer', description: 'Unix timestamp in milliseconds.' },
+            isSystemAction: {
+              type: 'boolean',
+              description: 'True when the message was initiated by a system action rather than a user.',
+            },
+            activityHistory: {
+              type: 'array',
+              description: 'Tool call activity recorded during the assistant response.',
+              items: { $ref: '#/components/schemas/ActivityHistoryEntry' },
+            },
+            evidenceItems: {
+              type: 'array',
+              description: 'Evidence references (files, commits, resources) found during investigation.',
+              items: { type: 'object' },
+            },
+            totalInvestigationTimeMs: {
+              type: 'number',
+              description: 'Total wall-clock time spent generating this response.',
+            },
+            debugContext: { $ref: '#/components/schemas/DebugContext' },
+            debugToolData: {
+              type: 'array',
+              description: 'Detailed tool call/result data for debugging.',
+              items: { $ref: '#/components/schemas/DebugToolData' },
+            },
+            debugMetrics: { $ref: '#/components/schemas/DebugMetrics' },
           },
           required: ['role', 'content', 'timestamp'],
+        },
+
+        ActivityHistoryEntry: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', description: 'The activity type (tool_call, processing, thinking, error).' },
+            message: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'completed', 'failed'] },
+            details: {
+              type: 'object',
+              properties: {
+                toolDurationMs: { type: 'number' },
+                totalDurationMs: { type: 'number' },
+              },
+            },
+            toolCallId: { type: 'string' },
+            resultPreview: { type: 'string', description: 'Truncated preview of the tool result.' },
+          },
+          required: ['type', 'message'],
+        },
+
+        DebugContext: {
+          type: 'object',
+          description: 'Debug information about the system prompt and model used for a response.',
+          properties: {
+            systemPrompt: { type: 'string' },
+            maskingStats: {
+              type: 'object',
+              nullable: true,
+              properties: {
+                totalTokensBefore: { type: 'integer' },
+                totalTokensAfter: { type: 'integer' },
+                maskedParts: { type: 'integer' },
+                savedTokens: { type: 'integer' },
+              },
+            },
+            provider: { type: 'string', description: 'LLM provider name (e.g. anthropic, openai).' },
+            modelId: { type: 'string' },
+          },
+          required: ['systemPrompt', 'provider', 'modelId'],
+        },
+
+        DebugToolData: {
+          type: 'object',
+          properties: {
+            toolCallId: { type: 'string' },
+            toolName: { type: 'string' },
+            toolArgs: { type: 'object', description: 'Arguments passed to the tool. May be truncated for storage.' },
+            toolResult: { description: 'Result returned by the tool. May be truncated for storage.' },
+            toolDurationMs: { type: 'number' },
+          },
+          required: ['toolCallId', 'toolName', 'toolArgs'],
+        },
+
+        DebugMetrics: {
+          type: 'object',
+          description: 'Aggregate metrics for a single AI response.',
+          properties: {
+            iterations: { type: 'integer', description: 'Number of orchestration loop iterations.' },
+            totalToolCalls: { type: 'integer' },
+            totalDurationMs: { type: 'number' },
+            inputTokens: { type: 'integer' },
+            outputTokens: { type: 'integer' },
+            inputCostPerMillion: { type: 'number' },
+            outputCostPerMillion: { type: 'number' },
+          },
+          required: ['iterations', 'totalToolCalls', 'totalDurationMs'],
         },
 
         GetAIMessagesSuccessResponse: {
@@ -948,6 +1093,239 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               required: ['data'],
             },
           ],
+        },
+
+        // ===================================================================
+        // AI Chat SSE Event Schemas
+        // ===================================================================
+
+        SSEChunkEvent: {
+          type: 'object',
+          description: 'Streamed text content fragment from the AI response.',
+          properties: {
+            type: { type: 'string', enum: ['chunk'] },
+            content: { type: 'string', description: 'A fragment of the AI response text.' },
+          },
+          required: ['type', 'content'],
+        },
+
+        SSEToolCallEvent: {
+          type: 'object',
+          description:
+            'Emitted when the AI invokes a tool. The toolCallId can be correlated with a later SSEProcessingEvent.',
+          properties: {
+            type: { type: 'string', enum: ['tool_call'] },
+            message: { type: 'string', description: 'Human-readable description of the tool being called.' },
+            toolCallId: { type: 'string' },
+          },
+          required: ['type', 'message'],
+        },
+
+        SSEProcessingEvent: {
+          type: 'object',
+          description: 'Emitted when a tool call completes. Messages starting with a checkmark indicate success.',
+          properties: {
+            type: { type: 'string', enum: ['processing'] },
+            message: { type: 'string' },
+            details: {
+              type: 'object',
+              properties: {
+                toolDurationMs: { type: 'number' },
+                totalDurationMs: { type: 'number' },
+              },
+            },
+            resultPreview: { type: 'string', description: 'Truncated preview of the tool result.' },
+            toolCallId: { type: 'string', description: 'Correlates with the original SSEToolCallEvent.' },
+          },
+          required: ['type', 'message'],
+        },
+
+        SSEThinkingEvent: {
+          type: 'object',
+          description: 'Emitted when the AI is reasoning before producing output.',
+          properties: {
+            type: { type: 'string', enum: ['thinking'] },
+            message: { type: 'string' },
+          },
+          required: ['type', 'message'],
+        },
+
+        SSEActivityErrorEvent: {
+          type: 'object',
+          description: 'Emitted for non-fatal processing errors during investigation.',
+          properties: {
+            type: { type: 'string', enum: ['error'] },
+            message: { type: 'string' },
+          },
+          required: ['type', 'message'],
+        },
+
+        SSEEvidenceFileEvent: {
+          type: 'object',
+          description: 'A source file referenced as evidence during investigation.',
+          properties: {
+            type: { type: 'string', enum: ['evidence_file'] },
+            toolCallId: { type: 'string' },
+            filePath: { type: 'string' },
+            repository: { type: 'string' },
+            branch: { type: 'string' },
+            lineStart: { type: 'integer' },
+            lineEnd: { type: 'integer' },
+            language: { type: 'string' },
+          },
+          required: ['type', 'toolCallId', 'filePath', 'repository'],
+        },
+
+        SSEEvidenceCommitEvent: {
+          type: 'object',
+          description: 'A git commit referenced as evidence during investigation.',
+          properties: {
+            type: { type: 'string', enum: ['evidence_commit'] },
+            toolCallId: { type: 'string' },
+            commitUrl: { type: 'string' },
+            commitMessage: { type: 'string' },
+            filePaths: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['type', 'toolCallId', 'commitUrl', 'commitMessage', 'filePaths'],
+        },
+
+        SSEEvidenceResourceEvent: {
+          type: 'object',
+          description: 'A Kubernetes resource referenced as evidence during investigation.',
+          properties: {
+            type: { type: 'string', enum: ['evidence_resource'] },
+            toolCallId: { type: 'string' },
+            resourceType: { type: 'string', description: 'Kubernetes resource kind (e.g. Pod, Deployment).' },
+            resourceName: { type: 'string' },
+            namespace: { type: 'string' },
+            status: { type: 'string' },
+          },
+          required: ['type', 'toolCallId', 'resourceType', 'resourceName', 'namespace'],
+        },
+
+        SSEDebugContextEvent: {
+          type: 'object',
+          description: 'Debug info about the system prompt and model selection for this response.',
+          properties: {
+            type: { type: 'string', enum: ['debug_context'] },
+            systemPrompt: { type: 'string' },
+            maskingStats: {
+              type: 'object',
+              nullable: true,
+              properties: {
+                totalTokensBefore: { type: 'integer' },
+                totalTokensAfter: { type: 'integer' },
+                maskedParts: { type: 'integer' },
+                savedTokens: { type: 'integer' },
+              },
+            },
+            provider: { type: 'string' },
+            modelId: { type: 'string' },
+          },
+          required: ['type', 'systemPrompt', 'provider', 'modelId'],
+        },
+
+        SSEDebugToolCallEvent: {
+          type: 'object',
+          description: 'Raw tool invocation data for debugging.',
+          properties: {
+            type: { type: 'string', enum: ['debug_tool_call'] },
+            toolCallId: { type: 'string' },
+            toolName: { type: 'string' },
+            toolArgs: { type: 'object' },
+          },
+          required: ['type', 'toolCallId', 'toolName', 'toolArgs'],
+        },
+
+        SSEDebugToolResultEvent: {
+          type: 'object',
+          description: 'Raw tool result data for debugging.',
+          properties: {
+            type: { type: 'string', enum: ['debug_tool_result'] },
+            toolCallId: { type: 'string' },
+            toolName: { type: 'string' },
+            toolResult: { description: 'The raw tool result value.' },
+            toolDurationMs: { type: 'number' },
+          },
+          required: ['type', 'toolCallId', 'toolName', 'toolResult'],
+        },
+
+        SSEDebugMetricsEvent: {
+          type: 'object',
+          description: 'Aggregate metrics emitted once per response.',
+          properties: {
+            type: { type: 'string', enum: ['debug_metrics'] },
+            iterations: { type: 'integer' },
+            totalToolCalls: { type: 'integer' },
+            totalDurationMs: { type: 'number' },
+            inputTokens: { type: 'integer' },
+            outputTokens: { type: 'integer' },
+            inputCostPerMillion: { type: 'number' },
+            outputCostPerMillion: { type: 'number' },
+          },
+          required: ['type', 'iterations', 'totalToolCalls', 'totalDurationMs'],
+        },
+
+        SSECompleteEvent: {
+          type: 'object',
+          description: 'Signals the end of a plain-text AI response. This is the final event in the stream.',
+          properties: {
+            type: { type: 'string', enum: ['complete'] },
+            totalInvestigationTimeMs: { type: 'number' },
+          },
+          required: ['type', 'totalInvestigationTimeMs'],
+        },
+
+        SSECompleteJsonEvent: {
+          type: 'object',
+          description:
+            'Signals the end of a structured JSON AI response (e.g. investigation_complete). ' +
+            'The content field contains the full JSON string. Sent before SSECompleteEvent.',
+          properties: {
+            type: { type: 'string', enum: ['complete_json'] },
+            content: { type: 'string', description: 'The full JSON response as a string.' },
+            totalInvestigationTimeMs: { type: 'number' },
+          },
+          required: ['type', 'content', 'totalInvestigationTimeMs'],
+        },
+
+        SSEErrorEvent: {
+          type: 'object',
+          description:
+            'Streamed error event. Errors during SSE streaming are sent as events (not HTTP errors) ' +
+            'because the HTTP 200 status has already been committed.',
+          properties: {
+            error: { type: 'boolean', enum: [true] },
+            userMessage: { type: 'string', description: 'Human-readable error description.' },
+            category: {
+              type: 'string',
+              enum: ['rate-limited', 'transient', 'deterministic', 'ambiguous'],
+              description:
+                'Error classification. rate-limited: provider rate limit hit (retryable). ' +
+                'transient: temporary provider outage (retryable). ' +
+                'deterministic: auth error, bad request, or config issue (not retryable). ' +
+                'ambiguous: unknown error state (retryable).',
+            },
+            suggestedAction: {
+              type: 'string',
+              enum: ['retry', 'switch-model', 'check-config'],
+              nullable: true,
+              description: 'Recommended client action.',
+            },
+            retryAfter: {
+              type: 'number',
+              nullable: true,
+              description: 'Seconds to wait before retrying (only for rate-limited errors).',
+            },
+            modelName: { type: 'string' },
+            code: {
+              type: 'string',
+              description:
+                'Machine-readable error code. Known codes: AI_AGENT_DISABLED, CONTEXT_ERROR, ' +
+                'LLM_INIT_ERROR, LLM_API_ERROR, CIRCUIT_BREAKER_OPEN.',
+            },
+          },
+          required: ['error', 'userMessage', 'category', 'suggestedAction', 'retryAfter', 'modelName'],
         },
 
         // ===================================================================

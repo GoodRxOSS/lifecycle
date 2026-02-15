@@ -23,10 +23,14 @@ import { OutputLimiter } from '../tools/outputLimiter';
 export class ToolSafetyManager {
   private requireConfirmation: boolean;
   private validator: JsonSchema.Validator;
+  private toolExecutionTimeout: number;
+  private toolOutputMaxChars: number;
 
-  constructor(requireConfirmation: boolean = true) {
+  constructor(requireConfirmation: boolean = true, toolExecutionTimeout?: number, toolOutputMaxChars?: number) {
     this.requireConfirmation = requireConfirmation;
     this.validator = new JsonSchema.Validator();
+    this.toolExecutionTimeout = toolExecutionTimeout || 30000;
+    this.toolOutputMaxChars = toolOutputMaxChars || 30000;
   }
 
   async safeExecute(
@@ -85,10 +89,10 @@ export class ToolSafetyManager {
     }
 
     try {
-      const result = await this.withTimeout(tool.execute(args, signal), 30000);
+      const result = await this.withTimeout(tool.execute(args, signal), this.toolExecutionTimeout);
 
       if (result.success && result.agentContent) {
-        result.agentContent = OutputLimiter.truncate(result.agentContent);
+        result.agentContent = OutputLimiter.truncate(result.agentContent, this.toolOutputMaxChars);
       }
 
       this.logToolExecution(tool.name, args, result, buildUuid);
@@ -96,11 +100,13 @@ export class ToolSafetyManager {
       return result;
     } catch (error: any) {
       if (error.message === 'Tool execution timeout') {
-        getLogger().warn(`AI: tool timeout tool=${tool.name} timeout=30s buildUuid=${buildUuid || 'none'}`);
+        getLogger().warn(
+          `AI: tool timeout tool=${tool.name} timeout=${this.toolExecutionTimeout}ms buildUuid=${buildUuid || 'none'}`
+        );
         return {
           success: false,
           error: {
-            message: `${tool.name} timed out after 30 seconds`,
+            message: `${tool.name} timed out after ${this.toolExecutionTimeout / 1000} seconds`,
             code: 'TIMEOUT',
             recoverable: true,
             suggestedAction: 'The operation took too long. Try narrowing your query.',
