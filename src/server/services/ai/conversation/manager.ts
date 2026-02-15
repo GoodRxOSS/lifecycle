@@ -35,7 +35,11 @@ export interface ConversationState {
 }
 
 export class ConversationManager {
-  private readonly COMPRESSION_THRESHOLD = 80000;
+  private readonly COMPRESSION_THRESHOLD: number;
+
+  constructor(compressionThreshold?: number) {
+    this.COMPRESSION_THRESHOLD = compressionThreshold || 80000;
+  }
 
   async shouldCompress(messages: ConversationMessage[]): Promise<boolean> {
     const tokenCount = await this.estimateTokens(messages);
