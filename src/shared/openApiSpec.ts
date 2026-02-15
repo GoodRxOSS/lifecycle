@@ -745,6 +745,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+            maxIterations: { type: 'integer', description: 'Maximum orchestration loop iterations' },
+            maxToolCalls: { type: 'integer', description: 'Maximum total tool calls per query' },
+            maxRepeatedCalls: {
+              type: 'integer',
+              description: 'Maximum repeated calls with same arguments before loop detection',
+            },
+            compressionThreshold: {
+              type: 'integer',
+              description: 'Token count threshold before conversation history is compressed',
+            },
+            observationMaskingRecencyWindow: {
+              type: 'integer',
+              description: 'Number of recent tool results to preserve when masking observations',
+            },
+            observationMaskingTokenThreshold: {
+              type: 'integer',
+              description: 'Token count threshold before observation masking activates',
+            },
+            toolExecutionTimeout: { type: 'integer', description: 'Tool execution timeout in milliseconds' },
+            toolOutputMaxChars: { type: 'integer', description: 'Maximum characters in tool output before truncation' },
+            retryBudget: { type: 'integer', description: 'Maximum retry attempts per query on provider errors' },
           },
           required: ['enabled', 'providers', 'maxMessagesPerSession', 'sessionTTL'],
         },

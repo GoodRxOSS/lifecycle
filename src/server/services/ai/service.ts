@@ -62,6 +62,15 @@ export interface AIAgentConfig {
     inputCostPerMillion: number;
     outputCostPerMillion: number;
   };
+  maxIterations?: number;
+  maxToolCalls?: number;
+  maxRepeatedCalls?: number;
+  compressionThreshold?: number;
+  observationMaskingRecencyWindow?: number;
+  observationMaskingTokenThreshold?: number;
+  toolExecutionTimeout?: number;
+  toolOutputMaxChars?: number;
+  retryBudget?: number;
 }
 
 export interface ProcessQueryResult {
@@ -88,6 +97,7 @@ export class AIAgentCore {
   private excludedTools?: string[];
   private excludedFilePatterns?: string[];
   private modelPricing?: { inputCostPerMillion: number; outputCostPerMillion: number };
+  private observationMaskingOptions?: { recencyWindow?: number; tokenThreshold?: number };
 
   private mcpToolsLoaded = false;
   private mcpToolInfos: McpToolInfo[] = [];
@@ -111,15 +121,32 @@ export class AIAgentCore {
     this.excludedTools = config.excludedTools;
     this.excludedFilePatterns = config.excludedFilePatterns;
     this.modelPricing = config.modelPricing;
+    if (config.observationMaskingRecencyWindow || config.observationMaskingTokenThreshold) {
+      this.observationMaskingOptions = {
+        recencyWindow: config.observationMaskingRecencyWindow,
+        tokenThreshold: config.observationMaskingTokenThreshold,
+      };
+    }
 
     this.toolRegistry = new ToolRegistry();
     this.registerAllTools();
 
-    const safetyManager = new ToolSafetyManager(config.requireToolConfirmation ?? true);
-    this.orchestrator = new ToolOrchestrator(this.toolRegistry, safetyManager);
+    const safetyManager = new ToolSafetyManager(
+      config.requireToolConfirmation ?? true,
+      config.toolExecutionTimeout,
+      config.toolOutputMaxChars
+    );
+    this.orchestrator = new ToolOrchestrator(this.toolRegistry, safetyManager, {
+      loopProtection: {
+        maxIterations: config.maxIterations,
+        maxToolCalls: config.maxToolCalls,
+        maxRepeatedCalls: config.maxRepeatedCalls,
+      },
+      retryBudget: config.retryBudget,
+    });
 
     this.promptBuilder = new AIAgentPromptBuilder();
-    this.conversationManager = new ConversationManager();
+    this.conversationManager = new ConversationManager(config.compressionThreshold);
   }
 
   async processQuery(
@@ -179,7 +206,7 @@ export class AIAgentCore {
         textMessage(m.role as 'user' | 'assistant', m.content)
       );
 
-      const maskResult = maskObservations(messages);
+      const maskResult = maskObservations(messages, this.observationMaskingOptions);
       if (maskResult.masked) {
         getLogger().info(
           `AIAgentCore: observation masking applied maskedParts=${maskResult.stats.maskedParts} savedTokens=${maskResult.stats.savedTokens} buildUuid=${context.buildUuid}`

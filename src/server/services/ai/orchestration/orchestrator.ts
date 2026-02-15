@@ -20,7 +20,7 @@ import { Tool, ToolCall } from '../types/tool';
 import { StreamCallbacks } from '../types/stream';
 import { ToolRegistry } from '../tools/registry';
 import { ToolSafetyManager } from './safety';
-import { LoopDetector } from './loopProtection';
+import { LoopDetector, LoopProtection } from './loopProtection';
 import { getLogger } from 'server/lib/logger';
 import { RetryBudget, createClassifiedError, ErrorCategory } from '../errors';
 import type { ClassifiedError } from '../errors';
@@ -43,11 +43,22 @@ export interface OrchestrationResult {
   };
 }
 
+export interface OrchestratorOptions {
+  loopProtection?: Partial<LoopProtection>;
+  retryBudget?: number;
+}
+
 export class ToolOrchestrator {
   private loopDetector: LoopDetector;
+  private retryBudgetMax: number;
 
-  constructor(private toolRegistry: ToolRegistry, private safetyManager: ToolSafetyManager) {
-    this.loopDetector = new LoopDetector();
+  constructor(
+    private toolRegistry: ToolRegistry,
+    private safetyManager: ToolSafetyManager,
+    options?: OrchestratorOptions
+  ) {
+    this.loopDetector = new LoopDetector(options?.loopProtection);
+    this.retryBudgetMax = options?.retryBudget || 10;
   }
 
   async executeToolLoop(
@@ -69,7 +80,7 @@ export class ToolOrchestrator {
 
     this.loopDetector.reset();
 
-    const retryBudget = new RetryBudget(10);
+    const retryBudget = new RetryBudget(this.retryBudgetMax);
     const policy = createProviderPolicy(provider.name, retryBudget);
 
     while (iteration < protection.maxIterations) {
