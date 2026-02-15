@@ -115,9 +115,15 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
+  let writerClosed = false;
 
   const sendEvent = (data: AIChatSSEEvent | SSEErrorEvent) => {
-    writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => {});
+    if (writerClosed) return;
+    try {
+      writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => {});
+    } catch {
+      writerClosed = true;
+    }
   };
 
   const MAX_STORED_JSON_LENGTH = 8000;
@@ -132,6 +138,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
   };
 
   req.signal.addEventListener('abort', () => {
+    writerClosed = true;
     try {
       writer.close();
     } catch {
@@ -334,6 +341,10 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
                     iterations: e.iterations,
                     totalToolCalls: e.totalToolCalls,
                     totalDurationMs: e.totalDurationMs,
+                    inputTokens: e.inputTokens,
+                    outputTokens: e.outputTokens,
+                    inputCostPerMillion: e.inputCostPerMillion,
+                    outputCostPerMillion: e.outputCostPerMillion,
                   };
                 }
               } catch {
@@ -464,6 +475,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         modelName: 'AI model',
       });
     } finally {
+      writerClosed = true;
       try {
         await writer.close();
       } catch {

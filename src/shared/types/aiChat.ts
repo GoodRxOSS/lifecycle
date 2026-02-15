@@ -130,6 +130,10 @@ export interface DebugMetricsEvent {
   iterations: number;
   totalToolCalls: number;
   totalDurationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
 }
 
 export type AIChatDebugEvent = DebugContextEvent | DebugToolCallEvent | DebugToolResultEvent | DebugMetricsEvent;

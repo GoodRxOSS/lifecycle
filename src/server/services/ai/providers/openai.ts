@@ -63,15 +63,24 @@ export class OpenAIProvider extends BaseLLMProvider {
       model: this.modelId,
       max_tokens: options.maxTokens || 250000,
       stream: true,
+      stream_options: { include_usage: true },
       messages: openaiMessages,
       tools: tools || undefined,
     });
 
     let accumulatedToolCalls: AccumulatedToolCall[] = [];
+    let finalUsage: { prompt_tokens: number; completion_tokens: number } | null = null;
 
     for await (const chunk of stream) {
       if (signal?.aborted) {
         throw new Error('Request aborted');
+      }
+
+      if (chunk.usage) {
+        finalUsage = {
+          prompt_tokens: chunk.usage.prompt_tokens,
+          completion_tokens: chunk.usage.completion_tokens,
+        };
       }
 
       const delta = chunk.choices[0]?.delta;
@@ -111,6 +120,16 @@ export class OpenAIProvider extends BaseLLMProvider {
       yield {
         type: 'tool_call',
         toolCalls,
+      };
+    }
+
+    if (finalUsage) {
+      yield {
+        type: 'text',
+        usage: {
+          inputTokens: finalUsage.prompt_tokens,
+          outputTokens: finalUsage.completion_tokens,
+        },
       };
     }
   }

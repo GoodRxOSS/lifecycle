@@ -251,6 +251,10 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                   iterations: data.iterations,
                   totalToolCalls: data.totalToolCalls,
                   totalDurationMs: data.totalDurationMs,
+                  inputTokens: data.inputTokens,
+                  outputTokens: data.outputTokens,
+                  inputCostPerMillion: data.inputCostPerMillion,
+                  outputCostPerMillion: data.outputCostPerMillion,
                 };
                 setDebugMetrics(localDebugMetrics);
               } else if (data.type === 'chunk') {

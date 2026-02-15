@@ -103,6 +103,8 @@ export interface ModelOption {
   displayName: string;
   default: boolean;
   maxTokens: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
 }
 
 export interface DebugToolData {
@@ -129,4 +131,8 @@ export interface DebugMetrics {
   iterations: number;
   totalToolCalls: number;
   totalDurationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
 }

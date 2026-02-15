@@ -25,22 +25,23 @@ export interface PromptSection {
 
 export const PROMPT_SECTIONS: PromptSection[] = [
   {
+    id: 'reference',
+    content: REFERENCE_SECTION,
+    order: 1,
+    rationale:
+      'Domain knowledge first — long-context research shows 30% improvement when reference data precedes instructions',
+  },
+  {
     id: 'foundations',
     content: FOUNDATIONS_SECTION,
-    order: 1,
-    rationale: 'Agent identity, communication style, tool rules, and efficiency establish behavioral frame',
+    order: 2,
+    rationale: 'Agent identity, communication style, and constraints after domain context is established',
   },
   {
     id: 'investigation',
     content: INVESTIGATION_SECTION,
-    order: 2,
-    rationale: 'Investigation strategy, debug/fix workflows, output format, and examples define operational patterns',
-  },
-  {
-    id: 'reference',
-    content: REFERENCE_SECTION,
     order: 3,
-    rationale: 'Configuration architecture and domain knowledge provide reference material',
+    rationale: 'Investigation methodology, output format, and examples define operational patterns',
   },
   {
     id: 'safety',

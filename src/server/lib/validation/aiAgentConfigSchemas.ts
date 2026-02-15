@@ -36,6 +36,8 @@ export const aiAgentConfigSchema = {
                 enabled: { type: 'boolean' },
                 default: { type: 'boolean' },
                 maxTokens: { type: 'integer', minimum: 1 },
+                inputCostPerMillion: { type: 'number', minimum: 0 },
+                outputCostPerMillion: { type: 'number', minimum: 0 },
               },
               required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],
             },

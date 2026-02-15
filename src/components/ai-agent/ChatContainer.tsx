@@ -25,7 +25,7 @@ import { ChatInput } from './ChatInput';
 import { SuggestedPrompts } from './SuggestedPrompts';
 import { MessageList } from './MessageList';
 import { globalStyles } from './styles';
-import { getFollowUpSuggestions } from './utils';
+import { getFollowUpSuggestions, computeCost, formatCost } from './utils';
 import type { ServiceInvestigationResult } from './types';
 
 interface ChatContainerProps {
@@ -82,6 +82,26 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
     [messages, loading, streaming]
   );
 
+  const sessionTotalCost = useMemo(() => {
+    let total = 0;
+    let hasCost = false;
+    for (const msg of messages) {
+      if (msg.debugMetrics?.inputTokens != null) {
+        const cost = computeCost(
+          msg.debugMetrics.inputTokens,
+          msg.debugMetrics.outputTokens || 0,
+          msg.debugMetrics.inputCostPerMillion,
+          msg.debugMetrics.outputCostPerMillion
+        );
+        if (cost != null) {
+          total += cost;
+          hasCost = true;
+        }
+      }
+    }
+    return hasCost ? formatCost(total) : null;
+  }, [messages]);
+
   if (!mounted) {
     return (
       <div className="flex items-center justify-center h-screen bg-white">
@@ -102,6 +122,7 @@ export function ChatContainer({ buildUuid }: ChatContainerProps) {
           hasMessages={messages.length > 0}
           onLabelClick={handleLabelClick}
           xrayMode={xrayMode}
+          sessionTotalCost={sessionTotalCost}
         />
       </CardHeader>
 

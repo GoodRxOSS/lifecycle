@@ -39,6 +39,7 @@ export default class AIAgentService extends BaseService {
   private service: AIAgentCore | null = null;
   private provider: ProviderType = 'anthropic';
   private modelId?: string;
+  private modelPricing?: { inputCostPerMillion: number; outputCostPerMillion: number };
   private currentMode: 'investigate' | 'fix' = 'investigate';
   private repoFullName?: string;
 
@@ -78,6 +79,13 @@ export default class AIAgentService extends BaseService {
 
       this.provider = provider;
       this.modelId = modelId;
+      this.modelPricing =
+        modelConfig.inputCostPerMillion != null && modelConfig.outputCostPerMillion != null
+          ? {
+              inputCostPerMillion: modelConfig.inputCostPerMillion,
+              outputCostPerMillion: modelConfig.outputCostPerMillion,
+            }
+          : undefined;
       getLogger().info(`AI: provider set to ${this.provider} modelId=${this.modelId}`);
     } else {
       getLogger().info(`AI: no provider/modelId provided, using defaults`);
@@ -91,6 +99,13 @@ export default class AIAgentService extends BaseService {
       }
       this.provider = enabledProvider.name as ProviderType;
       this.modelId = defaultModel.id;
+      this.modelPricing =
+        defaultModel.inputCostPerMillion != null && defaultModel.outputCostPerMillion != null
+          ? {
+              inputCostPerMillion: defaultModel.inputCostPerMillion,
+              outputCostPerMillion: defaultModel.outputCostPerMillion,
+            }
+          : undefined;
       getLogger().info(`AI: using default provider=${this.provider} modelId=${this.modelId}`);
     }
 
@@ -108,6 +123,7 @@ export default class AIAgentService extends BaseService {
       systemPromptOverride: aiAgentConfig.systemPromptOverride,
       excludedTools: aiAgentConfig.excludedTools,
       excludedFilePatterns: aiAgentConfig.excludedFilePatterns,
+      modelPricing: this.modelPricing,
     });
   }
 

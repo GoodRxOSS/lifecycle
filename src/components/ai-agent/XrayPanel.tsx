@@ -16,7 +16,7 @@
 
 import React from 'react';
 import { Chip } from '@heroui/react';
-import { formatDuration } from './utils';
+import { formatDuration, computeCost, formatCost } from './utils';
 import type { DebugContextData, DebugMetrics } from './types';
 
 interface XrayContextPanelProps {
@@ -63,6 +63,18 @@ export function XrayContextPanel({ debugContext, debugMetrics }: XrayContextPane
             <span>iterations: {debugMetrics.iterations}</span>
             <span>tool calls: {debugMetrics.totalToolCalls}</span>
             <span>duration: {formatDuration(debugMetrics.totalDurationMs)}</span>
+            {debugMetrics.inputTokens != null && (
+              <span>tokens: {(debugMetrics.inputTokens + (debugMetrics.outputTokens || 0)).toLocaleString()} ({debugMetrics.inputTokens.toLocaleString()} in / {(debugMetrics.outputTokens || 0).toLocaleString()} out)</span>
+            )}
+            {debugMetrics.inputTokens != null && (() => {
+              const cost = computeCost(
+                debugMetrics.inputTokens!,
+                debugMetrics.outputTokens || 0,
+                debugMetrics.inputCostPerMillion,
+                debugMetrics.outputCostPerMillion
+              );
+              return cost != null ? <span>cost: {formatCost(cost)}</span> : null;
+            })()}
           </div>
         </div>
       )}

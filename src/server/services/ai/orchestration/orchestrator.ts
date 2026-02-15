@@ -38,6 +38,8 @@ export interface OrchestrationResult {
     iterations: number;
     toolCalls: number;
     duration: number;
+    inputTokens: number;
+    outputTokens: number;
   };
 }
 
@@ -60,6 +62,8 @@ export class ToolOrchestrator {
     const startTime = Date.now();
     let iteration = 0;
     let totalToolCalls = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
     let fullResponse = '';
     const protection = this.loopDetector.getProtection();
 
@@ -74,7 +78,7 @@ export class ToolOrchestrator {
           success: false,
           error: 'Operation cancelled by user',
           cancelled: true,
-          metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
         };
       }
 
@@ -110,7 +114,7 @@ export class ToolOrchestrator {
             success: false,
             error: 'Provider circuit breaker is open',
             classifiedError: classified,
-            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+            metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
           };
         }
 
@@ -127,7 +131,7 @@ export class ToolOrchestrator {
             response: fullResponse || 'The response was interrupted. Here is what was generated before the error.',
             error: `Stream interrupted: ${error.message}`,
             classifiedError: createClassifiedError(provider.name, error),
-            metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+            metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
           };
         }
 
@@ -138,8 +142,14 @@ export class ToolOrchestrator {
           success: false,
           error: error.message || 'Provider error',
           classifiedError: createClassifiedError(provider.name, error),
-          metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
         };
+      }
+
+      const usageChunk = chunks.find((c) => c.usage);
+      if (usageChunk?.usage) {
+        totalInputTokens += usageChunk.usage.inputTokens;
+        totalOutputTokens += usageChunk.usage.outputTokens;
       }
 
       const llmThinkTime = Date.now() - iterationStartTime;
@@ -149,7 +159,7 @@ export class ToolOrchestrator {
         return {
           success: true,
           response: fullResponse,
-          metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
         };
       }
 
@@ -165,7 +175,7 @@ export class ToolOrchestrator {
           error:
             `Tool call limit exceeded (${protection.maxToolCalls}). ` +
             `The investigation is too broad. Try asking about specific services.`,
-          metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+          metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
         };
       }
 
@@ -341,7 +351,7 @@ export class ToolOrchestrator {
       error:
         `Investigation incomplete - hit iteration limit (${protection.maxIterations}). ` +
         `This may indicate the issue is complex or unclear from available data.`,
-      metrics: this.buildMetrics(iteration, totalToolCalls, startTime),
+      metrics: this.buildMetrics(iteration, totalToolCalls, startTime, totalInputTokens, totalOutputTokens),
     };
   }
 
@@ -349,11 +359,13 @@ export class ToolOrchestrator {
     return chunks.filter((c) => c.type === 'tool_call' && c.toolCalls).flatMap((c) => c.toolCalls || []);
   }
 
-  private buildMetrics(iterations: number, toolCalls: number, startTime: number) {
+  private buildMetrics(iterations: number, toolCalls: number, startTime: number, inputTokens = 0, outputTokens = 0) {
     return {
       iterations,
       toolCalls,
       duration: Date.now() - startTime,
+      inputTokens,
+      outputTokens,
     };
   }
 }

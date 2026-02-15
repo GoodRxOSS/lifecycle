@@ -16,6 +16,21 @@
 
 import type { StructuredDebugResponse, EvidenceItem, ServiceInvestigationResult } from './types';
 
+export function computeCost(
+  inputTokens: number,
+  outputTokens: number,
+  inputCostPerMillion?: number,
+  outputCostPerMillion?: number
+): number | null {
+  if (inputCostPerMillion == null || outputCostPerMillion == null) return null;
+  return (inputTokens * inputCostPerMillion + outputTokens * outputCostPerMillion) / 1_000_000;
+}
+
+export function formatCost(cost: number): string {
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
 export function formatDuration(durationMs?: number): string {
   if (durationMs === undefined || durationMs === null) return '';
 

@@ -171,6 +171,7 @@ export default class AIAgentContextService extends BaseService {
         latestCommit: build.pullRequest.latestCommit,
         fullName: build.pullRequest.fullName,
         commentId: build.pullRequest.commentId,
+        labels: build.pullRequest.labels || [],
       },
       environment: {
         id: build.environment.id,

@@ -27,6 +27,7 @@ interface ModelSelectorProps {
   hasMessages: boolean;
   onLabelClick?: () => void;
   xrayMode?: boolean;
+  sessionTotalCost?: string | null;
 }
 
 export function ModelSelector({
@@ -38,6 +39,7 @@ export function ModelSelector({
   hasMessages,
   onLabelClick,
   xrayMode,
+  sessionTotalCost,
 }: ModelSelectorProps) {
   return (
     <>
@@ -57,7 +59,7 @@ export function ModelSelector({
             }
             labelPlacement="outside-left"
             size="sm"
-            className="w-60"
+            className="w-72"
             variant="bordered"
             selectedKeys={selectedModel ? [`${selectedModel.provider}:${selectedModel.modelId}`] : []}
             onSelectionChange={(keys) => {
@@ -66,8 +68,10 @@ export function ModelSelector({
             }}
             isDisabled={loading}
             classNames={{
-              label: 'text-xs text-gray-600 font-semibold',
+              label: 'text-xs text-gray-600 font-semibold whitespace-nowrap',
               trigger: 'border-gray-200 hover:border-gray-300',
+              value: 'text-ellipsis overflow-visible',
+              innerWrapper: 'overflow-visible',
             }}
           >
             {availableModels.map((model) => (
@@ -77,6 +81,11 @@ export function ModelSelector({
         )}
       </div>
       <div className="flex items-center gap-2">
+        {xrayMode && sessionTotalCost && (
+          <span className="text-xs font-mono text-gray-500">
+            Session: {sessionTotalCost}
+          </span>
+        )}
         {hasMessages && (
           <Button
             onClick={onClearHistory}

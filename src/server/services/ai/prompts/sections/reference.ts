@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-export const REFERENCE_SECTION = `# Configuration Architecture
+export const REFERENCE_SECTION = `<domain_knowledge>
+# Configuration Architecture
 
 **Hierarchy:** lifecycle.yaml = SITEMAP referencing other files. Configuration is DISTRIBUTED — follow references for actual values.
 - dockerfile → Dockerfiles | helm.valueFiles → Helm values (replicaCount, resources, ports) | helm.chart → Local charts
@@ -36,25 +37,16 @@ Lifecycle creates ephemeral environments from Pull Requests.
 
 **Source of Truth (ranked):** 1. DB status 2. Config files (Helm values, Dockerfiles) 3. lifecycle.yaml 4. PR comment 5. K8s state 6. Events 7. Logs
 
+**PR Labels:** Lifecycle requires a deploy label (default: \`lifecycle-deploy!\`) on the PR before it will build and deploy an environment. Without this label, no builds or deploys are created — the environment will have 0 pods and no activity. The \`lifecycle-disabled!\` label explicitly prevents deployment. PR labels are shown in the injected context. If you see 0 pods and no builds/deploys, check whether the deploy label is present.
+
 **Build vs Deploy:** Builds first, deploys only if ALL builds succeed. Check builds before deploy issues.
 
 **Build system:** buildPipelineId → Codefresh (get_codefresh_logs) | builderEngine → Native K8s (get_k8s_resources + get_pod_logs) | GITHUB type → no build
 
 **K8s:** Deployments AND StatefulSets (check both). Labels: lc-service={serviceName}. Namespace: env-{buildUuid}.
 
-## Database Queries
-
-Batch with relations — ONE call:
-\`query_database(table="builds", filters={"uuid": "xyz"}, relations=["pullRequest", "environment", "deploys.[deployable, repository]"])\`
-Provides: build info, PR, environment, deploys, deployables, repos. READ-ONLY.
-
-**Lifecycle logs:** \`get_lifecycle_logs(build_uuid="{buildUuid}")\` — for debugging Lifecycle itself (jobs not starting, environments not creating).
-
-**Healthy:** All deploys READY/RUNNING in DB + all K8s ready>=1 AND ready==desired + no CrashLoopBackOff/ImagePullBackOff/Error.
-
 # Multi-Repo Architecture
 
-The PR repo branch contains ONLY lifecycle.yaml (environment config) — NOT service source code.
 Each service's code lives in its OWN repository, shown as "Repo: Owner/name @ branch" in injected context.
 
 **Single-repo environments:** The PR repo IS the service repo — use the PR repo directly.
@@ -63,4 +55,5 @@ Each service's code lives in its OWN repository, shown as "Repo: Owner/name @ br
 Use \`get_file\` with the service's repo and branch params to read service files.
 If a service repo is inaccessible, tell the user explicitly — do not guess at file contents.
 Always identify which repo a file is from when referencing it.
-Never commit fixes to repos other than the PR repo.`;
+Never commit fixes to repos other than the PR repo.
+</domain_knowledge>`;

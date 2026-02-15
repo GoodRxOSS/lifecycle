@@ -60,6 +60,10 @@ export interface DebugMessage {
     iterations: number;
     totalToolCalls: number;
     totalDurationMs: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    inputCostPerMillion?: number;
+    outputCostPerMillion?: number;
   };
 }
 
@@ -125,6 +129,7 @@ export interface PullRequestInfo {
   latestCommit: string;
   fullName: string;
   commentId?: number;
+  labels: string[];
 }
 
 export interface EnvironmentInfo {
@@ -308,6 +313,8 @@ export interface ModelConfig {
   enabled: boolean;
   default: boolean;
   maxTokens: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
 }
 
 export interface ProviderConfig {
