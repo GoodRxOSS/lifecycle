@@ -24,7 +24,11 @@ import AIAgentConfigService from 'server/services/aiAgentConfig';
  * /api/v2/ai/config:
  *   get:
  *     summary: Check AI agent configuration status
- *     description: Returns whether AI is enabled, which provider is active, and if API keys are configured.
+ *     description: >
+ *       Lightweight status check that returns whether the AI agent is enabled,
+ *       which LLM provider is active, and whether the provider API key is set.
+ *       Use this endpoint to gate UI features before making heavier API calls.
+ *       When `enabled` is false, the chat endpoint will reject messages.
  *     tags:
  *       - AI Chat
  *     operationId: getAIConfig

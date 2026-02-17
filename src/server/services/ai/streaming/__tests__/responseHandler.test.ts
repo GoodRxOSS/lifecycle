@@ -87,4 +87,33 @@ describe('ResponseHandler', () => {
     handler.handleChunk('three');
     expect(onTextChunk).toHaveBeenCalledTimes(3);
   });
+
+  it('detects markdown-fenced JSON', () => {
+    handler.handleChunk('```json\n{"type": "investigation_complete", "summary": "done"}\n```');
+    const result = handler.getResult();
+    expect(result.isJson).toBe(true);
+    expect(JSON.parse(result.response)).toEqual({ type: 'investigation_complete', summary: 'done' });
+  });
+
+  it('detects preamble text + fenced JSON', () => {
+    handler.handleChunk('Here are the findings:\n\n```json\n{"type": "investigation_complete", "data": []}\n```');
+    const result = handler.getResult();
+    expect(result.isJson).toBe(true);
+    expect(JSON.parse(result.response)).toEqual({ type: 'investigation_complete', data: [] });
+  });
+
+  it('detects fenced JSON without json language tag', () => {
+    handler.handleChunk('```\n{"type": "investigation_complete"}\n```');
+    const result = handler.getResult();
+    expect(result.isJson).toBe(true);
+    expect(JSON.parse(result.response)).toEqual({ type: 'investigation_complete' });
+  });
+
+  it('strips trailing fence markers from getResult', () => {
+    handler.handleChunk('```json\n{"type": "x"}');
+    handler.handleChunk('\n```');
+    const result = handler.getResult();
+    expect(result.isJson).toBe(true);
+    expect(result.response).not.toContain('```');
+  });
 });

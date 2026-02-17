@@ -42,8 +42,62 @@ export const dynamic = 'force-dynamic';
  *   post:
  *     summary: Stream AI chat response
  *     description: >
- *       Sends a message to the AI agent and streams the response as Server-Sent Events.
+ *       Sends a message to the AI agent and streams the response as Server-Sent Events (SSE).
  *       The buildUuid identifies the ephemeral environment context.
+ *
+ *
+ *       **Streaming protocol:**
+ *       The response uses the `text/event-stream` content type. Each event is a JSON object
+ *       sent as `data: {JSON}\n\n`. Clients should use the EventSource API or a streaming
+ *       fetch with an AbortController. The connection is kept alive via the `Connection: keep-alive`
+ *       header. Clients can cancel by aborting the request.
+ *
+ *
+ *       **SSE event types (by `type` field):**
+ *
+ *       - `chunk` — Streamed text fragment of the AI response. Concatenate all chunks to build
+ *         the full response. See SSEChunkEvent schema.
+ *
+ *       - `tool_call` — The AI is invoking a tool. Contains a `toolCallId` that correlates
+ *         with a later `processing` event. See SSEToolCallEvent schema.
+ *
+ *       - `processing` — A tool call has completed. Messages starting with a checkmark (✓)
+ *         indicate success. See SSEProcessingEvent schema.
+ *
+ *       - `thinking` — The AI is reasoning before producing output. See SSEThinkingEvent schema.
+ *
+ *       - `error` — A non-fatal processing error during investigation. See SSEActivityErrorEvent schema.
+ *
+ *       - `evidence_file` — A source file found as evidence. See SSEEvidenceFileEvent schema.
+ *
+ *       - `evidence_commit` — A git commit found as evidence. See SSEEvidenceCommitEvent schema.
+ *
+ *       - `evidence_resource` — A Kubernetes resource found as evidence. See SSEEvidenceResourceEvent schema.
+ *
+ *       - `debug_context` — System prompt and model selection info. See SSEDebugContextEvent schema.
+ *
+ *       - `debug_tool_call` — Raw tool invocation data. See SSEDebugToolCallEvent schema.
+ *
+ *       - `debug_tool_result` — Raw tool result data. See SSEDebugToolResultEvent schema.
+ *
+ *       - `debug_metrics` — Aggregate token/cost metrics. See SSEDebugMetricsEvent schema.
+ *
+ *       - `complete_json` — Structured JSON response (e.g. investigation_complete).
+ *         Sent before the `complete` event. See SSECompleteJsonEvent schema.
+ *
+ *       - `complete` — Final event signaling end of stream. See SSECompleteEvent schema.
+ *
+ *
+ *       **Error handling:**
+ *       Because the HTTP 200 status is committed before streaming begins, errors during
+ *       processing are delivered as SSE events with `error: true` instead of HTTP error codes.
+ *       See the SSEErrorEvent schema for the error payload format, which includes a `category`
+ *       field for classification and a `suggestedAction` field for client retry logic.
+ *
+ *
+ *       **Typical event sequence:**
+ *       `chunk*` → `tool_call` → `processing` → `chunk*` → ... → `complete_json`? → `complete`
+ *
  *     tags:
  *       - AI Chat
  *     operationId: streamAIChat
@@ -66,25 +120,85 @@ export const dynamic = 'force-dynamic';
  *               message:
  *                 type: string
  *                 description: The user message to send to the AI agent.
+ *                 example: Why is the web service CrashLoopBackOff?
  *               clearHistory:
  *                 type: boolean
  *                 description: Whether to clear conversation history before processing.
+ *                 default: false
  *               provider:
  *                 type: string
- *                 description: The LLM provider to use (e.g. anthropic, openai).
+ *                 description: >
+ *                   The LLM provider to use. When omitted the default provider from the
+ *                   effective configuration is used.
+ *                 example: anthropic
  *               modelId:
  *                 type: string
- *                 description: The specific model ID to use.
+ *                 description: >
+ *                   The specific model ID to use. Must belong to the given provider.
+ *                   When omitted the default model is used.
+ *                 example: claude-sonnet-4-20250514
  *               isSystemAction:
  *                 type: boolean
- *                 description: Whether this message is a system-initiated action.
+ *                 description: >
+ *                   Whether this message is a system-initiated action (e.g. automatic
+ *                   investigation triggered by a deployment event).
+ *                 default: false
+ *               mode:
+ *                 type: string
+ *                 enum: [investigate, fix]
+ *                 description: >
+ *                   Operation mode. "investigate" (default) is read-only analysis.
+ *                   "fix" enables the agent to take corrective actions via tools.
+ *                 default: investigate
  *     responses:
  *       '200':
- *         description: SSE event stream
+ *         description: >
+ *           SSE event stream. Each line is formatted as `data: {JSON}\n\n`.
+ *           Events use a `type` discriminator field — see the SSE event schemas
+ *           (SSEChunkEvent, SSEToolCallEvent, SSEProcessingEvent, SSEThinkingEvent,
+ *           SSEActivityErrorEvent, SSEEvidenceFileEvent, SSEEvidenceCommitEvent,
+ *           SSEEvidenceResourceEvent, SSEDebugContextEvent, SSEDebugToolCallEvent,
+ *           SSEDebugToolResultEvent, SSEDebugMetricsEvent, SSECompleteJsonEvent,
+ *           SSECompleteEvent). Errors arrive as SSEErrorEvent with `error: true`.
+ *         headers:
+ *           Content-Type:
+ *             schema:
+ *               type: string
+ *               example: text/event-stream; charset=utf-8
+ *           Cache-Control:
+ *             schema:
+ *               type: string
+ *               example: no-cache, no-transform
+ *           Connection:
+ *             schema:
+ *               type: string
+ *               example: keep-alive
+ *           X-Accel-Buffering:
+ *             schema:
+ *               type: string
+ *               example: 'no'
  *         content:
  *           text/event-stream:
  *             schema:
  *               type: string
+ *               description: >
+ *                 Newline-delimited SSE events. Each event is `data: <JSON>\n\n`.
+ *             examples:
+ *               chunk:
+ *                 summary: Text chunk event
+ *                 value: 'data: {"type":"chunk","content":"The web service is failing because..."}\n\n'
+ *               tool_call:
+ *                 summary: Tool invocation event
+ *                 value: 'data: {"type":"tool_call","message":"Reading pod logs...","toolCallId":"tc_1"}\n\n'
+ *               processing:
+ *                 summary: Tool completion event
+ *                 value: 'data: {"type":"processing","message":"✓ Pod logs retrieved","toolCallId":"tc_1","details":{"toolDurationMs":1200}}\n\n'
+ *               complete:
+ *                 summary: Stream completion event
+ *                 value: 'data: {"type":"complete","totalInvestigationTimeMs":8500}\n\n'
+ *               error:
+ *                 summary: Stream error event
+ *                 value: 'data: {"error":true,"userMessage":"Rate limit exceeded","category":"rate-limited","suggestedAction":"retry","retryAfter":30,"modelName":"claude-sonnet-4-20250514"}\n\n'
  *       '400':
  *         description: Missing required fields or invalid JSON
  *         content:

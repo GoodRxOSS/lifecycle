@@ -24,7 +24,7 @@ export class GetFileTool extends BaseTool {
 
   constructor(private githubClient: GitHubClient) {
     super(
-      'Read any file from the repository. Returns content with line numbers in format "  123: line content". Use this to read configuration files (lifecycle.yaml, lifecycle.yml), Dockerfiles, Helm values, source code, or any other file.',
+      'Read any file from the repository. Returns raw file content and total line count. Use this to read configuration files (lifecycle.yaml, lifecycle.yml), Dockerfiles, Helm values, source code, or any other file.',
       {
         type: 'object',
         properties: {
@@ -71,22 +71,17 @@ export class GetFileTool extends BaseTool {
 
       if (response.data && 'content' in response.data && response.data.type === 'file') {
         const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
-        const lines = content.split('\n');
-        const numberedContent = lines
-          .map((line, index) => {
-            const lineNum = (index + 1).toString().padStart(5, ' ');
-            return `${lineNum}: ${line}`;
-          })
-          .join('\n');
+        const totalLines = content.split('\n').length;
 
         const result = {
           success: true,
           path: filePath,
-          content: numberedContent,
+          content,
+          totalLines,
           sha: response.data.sha,
         };
 
-        const displayContent = `File: ${filePath} (${lines.length} lines)`;
+        const displayContent = `File: ${filePath} (${totalLines} lines)`;
         return this.createSuccessResult(OutputLimiter.truncate(JSON.stringify(result), 25000), displayContent);
       }
 

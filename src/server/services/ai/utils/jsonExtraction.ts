@@ -16,6 +16,45 @@
 
 import { getLogger } from 'server/lib/logger';
 
+export function extractBalancedJson(str: string, startIndex: number): string | null {
+  if (str[startIndex] !== '{') return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = startIndex; i < str.length; i++) {
+    const ch = str[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return str.substring(startIndex, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
 export function extractJsonFromResponse(aiResponse: string, buildUuid: string): { response: string; isJson: boolean } {
   if (!aiResponse.includes('"investigation_complete"')) {
     return { response: aiResponse, isJson: false };
@@ -23,23 +62,38 @@ export function extractJsonFromResponse(aiResponse: string, buildUuid: string): 
 
   let candidate = aiResponse.trim();
 
-  if (candidate.startsWith('```')) {
-    candidate = candidate
-      .replace(/^```(?:json)?\s*\n?/, '')
-      .replace(/\n?\s*```\s*$/, '')
-      .trim();
+  // Strip code fences anywhere in the string (not just at start/end)
+  candidate = candidate
+    .replace(/```(?:json)?\s*\n?/g, '')
+    .replace(/\n?\s*```/g, '')
+    .trim();
+
+  // Find the start of the JSON object
+  const jsonIdx = candidate.indexOf('{"type"');
+  if (jsonIdx < 0) {
+    // Try finding any opening brace if no {"type" pattern
+    const braceIdx = candidate.indexOf('{');
+    if (braceIdx < 0) return { response: aiResponse, isJson: false };
+
+    const balanced = extractBalancedJson(candidate, braceIdx);
+    if (balanced) {
+      try {
+        JSON.parse(balanced);
+        getLogger().info(`AI: late JSON detection - extracted valid JSON buildUuid=${buildUuid}`);
+        return { response: balanced, isJson: true };
+      } catch {
+        return { response: aiResponse, isJson: false };
+      }
+    }
+    return { response: aiResponse, isJson: false };
   }
 
-  if (!candidate.startsWith('{')) {
-    const jsonIdx = candidate.indexOf('{"type"');
-    if (jsonIdx >= 0) candidate = candidate.substring(jsonIdx);
-  }
-
-  if (candidate.startsWith('{')) {
+  const balanced = extractBalancedJson(candidate, jsonIdx);
+  if (balanced) {
     try {
-      JSON.parse(candidate);
+      JSON.parse(balanced);
       getLogger().info(`AI: late JSON detection - extracted valid JSON buildUuid=${buildUuid}`);
-      return { response: candidate, isJson: true };
+      return { response: balanced, isJson: true };
     } catch {
       return { response: aiResponse, isJson: false };
     }

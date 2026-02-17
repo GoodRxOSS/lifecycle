@@ -95,7 +95,7 @@ export const globalStyles = `
     margin: 0.375rem 0;
   }
 
-  .ai-message-content code {
+  .ai-message-content :not(pre) > code {
     background: #f3f4f6;
     padding: 3px 8px;
     border-radius: 4px;
@@ -126,6 +126,7 @@ export const globalStyles = `
     margin: 0 !important;
     border-radius: 8px !important;
     font-size: 13px !important;
+    padding: 1rem !important;
   }
 
   .ai-message-content strong {

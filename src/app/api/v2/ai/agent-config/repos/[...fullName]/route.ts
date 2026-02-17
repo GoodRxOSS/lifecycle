@@ -54,7 +54,10 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  * /api/v2/ai/agent-config/repos/{owner}/{repo}:
  *   get:
  *     summary: Get repository AI agent config override
- *     description: Returns the per-repository AI agent configuration override.
+ *     description: >
+ *       Returns the raw per-repository AI agent configuration override (not merged
+ *       with the global config). This shows only the fields that are explicitly
+ *       overridden for this repository. Returns 404 if no override exists.
  *     tags:
  *       - AI Agent Config
  *     operationId: getRepoAIAgentConfig
@@ -65,12 +68,14 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *         schema:
  *           type: string
  *         description: The repository owner
+ *         example: goodrx
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
+ *         example: lifecycle
  *     responses:
  *       '200':
  *         description: Repository AI agent config override
@@ -94,7 +99,15 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  * /api/v2/ai/agent-config/repos/{owner}/{repo}/effective:
  *   get:
  *     summary: Get effective (merged) AI agent config for repository
- *     description: Returns the fully merged global + repository AI agent configuration.
+ *     description: >
+ *       Returns the fully merged configuration for a repository. The merge applies
+ *       the repository override on top of the global config using these rules:
+ *       scalar fields (enabled, maxMessagesPerSession, sessionTTL, systemPromptOverride)
+ *       are replaced by the repo value when present; array fields (additiveRules,
+ *       excludedTools, excludedFilePatterns) are merged additively (union of global
+ *       and repo arrays). Provider settings and performance tuning parameters are
+ *       always taken from the global config (not overridable per-repo).
+ *       If no repo override exists, this returns the global config unchanged.
  *     tags:
  *       - AI Agent Config
  *     operationId: getEffectiveAIAgentConfig
@@ -105,12 +118,14 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *         schema:
  *           type: string
  *         description: The repository owner
+ *         example: goodrx
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
+ *         example: lifecycle
  *     responses:
  *       '200':
  *         description: Effective merged AI agent configuration
@@ -159,7 +174,13 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  * /api/v2/ai/agent-config/repos/{owner}/{repo}:
  *   put:
  *     summary: Create or update repository AI agent config override
- *     description: Validates and creates or updates the per-repository AI agent configuration override.
+ *     description: >
+ *       Upserts a per-repository AI agent configuration override. Only include
+ *       the fields you want to override — omitted fields will continue to inherit
+ *       from the global config. Validation enforces the same limits as the global
+ *       config (prompt length, pattern count, core tool restrictions). The request
+ *       body is validated against the AIAgentRepoOverride schema.
+ *       Changes take effect immediately and invalidate cached effective configs.
  *     tags:
  *       - AI Agent Config
  *     operationId: putRepoAIAgentConfig
@@ -170,12 +191,14 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *         schema:
  *           type: string
  *         description: The repository owner
+ *         example: goodrx
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
+ *         example: lifecycle
  *     requestBody:
  *       required: true
  *       content:
@@ -190,7 +213,10 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *             schema:
  *               $ref: '#/components/schemas/GetRepoAIAgentConfigSuccessResponse'
  *       '400':
- *         description: Validation error
+ *         description: >
+ *           Validation error. Possible reasons: JSON schema violation,
+ *           systemPromptOverride exceeds maximum length, excluded tool is a core tool,
+ *           invalid exclusion pattern, overly broad file pattern.
  *         content:
  *           application/json:
  *             schema:
@@ -261,7 +287,10 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
  * /api/v2/ai/agent-config/repos/{owner}/{repo}:
  *   delete:
  *     summary: Delete repository AI agent config override
- *     description: Soft-deletes the per-repository AI agent configuration override.
+ *     description: >
+ *       Soft-deletes the per-repository AI agent configuration override.
+ *       After deletion, the repository reverts to using the global config only.
+ *       The override can be recreated later with a PUT request.
  *     tags:
  *       - AI Agent Config
  *     operationId: deleteRepoAIAgentConfig
@@ -272,12 +301,14 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *         schema:
  *           type: string
  *         description: The repository owner
+ *         example: goodrx
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
+ *         example: lifecycle
  *     responses:
  *       '200':
  *         description: Repository config override deleted
@@ -286,7 +317,7 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *             schema:
  *               $ref: '#/components/schemas/SuccessApiResponse'
  *       '400':
- *         description: Invalid request
+ *         description: Invalid request (e.g. cannot delete the /effective endpoint)
  *         content:
  *           application/json:
  *             schema:

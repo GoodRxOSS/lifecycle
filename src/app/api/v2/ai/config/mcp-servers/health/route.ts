@@ -122,13 +122,18 @@ async function checkServerHealth(config: McpServerConfig): Promise<ServerHealthR
  *       Connects to every enabled MCP server config (across all scopes),
  *       lists their tools, and reports reachability. If the tool list has
  *       changed since the last check, the cached tools are refreshed in the
- *       database. The response is NOT wrapped in the standard API envelope.
+ *       database. The response is NOT wrapped in the standard SuccessApiResponse
+ *       envelope — it returns the GetMcpServerHealthResponse directly.
+ *       The `healthy` field is true only when all servers are reachable.
+ *       Servers returning 0 tools are considered unhealthy.
  *     tags:
  *       - MCP Server Config
  *     operationId: getMcpServerHealth
  *     responses:
  *       '200':
- *         description: Health check results for all enabled MCP servers
+ *         description: >
+ *           Health check results for all enabled MCP servers. Note: this response
+ *           is NOT wrapped in the standard API envelope.
  *         content:
  *           application/json:
  *             schema:

@@ -25,7 +25,11 @@ import AIAgentConversationService from 'server/services/ai/conversation/storage'
  * /api/v2/ai/chat/{buildUuid}/messages:
  *   get:
  *     summary: Get conversation messages
- *     description: Returns the conversation messages for a given build UUID.
+ *     description: >
+ *       Returns the full conversation history for a given build UUID, including
+ *       user and assistant messages. Assistant messages may include tool call
+ *       activity history, evidence items, and debug data collected during streaming.
+ *       Returns an empty array if no conversation exists for the build.
  *     tags:
  *       - AI Chat
  *     operationId: getAIChatMessages
@@ -36,9 +40,10 @@ import AIAgentConversationService from 'server/services/ai/conversation/storage'
  *         schema:
  *           type: string
  *         description: The UUID of the build to retrieve messages for.
+ *         example: white-poetry-596195
  *     responses:
  *       '200':
- *         description: Conversation messages
+ *         description: Conversation messages with optional activity history and debug data.
  *         content:
  *           application/json:
  *             schema:

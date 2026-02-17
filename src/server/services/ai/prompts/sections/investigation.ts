@@ -119,7 +119,7 @@ JSON — output ONLY valid JSON (no markdown, no conversational text):
 
 **errorSource / errorSourceDetail:** Identify where the error was found (e.g., errorSource="pod_logs", errorSourceDetail="web-build-abc-xyz").
 
-**Line numbers:** Extract from get_file output prefix. Include lineNumber + lineNumberEnd. If can't find, omit both.
+**Line numbers:** Count lines from the raw file content returned by get_file (the result includes totalLines). Include lineNumber + lineNumberEnd. If can't determine, omit both.
 
 **files array:** Include oldContent and newContent when canAutoFix=true. The UI renders these as a diff view. Each entry represents one file change.
 
