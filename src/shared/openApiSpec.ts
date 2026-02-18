@@ -1284,6 +1284,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             type: { type: 'string', enum: ['complete_json'] },
             content: { type: 'string', description: 'The full JSON response as a string.' },
+            preamble: {
+              type: 'string',
+              description:
+                'Optional plain-text summary emitted before structured JSON when mixed text+JSON model output is split.',
+            },
             totalInvestigationTimeMs: { type: 'number' },
           },
           required: ['type', 'content', 'totalInvestigationTimeMs'],

@@ -77,6 +77,7 @@ export interface AIAgentConfig {
 export interface ProcessQueryResult {
   response: string;
   isJson: boolean;
+  preamble?: string;
   metrics: {
     iterations: number;
     toolCalls: number;
@@ -316,6 +317,7 @@ export class AIAgentCore {
       return {
         response: result.response || result.error || finalResult.response,
         isJson: finalResult.isJson,
+        preamble: finalResult.preamble,
         metrics: result.metrics,
       };
     } catch (error: any) {

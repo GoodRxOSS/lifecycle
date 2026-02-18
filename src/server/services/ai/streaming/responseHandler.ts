@@ -22,10 +22,16 @@ function stripCodeFence(text: string): string {
   return text.replace(/```(?:json)?\s*\n?/g, '').replace(/\n?\s*```/g, '');
 }
 
+function cleanPreamble(text: string): string {
+  return stripCodeFence(text).trim();
+}
+
 export class ResponseHandler {
   private jsonBuffer: JSONBuffer;
   private isJsonResponse: boolean = false;
   private textBuffer: string = '';
+  private plainTextResponse: string = '';
+  private preambleText: string = '';
   private buildUuid?: string;
 
   constructor(private callbacks: StreamCallbacks, buildUuid?: string) {
@@ -33,25 +39,57 @@ export class ResponseHandler {
     this.buildUuid = buildUuid;
   }
 
-  handleChunk(text: string): void {
-    if (!this.isJsonResponse && this.isJsonStart(this.textBuffer + text)) {
-      this.isJsonResponse = true;
-      getLogger().info(`AI: JSON response detected buildUuid=${this.buildUuid || 'none'}`);
-      this.callbacks.onThinking('Generating structured report...');
-      // Strip fences and preamble, then buffer only the JSON portion
-      const combined = this.textBuffer + text;
-      const stripped = stripCodeFence(combined);
-      const jsonIdx = stripped.indexOf('{');
-      const jsonContent = jsonIdx >= 0 ? stripped.substring(jsonIdx) : stripped;
-      this.textBuffer = '';
-      this.jsonBuffer.append(jsonContent);
-      this.callbacks.onTextChunk(text);
-      return;
+  private appendPreamble(text: string): void {
+    const cleaned = cleanPreamble(text);
+    if (!cleaned) return;
+    this.preambleText = this.preambleText ? `${this.preambleText}\n${cleaned}` : cleaned;
+  }
+
+  private emitTextChunk(text: string): void {
+    if (!text) return;
+    this.plainTextResponse += text;
+    this.callbacks.onTextChunk(text);
+  }
+
+  private isPotentialJsonPrefix(text: string): boolean {
+    const trimmed = text.trimStart();
+    if (!trimmed) return true;
+
+    if (trimmed.startsWith('```')) {
+      if (/```(?:json)?\s*\n?\s*\{/.test(trimmed)) return true;
+      return !trimmed.includes('```', 3);
     }
 
+    if (!trimmed.startsWith('{')) return false;
+    if (trimmed.includes('"type"')) return false;
+    if (trimmed.includes('}') && !trimmed.includes('"type"')) return false;
+
+    const afterBrace = trimmed.slice(1);
+    if (afterBrace.length === 0) return true;
+    if (/^\s*$/.test(afterBrace)) return true;
+    if (/^\s*[\r\n]/.test(afterBrace)) return true;
+    if (/^\s*"/.test(afterBrace)) return true;
+    return false;
+  }
+
+  private findJsonBoundary(text: string): number {
+    const fenceMatch = text.match(/```(?:json)?\s*\n?\s*\{/);
+    if (fenceMatch && fenceMatch.index !== undefined) {
+      return fenceMatch.index;
+    }
+    const braceIdx = text.indexOf('{');
+    if (braceIdx >= 0) {
+      const tail = text.substring(braceIdx);
+      if (text.includes('"type"') || this.isPotentialJsonPrefix(tail)) {
+        return braceIdx;
+      }
+    }
+    return -1;
+  }
+
+  handleChunk(text: string): void {
     if (this.isJsonResponse) {
       this.jsonBuffer.append(text);
-      this.callbacks.onTextChunk(text);
 
       if (this.jsonBuffer.isComplete()) {
         getLogger().info(`AI: JSON response complete buildUuid=${this.buildUuid || 'none'}`);
@@ -66,33 +104,69 @@ export class ResponseHandler {
     }
 
     this.textBuffer += text;
-    this.callbacks.onTextChunk(text);
+    const combined = this.textBuffer;
+
+    if (this.isJsonStart(combined)) {
+      this.isJsonResponse = true;
+      getLogger().info(`AI: JSON response detected buildUuid=${this.buildUuid || 'none'}`);
+      this.callbacks.onThinking('Generating structured report...');
+
+      const boundary = this.findJsonBoundary(combined);
+      const preamble = boundary > 0 ? combined.substring(0, boundary) : '';
+      if (preamble.trim()) {
+        this.appendPreamble(preamble);
+        this.emitTextChunk(preamble);
+      }
+
+      const stripped = stripCodeFence(combined);
+      const jsonIdx = stripped.indexOf('{');
+      const jsonContent = jsonIdx >= 0 ? stripped.substring(jsonIdx) : stripped;
+      this.jsonBuffer.append(jsonContent);
+      this.textBuffer = '';
+      return;
+    }
+
+    const boundary = this.findJsonBoundary(combined);
+    if (boundary > 0) {
+      const preamble = combined.substring(0, boundary);
+      if (preamble.trim()) {
+        this.appendPreamble(preamble);
+        this.emitTextChunk(preamble);
+      }
+      this.textBuffer = combined.substring(boundary);
+      return;
+    }
+
+    if (this.isPotentialJsonPrefix(combined)) {
+      return;
+    }
+
+    this.emitTextChunk(combined);
+    this.textBuffer = '';
   }
 
   private isJsonStart(text: string): boolean {
     const trimmed = text.trim();
-    // Direct JSON start
     if (trimmed.startsWith('{') && trimmed.includes('"type"')) return true;
-    // Markdown-fenced JSON: ```json\n{ or ```\n{
     if (/```(?:json)?\s*\n?\s*\{/.test(trimmed) && trimmed.includes('"type"')) return true;
-    // Preamble text followed by fenced JSON containing "type"
     const stripped = stripCodeFence(trimmed);
     const braceIdx = stripped.indexOf('{');
     if (braceIdx >= 0 && stripped.includes('"type"')) return true;
     return false;
   }
 
-  getResult(): { response: string; isJson: boolean } {
+  getResult(): { response: string; isJson: boolean; preamble?: string } {
     if (this.isJsonResponse) {
       const content = stripCodeFence(this.jsonBuffer.getContent()).trim();
       return {
         response: content,
         isJson: true,
+        ...(this.preambleText ? { preamble: this.preambleText } : {}),
       };
     }
 
     return {
-      response: this.textBuffer,
+      response: this.plainTextResponse + this.textBuffer,
       isJson: false,
     };
   }

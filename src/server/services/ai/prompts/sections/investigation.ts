@@ -65,7 +65,7 @@ Decide your output format using this decision tree:
 - Any issue found OR config problem even if pods running → JSON schema below
 - Fix applied successfully → JSON with fixesApplied: true and commitUrl
 
-JSON — output ONLY valid JSON (no markdown, no conversational text):
+JSON — output ONLY the raw JSON object. Do not include any markdown preamble, conversational text, or code fences before or after it. If you want to provide a conversational summary, put it in the "summary" field of the JSON. The response must start with \`{\` and end with \`}\`:
 
 <output_schema>
 {

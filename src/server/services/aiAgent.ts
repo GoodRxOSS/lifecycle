@@ -245,7 +245,7 @@ export default class AIAgentService extends BaseService {
     }) => Promise<boolean>,
     mode?: 'investigate' | 'fix',
     onDebugEvent?: (event: any) => void
-  ): Promise<{ response: string; isJson: boolean; totalInvestigationTimeMs: number }> {
+  ): Promise<{ response: string; isJson: boolean; totalInvestigationTimeMs: number; preamble?: string }> {
     const effectiveMode = mode || 'investigate';
 
     if (!this.service) {
@@ -323,6 +323,7 @@ export default class AIAgentService extends BaseService {
       response: result.response,
       isJson: result.isJson,
       totalInvestigationTimeMs: result.metrics.duration,
+      preamble: result.preamble,
     };
   }
 

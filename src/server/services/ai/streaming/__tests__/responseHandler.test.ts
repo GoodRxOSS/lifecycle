@@ -38,7 +38,7 @@ describe('ResponseHandler', () => {
         onTextChunk,
         onToolCall: jest.fn(),
         onToolResult: jest.fn(),
-        onComplete: jest.fn(),
+        onActivity: jest.fn(),
         onError: jest.fn(),
       },
       'test-uuid'
@@ -81,7 +81,7 @@ describe('ResponseHandler', () => {
     expect(result.isJson).toBe(false);
   });
 
-  it('calls onTextChunk for every chunk', () => {
+  it('calls onTextChunk for plain text chunks', () => {
     handler.handleChunk('one');
     handler.handleChunk('two');
     handler.handleChunk('three');
@@ -115,5 +115,78 @@ describe('ResponseHandler', () => {
     const result = handler.getResult();
     expect(result.isJson).toBe(true);
     expect(result.response).not.toContain('```');
+  });
+
+  describe('JSON chunk suppression', () => {
+    it('does not call onTextChunk for JSON content chunks', () => {
+      handler.handleChunk('{"type": "investigation_complete", "summary": "done"}');
+      expect(onTextChunk).not.toHaveBeenCalled();
+    });
+
+    it('does not leak partial JSON prefix when type arrives in later chunk', () => {
+      handler.handleChunk('{');
+      handler.handleChunk('"type": "investigation_complete"}');
+      expect(onTextChunk).not.toHaveBeenCalled();
+    });
+
+    it('does not call onTextChunk for subsequent JSON chunks', () => {
+      handler.handleChunk('{"type": "invest');
+      handler.handleChunk('igation_complete"}');
+      expect(onTextChunk).not.toHaveBeenCalled();
+    });
+
+    it('does not call onTextChunk for fenced JSON', () => {
+      handler.handleChunk('```json\n{"type": "investigation_complete"}\n```');
+      expect(onTextChunk).not.toHaveBeenCalled();
+    });
+
+    it('sends preamble via onTextChunk but suppresses JSON', () => {
+      handler.handleChunk('Here is my analysis:\n\n```json\n{"type": "investigation_complete"}\n```');
+      const calls = onTextChunk.mock.calls.map((c: any[]) => c[0]);
+      const allText = calls.join('');
+      expect(allText).not.toContain('"investigation_complete"');
+      expect(allText).not.toContain('{');
+    });
+
+    it('emits plain-text preamble and suppresses split raw JSON tail', () => {
+      handler.handleChunk('Analysis complete.\n{');
+      handler.handleChunk('"type": "investigation_complete", "services": []}');
+
+      const calls = onTextChunk.mock.calls.map((c: any[]) => c[0]);
+      const allText = calls.join('');
+      expect(allText).toContain('Analysis complete.');
+      expect(allText).not.toContain('"investigation_complete"');
+      expect(allText).not.toContain('{');
+    });
+  });
+
+  describe('preamble tracking', () => {
+    it('returns preamble for mixed text+JSON responses', () => {
+      handler.handleChunk('Here are the findings:\n\n```json\n{"type": "investigation_complete", "data": []}\n```');
+      const result = handler.getResult();
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBe('Here are the findings:');
+    });
+
+    it('does not return preamble for pure JSON responses', () => {
+      handler.handleChunk('{"type": "investigation_complete", "summary": "done"}');
+      const result = handler.getResult();
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBeUndefined();
+    });
+
+    it('does not return preamble for plain text', () => {
+      handler.handleChunk('Just a regular message');
+      const result = handler.getResult();
+      expect(result.isJson).toBe(false);
+      expect(result.preamble).toBeUndefined();
+    });
+
+    it('does not return preamble for fenced JSON without preamble text', () => {
+      handler.handleChunk('```json\n{"type": "investigation_complete"}\n```');
+      const result = handler.getResult();
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBeUndefined();
+    });
   });
 });
