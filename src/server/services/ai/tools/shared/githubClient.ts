@@ -21,6 +21,7 @@ export class GitHubClient {
   private allowedBranch: string | null = null;
   private referencedFiles: Set<string> = new Set();
   private excludedFilePatterns: string[] = [];
+  private allowedWritePatterns: string[] = [];
 
   setAllowedBranch(branch: string) {
     this.allowedBranch = branch;
@@ -32,6 +33,10 @@ export class GitHubClient {
 
   setExcludedFilePatterns(patterns: string[]): void {
     this.excludedFilePatterns = patterns;
+  }
+
+  setAllowedWritePatterns(patterns: string[]): void {
+    this.allowedWritePatterns = patterns;
   }
 
   isFileExcluded(filePath: string): boolean {
@@ -58,20 +63,14 @@ export class GitHubClient {
       return true;
     }
 
-    const allowedPatterns = [
-      /^sysops\/dockerfiles\/.+\.dockerfile$/i,
-      /^helm\/.+\.(yaml|yml)$/i,
-      /^\.github\/workflows\/.+\.(yaml|yml)$/i,
-      /^sysops\/helm\/.+\.(yaml|yml)$/i,
-      /^docker-compose\.(yaml|yml)$/i,
-      /^package\.json$/i,
-      /^requirements\.txt$/i,
-      /^go\.(mod|sum)$/i,
-      /^pom\.xml$/i,
-      /^build\.gradle$/i,
-    ];
+    if (
+      this.allowedWritePatterns.length > 0 &&
+      picomatch.isMatch(filePath, this.allowedWritePatterns, { dot: true, nocase: true })
+    ) {
+      return true;
+    }
 
-    return allowedPatterns.some((pattern) => pattern.test(normalizedPath));
+    return false;
   }
 
   validateBranch(branch: string): { valid: boolean; error?: string } {

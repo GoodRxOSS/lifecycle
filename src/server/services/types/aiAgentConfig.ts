@@ -33,6 +33,7 @@ export interface AIAgentRepoOverride {
   systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
+  allowedWritePatterns?: string[];
 }
 
 export type EffectiveAIAgentConfig = import('./aiAgent').AIAgentConfig;

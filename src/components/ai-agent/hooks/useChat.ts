@@ -272,12 +272,24 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
                 receivedCompleteJson = true;
                 const debugToolData =
                   debugToolDataMapRef.current.size > 0 ? Array.from(debugToolDataMapRef.current.values()) : undefined;
+                const preamble =
+                  typeof data.preamble === 'string' && data.preamble.trim().length > 0 ? data.preamble.trim() : null;
+                const timestamp = Date.now();
                 setMessages((prev) => [
                   ...prev,
+                  ...(preamble
+                    ? [
+                        {
+                          role: 'assistant' as const,
+                          content: preamble,
+                          timestamp,
+                        },
+                      ]
+                    : []),
                   {
                     role: 'assistant',
                     content: data.content,
-                    timestamp: Date.now(),
+                    timestamp: timestamp + (preamble ? 1 : 0),
                     activityHistory: collectedActivities.length > 0 ? collectedActivities : undefined,
                     evidenceItems: collectedEvidence.length > 0 ? collectedEvidence : undefined,
                     totalInvestigationTimeMs: data.totalInvestigationTimeMs,
@@ -420,6 +432,10 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
   };
 
   const handleAutoFix = (service: ServiceInvestigationResult) => {
+    if (!service.canAutoFix) {
+      return;
+    }
+
     let fixMessage = `User consents to fix ${service.serviceName}. `;
 
     if (service.suggestedFix) {

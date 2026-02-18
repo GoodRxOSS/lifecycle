@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { validateDiff, UpdateFileTool } from '../updateFile';
+import { validateDiff, UpdateFileTool, MAX_LINES_CHANGED, MAX_LINES_REMOVED } from '../updateFile';
 
 describe('validateDiff', () => {
   it('allows identical content', () => {
@@ -33,40 +33,41 @@ describe('validateDiff', () => {
     expect(result.linesChanged).toBe(1);
   });
 
-  it('allows changes up to 10 lines', () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+  it(`allows changes up to ${MAX_LINES_CHANGED} lines`, () => {
+    const lines = Array.from({ length: MAX_LINES_CHANGED + 20 }, (_, i) => `line${i}`);
     const oldContent = lines.join('\n');
     const newLines = [...lines];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < MAX_LINES_CHANGED; i++) {
       newLines[i] = `changed${i}`;
     }
     const result = validateDiff(oldContent, newLines.join('\n'));
     expect(result.valid).toBe(true);
-    expect(result.linesChanged).toBe(10);
+    expect(result.linesChanged).toBe(MAX_LINES_CHANGED);
   });
 
-  it('rejects excessive changes (>10 lines changed)', () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+  it(`rejects excessive changes (>${MAX_LINES_CHANGED} lines changed)`, () => {
+    const lines = Array.from({ length: MAX_LINES_CHANGED + 20 }, (_, i) => `line${i}`);
     const oldContent = lines.join('\n');
     const newLines = [...lines];
-    for (let i = 0; i < 11; i++) {
+    const changedLineCount = MAX_LINES_CHANGED + 1;
+    for (let i = 0; i < changedLineCount; i++) {
       newLines[i] = `changed${i}`;
     }
     const result = validateDiff(oldContent, newLines.join('\n'));
     expect(result.valid).toBe(false);
-    expect(result.linesChanged).toBe(11);
+    expect(result.linesChanged).toBe(changedLineCount);
     expect(result.error).toContain('SAFETY ERROR');
-    expect(result.error).toContain('changes 11 lines');
+    expect(result.error).toContain(`changes ${changedLineCount} lines`);
   });
 
-  it('allows small deletions (up to 3 lines removed)', () => {
+  it(`allows small deletions (up to ${MAX_LINES_REMOVED} lines removed)`, () => {
     const old = 'line1\nline2\nline3\nline4\nline5\nline6\nline7';
     const updated = 'line1\nline2\nline3\nline7';
     const result = validateDiff(old, updated);
     expect(result.valid).toBe(true);
   });
 
-  it('rejects large deletions (>3 lines removed)', () => {
+  it(`rejects large deletions (>${MAX_LINES_REMOVED} lines removed)`, () => {
     const lines = Array.from({ length: 50 }, (_, i) => `line${i}`);
     const oldContent = lines.join('\n');
     const newContent = lines.slice(0, 20).join('\n');

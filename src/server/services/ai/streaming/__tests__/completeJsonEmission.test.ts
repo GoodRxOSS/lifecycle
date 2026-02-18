@@ -25,27 +25,35 @@ jest.mock('server/lib/logger', () => ({
 import { ResponseHandler } from '../responseHandler';
 import { extractJsonFromResponse } from '../../utils/jsonExtraction';
 
-/**
- * Simulates the post-processing logic from the route handler (lines 474-516 of route.ts).
- * Given a ResponseHandler result, applies the same complete_json emission logic.
- */
-function simulateRoutePostProcessing(result: { response: string; isJson: boolean }) {
-  const events: Array<{ type: string; content?: string }> = [];
+function simulateRoutePostProcessing(result: { response: string; isJson: boolean; preamble?: string }) {
+  const events: Array<{ type: string; content?: string; preamble?: string }> = [];
   let aiResponse = result.response;
   let isJsonResponse = result.isJson;
+  let preambleText: string | undefined = result.preamble;
+  let completeJsonEmitted = false;
 
-  // Late JSON detection fallback (route.ts lines 474-478)
-  if (!isJsonResponse && aiResponse.includes('"investigation_complete"')) {
+  if (aiResponse.includes('"investigation_complete"')) {
     const extracted = extractJsonFromResponse(aiResponse, 'test-uuid');
-    aiResponse = extracted.response;
-    isJsonResponse = extracted.isJson;
+    if (extracted.isJson) {
+      aiResponse = extracted.response;
+      isJsonResponse = true;
+      if (extracted.preamble && !preambleText) {
+        preambleText = extracted.preamble;
+      }
+    }
   }
 
-  // JSON validation and complete_json emission (route.ts lines 480-516)
   if (isJsonResponse) {
     try {
       JSON.parse(aiResponse);
-      events.push({ type: 'complete_json', content: aiResponse });
+      if (!completeJsonEmitted) {
+        completeJsonEmitted = true;
+        events.push({
+          type: 'complete_json',
+          content: aiResponse,
+          ...(preambleText ? { preamble: preambleText } : {}),
+        });
+      }
     } catch {
       isJsonResponse = false;
     }
@@ -63,7 +71,7 @@ function createHandler() {
       onTextChunk: jest.fn(),
       onToolCall: jest.fn(),
       onToolResult: jest.fn(),
-      onComplete: jest.fn(),
+      onActivity: jest.fn(),
       onError: jest.fn(),
     },
     'test-uuid'
@@ -94,7 +102,7 @@ describe('complete_json emission', () => {
     expect(JSON.parse(events[0].content!).type).toBe('investigation_complete');
   });
 
-  it('emits complete_json for preamble + fenced JSON via late detection', () => {
+  it('emits complete_json for preamble + fenced JSON', () => {
     const handler = createHandler();
     handler.handleChunk('Here are the findings:\n\n```json\n{"type": "investigation_complete", "items": []}\n```');
     const { events, isJsonResponse } = simulateRoutePostProcessing(handler.getResult());
@@ -103,6 +111,24 @@ describe('complete_json emission', () => {
     expect(events[0].type).toBe('complete_json');
     expect(events[1].type).toBe('complete');
     expect(JSON.parse(events[0].content!).type).toBe('investigation_complete');
+  });
+
+  it('includes preamble in complete_json when present', () => {
+    const handler = createHandler();
+    handler.handleChunk('Here are the findings:\n\n```json\n{"type": "investigation_complete", "items": []}\n```');
+    const { events } = simulateRoutePostProcessing(handler.getResult());
+
+    expect(events[0].type).toBe('complete_json');
+    expect(events[0].preamble).toBe('Here are the findings:');
+  });
+
+  it('does not include preamble for pure JSON responses', () => {
+    const handler = createHandler();
+    handler.handleChunk('{"type": "investigation_complete", "summary": "done"}');
+    const { events } = simulateRoutePostProcessing(handler.getResult());
+
+    expect(events[0].type).toBe('complete_json');
+    expect(events[0].preamble).toBeUndefined();
   });
 
   it('content field is valid JSON in complete_json event', () => {
@@ -124,6 +150,15 @@ describe('complete_json emission', () => {
     const jsonIdx = events.findIndex((e) => e.type === 'complete_json');
     const completeIdx = events.findIndex((e) => e.type === 'complete');
     expect(jsonIdx).toBeLessThan(completeIdx);
+  });
+
+  it('emits complete_json at most once', () => {
+    const handler = createHandler();
+    handler.handleChunk('{"type": "investigation_complete", "summary": "done"}');
+    const { events } = simulateRoutePostProcessing(handler.getResult());
+
+    const jsonEvents = events.filter((e) => e.type === 'complete_json');
+    expect(jsonEvents).toHaveLength(1);
   });
 
   it('does not emit complete_json for plain text responses', () => {

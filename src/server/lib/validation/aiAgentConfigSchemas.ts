@@ -52,6 +52,7 @@ export const aiAgentConfigSchema = {
     systemPromptOverride: { type: 'string', maxLength: 50000 },
     excludedTools: { type: 'array', items: { type: 'string' } },
     excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+    allowedWritePatterns: { type: 'array', items: { type: 'string' } },
     maxIterations: { type: 'integer', minimum: 1 },
     maxToolCalls: { type: 'integer', minimum: 1 },
     maxRepeatedCalls: { type: 'integer', minimum: 1 },
@@ -76,6 +77,7 @@ export const aiAgentRepoOverrideSchema = {
     systemPromptOverride: { type: 'string', maxLength: 50000 },
     excludedTools: { type: 'array', items: { type: 'string' } },
     excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+    allowedWritePatterns: { type: 'array', items: { type: 'string' } },
   },
   additionalProperties: false,
 };

@@ -28,6 +28,7 @@ export interface CompleteJsonEvent {
   type: 'complete_json';
   content: string;
   totalInvestigationTimeMs: number;
+  preamble?: string;
 }
 
 export interface ToolCallEvent {

@@ -333,6 +333,7 @@ export interface AIAgentConfig {
   systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
+  allowedWritePatterns?: string[];
   maxIterations?: number;
   maxToolCalls?: number;
   maxRepeatedCalls?: number;

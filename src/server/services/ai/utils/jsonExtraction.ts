@@ -55,32 +55,43 @@ export function extractBalancedJson(str: string, startIndex: number): string | n
   return null;
 }
 
-export function extractJsonFromResponse(aiResponse: string, buildUuid: string): { response: string; isJson: boolean } {
+export function extractJsonFromResponse(
+  aiResponse: string,
+  buildUuid: string
+): { response: string; isJson: boolean; preamble?: string } {
   if (!aiResponse.includes('"investigation_complete"')) {
     return { response: aiResponse, isJson: false };
   }
 
-  let candidate = aiResponse.trim();
+  const original = aiResponse.trim();
 
-  // Strip code fences anywhere in the string (not just at start/end)
+  let candidate = original;
+
+  const fenceStart = candidate.indexOf('```');
+  const hasFence = fenceStart >= 0;
+  const preambleBeforeFence = hasFence ? candidate.substring(0, fenceStart).trim() : '';
+
   candidate = candidate
     .replace(/```(?:json)?\s*\n?/g, '')
     .replace(/\n?\s*```/g, '')
     .trim();
 
-  // Find the start of the JSON object
   const jsonIdx = candidate.indexOf('{"type"');
   if (jsonIdx < 0) {
-    // Try finding any opening brace if no {"type" pattern
     const braceIdx = candidate.indexOf('{');
     if (braceIdx < 0) return { response: aiResponse, isJson: false };
 
+    const preambleRaw = candidate.substring(0, braceIdx).trim();
     const balanced = extractBalancedJson(candidate, braceIdx);
     if (balanced) {
       try {
         JSON.parse(balanced);
         getLogger().info(`AI: late JSON detection - extracted valid JSON buildUuid=${buildUuid}`);
-        return { response: balanced, isJson: true };
+        return {
+          response: balanced,
+          isJson: true,
+          ...(preambleRaw ? { preamble: preambleRaw } : {}),
+        };
       } catch {
         return { response: aiResponse, isJson: false };
       }
@@ -88,12 +99,18 @@ export function extractJsonFromResponse(aiResponse: string, buildUuid: string): 
     return { response: aiResponse, isJson: false };
   }
 
+  const preambleRaw = hasFence ? preambleBeforeFence : candidate.substring(0, jsonIdx).trim();
+
   const balanced = extractBalancedJson(candidate, jsonIdx);
   if (balanced) {
     try {
       JSON.parse(balanced);
       getLogger().info(`AI: late JSON detection - extracted valid JSON buildUuid=${buildUuid}`);
-      return { response: balanced, isJson: true };
+      return {
+        response: balanced,
+        isJson: true,
+        ...(preambleRaw ? { preamble: preambleRaw } : {}),
+      };
     } catch {
       return { response: aiResponse, isJson: false };
     }

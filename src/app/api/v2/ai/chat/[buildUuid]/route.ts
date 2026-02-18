@@ -24,6 +24,8 @@ import AIAgentConfigService from 'server/services/aiAgentConfig';
 import { getLogger, withLogContext } from 'server/lib/logger';
 import { extractJsonFromResponse } from 'server/services/ai/utils/jsonExtraction';
 import { sanitizeForJson } from 'server/services/ai/utils/sanitize';
+import { normalizeInvestigationPayload } from 'server/services/ai/utils/normalizePayload';
+import { authorizeToolForFixTarget, FixTargetScope } from 'server/services/ai/utils/fixTargetAuthorization';
 import {
   createClassifiedError,
   ErrorCategory,
@@ -150,6 +152,25 @@ export const dynamic = 'force-dynamic';
  *                   Operation mode. "investigate" (default) is read-only analysis.
  *                   "fix" enables the agent to take corrective actions via tools.
  *                 default: investigate
+ *               fixTarget:
+ *                 type: object
+ *                 description: >
+ *                   Optional service-scoped fix target. When provided in fix mode,
+ *                   mutating tool calls are constrained to this selected issue.
+ *                 properties:
+ *                   serviceName:
+ *                     type: string
+ *                   suggestedFix:
+ *                     type: string
+ *                   filePath:
+ *                     type: string
+ *                   files:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         path:
+ *                           type: string
  *     responses:
  *       '200':
  *         description: >
@@ -278,7 +299,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         return;
       }
 
-      const { message, clearHistory, provider, modelId, isSystemAction, mode: requestedMode } = body;
+      const { message, clearHistory, provider, modelId, isSystemAction, mode: requestedMode, fixTarget } = body;
 
       getLogger().info(
         `AI: v2 chat request received provider=${provider} modelId=${modelId} hasProvider=${!!provider} hasModelId=${!!modelId}`
@@ -364,6 +385,13 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           getLogger().info(`AI: using mode=${mode} (requestedMode=${requestedMode})`);
 
           const onToolConfirmation = mode === 'fix' ? async () => true : undefined;
+          const onToolAuthorization =
+            mode === 'fix' && fixTarget
+              ? async (
+                  tool: { name: string; description: string; category: string; safetyLevel: string },
+                  args: Record<string, unknown>
+                ) => authorizeToolForFixTarget(fixTarget as FixTargetScope, { ...tool, args })
+              : undefined;
 
           const result = await llmService.processQueryStream(
             message,
@@ -414,6 +442,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
               collectedEvidence.push(evidenceEvent as unknown as Record<string, unknown>);
             },
             onToolConfirmation,
+            onToolAuthorization,
             mode,
             (event: AIChatSSEEvent) => {
               try {
@@ -470,35 +499,46 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           aiResponse = result.response;
           isJsonResponse = result.isJson;
           totalInvestigationTimeMs = result.totalInvestigationTimeMs;
+          let preambleText: string | undefined = result.preamble;
+          let completeJsonEmitted = false;
 
-          if (!isJsonResponse && aiResponse.includes('"investigation_complete"')) {
+          if (aiResponse.includes('"investigation_complete"')) {
             const extracted = extractJsonFromResponse(aiResponse, buildUuid);
-            aiResponse = extracted.response;
-            isJsonResponse = extracted.isJson;
+            if (extracted.isJson) {
+              aiResponse = extracted.response;
+              isJsonResponse = true;
+              if (extracted.preamble && !preambleText) {
+                preambleText = extracted.preamble;
+              }
+            }
           }
 
           if (isJsonResponse) {
             try {
-              const parsed = JSON.parse(aiResponse);
+              let parsed = JSON.parse(aiResponse);
               getLogger().info(
                 `AI: JSON response type=${parsed.type} hasPullRequest=${!!context.lifecycleContext
                   ?.pullRequest} fullName=${context.lifecycleContext?.pullRequest?.fullName} branch=${
                   context.lifecycleContext?.pullRequest?.branch
                 }`
               );
-              if (parsed.type === 'investigation_complete' && context.lifecycleContext?.pullRequest) {
-                const fullName = context.lifecycleContext.pullRequest.fullName;
-                const branch = context.lifecycleContext.pullRequest.branch;
-                if (fullName && branch) {
-                  const [owner, name] = fullName.split('/');
-                  parsed.repository = { owner, name, branch };
-                  getLogger().info(`AI: added repository to response owner=${owner} name=${name} branch=${branch}`);
+              if (parsed.type === 'investigation_complete') {
+                parsed = normalizeInvestigationPayload(parsed, { availableTools: result.availableTools });
 
-                  const sanitized = sanitizeForJson(parsed);
-                  aiResponse = JSON.stringify(sanitized, null, 2);
-
-                  JSON.parse(aiResponse);
+                if (context.lifecycleContext?.pullRequest) {
+                  const fullName = context.lifecycleContext.pullRequest.fullName;
+                  const branch = context.lifecycleContext.pullRequest.branch;
+                  if (fullName && branch) {
+                    const [owner, name] = fullName.split('/');
+                    parsed.repository = { owner, name, branch };
+                    getLogger().info(`AI: added repository to response owner=${owner} name=${name} branch=${branch}`);
+                  }
                 }
+
+                const sanitized = sanitizeForJson(parsed);
+                aiResponse = JSON.stringify(sanitized, null, 2);
+
+                JSON.parse(aiResponse);
               }
             } catch (e) {
               getLogger().error(
@@ -510,8 +550,14 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
               isJsonResponse = false;
             }
 
-            if (isJsonResponse) {
-              sendEvent({ type: 'complete_json', content: aiResponse, totalInvestigationTimeMs });
+            if (isJsonResponse && !completeJsonEmitted) {
+              completeJsonEmitted = true;
+              sendEvent({
+                type: 'complete_json',
+                content: aiResponse,
+                totalInvestigationTimeMs,
+                ...(preambleText ? { preamble: preambleText } : {}),
+              });
             }
           }
         } catch (error: any) {

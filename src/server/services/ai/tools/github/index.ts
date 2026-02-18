@@ -18,3 +18,4 @@ export { GetFileTool } from './getFile';
 export { UpdateFileTool } from './updateFile';
 export { ListDirectoryTool } from './listDirectory';
 export { GetIssueCommentTool } from './getIssueComment';
+export { UpdatePrLabelsTool } from './updatePrLabels';

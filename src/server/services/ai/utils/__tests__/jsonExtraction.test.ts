@@ -115,4 +115,34 @@ describe('extractJsonFromResponse', () => {
     const result = extractJsonFromResponse(input, buildUuid);
     expect(result.isJson).toBe(false);
   });
+
+  describe('preamble extraction', () => {
+    it('returns preamble for preamble + fenced JSON', () => {
+      const input = 'Here are the findings:\n\n```json\n{"type": "investigation_complete", "data": []}\n```';
+      const result = extractJsonFromResponse(input, buildUuid);
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBe('Here are the findings:');
+    });
+
+    it('returns preamble for preamble + raw JSON', () => {
+      const input = 'Analysis complete.\n{"type": "investigation_complete", "items": []}';
+      const result = extractJsonFromResponse(input, buildUuid);
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBe('Analysis complete.');
+    });
+
+    it('does not return preamble for pure JSON', () => {
+      const json = '{"type": "investigation_complete", "summary": "done"}';
+      const result = extractJsonFromResponse(json, buildUuid);
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBeUndefined();
+    });
+
+    it('does not return preamble for fenced JSON without preamble text', () => {
+      const input = '```json\n{"type": "investigation_complete"}\n```';
+      const result = extractJsonFromResponse(input, buildUuid);
+      expect(result.isJson).toBe(true);
+      expect(result.preamble).toBeUndefined();
+    });
+  });
 });
