@@ -19,8 +19,8 @@ import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../../types/to
 import { GitHubClient } from '../shared/githubClient';
 
 // TODO: Make this configurable in db
-const MAX_LINES_REMOVED = 10;
-const MAX_LINES_CHANGED = 150;
+export const MAX_LINES_REMOVED = 10;
+export const MAX_LINES_CHANGED = 150;
 
 export function validateDiff(
   oldContent: string,
