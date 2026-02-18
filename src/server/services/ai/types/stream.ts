@@ -39,4 +39,13 @@ export interface StreamCallbacks {
   onError(error: ToolResult['error']): void;
   onActivity(activity: ActivityEvent): void;
   onToolConfirmation?(details: ConfirmationDetails): Promise<boolean>;
+  onToolAuthorization?(
+    tool: {
+      name: string;
+      description: string;
+      category: string;
+      safetyLevel: string;
+    },
+    args: Record<string, unknown>
+  ): Promise<{ allowed: boolean; reason?: string }>;
 }

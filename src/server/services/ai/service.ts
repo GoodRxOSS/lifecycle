@@ -33,6 +33,7 @@ import {
   QueryDatabaseTool,
   GetFileTool,
   UpdateFileTool,
+  UpdatePrLabelsTool,
   ListDirectoryTool,
   GetIssueCommentTool,
   GetCodefreshLogsTool,
@@ -78,6 +79,12 @@ export interface ProcessQueryResult {
   response: string;
   isJson: boolean;
   preamble?: string;
+  availableTools: Array<{
+    name: string;
+    description: string;
+    category: string;
+    safetyLevel: string;
+  }>;
   metrics: {
     iterations: number;
     toolCalls: number;
@@ -318,6 +325,7 @@ export class AIAgentCore {
         response: result.response || result.error || finalResult.response,
         isJson: finalResult.isJson,
         preamble: finalResult.preamble,
+        availableTools: this.getRegisteredTools(),
         metrics: result.metrics,
       };
     } catch (error: any) {
@@ -343,6 +351,7 @@ export class AIAgentCore {
     const githubTools = [
       new GetFileTool(this.githubClient),
       new UpdateFileTool(this.githubClient),
+      new UpdatePrLabelsTool(this.githubClient),
       new ListDirectoryTool(this.githubClient),
       new GetIssueCommentTool(this.githubClient),
     ];
@@ -352,7 +361,7 @@ export class AIAgentCore {
     let allTools = [...k8sTools, ...githubTools, ...codefreshTools];
 
     if (this.mode === 'investigate') {
-      const writingToolNames = [UpdateFileTool.Name, PatchK8sResourceTool.Name];
+      const writingToolNames = [UpdateFileTool.Name, UpdatePrLabelsTool.Name, PatchK8sResourceTool.Name];
       allTools = allTools.filter((tool) => !writingToolNames.includes(tool.name));
     }
 
@@ -369,6 +378,55 @@ export class AIAgentCore {
 
   getModelInfo() {
     return this.provider.getModelInfo();
+  }
+
+  getRegisteredTools(): Array<{
+    name: string;
+    description: string;
+    category: string;
+    safetyLevel: string;
+  }> {
+    const tools = this.toolRegistry.getAll().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      category: tool.category,
+      safetyLevel: tool.safetyLevel,
+    }));
+
+    // In investigate mode, write tools are intentionally hidden from execution.
+    // Add them back as "fix-mode available" capabilities for canAutoFix gating.
+    if (this.mode === 'investigate') {
+      const existing = new Set(tools.map((tool) => tool.name));
+      const excluded = new Set(this.excludedTools || []);
+      const fixModeToolHints = [
+        {
+          name: UpdateFileTool.Name,
+          description: 'Update repository files (available in fix mode)',
+          category: 'github',
+          safetyLevel: 'dangerous',
+        },
+        {
+          name: PatchK8sResourceTool.Name,
+          description: 'Patch Kubernetes resources (available in fix mode)',
+          category: 'k8s',
+          safetyLevel: 'dangerous',
+        },
+        {
+          name: UpdatePrLabelsTool.Name,
+          description: 'Update pull request labels in GitHub (available in fix mode)',
+          category: 'github',
+          safetyLevel: 'dangerous',
+        },
+      ];
+
+      for (const tool of fixModeToolHints) {
+        if (!existing.has(tool.name) && !excluded.has(tool.name)) {
+          tools.push(tool);
+        }
+      }
+    }
+
+    return tools;
   }
 
   private buildMcpToolInfos(servers: ResolvedMcpServer[]): McpToolInfo[] {

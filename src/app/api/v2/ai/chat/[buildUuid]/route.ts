@@ -25,6 +25,7 @@ import { getLogger, withLogContext } from 'server/lib/logger';
 import { extractJsonFromResponse } from 'server/services/ai/utils/jsonExtraction';
 import { sanitizeForJson } from 'server/services/ai/utils/sanitize';
 import { normalizeInvestigationPayload } from 'server/services/ai/utils/normalizePayload';
+import { authorizeToolForFixTarget, FixTargetScope } from 'server/services/ai/utils/fixTargetAuthorization';
 import {
   createClassifiedError,
   ErrorCategory,
@@ -151,6 +152,25 @@ export const dynamic = 'force-dynamic';
  *                   Operation mode. "investigate" (default) is read-only analysis.
  *                   "fix" enables the agent to take corrective actions via tools.
  *                 default: investigate
+ *               fixTarget:
+ *                 type: object
+ *                 description: >
+ *                   Optional service-scoped fix target. When provided in fix mode,
+ *                   mutating tool calls are constrained to this selected issue.
+ *                 properties:
+ *                   serviceName:
+ *                     type: string
+ *                   suggestedFix:
+ *                     type: string
+ *                   filePath:
+ *                     type: string
+ *                   files:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         path:
+ *                           type: string
  *     responses:
  *       '200':
  *         description: >
@@ -279,7 +299,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         return;
       }
 
-      const { message, clearHistory, provider, modelId, isSystemAction, mode: requestedMode } = body;
+      const { message, clearHistory, provider, modelId, isSystemAction, mode: requestedMode, fixTarget } = body;
 
       getLogger().info(
         `AI: v2 chat request received provider=${provider} modelId=${modelId} hasProvider=${!!provider} hasModelId=${!!modelId}`
@@ -365,6 +385,13 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           getLogger().info(`AI: using mode=${mode} (requestedMode=${requestedMode})`);
 
           const onToolConfirmation = mode === 'fix' ? async () => true : undefined;
+          const onToolAuthorization =
+            mode === 'fix' && fixTarget
+              ? async (
+                  tool: { name: string; description: string; category: string; safetyLevel: string },
+                  args: Record<string, unknown>
+                ) => authorizeToolForFixTarget(fixTarget as FixTargetScope, { ...tool, args })
+              : undefined;
 
           const result = await llmService.processQueryStream(
             message,
@@ -415,6 +442,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
               collectedEvidence.push(evidenceEvent as unknown as Record<string, unknown>);
             },
             onToolConfirmation,
+            onToolAuthorization,
             mode,
             (event: AIChatSSEEvent) => {
               try {
@@ -495,7 +523,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
                 }`
               );
               if (parsed.type === 'investigation_complete') {
-                parsed = normalizeInvestigationPayload(parsed);
+                parsed = normalizeInvestigationPayload(parsed, { availableTools: result.availableTools });
 
                 if (context.lifecycleContext?.pullRequest) {
                   const fullName = context.lifecycleContext.pullRequest.fullName;

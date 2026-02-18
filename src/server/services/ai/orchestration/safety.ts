@@ -57,6 +57,28 @@ export class ToolSafetyManager {
       };
     }
 
+    if (callbacks.onToolAuthorization) {
+      const decision = await callbacks.onToolAuthorization(
+        {
+          name: tool.name,
+          description: tool.description,
+          category: tool.category,
+          safetyLevel: tool.safetyLevel,
+        },
+        args
+      );
+      if (!decision.allowed) {
+        return {
+          success: false,
+          error: {
+            message: decision.reason || `Tool ${tool.name} is not authorized for this operation`,
+            code: 'TOOL_NOT_AUTHORIZED',
+            recoverable: false,
+          },
+        };
+      }
+    }
+
     if (this.needsConfirmation(tool)) {
       const confirmDetails = await tool.shouldConfirmExecution?.(args);
 

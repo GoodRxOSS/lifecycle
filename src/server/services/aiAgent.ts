@@ -28,6 +28,7 @@ import {
   QueryDatabaseTool,
   GetCodefreshLogsTool,
   UpdateFileTool,
+  UpdatePrLabelsTool,
   PatchK8sResourceTool,
   GetIssueCommentTool,
 } from './ai/tools';
@@ -183,6 +184,11 @@ export default class AIAgentService extends BaseService {
         if (toolArgs.commit_message) parts.push(`- ${toolArgs.commit_message}`);
         break;
 
+      case UpdatePrLabelsTool.Name:
+        parts.push(`Updating PR #${toolArgs.pull_request_number} labels`);
+        if (toolArgs.action) parts.push(`(${toolArgs.action})`);
+        break;
+
       case PatchK8sResourceTool.Name:
         parts.push(`Patching ${toolArgs.resource_type}/${toolArgs.name}`);
         if (toolArgs.namespace) parts.push(`in ${toolArgs.namespace}`);
@@ -243,9 +249,29 @@ export default class AIAgentService extends BaseService {
       impact: string;
       confirmButtonText: string;
     }) => Promise<boolean>,
+    onToolAuthorization?: (
+      tool: {
+        name: string;
+        description: string;
+        category: string;
+        safetyLevel: string;
+      },
+      args: Record<string, unknown>
+    ) => Promise<{ allowed: boolean; reason?: string }>,
     mode?: 'investigate' | 'fix',
     onDebugEvent?: (event: any) => void
-  ): Promise<{ response: string; isJson: boolean; totalInvestigationTimeMs: number; preamble?: string }> {
+  ): Promise<{
+    response: string;
+    isJson: boolean;
+    totalInvestigationTimeMs: number;
+    preamble?: string;
+    availableTools: Array<{
+      name: string;
+      description: string;
+      category: string;
+      safetyLevel: string;
+    }>;
+  }> {
     const effectiveMode = mode || 'investigate';
 
     if (!this.service) {
@@ -308,6 +334,7 @@ export default class AIAgentService extends BaseService {
       onError: (error) => onActivity?.({ type: 'error', message: error?.message || 'Error' }),
       onActivity: (activity) => onActivity?.(activity),
       onToolConfirmation: onToolConfirmation,
+      onToolAuthorization: onToolAuthorization,
     };
 
     const result = await this.service!.processQuery(
@@ -324,6 +351,7 @@ export default class AIAgentService extends BaseService {
       isJson: result.isJson,
       totalInvestigationTimeMs: result.metrics.duration,
       preamble: result.preamble,
+      availableTools: result.availableTools,
     };
   }
 

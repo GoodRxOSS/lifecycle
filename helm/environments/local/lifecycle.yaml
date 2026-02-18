@@ -83,7 +83,7 @@ components:
         httpGet:
           path: /api/health
           port: 80
-        periodSeconds: 5
+        periodSeconds: 15
         failureThreshold: 3
 
   worker:

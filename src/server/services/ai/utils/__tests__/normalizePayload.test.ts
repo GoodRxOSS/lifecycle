@@ -275,4 +275,77 @@ describe('normalizeInvestigationPayload', () => {
     expect(result.fixesApplied).toBe(true);
     expect(result.services[0].fixesApplied).toBe(true);
   });
+
+  it('downgrades canAutoFix for file edits when no file-write tool is available', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'Grant targets wrong table',
+          keyError: 'ERROR: relation "subscriber" does not exist',
+          errorSource: 'build_logs',
+          suggestedFix: "Change objs from 'a' to 'b' in lifecycle.yaml",
+          canAutoFix: true,
+          filePath: 'lifecycle.yaml',
+        },
+      ],
+    };
+
+    const result = normalizeInvestigationPayload(payload, {
+      availableTools: [{ name: 'get_file', description: 'Read repository files' }],
+    }) as any;
+
+    expect(result.services[0].canAutoFix).toBe(false);
+  });
+
+  it('allows canAutoFix for PR label fixes when a label tool is available', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'environment',
+          status: 'error',
+          issue: 'Missing deploy label blocks environment creation',
+          keyError: 'Deploy label not present',
+          errorSource: 'lifecycle',
+          suggestedFix: 'Add the lifecycle-deploy! label to the PR to start deployment.',
+          canAutoFix: true,
+        },
+      ],
+    };
+
+    const result = normalizeInvestigationPayload(payload, {
+      availableTools: [{ name: 'mcp__github__add_pr_label', description: 'Add a label to a pull request' }],
+    }) as any;
+
+    expect(result.services[0].canAutoFix).toBe(true);
+  });
+
+  it('downgrades PR label fixes when label mutation tool is not available', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'environment',
+          status: 'error',
+          issue: 'Missing deploy label blocks environment creation',
+          keyError: 'Deploy label not present',
+          errorSource: 'lifecycle',
+          suggestedFix: 'Add the lifecycle-deploy! label to the PR to start deployment.',
+          canAutoFix: true,
+        },
+      ],
+    };
+
+    const result = normalizeInvestigationPayload(payload, {
+      availableTools: [{ name: 'get_issue_comment', description: 'Read pull request comment text' }],
+    }) as any;
+
+    expect(result.services[0].canAutoFix).toBe(false);
+  });
 });
