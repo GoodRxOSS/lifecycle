@@ -79,12 +79,14 @@ components:
         initialDelaySeconds: 60
         periodSeconds: 10
         failureThreshold: 6
+        timeoutSeconds: 10
       readinessProbe:
         httpGet:
           path: /api/health
           port: 80
         periodSeconds: 15
         failureThreshold: 3
+        timeoutSeconds: 10
 
   worker:
     enabled: true
