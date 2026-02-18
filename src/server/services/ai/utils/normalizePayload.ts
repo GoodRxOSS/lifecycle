@@ -19,7 +19,7 @@ import { getLogger } from 'server/lib/logger';
 const VALID_STATUSES = new Set(['build_failed', 'deploy_failed', 'error', 'ready']);
 const UNCERTAINTY_PATTERN = /\b(maybe|might|could|likely|possibly|uncertain|not sure|probably)\b/i;
 const NON_ACTIONABLE_PATTERN = /\b(no action needed|manual fix|choose|decide|depends on)\b/i;
-const SINGLE_LINE_FIX_PATTERN = /from '([^']+)' to '([^']+)' in ([\w/.+-]+\.\w+)/;
+const SINGLE_LINE_FIX_PATTERN = /from ['"]([^'"]+)['"] to ['"]([^'"]+)['"] in ([\w/.+-]+\.\w+)/i;
 const PR_LABEL_MUTATION_PATTERN = /\b(add|apply|set|remove|update|edit)\b/i;
 const PR_LABEL_CONTEXT_PATTERN = /\b(pr|pull[\s-]?request)\b/i;
 const LABEL_PATTERN = /\blabels?\b/i;
@@ -57,10 +57,20 @@ function hasFileDiffPayload(service: Record<string, any>): boolean {
   });
 }
 
-function hasSingleLineFileTarget(service: Record<string, any>): boolean {
-  const filePath = typeof service.filePath === 'string' ? service.filePath.trim() : '';
+function extractSingleLineFixFilePath(service: Record<string, any>): string | undefined {
+  const explicitPath = typeof service.filePath === 'string' ? service.filePath.trim() : '';
+  if (explicitPath.length > 0) return explicitPath;
+
   const suggestedFix = typeof service.suggestedFix === 'string' ? service.suggestedFix : '';
-  return filePath.length > 0 && SINGLE_LINE_FIX_PATTERN.test(suggestedFix);
+  const match = suggestedFix.match(SINGLE_LINE_FIX_PATTERN);
+  if (!match || typeof match[3] !== 'string') return undefined;
+  const derivedPath = match[3].trim();
+  return derivedPath.length > 0 ? derivedPath : undefined;
+}
+
+function hasSingleLineFileTarget(service: Record<string, any>): boolean {
+  const suggestedFix = typeof service.suggestedFix === 'string' ? service.suggestedFix : '';
+  return Boolean(extractSingleLineFixFilePath(service)) && SINGLE_LINE_FIX_PATTERN.test(suggestedFix);
 }
 
 function isPrLabelFix(service: Record<string, any>): boolean {
@@ -220,6 +230,13 @@ export function normalizeInvestigationPayload(parsed: any, options: NormalizePay
 
     if (!service.suggestedFix) {
       service.suggestedFix = '';
+    }
+
+    if (!service.filePath) {
+      const derivedPath = extractSingleLineFixFilePath(service);
+      if (derivedPath) {
+        service.filePath = derivedPath;
+      }
     }
 
     service.canAutoFix = shouldAllowAutoFix(service, options);

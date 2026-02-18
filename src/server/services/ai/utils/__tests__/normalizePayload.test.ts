@@ -209,6 +209,29 @@ describe('normalizeInvestigationPayload', () => {
     expect(result.services[0].canAutoFix).toBe(true);
   });
 
+  it('derives filePath from suggestedFix single-line pattern', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'build_failed',
+          issue: 'Dockerfile path points to missing file',
+          keyError: 'open sysops/dockerfiles/appaasd.dockerfile: no such file or directory',
+          errorSource: 'build_logs',
+          suggestedFix:
+            "Change dockerfilePath from 'sysops/dockerfiles/appaasd.dockerfile' to 'sysops/dockerfiles/app.dockerfile' in lifecycle.yaml",
+          canAutoFix: true,
+        },
+      ],
+    };
+
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].filePath).toBe('lifecycle.yaml');
+    expect(result.services[0].canAutoFix).toBe(true);
+  });
+
   it('keeps canAutoFix=true for actionable multi-line file diffs with evidence', () => {
     const payload = {
       type: 'investigation_complete',

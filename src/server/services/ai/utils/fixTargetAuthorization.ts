@@ -41,7 +41,7 @@ export interface ToolAuthorizationDecision {
   reason?: string;
 }
 
-const SINGLE_LINE_FIX_PATTERN = /from '([^']+)' to '([^']+)' in ([\w/.+-]+\.\w+)/i;
+const SINGLE_LINE_FIX_PATTERN = /from ['"]([^'"]+)['"] to ['"]([^'"]+)['"] in ([\w/.+-]+\.\w+)/i;
 const PR_LABEL_MUTATION_PATTERN = /\b(add|apply|set|remove|update|edit)\b/i;
 const PR_LABEL_CONTEXT_PATTERN = /\b(pr|pull[\s-]?request)\b/i;
 const LABEL_PATTERN = /\blabels?\b/i;
@@ -99,14 +99,21 @@ function detectCapabilities(target: FixTargetScope): Set<Capability> {
 }
 
 function getAllowedPaths(target: FixTargetScope): Set<string> {
+  const normalizePath = (value: string): string =>
+    value
+      .trim()
+      .replace(/^\.\/+/, '')
+      .replace(/\/{2,}/g, '/')
+      .toLowerCase();
+
   const paths = new Set<string>();
   if (typeof target.filePath === 'string' && target.filePath.trim().length > 0) {
-    paths.add(target.filePath.trim().toLowerCase());
+    paths.add(normalizePath(target.filePath));
   }
   if (Array.isArray(target.files)) {
     for (const file of target.files) {
       if (typeof file?.path === 'string' && file.path.trim().length > 0) {
-        paths.add(file.path.trim().toLowerCase());
+        paths.add(normalizePath(file.path));
       }
     }
   }
@@ -156,10 +163,17 @@ function isReadOnlyTool(tool: ToolAuthorizationInput): boolean {
 }
 
 function getToolFilePath(args: Record<string, unknown>): string | undefined {
+  const normalizePath = (value: string): string =>
+    value
+      .trim()
+      .replace(/^\.\/+/, '')
+      .replace(/\/{2,}/g, '/')
+      .toLowerCase();
+
   const candidates = [args.file_path, args.path];
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate.trim().toLowerCase();
+      return normalizePath(candidate);
     }
   }
   return undefined;
