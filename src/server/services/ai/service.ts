@@ -58,6 +58,7 @@ export interface AIAgentConfig {
   systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
+  allowedWritePatterns?: string[];
   modelPricing?: {
     inputCostPerMillion: number;
     outputCostPerMillion: number;
@@ -96,6 +97,7 @@ export class AIAgentCore {
   private systemPromptOverride?: string;
   private excludedTools?: string[];
   private excludedFilePatterns?: string[];
+  private allowedWritePatterns?: string[];
   private modelPricing?: { inputCostPerMillion: number; outputCostPerMillion: number };
   private observationMaskingOptions?: { recencyWindow?: number; tokenThreshold?: number };
 
@@ -120,6 +122,7 @@ export class AIAgentCore {
     this.systemPromptOverride = config.systemPromptOverride;
     this.excludedTools = config.excludedTools;
     this.excludedFilePatterns = config.excludedFilePatterns;
+    this.allowedWritePatterns = config.allowedWritePatterns;
     this.modelPricing = config.modelPricing;
     if (config.observationMaskingRecencyWindow || config.observationMaskingTokenThreshold) {
       this.observationMaskingOptions = {
@@ -200,6 +203,10 @@ export class AIAgentCore {
 
       if (this.excludedFilePatterns && this.excludedFilePatterns.length > 0) {
         this.githubClient.setExcludedFilePatterns(this.excludedFilePatterns);
+      }
+
+      if (this.allowedWritePatterns && this.allowedWritePatterns.length > 0) {
+        this.githubClient.setAllowedWritePatterns(this.allowedWritePatterns);
       }
 
       const messages: ConversationMessage[] = conversationHistory.map((m) =>

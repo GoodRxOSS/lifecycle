@@ -112,9 +112,7 @@ export class UpdateFileTool extends BaseTool {
           `SAFETY ERROR: File path "${filePath}" is not allowed for modification. Allowed files include:
         1) Configuration files (lifecycle.yaml, lifecycle.yml)
         2) Files explicitly referenced in lifecycle configuration
-        3) Dockerfiles in sysops/dockerfiles/
-        4) Helm charts and values in helm/ or sysops/helm/
-        5) Common config files (package.json, requirements.txt, etc.)`,
+        3) Additional paths configured via allowedWritePatterns in the AI agent config`,
           'FILE_PATH_NOT_ALLOWED',
           false
         );

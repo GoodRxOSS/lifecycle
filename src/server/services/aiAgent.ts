@@ -123,6 +123,7 @@ export default class AIAgentService extends BaseService {
       systemPromptOverride: aiAgentConfig.systemPromptOverride,
       excludedTools: aiAgentConfig.excludedTools,
       excludedFilePatterns: aiAgentConfig.excludedFilePatterns,
+      allowedWritePatterns: aiAgentConfig.allowedWritePatterns,
       modelPricing: this.modelPricing,
       maxIterations: aiAgentConfig.maxIterations,
       maxToolCalls: aiAgentConfig.maxToolCalls,

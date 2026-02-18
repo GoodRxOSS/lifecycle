@@ -109,7 +109,12 @@ export default class AIAgentConfigService extends BaseService {
     if (repoOverride.systemPromptOverride !== undefined) {
       result.systemPromptOverride = repoOverride.systemPromptOverride;
     }
-    const arrayFields: (keyof AIAgentRepoOverride)[] = ['additiveRules', 'excludedTools', 'excludedFilePatterns'];
+    const arrayFields: (keyof AIAgentRepoOverride)[] = [
+      'additiveRules',
+      'excludedTools',
+      'excludedFilePatterns',
+      'allowedWritePatterns',
+    ];
 
     for (const field of arrayFields) {
       const globalArray = (global as any)[field] as string[] | undefined;
@@ -131,6 +136,7 @@ export default class AIAgentConfigService extends BaseService {
         providers: [],
         maxMessagesPerSession: 50,
         sessionTTL: 3600,
+        allowedWritePatterns: ['lifecycle.yaml', 'lifecycle.yml'],
       };
     }
     return config as AIAgentConfig;
