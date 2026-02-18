@@ -33,30 +33,30 @@ describe('validateDiff', () => {
     expect(result.linesChanged).toBe(1);
   });
 
-  it('allows changes up to 10 lines', () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+  it('allows changes up to 60 lines', () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `line${i}`);
     const oldContent = lines.join('\n');
     const newLines = [...lines];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 60; i++) {
       newLines[i] = `changed${i}`;
     }
     const result = validateDiff(oldContent, newLines.join('\n'));
     expect(result.valid).toBe(true);
-    expect(result.linesChanged).toBe(10);
+    expect(result.linesChanged).toBe(60);
   });
 
-  it('rejects excessive changes (>10 lines changed)', () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+  it('rejects excessive changes (>60 lines changed)', () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `line${i}`);
     const oldContent = lines.join('\n');
     const newLines = [...lines];
-    for (let i = 0; i < 11; i++) {
+    for (let i = 0; i < 61; i++) {
       newLines[i] = `changed${i}`;
     }
     const result = validateDiff(oldContent, newLines.join('\n'));
     expect(result.valid).toBe(false);
-    expect(result.linesChanged).toBe(11);
+    expect(result.linesChanged).toBe(61);
     expect(result.error).toContain('SAFETY ERROR');
-    expect(result.error).toContain('changes 11 lines');
+    expect(result.error).toContain('changes 61 lines');
   });
 
   it('allows small deletions (up to 3 lines removed)', () => {

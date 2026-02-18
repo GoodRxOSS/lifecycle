@@ -432,6 +432,10 @@ export function useChat({ buildUuid, selectedModel }: UseChatOptions) {
   };
 
   const handleAutoFix = (service: ServiceInvestigationResult) => {
+    if (!service.canAutoFix) {
+      return;
+    }
+
     let fixMessage = `User consents to fix ${service.serviceName}. `;
 
     if (service.suggestedFix) {

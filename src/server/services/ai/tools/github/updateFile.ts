@@ -18,6 +18,10 @@ import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../../types/tool';
 import { GitHubClient } from '../shared/githubClient';
 
+// TODO: Make this configurable in db
+const MAX_LINES_REMOVED = 10;
+const MAX_LINES_CHANGED = 150;
+
 export function validateDiff(
   oldContent: string,
   newContent: string
@@ -33,7 +37,7 @@ export function validateDiff(
   }
   linesChanged += Math.abs(oldLines.length - newLines.length);
 
-  if (linesRemoved > 3) {
+  if (linesRemoved > MAX_LINES_REMOVED) {
     return {
       valid: false,
       linesRemoved,
@@ -42,7 +46,7 @@ export function validateDiff(
     };
   }
 
-  if (linesChanged > 10) {
+  if (linesChanged > MAX_LINES_CHANGED) {
     return {
       valid: false,
       linesRemoved,

@@ -17,6 +17,52 @@
 import { getLogger } from 'server/lib/logger';
 
 const VALID_STATUSES = new Set(['build_failed', 'deploy_failed', 'error', 'ready']);
+const UNCERTAINTY_PATTERN = /\b(maybe|might|could|likely|possibly|uncertain|not sure|probably)\b/i;
+const NON_ACTIONABLE_PATTERN = /\b(no action needed|manual fix|choose|decide|depends on)\b/i;
+const SINGLE_LINE_FIX_PATTERN = /from '([^']+)' to '([^']+)' in ([\w/.+-]+\.\w+)/;
+
+function hasSpecificErrorEvidence(service: Record<string, any>): boolean {
+  const keyError = typeof service.keyError === 'string' ? service.keyError.trim() : '';
+  const errorSource = typeof service.errorSource === 'string' ? service.errorSource.trim() : '';
+  return keyError.length > 0 && errorSource.length > 0;
+}
+
+function hasFileDiffPayload(service: Record<string, any>): boolean {
+  if (!Array.isArray(service.files)) return false;
+  return service.files.some((file: Record<string, any>) => {
+    if (!file || typeof file !== 'object') return false;
+    const path = typeof file.path === 'string' ? file.path.trim() : '';
+    return (
+      path.length > 0 &&
+      typeof file.oldContent === 'string' &&
+      typeof file.newContent === 'string' &&
+      file.oldContent !== file.newContent
+    );
+  });
+}
+
+function hasSingleLineFileTarget(service: Record<string, any>): boolean {
+  const filePath = typeof service.filePath === 'string' ? service.filePath.trim() : '';
+  const suggestedFix = typeof service.suggestedFix === 'string' ? service.suggestedFix : '';
+  return filePath.length > 0 && SINGLE_LINE_FIX_PATTERN.test(suggestedFix);
+}
+
+function isConfidentlyActionable(service: Record<string, any>): boolean {
+  const issue = typeof service.issue === 'string' ? service.issue : '';
+  const suggestedFix = typeof service.suggestedFix === 'string' ? service.suggestedFix : '';
+  return (
+    !UNCERTAINTY_PATTERN.test(issue) &&
+    !UNCERTAINTY_PATTERN.test(suggestedFix) &&
+    !NON_ACTIONABLE_PATTERN.test(suggestedFix)
+  );
+}
+
+function shouldAllowAutoFix(service: Record<string, any>): boolean {
+  if (service.canAutoFix !== true) return false;
+  if (!hasSpecificErrorEvidence(service)) return false;
+  if (!isConfidentlyActionable(service)) return false;
+  return hasFileDiffPayload(service) || hasSingleLineFileTarget(service);
+}
 
 export function normalizeInvestigationPayload(parsed: any): object {
   if (!parsed || typeof parsed !== 'object') {
@@ -51,6 +97,8 @@ export function normalizeInvestigationPayload(parsed: any): object {
     if (!service.suggestedFix) {
       service.suggestedFix = '';
     }
+
+    service.canAutoFix = shouldAllowAutoFix(service);
 
     if (typeof service.fixesApplied !== 'boolean') {
       service.fixesApplied = false;

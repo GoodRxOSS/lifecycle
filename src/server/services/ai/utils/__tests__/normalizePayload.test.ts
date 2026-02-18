@@ -112,6 +112,130 @@ describe('normalizeInvestigationPayload', () => {
     expect(result.services[0].suggestedFix).toBe('');
   });
 
+  it('forces canAutoFix=false when missing or non-boolean', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        { serviceName: 'web', status: 'error', issue: 'broken', suggestedFix: 'fix it' },
+        { serviceName: 'api', status: 'error', issue: 'broken', suggestedFix: 'fix it', canAutoFix: 'yes' },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(false);
+    expect(result.services[1].canAutoFix).toBe(false);
+  });
+
+  it('downgrades canAutoFix when specific error evidence is missing', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'Schema grant failed',
+          suggestedFix: "Change objs from 'a' to 'b' in lifecycle.yaml",
+          canAutoFix: true,
+          filePath: 'lifecycle.yaml',
+          lineNumber: 42,
+        },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(false);
+  });
+
+  it('downgrades canAutoFix when file target is missing', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'Schema grant failed',
+          keyError: 'ERROR: relation "subscriber" does not exist',
+          errorSource: 'build_logs',
+          suggestedFix: 'Run migrations first',
+          canAutoFix: true,
+        },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(false);
+  });
+
+  it('downgrades canAutoFix for uncertain recommendations', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'This might be related to schema order',
+          keyError: 'ERROR: relation "subscriber" does not exist',
+          errorSource: 'build_logs',
+          suggestedFix: "Change objs from 'a' to 'b' in lifecycle.yaml",
+          canAutoFix: true,
+          filePath: 'lifecycle.yaml',
+        },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(false);
+  });
+
+  it('keeps canAutoFix=true for actionable single-line fixes with evidence', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'Grant targets wrong table',
+          keyError: 'ERROR: relation "subscriber" does not exist',
+          errorSource: 'build_logs',
+          suggestedFix: "Change objs from 'spatial_ref_sys' to 'subscriber,promo,stripe_customer' in lifecycle.yaml",
+          canAutoFix: true,
+          filePath: 'lifecycle.yaml',
+          lineNumber: 105,
+        },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(true);
+  });
+
+  it('keeps canAutoFix=true for actionable multi-line file diffs with evidence', () => {
+    const payload = {
+      type: 'investigation_complete',
+      summary: 'test',
+      services: [
+        {
+          serviceName: 'web',
+          status: 'deploy_failed',
+          issue: 'Migrations must run before grants',
+          keyError: 'ERROR: relation "subscriber" does not exist',
+          errorSource: 'build_logs',
+          suggestedFix: 'Move migrations block before grants in lifecycle.yaml',
+          canAutoFix: true,
+          files: [
+            {
+              path: 'sysops/ansible/playbooks/lifecycle.yaml',
+              oldContent: '- name: Add grants',
+              newContent: '- name: Run Migrations',
+            },
+          ],
+        },
+      ],
+    };
+    const result = normalizeInvestigationPayload(payload) as any;
+    expect(result.services[0].canAutoFix).toBe(true);
+  });
+
   it('defaults non-boolean fixesApplied to false on services', () => {
     const payload = {
       type: 'investigation_complete',
