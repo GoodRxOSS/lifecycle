@@ -313,10 +313,6 @@ export default class ActivityStream extends BaseService {
         commentIdentifier: `mission control ${isStaging() ? 'stg ' : ''}comment: enabled`,
       });
 
-      if (!hasGithubMissionControlComment && !pullRequest?.commentId) {
-        return;
-      }
-
       if (hasGithubMissionControlComment && !pullRequest?.commentId) {
         getLogger().warn('Comment: mission control id missing, recovering from GitHub');
         const recoveredCommentId = hasGithubMissionControlComment.id;
@@ -356,10 +352,6 @@ export default class ActivityStream extends BaseService {
       pullRequestNumber,
       commentIdentifier: `${isStaging() ? 'stg ' : ''}status comment: enabled`,
     });
-
-    if (!hasStatusComment && !commentId) {
-      return;
-    }
 
     if (hasStatusComment && !commentId) {
       getLogger().warn('Comment: status id missing, recovering from GitHub');
