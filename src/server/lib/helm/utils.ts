@@ -162,8 +162,6 @@ export function ingressBannerSnippet(deploy: Deploy) {
   const configSnippet = [
     'proxy_set_header Accept-Encoding "";',
     'sub_filter "</head>" \'' + fullSnippet + "</head>';",
-    'sub_filter_once off;',
-    'sub_filter_types text/html;',
   ].join('\n');
 
   return {

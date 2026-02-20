@@ -61,6 +61,7 @@ const mockedGetAllConfigs = jest.fn().mockResolvedValue({
 
 const mockedInstance = {
   getAllConfigs: mockedGetAllConfigs,
+  isFeatureEnabled: jest.fn().mockResolvedValue(false),
 };
 
 (GlobalConfigService.getInstance as jest.Mock).mockReturnValue(mockedInstance);

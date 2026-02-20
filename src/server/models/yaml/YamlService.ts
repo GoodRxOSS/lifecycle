@@ -913,16 +913,18 @@ export function getBuilder(service: Service): Builder {
   return {};
 }
 
-export function getEnvLens(service: Service): boolean {
+export async function getEnvLens(service: Service): Promise<boolean> {
+  const globalDefault = await GlobalConfigService.getInstance().isFeatureEnabled('envLens');
+
   switch (getDeployType(service)) {
     case DeployTypes.GITHUB:
-      return (service as GithubService)?.github?.envLens ?? false;
+      return (service as GithubService)?.github?.envLens ?? globalDefault;
     case DeployTypes.DOCKER:
-      return (service as DockerService)?.docker?.envLens ?? false;
+      return (service as DockerService)?.docker?.envLens ?? globalDefault;
     case DeployTypes.HELM:
-      return (service as unknown as HelmService)?.helm?.envLens ?? false;
+      return (service as unknown as HelmService)?.helm?.envLens ?? globalDefault;
     default:
-      return false;
+      return globalDefault;
   }
 }
 
