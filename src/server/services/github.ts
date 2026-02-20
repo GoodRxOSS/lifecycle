@@ -122,6 +122,7 @@ export default class GithubService extends Service {
       if (isOpened) {
         if (!latestCommit) await pullRequest.$query().patch({ latestCommit: branchSha });
         const environmentId = repository?.defaultEnvId;
+        await pullRequest.$query().first();
         const isDeploy = pullRequest?.deployOnUpdate;
         // only create build and deploys. do not build or deploy here
         await this.db.services.BuildService.createBuildAndDeploys({

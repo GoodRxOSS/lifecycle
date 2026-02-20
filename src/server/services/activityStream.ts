@@ -314,8 +314,10 @@ export default class ActivityStream extends BaseService {
       });
 
       if (hasGithubMissionControlComment && !pullRequest?.commentId) {
-        getLogger().error('Comment: mission control id missing');
-        return;
+        getLogger().warn('Comment: mission control id missing, recovering from GitHub');
+        const recoveredCommentId = hasGithubMissionControlComment.id;
+        await pullRequest.$query().patch({ commentId: recoveredCommentId });
+        pullRequest.commentId = recoveredCommentId;
       }
 
       const isBot = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
@@ -340,7 +342,7 @@ export default class ActivityStream extends BaseService {
 
   private async updateStatusComment(build: Build, deploys: Deploy[], pullRequest: PullRequest, repository: Repository) {
     const fullName = pullRequest?.fullName;
-    const commentId = pullRequest?.statusCommentId;
+    let commentId = pullRequest?.statusCommentId;
     const etag = pullRequest?.etag;
     const pullRequestNumber = pullRequest?.pullRequestNumber;
     const installationId = repository?.githubInstallationId;
@@ -352,8 +354,11 @@ export default class ActivityStream extends BaseService {
     });
 
     if (hasStatusComment && !commentId) {
-      getLogger().warn('Comment: status id missing');
-      return;
+      getLogger().warn('Comment: status id missing, recovering from GitHub');
+      const recoveredCommentId = hasStatusComment.id;
+      await pullRequest.$query().patch({ statusCommentId: recoveredCommentId });
+      pullRequest.statusCommentId = recoveredCommentId;
+      commentId = recoveredCommentId;
     }
     const message = await this.generateStatusCommentForBuild(build, deploys, pullRequest);
     const response = await github.createOrUpdatePullRequestComment({
