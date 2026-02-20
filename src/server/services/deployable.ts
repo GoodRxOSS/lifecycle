@@ -377,7 +377,7 @@ export default class DeployableService extends BaseService {
           deploymentDependsOn: service.deploymentDependsOn || [],
           kedaScaleToZero: kedaScaleToZero?.enabled ? YamlService.getScaleToZeroConfig(service) : null,
           builder: YamlService.getBuilder(service) ?? {},
-          envLens: YamlService.getEnvLens(service),
+          envLens: await YamlService.getEnvLens(service),
         };
       }
     } catch (error) {
