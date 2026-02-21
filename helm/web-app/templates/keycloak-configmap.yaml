@@ -15,6 +15,10 @@ limitations under the License.
 */}}
 
 {{- if .Values.keycloak.enabled }}
+{{- $keycloakScheme := .Values.keycloak.scheme | default "https" -}}
+{{- $uiScheme := .Values.keycloak.uiScheme | default "https" -}}
+{{- $keycloakOrigin := printf "%s://%s" $keycloakScheme .Values.keycloak.url -}}
+{{- $uiOrigin := printf "%s://%s" $uiScheme .Values.keycloak.uiUrl -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -52,6 +56,17 @@ data:
           "groups": []
         }
       ],
+      "roles": {
+        "client": {
+          "broker": [
+            {
+              "name": "read-token",
+              "description": "Read broker tokens from linked identity providers",
+              "clientRole": true
+            }
+          ]
+        }
+      },
       "clients": [
         {
           "clientId": "broker",
@@ -173,7 +188,7 @@ data:
           "alwaysDisplayInConsole": false,
           "clientAuthenticatorType": "client-secret",
           "secret": "changeme",
-          "redirectUris": ["https://{{ .Values.keycloak.uiUrl }}/*"],
+          "redirectUris": ["{{ $uiOrigin }}", "{{ $uiOrigin }}/*"],
           "webOrigins": ["+"],
           "notBefore": 0,
           "bearerOnly": false,
@@ -328,7 +343,7 @@ data:
           "updateProfileFirstLoginMode": "on",
           "trustEmail": false,
           "storeToken": true,
-          "addReadTokenRoleOnCreate": false,
+          "addReadTokenRoleOnCreate": true,
           "authenticateByDefault": false,
           "linkOnly": true,
           "hideOnLogin": false,
@@ -672,7 +687,7 @@ data:
           "publicClient": false,
           "secret": "changeme-company-realm-broker-secret",
           "redirectUris": [
-            "https://{{ .Values.keycloak.url }}/realms/lifecycle/broker/company-sso/endpoint/*"
+            "{{ $keycloakOrigin }}/realms/lifecycle/broker/company-sso/endpoint/*"
           ],
           "webOrigins": ["+"],
           "standardFlowEnabled": true,

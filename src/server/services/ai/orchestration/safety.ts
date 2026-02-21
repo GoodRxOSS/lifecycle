@@ -101,8 +101,8 @@ export class ToolSafetyManager {
           return {
             success: false,
             error: {
-              message: 'Operation cancelled by user',
-              code: 'USER_CANCELLED',
+              message: `${tool.name} requires user approval. The request has been sent to the user for confirmation. Do not attempt alternative approaches or workarounds — wait for the user to approve or deny this operation.`,
+              code: 'AWAITING_APPROVAL',
               recoverable: false,
             },
           };
@@ -110,8 +110,9 @@ export class ToolSafetyManager {
       }
     }
 
+    const effectiveTimeout = tool.executionTimeout ?? this.toolExecutionTimeout;
     try {
-      const result = await this.withTimeout(tool.execute(args, signal), this.toolExecutionTimeout);
+      const result = await this.withTimeout(tool.execute(args, signal), effectiveTimeout);
 
       if (result.success && result.agentContent) {
         result.agentContent = OutputLimiter.truncate(result.agentContent, this.toolOutputMaxChars);
@@ -123,12 +124,12 @@ export class ToolSafetyManager {
     } catch (error: any) {
       if (error.message === 'Tool execution timeout') {
         getLogger().warn(
-          `AI: tool timeout tool=${tool.name} timeout=${this.toolExecutionTimeout}ms buildUuid=${buildUuid || 'none'}`
+          `AI: tool timeout tool=${tool.name} timeout=${effectiveTimeout}ms buildUuid=${buildUuid || 'none'}`
         );
         return {
           success: false,
           error: {
-            message: `${tool.name} timed out after ${this.toolExecutionTimeout / 1000} seconds`,
+            message: `${tool.name} timed out after ${effectiveTimeout / 1000} seconds`,
             code: 'TIMEOUT',
             recoverable: true,
             suggestedAction: 'The operation took too long. Try narrowing your query.',
