@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { DeployStatus } from 'shared/constants';
+import { BuildKind, DeployStatus } from 'shared/constants';
 import { BuildServiceOverride, Deploy, Deployable, Environment, PullRequest, Service } from '.';
 import Model from './_Model';
 
@@ -23,11 +23,14 @@ export default class Build extends Model {
   status!: string;
   statusMessage!: string;
   manifest!: string;
+  kind!: BuildKind;
 
   sha?: string;
 
   environmentId: number;
+  baseBuildId?: number | null;
   environment?: Environment;
+  baseBuild?: Build;
   deploys?: Deploy[];
   services?: Service[];
   buildServiceOverrides?: BuildServiceOverride[];
@@ -73,6 +76,10 @@ export default class Build extends Model {
         type: 'string',
         default: DeployStatus.QUEUED,
       },
+      kind: {
+        type: 'string',
+        default: BuildKind.ENVIRONMENT,
+      },
       name: {
         type: 'string',
       },
@@ -86,6 +93,14 @@ export default class Build extends Model {
       join: {
         from: 'builds.environmentId',
         to: 'environments.id',
+      },
+    },
+    baseBuild: {
+      relation: Model.BelongsToOneRelation,
+      modelClass: () => Build,
+      join: {
+        from: 'builds.baseBuildId',
+        to: 'builds.id',
       },
     },
     services: {

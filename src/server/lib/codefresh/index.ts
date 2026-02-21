@@ -23,7 +23,7 @@ import { Metrics } from 'server/lib/metrics';
 import { ENVIRONMENT } from 'shared/config';
 import GlobalConfigService from 'server/services/globalConfig';
 
-export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid = '' }) => {
+export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid: _uuid = '' }) => {
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   const repoName = ecrRepo;
   const registryId = (lifecycleDefaults.ecrDomain?.split?.('.') || [])[0] || '';
