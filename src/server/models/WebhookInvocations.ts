@@ -26,7 +26,7 @@ export default class WebhookInvocations extends Model {
   state!: string;
   yamlConfig!: string;
   owner!: string; // could be enum?
-  metadata: string;
+  metadata!: Record<string, unknown>;
   status!: string;
 
   static tableName = 'webhook_invocations';
@@ -56,4 +56,8 @@ export default class WebhookInvocations extends Model {
       },
     },
   };
+
+  static get jsonAttributes() {
+    return ['metadata'];
+  }
 }

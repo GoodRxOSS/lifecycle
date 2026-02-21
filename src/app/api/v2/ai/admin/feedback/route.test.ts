@@ -99,7 +99,7 @@ describe('GET /api/v2/ai/admin/feedback', () => {
           buildUuid: 'uuid-1',
           rating: 'up',
           text: null,
-          userIdentifier: 'vmelikyan',
+          userIdentifier: 'sample-user',
           repo: 'org/repo',
           prNumber: null,
           messageId: 11,
@@ -129,7 +129,7 @@ describe('GET /api/v2/ai/admin/feedback', () => {
     expect(body.data).toHaveLength(1);
     expect(preview.endsWith('…')).toBe(true);
     expect(/[\uD800-\uDBFF]$/.test(previewWithoutEllipsis)).toBe(false);
-    expect(body.data[0].userIdentifier).toBe('vmelikyan');
+    expect(body.data[0].userIdentifier).toBe('sample-user');
     expect(body.data[0].costUsd).toBeCloseTo(4, 6);
     expect(rowsBuilder.orderBy).toHaveBeenCalledWith('createdAt', 'desc');
   });
@@ -190,7 +190,7 @@ describe('GET /api/v2/ai/admin/feedback', () => {
           buildUuid: 'uuid-2',
           rating: 'up',
           text: 'Great session',
-          userIdentifier: 'vmelikyan',
+          userIdentifier: 'sample-user',
           repo: 'org/repo',
           prNumber: null,
           messageId: null,
@@ -211,7 +211,7 @@ describe('GET /api/v2/ai/admin/feedback', () => {
 
     expect(response.status).toBe(200);
     expect(body.data).toHaveLength(1);
-    expect(body.data[0].userIdentifier).toBe('vmelikyan');
+    expect(body.data[0].userIdentifier).toBe('sample-user');
     expect(body.data[0].costUsd).toBeCloseTo(4, 6);
     expect(conversationMessagesBuilder.whereIn).toHaveBeenCalledWith('cm.buildUuid', ['uuid-2']);
   });

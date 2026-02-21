@@ -17,6 +17,10 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
+const mockAppAuth = jest.fn();
+const mockOctokitRequest = jest.fn();
+
+import { Queue } from 'bullmq';
 import GlobalConfigService from '../globalConfig';
 
 jest.mock('redlock', () => {
@@ -28,6 +32,14 @@ jest.mock('ioredis', () => {
     hmset: jest.fn(),
   }));
 });
+jest.mock('@octokit/auth-app', () => ({
+  createAppAuth: jest.fn(() => mockAppAuth),
+}));
+jest.mock('@octokit/core', () => ({
+  Octokit: jest.fn().mockImplementation(() => ({
+    request: mockOctokitRequest,
+  })),
+}));
 
 jest.mock('server/database');
 jest.mock('bullmq', () => ({
@@ -81,7 +93,10 @@ describe('GlobalConfigService', () => {
     it('should set up a cache refresh job', async () => {
       await service.setupCacheRefreshJob();
 
-      expect(service.cacheRefreshQueue.add).toHaveBeenCalled();
+      const mockedQueueConstructor = Queue as unknown as jest.Mock;
+      const createdQueue = mockedQueueConstructor.mock.results[0]?.value as { add: jest.Mock };
+
+      expect(createdQueue.add).toHaveBeenCalled();
     });
   });
 
@@ -142,6 +157,41 @@ describe('GlobalConfigService', () => {
       });
       expect(mockGetAllConfigs).toHaveBeenCalled();
 
+      mockGetAllConfigs.mockRestore();
+    });
+  });
+
+  describe('getGithubAppName', () => {
+    it('returns the live GitHub app name when metadata lookup succeeds', async () => {
+      service.redis.hgetall.mockResolvedValueOnce({});
+      mockAppAuth.mockResolvedValueOnce({ token: 'app-token' });
+      mockOctokitRequest.mockResolvedValueOnce({
+        data: {
+          name: 'Sample Lifecycle App',
+          slug: 'sample-lifecycle-app',
+        },
+      });
+
+      const result = await service.getGithubAppName();
+
+      expect(result).toBe('Sample Lifecycle App');
+      expect(service.redis.hmset).toHaveBeenCalledWith('github_cached_app_info', {
+        name: 'Sample Lifecycle App',
+      });
+    });
+
+    it('falls back to stored setup metadata when live lookup fails', async () => {
+      service.redis.hgetall.mockResolvedValueOnce({});
+      mockAppAuth.mockRejectedValueOnce(new Error('GitHub unavailable'));
+      const mockGetAllConfigs = jest.spyOn(service, 'getAllConfigs').mockResolvedValueOnce({
+        app_setup: {
+          name: 'sample-lifecycle-app',
+        },
+      } as any);
+
+      const result = await service.getGithubAppName();
+
+      expect(result).toBe('sample-lifecycle-app');
       mockGetAllConfigs.mockRestore();
     });
   });
