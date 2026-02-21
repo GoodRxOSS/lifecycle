@@ -104,6 +104,33 @@ describe('Yaml Service', () => {
         branchName: 'main'
 `;
 
+  describe('validation', () => {
+    test('accepts forwardEnvVarsToAgent in dev config', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+      installCommand: 'pnpm install --frozen-lockfile'
+      forwardEnvVarsToAgent:
+        - PRIVATE_REGISTRY_TOKEN
+        - TURBO_TOKEN
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+  });
+
   describe('isGithubService', () => {
     test('GithubService', () => {
       const parser = new YamlConfigParser();
@@ -259,6 +286,70 @@ describe('Yaml Service', () => {
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'configurationApp');
 
       expect(YamlService.getDeployType(service)).toEqual(DeployTypes.CONFIGURATION);
+    });
+  });
+
+  describe('hasLifecycleManagedDockerBuild', () => {
+    test('returns true for github services with docker config', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'githubApp');
+
+      expect(YamlService.hasLifecycleManagedDockerBuild(service)).toEqual(true);
+    });
+
+    test('returns true for helm services with docker config', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'grpc-echo'
+    dev:
+      image: 'repo/app:dev'
+      command: 'npm run dev'
+    helm:
+      repository: 'org/example'
+      branchName: 'main'
+      chart:
+        name: './helm/app'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'grpc-echo/Dockerfile'
+`);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'grpc-echo');
+
+      expect(YamlService.hasLifecycleManagedDockerBuild(service)).toEqual(true);
+    });
+
+    test('returns false for helm services without docker config', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'redis'
+    dev:
+      image: 'repo/redis:dev'
+      command: 'redis-server'
+    helm:
+      repository: 'org/example'
+      branchName: 'main'
+      chart:
+        name: 'redis'
+`);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'redis');
+
+      expect(YamlService.hasLifecycleManagedDockerBuild(service)).toEqual(false);
+    });
+
+    test('returns false for docker services that only reference external images', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'dockerApp');
+
+      expect(YamlService.hasLifecycleManagedDockerBuild(service)).toEqual(false);
     });
   });
 

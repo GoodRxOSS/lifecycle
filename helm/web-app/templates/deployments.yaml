@@ -62,6 +62,18 @@ spec:
                 {{- toYaml .valueFrom | nindent 16 }}
               {{- end }}
             {{- end }}
+            {{- if $.Values.secrets.keycloakIssuerPublic }}
+            - name: KEYCLOAK_ISSUER
+              value: {{ $.Values.secrets.keycloakIssuerPublic | quote }}
+            {{- end }}
+            {{- if $.Values.secrets.keycloakIssuerInternal }}
+            - name: KEYCLOAK_ISSUER_INTERNAL
+              value: {{ $.Values.secrets.keycloakIssuerInternal | quote }}
+            - name: KEYCLOAK_JWKS_URL
+              value: {{ printf "%s/protocol/openid-connect/certs" $.Values.secrets.keycloakIssuerInternal | quote }}
+            {{- end }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ $.Values.secrets.keycloakCoreClientId | default "lifecycle-core" | quote }}
             {{- range $component.deployment.extraEnv }}
             - name: {{ .name }}
               {{- if hasKey . "value" }}

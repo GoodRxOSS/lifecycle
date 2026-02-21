@@ -126,7 +126,7 @@ export default class GithubService extends Service {
         const isDeploy = pullRequest?.deployOnUpdate;
         // only create build and deploys. do not build or deploy here
         await this.db.services.BuildService.createBuildAndDeploys({
-          repositoryId: repositoryId.toString(),
+          repositoryId,
           repositoryBranchName: branch,
           installationId,
           pullRequestId,
@@ -199,7 +199,7 @@ export default class GithubService extends Service {
       label: changedLabel,
       pull_request: { id: githubPullRequestId, labels, state: status },
     } = body;
-    let pullRequest: PullRequest, build: Build, _repository: Repository;
+    let pullRequest: PullRequest, build: Build;
     try {
       const changedLabelName = changedLabel?.name?.toLowerCase();
       const isLifecycle = await isLifecycleLabel(changedLabelName);
@@ -224,7 +224,6 @@ export default class GithubService extends Service {
 
       await pullRequest.$fetchGraph('[build, repository]');
       build = pullRequest?.build;
-      _repository = pullRequest?.repository;
       await this.patchPullRequest({
         pullRequest,
         labels,
@@ -286,6 +285,10 @@ export default class GithubService extends Service {
       }
       const deploysToRebuild = allDeploys.filter((deploy) => {
         if (!deploy?.build) return false;
+        if (deploy.devMode) {
+          getLogger().info(`Push: skipping dev mode service deployId=${deploy.id} service=${deploy.service?.name}`);
+          return false;
+        }
         const serviceBranchName: string = deploy.build.enableFullYaml
           ? deploy.deployable.defaultBranchName
           : deploy.service.branchName;

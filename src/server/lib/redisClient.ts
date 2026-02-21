@@ -32,6 +32,7 @@ export class RedisClient {
       const redisConfig: any = {
         host: APP_REDIS_HOST,
         port: APP_REDIS_PORT ? parseInt(APP_REDIS_PORT, 10) : 6379,
+        lazyConnect: true,
       };
 
       if (APP_REDIS_PASSWORD) {
@@ -46,7 +47,7 @@ export class RedisClient {
 
       this.redis = new Redis(redisConfig);
     } else if (REDIS_URL) {
-      this.redis = new Redis(REDIS_URL);
+      this.redis = new Redis(REDIS_URL, { lazyConnect: true });
     } else {
       throw new Error(
         'Redis configuration not found. Please provide either REDIS_URL or individual APP_REDIS_* environment variables.'
