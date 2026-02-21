@@ -20,6 +20,8 @@ import { defaultDb, redisClient } from 'server/lib/dependencies';
 import RedisClient from 'server/lib/redisClient';
 import QueueManager from 'server/lib/queueManager';
 import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, QUEUE_NAMES } from 'shared/config';
+import { processAgentSessionCleanup } from './agentSessionCleanup';
+import { processAgentSandboxSessionLaunch } from './agentSandboxSessionLaunch';
 
 let isBootstrapped = false;
 
@@ -102,6 +104,35 @@ export default function bootstrapJobs(services: IServices) {
     connection: redisClient.getConnection(),
     concurrency: 10,
   });
+
+  queueManager.registerWorker(QUEUE_NAMES.AGENT_SESSION_CLEANUP, processAgentSessionCleanup, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.AGENT_SANDBOX_SESSION_LAUNCH, processAgentSandboxSessionLaunch, {
+    connection: redisClient.getConnection(),
+    concurrency: 5,
+  });
+
+  const agentCleanupQueue = queueManager.registerQueue(QUEUE_NAMES.AGENT_SESSION_CLEANUP, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  });
+
+  agentCleanupQueue.add(
+    'agent-session-cleanup',
+    {},
+    {
+      repeat: {
+        every: 5 * 60 * 1000,
+      },
+    }
+  );
 
   defaultDb.services = services;
 

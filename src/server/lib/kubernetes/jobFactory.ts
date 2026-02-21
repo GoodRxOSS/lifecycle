@@ -17,6 +17,7 @@
 import { V1Job } from '@kubernetes/client-node';
 import { normalizeKubernetesLabelValue } from './utils';
 import { RegistryAuthConfig, createRegistryAuthInitContainer } from 'server/lib/nativeHelm/registryAuth';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export interface JobConfig {
   name: string;
@@ -64,9 +65,9 @@ export function createKubernetesJob(config: JobConfig): V1Job {
       name,
       namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': appName,
         'app.kubernetes.io/component': component,
-        'app.kubernetes.io/managed-by': 'lifecycle',
         ...labels,
       },
       annotations: {
@@ -91,6 +92,9 @@ export function createKubernetesJob(config: JobConfig): V1Job {
           serviceAccountName: serviceAccount,
           restartPolicy: 'Never',
           terminationGracePeriodSeconds,
+          hostNetwork: false,
+          hostPID: false,
+          hostIPC: false,
           ...(initContainers.length > 0 && { initContainers }),
           containers,
           ...(volumes.length > 0 && { volumes }),

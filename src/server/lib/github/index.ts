@@ -261,13 +261,10 @@ export async function getYamlFileContentFromPullRequest(fullName: string, pullRe
   }
 }
 
-export async function getYamlFileContentFromBranch(
-  fullName: string,
-  branchName: string
-): Promise<string | LifecycleYamlConfigOptions> {
+export async function getYamlFileContentFromBranch(fullName: string, branchName: string): Promise<string> {
   try {
     const config = await getYamlFileContent({ fullName, branch: branchName });
-    return config;
+    return config as string;
   } catch (error) {
     getLogger({
       error,
