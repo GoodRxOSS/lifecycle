@@ -1,0 +1,222 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { NextRequest } from 'next/server';
+import { createApiHandler } from 'server/lib/createApiHandler';
+import { successResponse, errorResponse } from 'server/lib/response';
+import { getRequestUserSub } from 'server/lib/get-user';
+import AgentSessionService from 'server/services/agentSession';
+
+function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
+  const sessionId = session.uuid || String(session.id);
+  const {
+    id: _internalId,
+    uuid: _uuid,
+    ...serialized
+  } = session as T & {
+    uuid?: string | null;
+    id: string | number;
+  };
+
+  return {
+    ...serialized,
+    id: sessionId,
+    websocketUrl: `/api/agent/session?sessionId=${sessionId}`,
+    editorUrl: `/api/agent/editor/${sessionId}/`,
+  };
+}
+
+/**
+ * @openapi
+ * /api/v2/ai/agent/sessions/{sessionId}:
+ *   get:
+ *     summary: Get an agent session by id
+ *     tags:
+ *       - Agent Sessions
+ *     operationId: getAgentSession
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       '200':
+ *         description: Agent session
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [request_id, data, error]
+ *               properties:
+ *                 request_id:
+ *                   type: string
+ *                 data:
+ *                   type: object
+ *                   required:
+ *                     - id
+ *                     - buildUuid
+ *                     - baseBuildUuid
+ *                     - buildKind
+ *                     - userId
+ *                     - ownerGithubUsername
+ *                     - podName
+ *                     - namespace
+ *                     - model
+ *                     - status
+ *                     - lastActivity
+ *                     - createdAt
+ *                     - updatedAt
+ *                     - endedAt
+ *                     - websocketUrl
+ *                     - editorUrl
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     buildUuid:
+ *                       type: string
+ *                       nullable: true
+ *                     baseBuildUuid:
+ *                       type: string
+ *                       nullable: true
+ *                     buildKind:
+ *                       $ref: '#/components/schemas/BuildKind'
+ *                     userId:
+ *                       type: string
+ *                     ownerGithubUsername:
+ *                       type: string
+ *                       nullable: true
+ *                     podName:
+ *                       type: string
+ *                     namespace:
+ *                       type: string
+ *                     model:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                       enum: [starting, active, ended, error]
+ *                     lastActivity:
+ *                       type: string
+ *                       format: date-time
+ *                     createdAt:
+ *                       type: string
+ *                       format: date-time
+ *                     updatedAt:
+ *                       type: string
+ *                       format: date-time
+ *                     endedAt:
+ *                       type: string
+ *                       nullable: true
+ *                       format: date-time
+ *                     websocketUrl:
+ *                       type: string
+ *                     editorUrl:
+ *                       type: string
+ *                 error:
+ *                   nullable: true
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Session not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   delete:
+ *     summary: End an agent session
+ *     tags:
+ *       - Agent Sessions
+ *     operationId: deleteAgentSession
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       '200':
+ *         description: Session ended
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [request_id, data, error]
+ *               properties:
+ *                 request_id:
+ *                   type: string
+ *                 data:
+ *                   type: object
+ *                   required:
+ *                     - ended
+ *                   properties:
+ *                     ended:
+ *                       type: boolean
+ *                 error:
+ *                   nullable: true
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Session not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const userId = getRequestUserSub(req);
+  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+
+  const { sessionId } = await params;
+  const session = await AgentSessionService.getSession(sessionId);
+  if (!session) {
+    return errorResponse(new Error('Session not found'), { status: 404 }, req);
+  }
+
+  if (session.userId !== userId) {
+    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
+  }
+
+  return successResponse(serializeSessionSummary(session), { status: 200 }, req);
+};
+
+const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const userId = getRequestUserSub(req);
+  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+
+  const { sessionId } = await params;
+  const session = await AgentSessionService.getSession(sessionId);
+  if (!session) {
+    return errorResponse(new Error('Session not found'), { status: 404 }, req);
+  }
+
+  if (session.userId !== userId) {
+    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
+  }
+
+  await AgentSessionService.endSession(sessionId);
+  return successResponse({ ended: true }, { status: 200 }, req);
+};
+
+export const GET = createApiHandler(getHandler);
+export const DELETE = createApiHandler(deleteHandler);

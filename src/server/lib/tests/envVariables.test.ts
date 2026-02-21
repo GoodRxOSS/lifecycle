@@ -19,7 +19,6 @@ import { EnvironmentVariables } from '../envVariables';
 import GlobalConfigService from 'server/services/globalConfig';
 import { IServices } from 'server/services/types';
 import * as models from 'server/models';
-import { QueryBuilder } from 'objection';
 
 jest.mock('server/database');
 jest.mock('redlock', () => {
@@ -78,10 +77,30 @@ describe('EnvironmentVariables library', () => {
   const db = new Database();
   const globalConfigService = GlobalConfigService.getInstance();
   const buildService = { getNamespace: jest.fn().mockResolvedValue('testns') };
+  const defaultLifecycleConfig = {
+    lifecycleDefaults: {
+      defaultUUID: 'dev-0',
+      defaultPublicUrl: 'dev-0.lifecycle.dev.example.com',
+    },
+  };
 
   db.services = { GlobalConfig: globalConfigService, BuildService: buildService } as unknown as IServices;
   db.models = models;
   const envVariables = new TestEnvironmentVariables(db);
+
+  beforeEach(() => {
+    jest.spyOn(globalConfigService, 'getAllConfigs').mockResolvedValue(defaultLifecycleConfig as any);
+    jest.spyOn(models.Build, 'query').mockReturnValue({
+      findOne: jest.fn().mockReturnValue({
+        select: jest.fn().mockResolvedValue({ namespace: 'testns' }),
+      }),
+    } as any);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   test('custom render uses global config default uuid', async () => {
     const template = JSON.stringify({
       VAR_1: '{{test______something_internalHostname}}',
@@ -95,16 +114,6 @@ describe('EnvironmentVariables library', () => {
       test______something_internalHostname: 'test',
       test______something_internalPort: '1234',
     };
-
-    const queryResult = {
-      id: 2,
-      key: 'defaultUUID',
-      value: 'dev-0',
-    };
-
-    const globalConfigQueryBuilder = QueryBuilder.forClass(models.GlobalConfig);
-    globalConfigQueryBuilder.where = jest.fn().mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
-    jest.spyOn(models.GlobalConfig, 'query').mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
 
     const result = {
       VAR_1: 'test.testns.svc.cluster.local',
@@ -132,16 +141,6 @@ describe('EnvironmentVariables library', () => {
       test______something_publicUrl: 'test',
       test______something_internalPort: '1234',
     };
-
-    const queryResult = {
-      id: 2,
-      key: 'defaultPublicUrl',
-      value: 'dev-0.lifecycle.dev.example.com',
-    };
-
-    const globalConfigQueryBuilder = QueryBuilder.forClass(models.GlobalConfig);
-    globalConfigQueryBuilder.where = jest.fn().mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
-    jest.spyOn(models.GlobalConfig, 'query').mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
 
     const result = {
       VAR_1: 'test',
@@ -248,15 +247,6 @@ describe('EnvironmentVariables library', () => {
     const data = {
       unrelated_var: 'value',
     };
-
-    const queryResult = {
-      id: 2,
-      key: 'defaultUUID',
-      value: 'dev-0',
-    };
-    const globalConfigQueryBuilder = QueryBuilder.forClass(models.GlobalConfig);
-    globalConfigQueryBuilder.where = jest.fn().mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
-    jest.spyOn(models.GlobalConfig, 'query').mockImplementation(() => globalConfigQueryBuilder.resolve(queryResult));
 
     const result = {
       VAR_1: 'dev-0',
