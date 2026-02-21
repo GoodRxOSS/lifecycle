@@ -42,6 +42,14 @@ ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
 ngrok_domain = os.getenv("NGROK_LIFECYCLE_DOMAIN", "")
 ngrok_keycloak_domain = os.getenv("NGROK_KEYCLOAK_DOMAIN", "")
 ngrok_ui_domain = os.getenv("NGROK_LIFECYCLE_UI_DOMAIN", "")
+keycloak_scheme = "https" if ngrok_keycloak_domain else "http"
+app_scheme = "https" if ngrok_domain else "http"
+ui_scheme = "https" if ngrok_ui_domain else "http"
+keycloak_host = ngrok_keycloak_domain or "localhost:8081"
+app_host = ngrok_domain or "localhost:5001"
+ui_host = ngrok_ui_domain or "localhost:3000"
+company_idp_origin = "{}://{}".format(keycloak_scheme, keycloak_host)
+internal_keycloak_origin = "http://lifecycle-keycloak.{}.svc.cluster.local:8080".format(app_namespace)
 
 
 ##################################
@@ -164,15 +172,19 @@ helm_set_args = [
     'namespace={}'.format(app_namespace),
     'image.repository={}'.format(lifecycle_app),
     'image.tag=dev',
-    'keycloak.url={}'.format(ngrok_keycloak_domain or 'localhost'),
-    'keycloak.appUrl={}'.format(ngrok_domain or 'localhost:5001'),
-    'keycloak.uiUrl={}'.format(ngrok_ui_domain or 'localhost:3000'),
+    'keycloak.scheme={}'.format(keycloak_scheme),
+    'keycloak.url={}'.format(keycloak_host),
+    'keycloak.appUrl={}'.format(app_host),
+    'keycloak.uiScheme={}'.format(ui_scheme),
+    'keycloak.uiUrl={}'.format(ui_host),
+    'secrets.keycloakIssuerPublic={}/realms/lifecycle'.format(company_idp_origin),
+    'secrets.keycloakIssuerInternal={}/realms/lifecycle'.format(internal_keycloak_origin),
     # Update IDP URLs to use ngrok domain or localhost
-    'keycloak.companyIdp.tokenUrl=https://{}/realms/company/protocol/openid-connect/token'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.tokenUrl=http://localhost:8080/realms/company/protocol/openid-connect/token',
-    'keycloak.companyIdp.authorizationUrl=https://{}/realms/company/protocol/openid-connect/auth'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.authorizationUrl=http://localhost:8080/realms/company/protocol/openid-connect/auth',
-    'keycloak.companyIdp.userInfoUrl=https://{}/realms/company/protocol/openid-connect/userinfo'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.userInfoUrl=http://localhost:8080/realms/company/protocol/openid-connect/userinfo',
-    'keycloak.companyIdp.jwksUrl=https://{}/realms/company/protocol/openid-connect/certs'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.jwksUrl=http://localhost:8080/realms/company/protocol/openid-connect/certs',
-    'keycloak.companyIdp.issuer=https://{}/realms/company'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.issuer=http://localhost:8080/realms/company',
+    'keycloak.companyIdp.tokenUrl={}/realms/company/protocol/openid-connect/token'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.authorizationUrl={}/realms/company/protocol/openid-connect/auth'.format(company_idp_origin),
+    'keycloak.companyIdp.userInfoUrl={}/realms/company/protocol/openid-connect/userinfo'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.jwksUrl={}/realms/company/protocol/openid-connect/certs'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.issuer={}/realms/company'.format(company_idp_origin),
     'secrets.aiApiKey={}'.format(os.getenv("AI_API_KEY", "")),
     'secrets.geminiApiKey={}'.format(os.getenv("GEMINI_API_KEY", "")),
 ]

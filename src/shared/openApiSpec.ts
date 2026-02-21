@@ -1,5 +1,5 @@
 import { OAS3Options } from 'swagger-jsdoc';
-import { BuildStatus, DeployStatus, DeployTypes } from './constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from './constants';
 
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
@@ -613,6 +613,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           enum: Object.values(BuildStatus),
         },
 
+        BuildKind: {
+          type: 'string',
+          enum: Object.values(BuildKind),
+        },
+
         /**
          * @description The main Build object.
          */
@@ -624,10 +629,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             manifest: { type: 'string', example: 'version: 1.0.0\nservices:\n  web:\n    image: myapp:web\n' },
             uuid: { type: 'string', example: 'white-poetry-596195' },
             status: { $ref: '#/components/schemas/BuildStatus' },
+            kind: { $ref: '#/components/schemas/BuildKind' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
+            baseBuildId: { type: 'integer', nullable: true },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
+            baseBuild: {
+              type: 'object',
+              nullable: true,
+              properties: {
+                id: { type: 'integer' },
+                uuid: { type: 'string' },
+              },
+            },
             pullRequest: { $ref: '#/components/schemas/PullRequest' },
             deploys: {
               type: 'array',
@@ -639,6 +654,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'id',
             'uuid',
             'status',
+            'kind',
             'namespace',
             'manifest',
             'isStatic',
@@ -705,6 +721,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             dockerImage: { type: 'string', example: 'myapp:web' },
             buildLogs: { type: 'string', example: 'https://g.codefresh.io/build/123...' },
             active: { type: 'boolean', example: true },
+            devMode: { type: 'boolean', example: false },
             branchName: { type: 'string', example: 'main' },
             publicUrl: { type: 'string', example: 'http://myapp.example.com' },
             deployableId: { type: 'integer' },
@@ -726,6 +743,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'dockerImage',
             'buildLogs',
             'active',
+            'devMode',
             'branchName',
             'publicUrl',
             'deployableId',

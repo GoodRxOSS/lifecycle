@@ -24,7 +24,7 @@ import { customAlphabet, nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
 import { Build, Deploy, Environment, Service, BuildServiceOverride } from 'server/models';
-import { BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
 import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
 import BaseService from './_service';
@@ -43,6 +43,7 @@ import { Tracer } from 'server/lib/tracer';
 import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
+import IngressService from './ingress';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
@@ -61,6 +62,7 @@ export interface IngressConfiguration {
 
 export default class BuildService extends BaseService {
   fastly = new Fastly(this.redis);
+  ingressService = new IngressService(this.db, this.redis, this.redlock, this.queueManager);
   /**
    * For every build that is not closed
    * 1. Check if the PR is open, if not, destroy
@@ -100,6 +102,7 @@ export default class BuildService extends BaseService {
    */
   async activeBuilds(): Promise<Build[]> {
     const builds = await this.db.models.Build.query()
+      .where('kind', BuildKind.ENVIRONMENT)
       .whereNot('status', 'torn_down')
       .whereNot('status', 'pending')
       .withGraphFetched('deploys.[service.[repository]]');
@@ -125,7 +128,8 @@ export default class BuildService extends BaseService {
     const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
 
     const baseQuery = this.db.models.Build.query()
-      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'isStatic')
+      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'isStatic', 'kind', 'baseBuildId')
+      .where('kind', BuildKind.ENVIRONMENT)
       .whereNotIn('status', exclude)
       .modify((qb) => {
         if (filterByAuthor) {
@@ -181,11 +185,16 @@ export default class BuildService extends BaseService {
         'createdAt',
         'updatedAt',
         'dependencyGraph',
-        'isStatic'
+        'isStatic',
+        'kind',
+        'baseBuildId'
       )
-      .withGraphFetched('[pullRequest, deploys.[deployable, repository]]')
+      .withGraphFetched('[baseBuild, pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {
         b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
+      })
+      .modifyGraph('baseBuild', (b) => {
+        b.select('id', 'uuid');
       })
       .modifyGraph('deploys', (b) => {
         b.select(
@@ -194,6 +203,7 @@ export default class BuildService extends BaseService {
           'status',
           'statusMessage',
           'active',
+          'devMode',
           'deployableId',
           'branchName',
           'deployPipelineId',
@@ -242,7 +252,7 @@ export default class BuildService extends BaseService {
       throw new Error(`Deployable ${serviceName} not found for ${buildUuid}.`);
     }
 
-    const githubRepositoryId = deploy.deployable.repositoryId;
+    const githubRepositoryId = Number(deploy.deployable.repositoryId);
 
     const runUUID = nanoid();
 
@@ -611,7 +621,7 @@ export default class BuildService extends BaseService {
     pullRequestId,
     environmentId,
     lifecycleConfig,
-  }: DeployOptions & { repositoryId: string }) {
+  }: DeployOptions & { repositoryId: number }) {
     const environments = await this.getEnvironmentsToBuild(environmentId, repositoryId);
 
     if (!environments.length) {
@@ -867,7 +877,7 @@ export default class BuildService extends BaseService {
   private async setupDefaultBuildServiceOverrides(
     build: Build,
     environment: Environment,
-    repositoryId: string,
+    repositoryId: number,
     branchName: string
   ): Promise<BuildServiceOverride[]> {
     // Deal with database configuration first
@@ -930,7 +940,6 @@ export default class BuildService extends BaseService {
         if (build?.uuid) {
           updateLogContext({ buildUuid: build.uuid });
         }
-
         getLogger().debug('Build: triggering cleanup');
 
         await this.updateStatusAndComment(build, BuildStatus.TEARING_DOWN, build.runUUID, true, true).catch((error) => {
@@ -953,10 +962,12 @@ export default class BuildService extends BaseService {
         );
 
         await k8s.deleteNamespace(build.namespace);
-        await this.db.services.Ingress.ingressCleanupQueue.add('cleanup', {
-          buildId: build.id,
-          ...extractContextForQueue(),
-        });
+        if (this.db.services?.Ingress?.ingressCleanupQueue) {
+          await this.ingressService.ingressCleanupQueue.add('cleanup', {
+            buildId: build.id,
+            ...extractContextForQueue(),
+          });
+        }
         getLogger().info('Build: deleted');
         await this.updateStatusAndComment(build, BuildStatus.TORN_DOWN, build.runUUID, true, true).catch((error) => {
           getLogger().warn({ error }, `Build: status update failed status=${BuildStatus.TORN_DOWN}`);
@@ -990,7 +1001,8 @@ export default class BuildService extends BaseService {
         await build?.$fetchGraph('[deploys.[service, deployable], pullRequest.[repository]]');
 
         const { deploys, pullRequest } = build;
-        const { repository } = pullRequest;
+        const isSandboxBuild = build.kind === BuildKind.SANDBOX;
+        const repository = pullRequest?.repository;
 
         if (build.runUUID !== runUUID) {
           return;
@@ -1014,22 +1026,29 @@ export default class BuildService extends BaseService {
           }
           await build.$query().patch({ dashboardLinks });
 
-          await this.db.services.ActivityStream.updatePullRequestActivityStream(
-            build,
-            deploys,
-            pullRequest,
-            repository,
-            updateMissionControl,
-            updateStatus,
-            error
-          ).catch((e) => {
-            getLogger().error({ error: e }, 'ActivityStream: update failed');
-          });
+          if (!isSandboxBuild && pullRequest && repository) {
+            await this.db.services.ActivityStream.updatePullRequestActivityStream(
+              build,
+              deploys,
+              pullRequest,
+              repository,
+              updateMissionControl,
+              updateStatus,
+              error
+            ).catch((e) => {
+              getLogger().error({ error: e }, 'ActivityStream: update failed');
+            });
+          }
         }
       } finally {
         getLogger().debug(`Build status changed: status=${build.status}`);
 
-        await this.db.services.Webhook.webhookQueue.add('webhook', { buildId: build.id, ...extractContextForQueue() });
+        if (build.kind !== BuildKind.SANDBOX) {
+          await this.db.services.Webhook.webhookQueue.add('webhook', {
+            buildId: build.id,
+            ...extractContextForQueue(),
+          });
+        }
       }
     });
   }
@@ -1219,7 +1238,7 @@ export default class BuildService extends BaseService {
     namespace,
   }: {
     build: Build;
-    githubRepositoryId: string;
+    githubRepositoryId: number | null;
     namespace: string;
   }): Promise<boolean> {
     if (build?.enableFullYaml) {
@@ -1283,7 +1302,7 @@ export default class BuildService extends BaseService {
         }
 
         // Queue ingress creation after all deployments
-        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
+        await this.ingressService.ingressManifestQueue.add('manifest', {
           buildId,
           ...extractContextForQueue(),
         });
@@ -1346,7 +1365,7 @@ export default class BuildService extends BaseService {
         }
 
         /* Generate the nginx manifests for this new build */
-        await this.db.services.Ingress.ingressManifestQueue.add('manifest', {
+        await this.ingressService.ingressManifestQueue.add('manifest', {
           buildId,
           ...extractContextForQueue(),
         });
@@ -1383,7 +1402,7 @@ export default class BuildService extends BaseService {
    * @param environmentId the default environmentId (if one exists)
    * @param repositoryId the repository to use for finding relevant environments, if needed
    */
-  private async getEnvironmentsToBuild(environmentId: number, repositoryId: string) {
+  private async getEnvironmentsToBuild(environmentId: number, repositoryId: number) {
     let environments: Environment[] = [];
     if (environmentId != null) {
       environments.push(await this.db.models.Environment.findOne({ id: environmentId }));

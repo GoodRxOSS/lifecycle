@@ -19,7 +19,7 @@ import { Environment, Build, Service, Deploy, Deployable } from 'server/models';
 import * as codefresh from 'server/lib/codefresh';
 import { getLogger, withLogContext, extractContextForQueue } from 'server/lib/logger';
 import hash from 'object-hash';
-import { DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, DeployStatus, DeployTypes } from 'shared/constants';
 import * as cli from 'server/lib/cli';
 import RDS from 'aws-sdk/clients/rds';
 import resourceGroupsTagging from 'aws-sdk/clients/resourcegroupstaggingapi';
@@ -41,7 +41,7 @@ import { SecretProcessor } from 'server/services/secretProcessor';
 
 export interface DeployOptions {
   ownerId?: number;
-  repositoryId?: string;
+  repositoryId?: number;
   installationId?: number;
   repositoryBranchName?: string;
   isDeploy?: boolean;
@@ -52,7 +52,6 @@ export interface DeployOptions {
 
 export interface PipelineWaitItem {
   dependentDeploy: Deploy;
-  awaitingDeploy: Deploy;
   pipelineId: string;
   serviceName: string;
   patternInfo: PatternInfo[];
@@ -89,7 +88,8 @@ export default class DeployService extends BaseService {
         deployables.map(async (deployable) => {
           const uuid = `${deployable.name}-${build?.uuid}`;
           const patchFields: Objection.PartialModelObject<Deploy> = {};
-          const isTargetRepo = !githubRepositoryId || deployable.repositoryId === githubRepositoryId;
+          const deployableRepositoryId = Number(deployable.repositoryId);
+          const isTargetRepo = !githubRepositoryId || deployableRepositoryId === githubRepositoryId;
 
           let deploy = existingDeployMap.get(deployable.id) ?? null;
           if (!deploy) {
@@ -122,7 +122,7 @@ export default class DeployService extends BaseService {
               deployableId: deployable?.id ?? null,
               uuid,
               internalHostname: uuid,
-              githubRepositoryId: deployable.repositoryId,
+              githubRepositoryId: deployableRepositoryId,
               active: deployable.active,
             });
 
@@ -270,7 +270,7 @@ export default class DeployService extends BaseService {
         deployableId: deployable?.id ?? null,
         uuid,
         internalHostname: uuid,
-        githubRepositoryId: service.repositoryId,
+        githubRepositoryId: Number(service.repositoryId),
         active,
       });
 
@@ -811,6 +811,7 @@ export default class DeployService extends BaseService {
       await deploy.$fetchGraph('build.pullRequest');
       build = deploy?.build;
       const pullRequest = build?.pullRequest;
+      const isSandboxBuild = build?.kind === BuildKind.SANDBOX;
 
       const terminalStatuses = [
         DeployStatus.READY,
@@ -822,24 +823,26 @@ export default class DeployService extends BaseService {
       ];
       const isTerminalStatus = terminalStatuses.includes(params.status as DeployStatus);
 
-      if (isTerminalStatus && build?.githubDeployments) {
+      if (isTerminalStatus && build?.githubDeployments && !isSandboxBuild) {
         await deploy.$fetchGraph('[service, deployable]');
         if (await this.shouldTriggerGithubDeployment(deploy)) {
           await this.triggerGithubDeploymentUpdate(deploy);
         }
       }
 
-      await this.db.services.ActivityStream.updatePullRequestActivityStream(
-        build,
-        [],
-        pullRequest,
-        null,
-        true,
-        true,
-        null,
-        true,
-        targetGithubRepositoryId
-      );
+      if (!isSandboxBuild && pullRequest) {
+        await this.db.services.ActivityStream.updatePullRequestActivityStream(
+          build,
+          [],
+          pullRequest,
+          null,
+          true,
+          true,
+          null,
+          true,
+          targetGithubRepositoryId
+        );
+      }
     } catch (error) {
       getLogger().warn({ error }, 'ActivityFeed: update failed');
     }
@@ -885,7 +888,6 @@ export default class DeployService extends BaseService {
   private async patchDeployWithTag({ tag, deploy, initTag, ecrDomain }) {
     await deploy.$fetchGraph('[build, service, deployable]');
     const { build, deployable, service } = deploy;
-    const _uuid = build?.uuid;
     let ecrRepo = deployable?.ecr as string;
 
     const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
@@ -1170,13 +1172,11 @@ export default class DeployService extends BaseService {
 
   async waitAndResolveForBuildDependentEnvVars(deploy: Deploy, envVariables: Record<string, string>, runUUID: string) {
     const pipelineIdsToWaitFor: PipelineWaitItem[] = [];
-    const awaitingDeploy = deploy;
     const { build } = deploy;
     const deploys = build.deploys;
     const servicesToWaitFor = extractEnvVarsWithBuildDependencies(deploy.deployable.env);
 
     for (const [serviceName, patternsInfo] of Object.entries(servicesToWaitFor)) {
-      const _awaitingService = deploy.uuid;
       const waitingForService = `${serviceName}-${build.uuid}`;
 
       const dependentDeploy = deploys.find((d) => d.uuid === waitingForService);
@@ -1195,7 +1195,6 @@ export default class DeployService extends BaseService {
         if (updatedDeploy?.buildPipelineId) {
           pipelineIdsToWaitFor.push({
             dependentDeploy,
-            awaitingDeploy,
             pipelineId: updatedDeploy.buildPipelineId,
             serviceName,
             patternInfo: patternsInfo,
@@ -1206,7 +1205,7 @@ export default class DeployService extends BaseService {
 
     const extractedValues = {};
     const pipelinePromises = pipelineIdsToWaitFor.map(
-      async ({ dependentDeploy, awaitingDeploy, pipelineId, serviceName, patternInfo }: PipelineWaitItem) => {
+      async ({ dependentDeploy, pipelineId, serviceName, patternInfo }: PipelineWaitItem) => {
         try {
           const updatedDeploy = await waitForColumnValue(dependentDeploy, 'buildOutput', 240, 5000);
 
