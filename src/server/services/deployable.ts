@@ -34,7 +34,7 @@ export interface DeployableAttributes {
   layer?: number;
   type: string;
   dockerImage?: string;
-  repositoryId?: string;
+  repositoryId?: number;
   defaultTag?: string;
   dockerfilePath?: string;
   // buildArgs: NOT IN USE
@@ -307,7 +307,7 @@ export default class DeployableService extends BaseService {
           name: service.name,
           type: YamlService.getDeployType(service),
           dockerImage: YamlService.getDockerImage(service),
-          repositoryId: repositoryId ? `${repositoryId}` : null,
+          repositoryId: repositoryId ?? null,
           branchName,
           defaultBranchName,
           defaultTag: await YamlService.getDefaultTag(service),

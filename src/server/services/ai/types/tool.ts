@@ -73,6 +73,7 @@ export interface ConfirmationDetails {
   description: string;
   impact: string;
   confirmButtonText: string;
+  toolName?: string;
   onConfirm?(): Promise<void>;
 }
 
@@ -92,6 +93,7 @@ export interface Tool {
   parameters: JSONSchema;
   safetyLevel: ToolSafetyLevel;
   category: ToolCategory;
+  executionTimeout?: number;
 
   execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
 

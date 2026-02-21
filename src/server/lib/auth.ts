@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { NextRequest } from 'next/server';
 import { createRemoteJWKSet, JWTPayload, jwtVerify } from 'jose';
 
 interface AuthResult {
@@ -26,19 +25,36 @@ interface AuthResult {
   };
 }
 
-export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
-  // 1. Extract token from the "Bearer <token>" format in the Authorization header.
-  const authHeader = request.headers.get('Authorization');
+type HeadersLike = {
+  get(name: string): string | null | undefined;
+};
 
-  if (!authHeader) {
-    return {
-      success: false,
-      error: { message: 'Authorization header is missing', status: 401 },
-    };
+type RequestWithHeaders = {
+  headers?: HeadersLike | null;
+};
+
+type RemoteJwksUrl = Parameters<typeof createRemoteJWKSet>[0];
+type UrlConstructor = new (input: string, base?: string) => unknown;
+
+function getAuthorizationHeader(request: RequestWithHeaders): string | null {
+  const headers = request.headers;
+  if (!headers || typeof headers.get !== 'function') {
+    return null;
   }
 
-  const token = authHeader.split(' ')[1];
+  return headers.get('Authorization') || headers.get('authorization') || null;
+}
 
+function buildJwksUrl(input: string): RemoteJwksUrl {
+  const urlCtor = (globalThis as unknown as { URL?: UrlConstructor }).URL;
+  if (typeof urlCtor !== 'function') {
+    throw new Error('URL constructor is not available');
+  }
+
+  return new urlCtor(input) as RemoteJwksUrl;
+}
+
+export async function verifyBearerToken(token: string | null | undefined): Promise<AuthResult> {
   if (!token) {
     return {
       success: false,
@@ -61,12 +77,12 @@ export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
 
   try {
     // 3. Fetch the JSON Web Key Set (JWKS) from your Keycloak server.
-    const JWKS = createRemoteJWKSet(new URL(jwksUrl));
+    const JWKS = createRemoteJWKSet(buildJwksUrl(jwksUrl));
 
     // 4. Verify the token. This function checks the signature, expiration, issuer, and audience.
     const { payload } = await jwtVerify(token, JWKS, {
-      issuer: issuer,
-      audience: audience,
+      issuer,
+      audience,
     });
 
     // 5. If verification is successful, return a success result.
@@ -81,4 +97,18 @@ export async function verifyAuth(request: NextRequest): Promise<AuthResult> {
       error: { message: `Authentication failed: ${errorMessage}`, status: 401 },
     };
   }
+}
+
+export async function verifyAuth(request: RequestWithHeaders): Promise<AuthResult> {
+  const authHeader = getAuthorizationHeader(request);
+
+  if (!authHeader) {
+    return {
+      success: false,
+      error: { message: 'Authorization header is missing', status: 401 },
+    };
+  }
+
+  const token = authHeader.split(' ')[1];
+  return verifyBearerToken(token);
 }

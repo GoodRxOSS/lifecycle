@@ -28,7 +28,7 @@ export default class Database {
   services: IServices;
   config: any = {};
 
-  private __knexInstance: Knex;
+  private __knexInstance: Knex | null = null;
   private knexConfig: Knex.Config;
 
   constructor(knexConfig?: Knex.Config) {
@@ -41,7 +41,7 @@ export default class Database {
       this.connect();
     }
 
-    return this.__knexInstance;
+    return this.__knexInstance!;
   }
 
   setKnexConfig(knexConfig: Knex.Config = {}) {
@@ -57,11 +57,13 @@ export default class Database {
     this.close();
 
     this.setKnexConfig(knexConfig);
-    if (
-      typeof this.knexConfig.connection === 'object' &&
-      !(this.knexConfig.connection as Knex.ConnectionConfig).database
-    ) {
-      delete (this.knexConfig.connection as Knex.ConnectionConfig).database;
+    if (typeof this.knexConfig.connection === 'object' && this.knexConfig.connection) {
+      const connection = { ...(this.knexConfig.connection as Knex.ConnectionConfig) };
+      if (!connection.database) {
+        this.knexConfig.connection = Object.fromEntries(
+          Object.entries(connection).filter(([, value]) => value != null && value !== '')
+        ) as unknown as Knex.ConnectionConfig;
+      }
     }
 
     this.__knexInstance = knex(this.knexConfig);
