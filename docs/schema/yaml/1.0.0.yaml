@@ -705,3 +705,24 @@ services:
       defaultTag: ''
       # @param services.configuration.branchName (required)
       branchName: ''
+    # @param services.dev
+    dev:
+      # @param services.dev.image (required)
+      image: ''
+      # @param services.dev.command (required)
+      command: ''
+      # @param services.dev.installCommand
+      installCommand: ''
+      # @param services.dev.workDir
+      workDir: ''
+      # @param services.dev.ports
+      ports:
+        # @param services.dev.ports[]
+        - 0
+      # @param services.dev.env
+      env:
+
+      # @param services.dev.forwardEnvVarsToAgent
+      forwardEnvVarsToAgent:
+        # @param services.dev.forwardEnvVarsToAgent[]
+        - ''

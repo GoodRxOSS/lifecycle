@@ -124,7 +124,7 @@ describe('POST /api/v2/ai/chat/[buildUuid]/feedback', () => {
   });
 
   it('derives userIdentifier from auth claims when present', async () => {
-    const response = await POST(makeRequest({ rating: 'up' }, { github_username: 'vmelikyan' }), {
+    const response = await POST(makeRequest({ rating: 'up' }, { github_username: 'sample-user' }), {
       params: { buildUuid: 'uuid-4' },
     });
 
@@ -133,7 +133,7 @@ describe('POST /api/v2/ai/chat/[buildUuid]/feedback', () => {
       buildUuid: 'uuid-4',
       rating: 'up',
       text: undefined,
-      userIdentifier: 'vmelikyan',
+      userIdentifier: 'sample-user',
       repo: 'org/repo',
       prNumber: 123,
     });
