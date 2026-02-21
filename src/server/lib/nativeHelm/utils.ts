@@ -30,6 +30,7 @@ import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
 import { getLogger } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export interface HelmReleaseState {
   status: 'deployed' | 'pending-install' | 'pending-upgrade' | 'pending-rollback' | 'failed' | 'unknown';
@@ -473,6 +474,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },
@@ -493,6 +495,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleBindingName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },

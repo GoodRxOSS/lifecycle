@@ -17,6 +17,7 @@
 import yaml from 'js-yaml';
 import fs from 'fs';
 import Deploy from 'server/models/Deploy';
+import Deployable from 'server/models/Deployable';
 import GlobalConfigService from 'server/services/globalConfig';
 import { getLogger, withSpan, withLogContext } from 'server/lib/logger';
 import { shellPromise } from 'server/lib/shell';
@@ -60,6 +61,14 @@ export interface JobResult {
   completed: boolean;
   logs: string;
   status: string;
+}
+
+function requireDeployable(deploy: Deploy): Deployable {
+  if (!deploy.deployable) {
+    throw new Error(`Deployable missing for deploy ${deploy.uuid}`);
+  }
+
+  return deploy.deployable;
 }
 
 export async function createHelmContainer(
@@ -119,7 +128,8 @@ export async function generateHelmManifest(
   await deploy.$fetchGraph('deployable.repository');
   await deploy.$fetchGraph('build');
 
-  const { deployable, build } = deploy;
+  const deployable = requireDeployable(deploy);
+  const { build } = deploy;
   const repository = deployable.repository;
   const helmConfig = await getHelmConfiguration(deploy);
 
@@ -180,7 +190,7 @@ export async function generateHelmManifest(
     name: jobName,
     namespace: options.namespace,
     serviceAccount: serviceAccountName,
-    serviceName: deploy.deployable.name,
+    serviceName: deployable.name,
     buildUUID: build.uuid,
     isStatic: build.isStatic,
     gitUsername: GIT_USERNAME,
@@ -200,6 +210,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   await deploy.$fetchGraph('build.pullRequest.repository');
   await deploy.$fetchGraph('deployable.repository');
 
+  const deployable = requireDeployable(deploy);
   const jobId = randomAlphanumeric(4).toLowerCase();
   const { namespace } = options;
   const releaseName = deploy.uuid.toLowerCase();
@@ -235,7 +246,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
         {
           jobName,
           jobType: 'deploy',
-          serviceName: deploy.deployable.name,
+          serviceName: deployable.name,
           namespace: options.namespace,
           status: jobResult.success ? 'Complete' : 'Failed',
           sha: deploy.sha || '',
@@ -261,11 +272,16 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
 }
 
 export async function shouldUseNativeHelm(deploy: Deploy): Promise<boolean> {
-  if (deploy.deployable.helm?.deploymentMethod) {
-    return deploy.deployable.helm.deploymentMethod === 'native';
+  const deployable = deploy.deployable;
+  if (!deployable) {
+    return false;
   }
 
-  if (deploy.deployable.helm?.nativeHelm?.enabled) {
+  if (deployable.helm?.deploymentMethod) {
+    return deployable.helm.deploymentMethod === 'native';
+  }
+
+  if (deployable.helm?.nativeHelm?.enabled) {
     return true;
   }
 
@@ -273,7 +289,8 @@ export async function shouldUseNativeHelm(deploy: Deploy): Promise<boolean> {
 }
 
 export async function deployNativeHelm(deploy: Deploy): Promise<void> {
-  const { deployable, build } = deploy;
+  const deployable = requireDeployable(deploy);
+  const { build } = deploy;
 
   getLogger().info('Helm: deploying method=native');
 
@@ -322,7 +339,8 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
 }
 
 async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService, runUUID: string): Promise<void> {
-  const { deployable, build } = deploy;
+  const deployable = requireDeployable(deploy);
+  const { build } = deploy;
 
   if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
     await applyHttpScaleObjectManifestYaml(deploy, build.namespace);

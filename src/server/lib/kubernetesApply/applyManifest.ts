@@ -21,11 +21,21 @@ import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export interface KubernetesApplyJobConfig {
   deploy: Deploy;
   namespace: string;
   jobId: string;
+}
+
+export function getKubernetesApplyJobName(deploy: Deploy, jobId: string): string {
+  const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
+  return buildDeployJobName({
+    deployUuid: deploy.uuid,
+    jobId,
+    shortSha,
+  });
 }
 
 export async function createKubernetesApplyJob({
@@ -36,12 +46,7 @@ export async function createKubernetesApplyJob({
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const batchApi = kc.makeApiClient(k8s.BatchV1Api);
-  const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
-  const jobName = buildDeployJobName({
-    deployUuid: deploy.uuid,
-    jobId,
-    shortSha,
-  });
+  const jobName = getKubernetesApplyJobName(deploy, jobId);
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
   getLogger().info(`Job: creating name=${jobName} service=${serviceName}`);
@@ -56,8 +61,7 @@ export async function createKubernetesApplyJob({
       name: jobName,
       namespace,
       labels: {
-        lc_uuid: deploy.build.uuid,
-        deploy_uuid: deploy.uuid,
+        ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
         app: 'lifecycle-deploy',
         type: 'kubernetes-apply',
         ...(serviceName ? { service: serviceName } : {}),
@@ -74,8 +78,7 @@ export async function createKubernetesApplyJob({
       template: {
         metadata: {
           labels: {
-            lc_uuid: deploy.build.uuid,
-            deploy_uuid: deploy.uuid,
+            ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
             'job-name': jobName,
             ...(serviceName ? { service: serviceName } : {}),
           },
@@ -158,8 +161,7 @@ async function createManifestConfigMap(deploy: Deploy, configMapName: string, na
       name: configMapName,
       namespace,
       labels: {
-        lc_uuid: deploy.build.uuid,
-        deploy_uuid: deploy.uuid,
+        ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
         app: 'lifecycle-deploy',
       },
     },

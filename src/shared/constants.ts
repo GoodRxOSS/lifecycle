@@ -73,6 +73,11 @@ export enum BuildStatus {
   CONFIG_ERROR = 'config_error',
 }
 
+export enum BuildKind {
+  ENVIRONMENT = 'environment',
+  SANDBOX = 'sandbox',
+}
+
 export enum PullRequestStatus {
   OPEN = 'open',
   CLOSED = 'closed',
@@ -83,6 +88,7 @@ export enum DeployStatus {
   BUILDING = 'building',
   BUILT = 'built',
   READY = 'ready',
+  DEPLOYED = 'deployed',
   ERROR = 'error',
   QUEUED = 'queued',
   PENDING = 'pending',

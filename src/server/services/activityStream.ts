@@ -24,6 +24,7 @@ import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
 import OverrideService from './override';
 import {
+  BuildKind,
   BuildStatus,
   DeployStatus,
   CommentParser,
@@ -391,6 +392,10 @@ export default class ActivityStream extends BaseService {
     queue: boolean = true,
     targetGithubRepositoryId?: number
   ) {
+    if (build?.kind === BuildKind.SANDBOX) {
+      return;
+    }
+
     const buildId = build?.id;
     const uuid = build?.uuid;
     const isFullYaml = build?.enableFullYaml;
@@ -458,7 +463,7 @@ export default class ActivityStream extends BaseService {
     }
   }
 
-  private async forceUnlock(resource: string, buildUuid: string, fullName: string, branchName: string) {
+  private async forceUnlock(resource: string, _buildUuid: string, fullName: string, branchName: string) {
     try {
       await this.redis.del(resource);
     } catch (error) {
@@ -611,7 +616,7 @@ export default class ActivityStream extends BaseService {
   private async generateMissionControlComment(
     build: Build,
     deploys: Deploy[],
-    repository: Repository,
+    _repository: Repository,
     pullRequest: PullRequest,
     isBot?: boolean
   ) {

@@ -81,6 +81,7 @@ brew install --cask docker
       githubAppId: "<app_id>"
       githubClientId: "<client_id>"
       githubInstallationId: "<installation_id>"
+      encryptionKey: "<64-char hex string, e.g. output of openssl rand -hex 32>"
     ```
 > [!NOTE]  
 > You can create the GitHub app with the app creation setup flow and then copy the secrets created for local development.
