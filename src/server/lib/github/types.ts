@@ -95,6 +95,7 @@ export interface CacheRequestDataYHeaders {
 
 export interface CacheRequestData {
   headers?: CacheRequestDataYHeaders;
+  data?: Record<string, unknown>;
   owner?: string;
   branch?: string;
   repo?: string;

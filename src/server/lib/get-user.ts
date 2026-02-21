@@ -30,3 +30,94 @@ export function getUser(req: NextRequest): JWTPayload | null {
   const raw = req.headers.get('x-user');
   return decode<JWTPayload>(raw);
 }
+
+function normalizeClaim(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function getLocalDevUserId(): string {
+  const configured = process.env.LOCAL_DEV_USER_ID?.trim();
+  return configured || 'local-dev-user';
+}
+
+function buildGitFallbackEmail(identifier: string): string {
+  if (/^[A-Za-z0-9-]+$/.test(identifier)) {
+    return `${identifier}@users.noreply.github.com`;
+  }
+
+  return `${identifier.replace(/[^A-Za-z0-9._-]+/g, '-') || 'local-dev-user'}@local.lifecycle`;
+}
+
+export interface RequestUserIdentity {
+  userId: string;
+  githubUsername: string | null;
+  preferredUsername: string | null;
+  email: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  displayName: string;
+  gitUserName: string;
+  gitUserEmail: string;
+}
+
+function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestUserIdentity {
+  const claims = (payload || {}) as Record<string, unknown>;
+  const githubUsername = normalizeClaim(claims.github_username) || normalizeClaim(claims.githubUsername);
+  const preferredUsername = normalizeClaim(claims.preferred_username) || normalizeClaim(claims.preferredUsername);
+  const email = normalizeClaim(claims.email);
+  const firstName = normalizeClaim(claims.given_name) || normalizeClaim(claims.firstName);
+  const lastName = normalizeClaim(claims.family_name) || normalizeClaim(claims.lastName);
+  const explicitName = normalizeClaim(claims.name);
+  const displayName =
+    explicitName ||
+    [firstName, lastName].filter(Boolean).join(' ').trim() ||
+    githubUsername ||
+    preferredUsername ||
+    userId;
+  const gitUserName = displayName;
+  const gitUserEmail = email || buildGitFallbackEmail(githubUsername || preferredUsername || userId);
+
+  return {
+    userId,
+    githubUsername,
+    preferredUsername,
+    email,
+    firstName,
+    lastName,
+    displayName,
+    gitUserName,
+    gitUserEmail,
+  };
+}
+
+export function getRequestUserSub(req: NextRequest): string | null {
+  const sub = normalizeClaim(getUser(req)?.sub);
+  if (sub) {
+    return sub;
+  }
+
+  if (process.env.ENABLE_AUTH === 'true') {
+    return null;
+  }
+
+  return getLocalDevUserId();
+}
+
+export function getRequestUserIdentity(req: NextRequest): RequestUserIdentity | null {
+  const payload = getUser(req);
+  const sub = normalizeClaim(payload?.sub);
+  if (sub) {
+    return buildUserIdentity(payload, sub);
+  }
+
+  if (process.env.ENABLE_AUTH === 'true') {
+    return null;
+  }
+
+  return buildUserIdentity(null, getLocalDevUserId());
+}
