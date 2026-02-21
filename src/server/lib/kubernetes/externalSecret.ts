@@ -20,6 +20,7 @@ import { shellPromise } from 'server/lib/shell';
 import { getLogger } from 'server/lib/logger';
 import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 import { SecretProviderConfig } from 'server/services/types/globalConfig';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export interface ExternalSecretManifest {
   apiVersion: string;
@@ -106,7 +107,7 @@ export function generateExternalSecretManifest(options: GenerateExternalSecretOp
   });
 
   const labels: Record<string, string> = {
-    'app.kubernetes.io/managed-by': 'lifecycle',
+    ...buildLifecycleLabels({ buildUuid }),
     'lfc/secret-provider': provider,
   };
 

@@ -20,6 +20,7 @@ export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
   helmDefaults: HelmDefaults;
   buildDefaults?: BuildDefaults;
+  agentSessionDefaults?: AgentSessionDefaults;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -48,7 +49,30 @@ export type AppSetup = {
   restarted: boolean;
   url: string;
   state: string;
+  name?: string;
   org?: string;
+};
+
+export type AgentSessionClaudePermissions = {
+  allow?: string[];
+  deny?: string[];
+};
+
+export type AgentSessionClaudeAttribution = {
+  commitTemplate?: string;
+  prTemplate?: string;
+};
+
+export type AgentSessionClaudeConfig = {
+  permissions?: AgentSessionClaudePermissions;
+  attribution?: AgentSessionClaudeAttribution;
+  appendSystemPrompt?: string;
+};
+
+export type AgentSessionDefaults = {
+  image?: string | null;
+  editorImage?: string | null;
+  claude?: AgentSessionClaudeConfig;
 };
 
 export type RoleSettings = {

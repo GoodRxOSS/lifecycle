@@ -27,6 +27,7 @@ import {
   setupDeployServiceAccountInNamespace,
 } from 'server/lib/kubernetes/rbac';
 import { getLogger } from 'server/lib/logger';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 import {
   NativeHelmConfig as GlobalNativeHelmConfig,
@@ -417,6 +418,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },
@@ -437,6 +439,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleBindingName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },

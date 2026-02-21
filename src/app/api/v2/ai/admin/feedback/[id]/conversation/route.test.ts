@@ -68,7 +68,7 @@ describe('GET /api/v2/ai/admin/feedback/[id]/conversation', () => {
       repo: 'org/repo',
       rating: 'up',
       text: 'Very helpful',
-      userIdentifier: 'vmelikyan',
+      userIdentifier: 'sample-user',
       createdAt: '2026-02-27T10:00:00.000Z',
     });
     MockMessageFeedback.query.mockReturnValue({ findById: findByIdMessageFeedback });
@@ -106,7 +106,7 @@ describe('GET /api/v2/ai/admin/feedback/[id]/conversation', () => {
 
     expect(response.status).toBe(200);
     expect(body.data.feedbackText).toBe('Very helpful');
-    expect(body.data.feedbackUserIdentifier).toBe('vmelikyan');
+    expect(body.data.feedbackUserIdentifier).toBe('sample-user');
     expect(body.data.feedbackType).toBe('message');
     expect(body.data.ratedMessageId).toBe(42);
     expect(body.data.conversation.messages).toHaveLength(2);
@@ -121,7 +121,7 @@ describe('GET /api/v2/ai/admin/feedback/[id]/conversation', () => {
       repo: 'org/repo',
       rating: 'down',
       text: 'Session feedback comment',
-      userIdentifier: 'vmelikyan',
+      userIdentifier: 'sample-user',
       createdAt: '2026-02-27T10:05:00.000Z',
     });
     MockConversationFeedback.query.mockReturnValue({ findById: findByIdConversationFeedback });
@@ -153,7 +153,7 @@ describe('GET /api/v2/ai/admin/feedback/[id]/conversation', () => {
     expect(response.status).toBe(200);
     expect(body.data.feedbackType).toBe('conversation');
     expect(body.data.feedbackText).toBe('Session feedback comment');
-    expect(body.data.feedbackUserIdentifier).toBe('vmelikyan');
+    expect(body.data.feedbackUserIdentifier).toBe('sample-user');
     expect(body.data.ratedMessageId).toBeNull();
   });
 });

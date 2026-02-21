@@ -30,6 +30,8 @@ global:
     # Add any global env vars here if needed
     - name: PORT
       value: '80'
+    - name: ENABLE_AUTH
+      value: 'false'
     - name: OBJECT_STORE_TYPE
       value: 'minio'
     - name: OBJECT_STORE_ENDPOINT
@@ -188,8 +190,11 @@ rbac:
 keycloak:
   enabled: true
   realm: lifecycle
-  url: localhost
+  scheme: http
+  url: localhost:8081
   appUrl: localhost:5001
+  uiScheme: http
+  uiUrl: localhost:3000
 
   adminUsername: admin
   adminPassword: admin
@@ -205,11 +210,11 @@ keycloak:
     enabled: true
     clientId: app-broker
     clientSecret: changeme
-    tokenUrl: http://localhost:8080/realms/company/protocol/openid-connect/token
-    authorizationUrl: http://localhost:8080/realms/company/protocol/openid-connect/auth
-    userInfoUrl: http://localhost:8080/realms/company/protocol/openid-connect/userinfo
-    jwksUrl: http://localhost:8080/realms/company/protocol/openid-connect/certs
-    issuer: http://localhost:8080/realms/company
+    tokenUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/token
+    authorizationUrl: http://localhost:8081/realms/company/protocol/openid-connect/auth
+    userInfoUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/userinfo
+    jwksUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/certs
+    issuer: http://localhost:8081/realms/company
 
   githubIdp:
     enabled: true

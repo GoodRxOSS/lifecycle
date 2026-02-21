@@ -275,8 +275,26 @@ export class ToolOrchestrator {
             };
           }
           const toolStartTime = Date.now();
+          const tool = this.toolRegistry.get(toolCalls[i].name);
+          if (!tool) {
+            const registeredNames = this.toolRegistry.getAll().map((t) => t.name);
+            return {
+              index: i,
+              result: {
+                success: false,
+                error: {
+                  message: `Tool "${toolCalls[i].name}" is not available. Available tools: ${registeredNames.join(
+                    ', '
+                  )}`,
+                  code: 'TOOL_NOT_FOUND',
+                  recoverable: true,
+                },
+              },
+              toolDuration: 0,
+            };
+          }
           const result = await this.safetyManager.safeExecute(
-            this.toolRegistry.get(toolCalls[i].name)!,
+            tool,
             toolCalls[i].arguments,
             callbacks,
             signal,

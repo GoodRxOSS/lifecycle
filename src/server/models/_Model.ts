@@ -16,15 +16,7 @@
 
 /* eslint-disable no-unused-vars */
 import { omit, pick } from 'lodash';
-import objection, {
-  Model as ObjectionModel,
-  ModelOptions,
-  Pojo,
-  QueryBuilder,
-  QueryContext,
-  QueryInterface,
-  Transaction,
-} from 'objection';
+import objection, { Model as ObjectionModel, ModelOptions, Pojo, QueryContext, Transaction } from 'objection';
 import { getUtcTimestamp } from '../lib/time';
 
 type Constructor<M> = (new (...args: any[]) => M) & typeof Model;
@@ -33,7 +25,7 @@ interface IFindOptions {
   required?: boolean;
   eager?: string;
   eagerOpts?: Pojo;
-  modify?: (qb: QueryBuilder<any>) => QueryInterface<any, any, any>;
+  modify?: (qb: any) => unknown;
   cache?: boolean;
 }
 
@@ -67,7 +59,7 @@ export default class Model extends ObjectionModel {
 
   static pickJsonSchemaProperties = false;
 
-  static find<T>(this: Constructor<T>, scope?: Pojo | null, options: IFindOptions = {}): QueryBuilder<T & Model> {
+  static find<T>(this: Constructor<T>, scope?: Pojo | null, options: IFindOptions = {}): any {
     const { eager, eagerOpts = {}, modify } = options;
 
     const query = this.query();
@@ -94,7 +86,7 @@ export default class Model extends ObjectionModel {
         if (options.required && !record) {
           throw Error(`${this.name} could not be found: ${JSON.stringify(query)}`);
         }
-        return record;
+        return record as T;
       });
   }
 
@@ -102,7 +94,7 @@ export default class Model extends ObjectionModel {
     let records;
     let offset = 0;
 
-    const modify = (qb: QueryBuilder<any>) => {
+    const modify = (qb: any) => {
       if (options.modify) {
         options.modify(qb);
       }
@@ -128,7 +120,7 @@ export default class Model extends ObjectionModel {
   }
 
   static async create<T>(this: Constructor<T>, attributes: object, trx?: Transaction): Promise<T> {
-    return this.query(trx).insert(attributes);
+    return this.query(trx).insert(attributes) as unknown as Promise<T>;
   }
 
   static async upsert(data: Pojo, unique = ['id'], trx?: Transaction) {
