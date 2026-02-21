@@ -31,6 +31,7 @@ export abstract class BaseTool implements Tool {
   public readonly parameters: JSONSchema;
   public readonly safetyLevel: ToolSafetyLevel;
   public readonly category: ToolCategory;
+  public readonly executionTimeout?: number;
 
   constructor(description: string, parameters: JSONSchema, safetyLevel: ToolSafetyLevel, category: ToolCategory) {
     this.description = description;

@@ -29,7 +29,7 @@ export default class Service extends Model {
   // Dockerfile path specifically for the init container.
   initDockerfilePath: string;
   branchName: string;
-  repositoryId: string;
+  repositoryId: number;
   defaultTag: string;
   port: string;
   env!: Record<string, any>;
@@ -63,6 +63,8 @@ export default class Service extends Model {
   readinessTcpSocketPort: number;
   readinessHttpGetPath: string;
   readinessHttpGetPort: number;
+  livenessProbe: string;
+  readinessProbe: string;
 
   serviceDisks: ServiceDisk[];
 

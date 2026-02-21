@@ -24,6 +24,7 @@ import { shellPromise } from 'server/lib/shell';
 import yaml from 'js-yaml';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 const MANIFEST_PATH = `${TMP_PATH}/ingress`;
 
@@ -144,7 +145,7 @@ export default class IngressService extends BaseService {
         name: `ingress-${configuration.deployUUID}`,
         annotations,
         labels: {
-          lc_uuid: configuration.deployUUID,
+          ...buildLifecycleLabels({ buildUuid: configuration.deployUUID }),
         },
       },
       spec: {

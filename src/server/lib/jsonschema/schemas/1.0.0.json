@@ -1346,6 +1346,43 @@
               "defaultTag",
               "branchName"
             ]
+          },
+          "dev": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "image": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "installCommand": {
+                "type": "string"
+              },
+              "workDir": {
+                "type": "string"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "env": {
+                "type": "object"
+              },
+              "forwardEnvVarsToAgent": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "image",
+              "command"
+            ]
           }
         },
         "required": [

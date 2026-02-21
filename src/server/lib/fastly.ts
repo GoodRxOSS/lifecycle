@@ -106,7 +106,7 @@ class Fastly {
    * Purge all the cache for the Fastly service for the corresponding LC environment.
    * @param serviceId Fastly Service ID
    */
-  async purgeAllServiceCache(serviceId: string, uuid: string, fastlyServiceType: string) {
+  async purgeAllServiceCache(serviceId: string, _uuid: string, fastlyServiceType: string) {
     try {
       if (!serviceId) throw new Error('Service ID is missing');
       await fastlyPurge.purgeAll({ service_id: serviceId });
