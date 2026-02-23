@@ -228,7 +228,7 @@ export default class BuildService extends BaseService {
       throw new Error(`Deployable ${serviceName} not found for ${buildUuid}.`);
     }
 
-    const githubRepositoryId = Number(deploy.deployable.repositoryId);
+    const githubRepositoryId = deploy.deployable.repositoryId;
 
     const runUUID = nanoid();
 
