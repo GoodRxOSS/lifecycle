@@ -125,7 +125,7 @@ export default class BuildService extends BaseService {
     const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
 
     const baseQuery = this.db.models.Build.query()
-      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt')
+      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'isStatic')
       .whereNotIn('status', exclude)
       .modify((qb) => {
         if (filterByAuthor) {
@@ -171,7 +171,18 @@ export default class BuildService extends BaseService {
   async getBuildByUUID(uuid: string): Promise<Build | null> {
     const build = await this.db.models.Build.query()
       .findOne({ uuid })
-      .select('id', 'uuid', 'status', 'namespace', 'manifest', 'sha', 'createdAt', 'updatedAt', 'dependencyGraph')
+      .select(
+        'id',
+        'uuid',
+        'status',
+        'namespace',
+        'manifest',
+        'sha',
+        'createdAt',
+        'updatedAt',
+        'dependencyGraph',
+        'isStatic'
+      )
       .withGraphFetched('[pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {
         b.select('id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels');
