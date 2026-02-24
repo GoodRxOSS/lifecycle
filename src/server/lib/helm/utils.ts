@@ -131,7 +131,7 @@ export function ingressBannerSnippet(deploy: Deploy) {
       },
       {
         label: 'PR',
-        value: `#${pullRequestNumber}` || '',
+        value: `${pullRequestNumber}` || '',
         url: `https://github.com/${pullRequest.fullName}/pull/${pullRequestNumber}`,
       },
       {
