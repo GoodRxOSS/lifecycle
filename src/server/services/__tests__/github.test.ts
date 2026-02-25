@@ -21,6 +21,19 @@ import { PushEvent } from '@octokit/webhooks-types';
 
 mockRedisClient();
 
+const mockIsLifecycleLabel = jest.fn();
+const mockHasDeployLabel = jest.fn();
+const mockEnableKillSwitch = jest.fn();
+const mockIsStaging = jest.fn().mockReturnValue(false);
+
+jest.mock('server/lib/utils', () => ({
+  ...jest.requireActual('server/lib/utils'),
+  isLifecycleLabel: (...args) => mockIsLifecycleLabel(...args),
+  hasDeployLabel: (...args) => mockHasDeployLabel(...args),
+  enableKillSwitch: (...args) => mockEnableKillSwitch(...args),
+  isStaging: (...args) => mockIsStaging(...args),
+}));
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
     error: jest.fn(),
@@ -311,5 +324,199 @@ describe('Github Service - handlePushWebhook', () => {
 
       expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('Github Service - handleLabelWebhook', () => {
+  let githubService: Github;
+  let mockDb: any;
+  let mockQueueManager: any;
+
+  const createMockLabelWebhookBody = ({
+    action = 'labeled',
+    changedLabel = 'ready-for-review',
+    allLabels = [{ name: 'ready-for-review' }],
+    githubPullRequestId = 1001,
+    status = 'open',
+  } = {}) => ({
+    action,
+    label: { name: changedLabel },
+    pull_request: {
+      id: githubPullRequestId,
+      labels: allLabels,
+      state: status,
+    },
+  });
+
+  const createMockPullRequest = (overrides: any = {}) => ({
+    id: 1,
+    deployOnUpdate: false,
+    githubLogin: 'test-user',
+    fullName: 'org/repo',
+    branchName: 'feature-branch',
+    build: { id: 10, uuid: 'build-uuid' },
+    repository: { id: 5 },
+    $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    $query: jest.fn().mockReturnValue({
+      patch: jest.fn().mockResolvedValue(undefined),
+      first: jest.fn().mockResolvedValue(undefined),
+    }),
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    mockDb = {
+      models: {
+        PullRequest: {
+          findOne: jest.fn().mockResolvedValue(null),
+        },
+      },
+      services: {
+        BuildService: {
+          deleteBuild: jest.fn().mockResolvedValue(undefined),
+          resolveAndDeployBuildQueue: {
+            add: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        BotUser: {
+          isBotUser: jest.fn().mockResolvedValue(false),
+        },
+      },
+    };
+
+    mockQueueManager = {
+      registerQueue: jest.fn().mockReturnValue({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      }),
+    };
+
+    githubService = new Github(mockDb, {}, {}, mockQueueManager);
+  });
+
+  test('should skip processing when changed label is not a lifecycle label', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(false);
+
+    const body = createMockLabelWebhookBody({
+      changedLabel: 'ready-for-review',
+      allLabels: [{ name: 'lifecycle-deploy!' }, { name: 'ready-for-review' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('ready-for-review');
+    expect(mockDb.models.PullRequest.findOne).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.deleteBuild).not.toHaveBeenCalled();
+  });
+
+  test('should skip processing for donotmerge label', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(false);
+
+    const body = createMockLabelWebhookBody({
+      changedLabel: 'donotmerge',
+      allLabels: [{ name: 'lifecycle-deploy!' }, { name: 'donotmerge' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('donotmerge');
+    expect(mockDb.models.PullRequest.findOne).not.toHaveBeenCalled();
+  });
+
+  test('should process webhook when deploy label is added', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(true);
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPr = createMockPullRequest({ deployOnUpdate: true });
+    mockDb.models.PullRequest.findOne.mockResolvedValue(mockPr);
+
+    const body = createMockLabelWebhookBody({
+      action: 'labeled',
+      changedLabel: 'lifecycle-deploy!',
+      allLabels: [{ name: 'lifecycle-deploy!' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('lifecycle-deploy!');
+    expect(mockDb.models.PullRequest.findOne).toHaveBeenCalled();
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+      'resolve-deploy',
+      expect.objectContaining({ buildId: 10 })
+    );
+  });
+
+  test('should delete build when deploy label is removed', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(true);
+    mockHasDeployLabel.mockResolvedValue(false);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPr = createMockPullRequest({ deployOnUpdate: false });
+    mockDb.models.PullRequest.findOne.mockResolvedValue(mockPr);
+
+    const body = createMockLabelWebhookBody({
+      action: 'unlabeled',
+      changedLabel: 'lifecycle-deploy!',
+      allLabels: [],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('lifecycle-deploy!');
+    expect(mockDb.services.BuildService.deleteBuild).toHaveBeenCalledWith(mockPr.build);
+  });
+
+  test('should delete build when disabled label is added', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(true);
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(true);
+
+    const mockPr = createMockPullRequest({ deployOnUpdate: false });
+    mockDb.models.PullRequest.findOne.mockResolvedValue(mockPr);
+
+    const body = createMockLabelWebhookBody({
+      action: 'labeled',
+      changedLabel: 'lifecycle-disabled!',
+      allLabels: [{ name: 'lifecycle-deploy!' }, { name: 'lifecycle-disabled!' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('lifecycle-disabled!');
+    expect(mockDb.services.BuildService.deleteBuild).toHaveBeenCalledWith(mockPr.build);
+  });
+
+  test('should return early when PR is not found in database', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(true);
+    mockDb.models.PullRequest.findOne.mockResolvedValue(null);
+
+    const body = createMockLabelWebhookBody({
+      changedLabel: 'lifecycle-deploy!',
+      allLabels: [{ name: 'lifecycle-deploy!' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.deleteBuild).not.toHaveBeenCalled();
+  });
+
+  test('should handle case-insensitive label names', async () => {
+    mockIsLifecycleLabel.mockResolvedValue(false);
+
+    const body = createMockLabelWebhookBody({
+      changedLabel: 'Ready-For-Review',
+      allLabels: [{ name: 'lifecycle-deploy!' }, { name: 'Ready-For-Review' }],
+    });
+
+    await githubService.handleLabelWebhook(body);
+
+    expect(mockIsLifecycleLabel).toHaveBeenCalledWith('ready-for-review');
+    expect(mockDb.models.PullRequest.findOne).not.toHaveBeenCalled();
   });
 });

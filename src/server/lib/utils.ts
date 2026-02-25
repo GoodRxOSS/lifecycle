@@ -199,6 +199,18 @@ export const isStaging = () => {
   return ENVIRONMENT === 'staging';
 };
 
+export const isLifecycleLabel = async (label: string): Promise<boolean> => {
+  if (!label) return false;
+  const labelsConfig = await GlobalConfigService.getInstance().getLabels();
+  const allLifecycleLabels = [
+    ...(labelsConfig.deploy || []),
+    ...(labelsConfig.disabled || []),
+    ...(labelsConfig.keep || []),
+    ...(labelsConfig.statusComments || []),
+  ];
+  return allLifecycleLabels.includes(label.toLowerCase());
+};
+
 export const hasDeployLabel = async (labels: string[]): Promise<boolean> => {
   if (!labels || labels.length === 0) return false;
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();

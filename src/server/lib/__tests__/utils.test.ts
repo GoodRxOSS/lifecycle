@@ -20,6 +20,7 @@ import {
   constructEcrRepoPath,
   waitUntil,
   enableKillSwitch,
+  isLifecycleLabel,
   hasDeployLabel,
   hasDisabledLabel,
   hasStatusCommentLabel,
@@ -328,6 +329,62 @@ describe('enableKillSwitch', () => {
     const options = { action: '', branch: '', fullName: '', githubUser: '', isOpen: true };
     const result = await enableKillSwitch(options);
     expect(result).toEqual(false);
+  });
+});
+
+describe('isLifecycleLabel', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns true for a deploy label', async () => {
+    const result = await isLifecycleLabel('lifecycle-deploy!');
+    expect(result).toBe(true);
+  });
+
+  test('returns true for a custom deploy label', async () => {
+    const result = await isLifecycleLabel('custom-deploy!');
+    expect(result).toBe(true);
+  });
+
+  test('returns true for a disabled label', async () => {
+    const result = await isLifecycleLabel('lifecycle-disabled!');
+    expect(result).toBe(true);
+  });
+
+  test('returns true for a keep label', async () => {
+    const result = await isLifecycleLabel('lifecycle-keep!');
+    expect(result).toBe(true);
+  });
+
+  test('returns true for a status comments label', async () => {
+    const result = await isLifecycleLabel('lifecycle-status-comments!');
+    expect(result).toBe(true);
+  });
+
+  test('returns false for a non-lifecycle label', async () => {
+    const result = await isLifecycleLabel('ready-for-review');
+    expect(result).toBe(false);
+  });
+
+  test('returns false for an empty string', async () => {
+    const result = await isLifecycleLabel('');
+    expect(result).toBe(false);
+  });
+
+  test('returns false for null', async () => {
+    const result = await isLifecycleLabel(null as any);
+    expect(result).toBe(false);
+  });
+
+  test('returns false for undefined', async () => {
+    const result = await isLifecycleLabel(undefined as any);
+    expect(result).toBe(false);
+  });
+
+  test('is case-insensitive', async () => {
+    const result = await isLifecycleLabel('Lifecycle-Deploy!');
+    expect(result).toBe(true);
   });
 });
 
