@@ -32,7 +32,7 @@ import * as github from 'server/lib/github';
 import { Environment, Repository, Build, PullRequest } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
-import { enableKillSwitch, isStaging, hasDeployLabel } from 'server/lib/utils';
+import { enableKillSwitch, isStaging, hasDeployLabel, isLifecycleLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 
 export default class GithubService extends Service {
@@ -196,10 +196,18 @@ export default class GithubService extends Service {
   handleLabelWebhook = async (body) => {
     const {
       action,
+      label: changedLabel,
       pull_request: { id: githubPullRequestId, labels, state: status },
     } = body;
     let pullRequest: PullRequest, build: Build, _repository: Repository;
     try {
+      const changedLabelName = changedLabel?.name?.toLowerCase();
+      const isLifecycle = await isLifecycleLabel(changedLabelName);
+      if (!isLifecycle) {
+        getLogger().info(`Label: skipping non-lifecycle label=${changedLabelName} action=${action}`);
+        return;
+      }
+
       // this is a hacky way to force deploy by adding a label
       const labelNames = labels.map(({ name }) => name.toLowerCase()) || [];
       const shouldDeploy = isStaging() && labelNames.includes(FallbackLabels.DEPLOY_STG);
