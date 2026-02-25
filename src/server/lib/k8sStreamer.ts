@@ -35,7 +35,7 @@ export function streamK8sLogs(
     namespace: string;
     containerName: string;
     follow: boolean;
-    tailLines: number;
+    tailLines?: number;
     timestamps: boolean;
   },
   callbacks: {
@@ -112,7 +112,7 @@ export function streamK8sLogs(
     try {
       const logOptions = {
         follow,
-        tailLines,
+        ...(tailLines !== undefined ? { tailLines } : {}),
         timestamps,
         pretty: false,
       };

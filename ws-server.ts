@@ -104,9 +104,9 @@ app.prepare().then(() => {
         throw new Error('Missing or invalid required parameters: podName, namespace, containerName');
       }
       const follow = followStr === 'true';
-      const tailLines = tailLinesStr ? parseInt(tailLinesStr as string, 10) : 200;
+      const tailLines = tailLinesStr ? parseInt(tailLinesStr as string, 10) : undefined;
       const timestamps = timestampsStr === 'true';
-      if (isNaN(tailLines)) throw new Error('Invalid tailLines parameter.');
+      if (tailLines !== undefined && isNaN(tailLines)) throw new Error('Invalid tailLines parameter.');
 
       logger.debug(logCtx, 'Initiating K8s log stream');
       k8sStreamAbort = streamK8sLogs(

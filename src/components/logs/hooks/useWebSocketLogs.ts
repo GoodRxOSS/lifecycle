@@ -89,18 +89,18 @@ export function useWebSocketLogs(showTimestamps: boolean, uuid?: string) {
       const params = new URLSearchParams();
 
       if (jobInfo.websocket) {
+        const follow = jobInfo.websocket.parameters.follow;
         params.append('podName', jobInfo.websocket.parameters.podName);
         params.append('namespace', jobInfo.websocket.parameters.namespace);
         params.append('containerName', containerName);
-        params.append('follow', jobInfo.websocket.parameters.follow.toString());
-        params.append('tailLines', '500');
+        params.append('follow', follow.toString());
+        if (follow) params.append('tailLines', '1000');
         params.append('timestamps', showTimestamps.toString());
       } else if (jobInfo.podName) {
         params.append('podName', jobInfo.podName);
         params.append('namespace', `env-${uuid}`);
         params.append('containerName', containerName);
         params.append('follow', 'false');
-        params.append('tailLines', '500');
         params.append('timestamps', showTimestamps.toString());
       }
 
