@@ -127,6 +127,7 @@ export type BuildDefaults = {
   jobTimeout?: number;
   serviceAccount?: string;
   cacheRegistry?: string;
+  podAnnotations?: Record<string, string>;
   resources?: {
     buildkit?: ResourceRequirements;
     kaniko?: ResourceRequirements;

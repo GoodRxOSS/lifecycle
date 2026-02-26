@@ -27,6 +27,7 @@ export interface JobConfig {
   ttl?: number;
   labels: Record<string, string>;
   annotations?: Record<string, string>;
+  podAnnotations?: Record<string, string>;
   initContainers?: any[];
   containers: any[];
   volumes?: any[];
@@ -46,6 +47,7 @@ export function createKubernetesJob(config: JobConfig): V1Job {
     ttl,
     labels,
     annotations = {},
+    podAnnotations = {},
     initContainers = [],
     containers,
     volumes = [],
@@ -82,6 +84,7 @@ export function createKubernetesJob(config: JobConfig): V1Job {
             'app.kubernetes.io/component': component,
             ...(labels['lc-service'] && { 'lc-service': labels['lc-service'] }),
           },
+          ...(Object.keys(podAnnotations).length > 0 && { annotations: podAnnotations }),
         },
         spec: {
           serviceAccountName: serviceAccount,
@@ -117,6 +120,7 @@ export interface BuildJobConfig {
   initContainers: any[];
   containers: any[];
   volumes?: any[];
+  podAnnotations?: Record<string, string>;
 }
 
 export function createBuildJob(config: BuildJobConfig): V1Job {
@@ -143,6 +147,7 @@ export function createBuildJob(config: BuildJobConfig): V1Job {
       'lifecycle.io/dockerfile': config.dockerfilePath,
       'lifecycle.io/ecr-repo': config.ecrRepo,
     },
+    podAnnotations: config.podAnnotations,
     initContainers: config.initContainers,
     containers: config.containers,
     volumes: config.volumes || [{ name: 'workspace', emptyDir: {} }],
