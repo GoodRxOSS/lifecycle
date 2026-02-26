@@ -285,6 +285,10 @@ export interface ServiceDiskConfig {
 
 export interface Builder {
   readonly engine?: string;
+  readonly resources?: {
+    readonly requests?: Record<string, string>;
+    readonly limits?: Record<string, string>;
+  };
 }
 
 /**

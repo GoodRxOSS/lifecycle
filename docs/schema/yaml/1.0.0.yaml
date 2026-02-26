@@ -177,6 +177,14 @@ services:
         builder:
           # @param services.helm.docker.builder.engine
           engine: ''
+          # @param services.helm.docker.builder.resources
+          resources:
+            # @param services.helm.docker.builder.resources.requests
+            requests:
+
+            # @param services.helm.docker.builder.resources.limits
+            limits:
+
         # @param services.helm.docker.app (required)
         app:
           # @param services.helm.docker.app.afterBuildPipelineConfig
@@ -372,6 +380,14 @@ services:
         builder:
           # @param services.github.docker.builder.engine
           engine: ''
+          # @param services.github.docker.builder.resources
+          resources:
+            # @param services.github.docker.builder.resources.requests
+            requests:
+
+            # @param services.github.docker.builder.resources.limits
+            limits:
+
         # @param services.github.docker.app (required)
         app:
           # @param services.github.docker.app.afterBuildPipelineConfig
