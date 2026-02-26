@@ -426,6 +426,145 @@ describe('build resource precedence', () => {
   });
 });
 
+describe('build pod annotations', () => {
+  const mockDeploy = {
+    deployable: { name: 'test-service' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  const baseOptions: BuildkitBuildOptions = {
+    ecrRepo: 'test-repo',
+    ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    envVars: { NODE_ENV: 'production' },
+    dockerfilePath: 'Dockerfile',
+    tag: 'v1.0.0',
+    revision: 'abc123def456789',
+    repo: 'owner/repo',
+    branch: 'main',
+    namespace: 'env-test-123',
+    buildId: '456',
+    deployUuid: 'test-service-abc123',
+    jobTimeout: 1800,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'Build completed successfully',
+      success: true,
+    });
+  });
+
+  it('includes safe-to-evict annotation on pod template by default', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({}),
+    });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cluster-autoscaler.kubernetes.io/safe-to-evict: "false"');
+  });
+
+  it('applies custom podAnnotations from global config to pod template', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        podAnnotations: {
+          'custom-annotation/team': 'platform',
+          'custom-annotation/cost-center': 'engineering',
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('custom-annotation/team: "platform"');
+    expect(fullCommand).toContain('custom-annotation/cost-center: "engineering"');
+    expect(fullCommand).toContain('cluster-autoscaler.kubernetes.io/safe-to-evict: "false"');
+  });
+
+  it('applies per-service podAnnotations from options', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({}),
+    });
+
+    await buildkitBuild(mockDeploy, {
+      ...baseOptions,
+      podAnnotations: { 'my-org/service-tier': 'critical' },
+    });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('my-org/service-tier: "critical"');
+    expect(fullCommand).toContain('cluster-autoscaler.kubernetes.io/safe-to-evict: "false"');
+  });
+
+  it('per-service podAnnotations override global config podAnnotations', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        podAnnotations: {
+          'my-org/team': 'platform',
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    await buildkitBuild(mockDeploy, {
+      ...baseOptions,
+      podAnnotations: { 'my-org/team': 'frontend' },
+    });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('my-org/team: "frontend"');
+    expect(fullCommand).not.toContain('my-org/team: "platform"');
+  });
+
+  it('hardcoded safe-to-evict cannot be overridden by global config or options', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        podAnnotations: {
+          'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    await buildkitBuild(mockDeploy, {
+      ...baseOptions,
+      podAnnotations: { 'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true' },
+    });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cluster-autoscaler.kubernetes.io/safe-to-evict: "false"');
+    expect(fullCommand).not.toContain('cluster-autoscaler.kubernetes.io/safe-to-evict: "true"');
+  });
+});
+
 describe('generateSecretArgsScript', () => {
   it('returns comment when no secret keys provided', () => {
     expect(generateSecretArgsScript(undefined)).toBe('# No secret env keys');

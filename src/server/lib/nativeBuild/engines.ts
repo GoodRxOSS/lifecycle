@@ -50,6 +50,7 @@ export interface NativeBuildOptions {
   };
   secretRefs?: string[];
   secretEnvKeys?: string[];
+  podAnnotations?: Record<string, string>;
 }
 
 interface BuildEngine {
@@ -279,6 +280,11 @@ export async function buildWithEngine(
   const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
   const resources = options.resources || buildDefaults.resources?.[engineName] || DEFAULT_BUILD_RESOURCES[engineName];
+  const podAnnotations = {
+    ...buildDefaults.podAnnotations,
+    ...options.podAnnotations,
+    'cluster-autoscaler.kubernetes.io/safe-to-evict': 'false',
+  };
 
   const cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
 
@@ -424,6 +430,7 @@ export async function buildWithEngine(
         emptyDir: {},
       },
     ],
+    podAnnotations,
   });
 
   const jobYaml = yaml.dump(job, { quotingType: '"', forceQuotes: true });

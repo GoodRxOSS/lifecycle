@@ -289,6 +289,7 @@ export interface Builder {
     readonly requests?: Record<string, string>;
     readonly limits?: Record<string, string>;
   };
+  readonly podAnnotations?: Record<string, string>;
 }
 
 /**
