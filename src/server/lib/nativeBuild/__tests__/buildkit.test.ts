@@ -251,6 +251,181 @@ describe('buildkitBuild', () => {
   });
 });
 
+describe('build resource precedence', () => {
+  const mockDeploy = {
+    deployable: { name: 'test-service' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  const baseOptions: BuildkitBuildOptions = {
+    ecrRepo: 'test-repo',
+    ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    envVars: { NODE_ENV: 'production' },
+    dockerfilePath: 'Dockerfile',
+    tag: 'v1.0.0',
+    revision: 'abc123def456789',
+    repo: 'owner/repo',
+    branch: 'main',
+    namespace: 'env-test-123',
+    buildId: '456',
+    deployUuid: 'test-service-abc123',
+    jobTimeout: 1800,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'Build completed successfully',
+      success: true,
+    });
+  });
+
+  it('uses yaml resources (options.resources) over global config', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        resources: {
+          buildkit: {
+            requests: { cpu: '1', memory: '2Gi' },
+            limits: { cpu: '2', memory: '4Gi' },
+          },
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    const yamlResources = {
+      requests: { cpu: '4', memory: '8Gi' },
+      limits: { cpu: '8', memory: '16Gi' },
+    };
+
+    await buildkitBuild(mockDeploy, { ...baseOptions, resources: yamlResources });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cpu: "4"');
+    expect(fullCommand).toContain('memory: "8Gi"');
+    expect(fullCommand).toContain('cpu: "8"');
+    expect(fullCommand).toContain('memory: "16Gi"');
+    expect(fullCommand).not.toContain('cpu: "1"');
+    expect(fullCommand).not.toContain('cpu: "2"');
+  });
+
+  it('falls back to global config resources when yaml resources not set', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        resources: {
+          buildkit: {
+            requests: { cpu: '1', memory: '2Gi' },
+            limits: { cpu: '3', memory: '6Gi' },
+          },
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cpu: "1"');
+    expect(fullCommand).toContain('memory: "2Gi"');
+    expect(fullCommand).toContain('cpu: "3"');
+    expect(fullCommand).toContain('memory: "6Gi"');
+  });
+
+  it('falls back to default resources when neither yaml nor global config set', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({}),
+    });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cpu: "500m"');
+    expect(fullCommand).toContain('memory: "1Gi"');
+    expect(fullCommand).toContain('cpu: "2"');
+    expect(fullCommand).toContain('memory: "4Gi"');
+  });
+
+  it('uses yaml resources for kaniko over global config', async () => {
+    const { kanikoBuild } = require('../engines');
+    const globalConfig = {
+      buildDefaults: {
+        resources: {
+          kaniko: {
+            requests: { cpu: '300m', memory: '750Mi' },
+            limits: { cpu: '1', memory: '2Gi' },
+          },
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    const yamlResources = {
+      requests: { cpu: '2', memory: '4Gi' },
+      limits: { cpu: '4', memory: '8Gi' },
+    };
+
+    await kanikoBuild(mockDeploy, { ...baseOptions, resources: yamlResources });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cpu: "2"');
+    expect(fullCommand).toContain('memory: "4Gi"');
+    expect(fullCommand).toContain('cpu: "4"');
+    expect(fullCommand).toContain('memory: "8Gi"');
+    expect(fullCommand).not.toContain('cpu: "300m"');
+    expect(fullCommand).not.toContain('memory: "750Mi"');
+  });
+
+  it('uses partial yaml resources without merging with global config', async () => {
+    const globalConfig = {
+      buildDefaults: {
+        resources: {
+          buildkit: {
+            requests: { cpu: '1', memory: '2Gi' },
+            limits: { cpu: '2', memory: '4Gi' },
+          },
+        },
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    const yamlResources = {
+      requests: { cpu: '4', memory: '8Gi' },
+    };
+
+    await buildkitBuild(mockDeploy, { ...baseOptions, resources: yamlResources });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('cpu: "4"');
+    expect(fullCommand).toContain('memory: "8Gi"');
+  });
+});
+
 describe('generateSecretArgsScript', () => {
   it('returns comment when no secret keys provided', () => {
     expect(generateSecretArgsScript(undefined)).toBe('# No secret env keys');

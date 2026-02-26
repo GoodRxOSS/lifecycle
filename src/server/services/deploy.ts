@@ -1107,6 +1107,7 @@ export default class DeployService extends BaseService {
             buildId: String(deploy.build.id),
             deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
+            resources: deployable.builder?.resources,
             secretRefs: buildSecretNames,
             secretEnvKeys: Array.from(secretEnvKeys),
           };

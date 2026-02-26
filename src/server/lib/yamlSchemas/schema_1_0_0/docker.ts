@@ -26,6 +26,14 @@ export const docker = {
       additionalProperties: true,
       properties: {
         engine: { type: 'string' },
+        resources: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            requests: { type: 'object', additionalProperties: { type: 'string' } },
+            limits: { type: 'object', additionalProperties: { type: 'string' } },
+          },
+        },
       },
     },
     app: {
