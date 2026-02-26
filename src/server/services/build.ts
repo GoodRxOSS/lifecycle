@@ -196,6 +196,7 @@ export default class BuildService extends BaseService {
           'active',
           'deployableId',
           'branchName',
+          'deployPipelineId',
           'publicUrl',
           'dockerImage',
           'buildLogs',
