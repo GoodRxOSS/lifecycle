@@ -603,10 +603,11 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           isSystemAction,
         });
 
+        const assistantTimestamp = Date.now();
         await conversationService.addMessage(buildUuid, {
           role: 'assistant',
           content: aiResponse,
-          timestamp: Date.now(),
+          timestamp: assistantTimestamp,
           activityHistory: collectedActivities.length > 0 ? collectedActivities : undefined,
           evidenceItems: collectedEvidence.length > 0 ? collectedEvidence : undefined,
           totalInvestigationTimeMs,
@@ -622,7 +623,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
           debugMetrics: collectedDebugMetrics || undefined,
         });
 
-        sendEvent({ type: 'complete', totalInvestigationTimeMs });
+        sendEvent({ type: 'complete', totalInvestigationTimeMs, assistantTimestamp });
       });
     } catch (error: any) {
       getLogger().error({ error }, 'AI: chat request failed');

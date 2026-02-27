@@ -28,6 +28,10 @@ import BotUser from './BotUser';
 import GlobalConfig from './GlobalConfig';
 import WebhookInvocations from './WebhookInvocations';
 import AIAgentRepoConfig from './AIAgentRepoConfig';
+import Conversation from './Conversation';
+import ConversationMessage from './ConversationMessage';
+import MessageFeedback from './MessageFeedback';
+import ConversationFeedback from './ConversationFeedback';
 
 export interface IModels {
   Build: typeof Build;
@@ -44,6 +48,10 @@ export interface IModels {
   GlobalConfig: typeof GlobalConfig;
   WebhookInvocations: typeof WebhookInvocations;
   AIAgentRepoConfig: typeof AIAgentRepoConfig;
+  Conversation: typeof Conversation;
+  ConversationMessage: typeof ConversationMessage;
+  MessageFeedback: typeof MessageFeedback;
+  ConversationFeedback: typeof ConversationFeedback;
 }
 
 export {
@@ -61,4 +69,8 @@ export {
   GlobalConfig,
   WebhookInvocations,
   AIAgentRepoConfig,
+  Conversation,
+  ConversationMessage,
+  MessageFeedback,
+  ConversationFeedback,
 };

@@ -22,6 +22,7 @@ export interface ChunkEvent {
 export interface CompleteEvent {
   type: 'complete';
   totalInvestigationTimeMs: number;
+  assistantTimestamp?: number;
 }
 
 export interface CompleteJsonEvent {

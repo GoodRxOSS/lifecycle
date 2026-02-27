@@ -19,6 +19,7 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { defaultDb, defaultRedis } from 'server/lib/dependencies';
 import AIAgentConversationService from 'server/services/ai/conversation/storage';
+import ConversationMessage from 'server/models/ConversationMessage';
 
 /**
  * @openapi
@@ -71,11 +72,30 @@ const getHandler = async (req: NextRequest, { params }: { params: { buildUuid: s
   const conversationService = new AIAgentConversationService(defaultDb, defaultRedis);
   const conversation = await conversationService.getConversation(buildUuid);
 
-  return successResponse(
-    { messages: conversation?.messages || [], lastActivity: conversation?.lastActivity || null },
-    { status: 200 },
-    req
-  );
+  const pgMessages = await ConversationMessage.query()
+    .where({ buildUuid })
+    .select('id', 'timestamp', 'role')
+    .orderBy('id', 'asc');
+
+  const messageIdsByKey = new Map<string, number[]>();
+  for (const pgMessage of pgMessages) {
+    const key = `${pgMessage.role}:${String(pgMessage.timestamp)}`;
+    const existing = messageIdsByKey.get(key);
+    if (existing) {
+      existing.push(pgMessage.id);
+    } else {
+      messageIdsByKey.set(key, [pgMessage.id]);
+    }
+  }
+
+  const messages = (conversation?.messages || []).map((msg) => {
+    const key = `${msg.role}:${String(msg.timestamp)}`;
+    const ids = messageIdsByKey.get(key);
+    const matchedMessageId = ids?.shift();
+    return matchedMessageId != null ? { ...msg, messageId: matchedMessageId } : msg;
+  });
+
+  return successResponse({ messages, lastActivity: conversation?.lastActivity || null }, { status: 200 }, req);
 };
 
 export const GET = createApiHandler(getHandler);

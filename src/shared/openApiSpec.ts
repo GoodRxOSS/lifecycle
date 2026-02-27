@@ -1274,6 +1274,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             type: { type: 'string', enum: ['complete'] },
             totalInvestigationTimeMs: { type: 'number' },
+            assistantTimestamp: {
+              type: 'number',
+              description: 'Server-side timestamp (epoch ms) used for persisting the final assistant message.',
+            },
           },
           required: ['type', 'totalInvestigationTimeMs'],
         },
