@@ -33,7 +33,11 @@ class Fastly {
 
   async getFastlyUrl(): Promise<string> {
     const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-    return `fastly.${domainDefaults.http}`;
+    // TEMP PATCH:
+    // Fastly services for current env are named under fastly.<base-domain> (without "lifecycle.").
+    // This is an interim compatibility fix for lookup failures and should be reworked when
+    // Fastly naming/configuration is moved to a dedicated integration.
+    return `fastly.${domainDefaults.http.replace(/^lifecycle\./, '')}`;
   }
 
   async getCacheKey(uuid: string, fastlyServiceType = ''): Promise<string> {
