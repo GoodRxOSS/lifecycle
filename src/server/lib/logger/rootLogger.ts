@@ -57,6 +57,11 @@ let rootLogger = pino({
   level,
   enabled,
   serializers,
+  formatters: {
+    level(label) {
+      return { level: label };
+    },
+  },
   ...(pinoPretty ? transport : {}),
 });
 
