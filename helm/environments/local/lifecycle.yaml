@@ -154,6 +154,20 @@ postgresql:
 redis:
   enabled: false
 
+minio:
+  enabled: false
+  defaultBuckets: 'lifecycle-logs'
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  persistence:
+    enabled: true
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
 rbac:
   create: true
 

@@ -26,6 +26,7 @@ import {
 } from './utils';
 import { createBuildJob } from '../kubernetes/jobFactory';
 import * as yaml from 'js-yaml';
+import { getLogArchivalService } from '../../services/logArchival';
 
 export interface NativeBuildOptions {
   ecrRepo: string;
@@ -439,8 +440,34 @@ ${jobYaml}
 EOF`);
   getLogger().debug(`Job: created ${jobName}`);
 
+  const logArchivalEnabled = globalConfig.logArchival?.enabled;
+
   try {
     const { logs, success } = await waitForJobAndGetLogs(jobName, options.namespace, jobTimeout);
+
+    if (logArchivalEnabled) {
+      try {
+        const archivalService = getLogArchivalService();
+        await archivalService.archiveLogs(
+          {
+            jobName,
+            jobType: 'build',
+            serviceName,
+            namespace: options.namespace,
+            status: success ? 'Complete' : 'Failed',
+            sha: options.revision,
+            deployUuid: options.deployUuid,
+            buildUuid: options.buildId,
+            engine: engineName,
+            archivedAt: new Date().toISOString(),
+          },
+          logs
+        );
+      } catch (archiveError) {
+        getLogger().warn({ error: archiveError }, `LogArchival: failed to archive build logs jobName=${jobName}`);
+      }
+    }
+
     return { success, logs, jobName };
   } catch (error) {
     getLogger({ error }).error(`Job: log retrieval failed name=${jobName}`);
@@ -457,6 +484,29 @@ EOF`);
       }
     } catch (statusError) {
       getLogger({ error: statusError }).error(`Job: status check failed name=${jobName}`);
+    }
+
+    if (logArchivalEnabled) {
+      try {
+        const archivalService = getLogArchivalService();
+        await archivalService.archiveLogs(
+          {
+            jobName,
+            jobType: 'build',
+            serviceName,
+            namespace: options.namespace,
+            status: 'Failed',
+            sha: options.revision,
+            deployUuid: options.deployUuid,
+            buildUuid: options.buildId,
+            engine: engineName,
+            archivedAt: new Date().toISOString(),
+          },
+          `Build failed: ${error.message}`
+        );
+      } catch (archiveError) {
+        getLogger().warn({ error: archiveError }, `LogArchival: failed to archive build error logs jobName=${jobName}`);
+      }
     }
 
     return { success: false, logs: `Build failed: ${error.message}`, jobName };

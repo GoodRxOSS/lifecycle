@@ -1,5 +1,7 @@
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from 'server/lib/logger';
+import { getLogArchivalService } from 'server/services/logArchival';
+import GlobalConfigService from 'server/services/globalConfig';
 
 export interface DeploymentJobInfo {
   jobName: string;
@@ -12,6 +14,7 @@ export interface DeploymentJobInfo {
   error?: string;
   podName?: string;
   deploymentType: 'helm' | 'github';
+  source?: 'live' | 'archived';
 }
 
 export async function getDeploymentJobs(serviceName: string, namespace: string): Promise<DeploymentJobInfo[]> {
@@ -122,7 +125,38 @@ export async function getDeploymentJobs(serviceName: string, namespace: string):
         error,
         podName,
         deploymentType,
+        source: 'live',
       });
+    }
+
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    if (globalConfig.logArchival?.enabled) {
+      try {
+        const archivalService = getLogArchivalService();
+        const archivedJobs = await archivalService.listArchivedJobs(namespace, 'deploy', serviceName);
+        const liveJobNames = new Set(deploymentJobs.map((j) => j.jobName));
+
+        for (const archived of archivedJobs) {
+          if (!liveJobNames.has(archived.jobName)) {
+            deploymentJobs.push({
+              jobName: archived.jobName,
+              deployUuid: archived.deployUuid || '',
+              sha: archived.sha,
+              status: archived.status,
+              startedAt: archived.startedAt,
+              completedAt: archived.completedAt,
+              duration: archived.duration,
+              deploymentType: archived.deploymentType || 'helm',
+              source: 'archived',
+            });
+          }
+        }
+      } catch (archiveError) {
+        getLogger().warn(
+          { error: archiveError },
+          `LogArchival: failed to list archived deploy jobs service=${serviceName}`
+        );
+      }
     }
 
     deploymentJobs.sort((a, b) => {

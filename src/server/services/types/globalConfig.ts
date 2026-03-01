@@ -39,6 +39,7 @@ export type GlobalConfig = {
   labels: LabelsConfig;
   ttl_cleanup?: TTLCleanupConfig;
   secretProviders?: SecretProvidersConfig;
+  logArchival?: LogArchivalConfig;
 };
 
 export type AppSetup = {
@@ -177,4 +178,9 @@ export type SecretProviderConfig = {
 
 export type SecretProvidersConfig = {
   [provider: string]: SecretProviderConfig;
+};
+
+export type LogArchivalConfig = {
+  enabled: boolean;
+  retentionDays: number;
 };

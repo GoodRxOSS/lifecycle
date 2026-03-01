@@ -71,6 +71,12 @@ module.exports = {
     KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID,
     KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL,
     ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
+    MINIO_ENDPOINT: process.env.MINIO_ENDPOINT,
+    MINIO_PORT: process.env.MINIO_PORT,
+    MINIO_ACCESS_KEY: process.env.MINIO_ACCESS_KEY,
+    MINIO_SECRET_KEY: process.env.MINIO_SECRET_KEY,
+    MINIO_BUCKET: process.env.MINIO_BUCKET,
+    MINIO_USE_SSL: process.env.MINIO_USE_SSL,
   },
   typescript: {
     ignoreBuildErrors: true,
