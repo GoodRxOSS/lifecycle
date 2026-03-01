@@ -145,3 +145,10 @@ export const DD_ENVS = {
 };
 export const ENVIRONMENT = getServerRuntimeConfig('ENVIRONMENT', 'production');
 export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:5001');
+
+export const MINIO_ENDPOINT = getServerRuntimeConfig('MINIO_ENDPOINT', 'lifecycle-minio');
+export const MINIO_PORT = getServerRuntimeConfig('MINIO_PORT', 9000);
+export const MINIO_ACCESS_KEY = getServerRuntimeConfig('MINIO_ACCESS_KEY', 'minioadmin');
+export const MINIO_SECRET_KEY = getServerRuntimeConfig('MINIO_SECRET_KEY', 'minioadmin');
+export const MINIO_BUCKET = getServerRuntimeConfig('MINIO_BUCKET', 'lifecycle-logs');
+export const MINIO_USE_SSL = getServerRuntimeConfig('MINIO_USE_SSL', 'false');

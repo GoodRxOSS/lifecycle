@@ -14,27 +14,19 @@
  * limitations under the License.
  */
 
-export type LogType = 'build' | 'deploy' | 'webhook';
-
-export interface LogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending' | 'Archived';
-  streamingRequired: boolean;
-  podName?: string | null;
-  websocket?: {
-    endpoint: string;
-    parameters: {
-      podName: string;
-      namespace: string;
-      follow: boolean;
-      timestamps: boolean;
-      container?: string;
-    };
-  };
-  containers?: Array<{
-    name: string;
-    state: string;
-  }>;
-  message?: string;
-  error?: string;
-  archivedLogs?: string;
+export interface ArchivedJobMetadata {
+  jobName: string;
+  jobType: 'build' | 'deploy';
+  serviceName: string;
+  namespace: string;
+  status: 'Complete' | 'Failed';
+  sha: string;
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
+  engine?: string;
+  deployUuid?: string;
+  buildUuid?: string;
+  deploymentType?: 'helm' | 'github';
+  archivedAt: string;
 }

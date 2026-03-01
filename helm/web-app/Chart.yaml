@@ -35,3 +35,9 @@ dependencies:
     repository: 'https://charts.bitnami.com/bitnami'
     # Condition to control installation via values.yaml
     condition: redis.enabled
+
+  # Add MinIO Dependency for log archival
+  - name: minio
+    version: '14.8.5'
+    repository: 'https://charts.bitnami.com/bitnami'
+    condition: minio.enabled

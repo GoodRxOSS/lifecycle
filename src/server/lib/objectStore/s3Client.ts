@@ -14,27 +14,20 @@
  * limitations under the License.
  */
 
-export type LogType = 'build' | 'deploy' | 'webhook';
+import { Client } from 'minio';
+import { MINIO_ENDPOINT, MINIO_PORT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_USE_SSL } from 'shared/config';
 
-export interface LogStreamResponse {
-  status: 'Active' | 'Complete' | 'Failed' | 'NotFound' | 'Pending' | 'Archived';
-  streamingRequired: boolean;
-  podName?: string | null;
-  websocket?: {
-    endpoint: string;
-    parameters: {
-      podName: string;
-      namespace: string;
-      follow: boolean;
-      timestamps: boolean;
-      container?: string;
-    };
-  };
-  containers?: Array<{
-    name: string;
-    state: string;
-  }>;
-  message?: string;
-  error?: string;
-  archivedLogs?: string;
+let _client: Client | null = null;
+
+export function getMinioClient(): Client {
+  if (!_client) {
+    _client = new Client({
+      endPoint: MINIO_ENDPOINT,
+      port: Number(MINIO_PORT),
+      useSSL: MINIO_USE_SSL === 'true',
+      accessKey: MINIO_ACCESS_KEY,
+      secretKey: MINIO_SECRET_KEY,
+    });
+  }
+  return _client;
 }

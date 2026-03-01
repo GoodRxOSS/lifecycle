@@ -52,6 +52,7 @@ import {
 } from 'server/lib/nativeBuild/utils';
 import { createHelmJob as createHelmJobFromFactory } from 'server/lib/kubernetes/jobFactory';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
+import { getLogArchivalService } from 'server/services/logArchival';
 
 export interface JobResult {
   completed: boolean;
@@ -225,6 +226,29 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   const jobResult = await waitForJobAndGetLogs(jobName, options.namespace, `[HELM ${deploy.uuid}]`);
 
   await deploy.$query().patch({ buildOutput: jobResult.logs });
+
+  const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+  if (globalConfig.logArchival?.enabled) {
+    try {
+      const archivalService = getLogArchivalService();
+      await archivalService.archiveLogs(
+        {
+          jobName,
+          jobType: 'deploy',
+          serviceName: deploy.deployable.name,
+          namespace: options.namespace,
+          status: jobResult.success ? 'Complete' : 'Failed',
+          sha: deploy.sha || '',
+          deployUuid: deploy.uuid,
+          deploymentType: 'helm',
+          archivedAt: new Date().toISOString(),
+        },
+        jobResult.logs
+      );
+    } catch (archiveError) {
+      getLogger().warn({ error: archiveError }, `LogArchival: failed to archive deploy logs jobName=${jobName}`);
+    }
+  }
 
   return {
     completed: jobResult.success,
