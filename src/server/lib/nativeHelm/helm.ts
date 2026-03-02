@@ -241,6 +241,9 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
           sha: deploy.sha || '',
           deployUuid: deploy.uuid,
           deploymentType: 'helm',
+          startedAt: jobResult.startedAt,
+          completedAt: jobResult.completedAt,
+          duration: jobResult.duration,
           archivedAt: new Date().toISOString(),
         },
         jobResult.logs

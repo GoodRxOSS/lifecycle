@@ -153,7 +153,14 @@ export async function waitForJobAndGetLogs(
   jobName: string,
   namespace: string,
   logPrefix?: string | number
-): Promise<{ logs: string; success: boolean; status?: string }> {
+): Promise<{
+  logs: string;
+  success: boolean;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
+}> {
   return JobMonitor.waitForJobAndGetLogs(jobName, namespace, logPrefix);
 }
 

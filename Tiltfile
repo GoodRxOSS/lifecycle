@@ -105,6 +105,37 @@ k8s_resource(
 )
 
 ##################################
+# MinIO (Helm)
+##################################
+helm_resource(
+    name='minio',
+    chart='bitnami/minio',
+    namespace=app_namespace,
+    resource_deps=['bitnami'],
+    flags=[
+        '--version', '17.0.21',
+        '--set', 'auth.rootUser=minioadmin',
+        '--set', 'auth.rootPassword=minioadmin',
+        '--set', 'defaultBuckets=lifecycle-logs',
+        '--set', 'persistence.enabled=false',
+        '--set', 'image.repository=bitnamilegacy/minio',
+        '--set', 'image.tag=2025.7.23',
+        '--set', 'clientImage.repository=bitnamilegacy/minio-client',
+        '--set', 'clientImage.tag=2025.7.23',
+        '--set', 'console.image.repository=bitnamilegacy/minio-object-browser',
+        '--set', 'console.image.tag=2.0.2-debian-12-r3',
+        '--set', 'volumePermissions.image.repository=bitnamilegacy/os-shell',
+        '--set', 'volumePermissions.image.tag=2025.7.23',
+    ],
+    labels=["infra"]
+)
+k8s_resource(
+    "minio",
+    port_forwards=["9000:9000", "9001:9001"],
+    labels=["infra"]
+)
+
+##################################
 # Worker & Web (Helm, Single Deploy)
 ##################################
 

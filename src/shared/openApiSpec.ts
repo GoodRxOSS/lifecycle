@@ -230,6 +230,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               description: 'Error message if the build job failed',
               example: 'Job failed due to ...',
             },
+            source: {
+              type: 'string',
+              enum: ['live', 'archived'],
+              description: 'Whether the job is from a live k8s resource or archived in object storage',
+            },
           },
           required: ['jobName', 'buildUuid', 'sha', 'status', 'engine'],
         },

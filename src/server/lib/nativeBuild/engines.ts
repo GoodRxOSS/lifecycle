@@ -443,7 +443,11 @@ EOF`);
   const logArchivalEnabled = globalConfig.logArchival?.enabled;
 
   try {
-    const { logs, success } = await waitForJobAndGetLogs(jobName, options.namespace, jobTimeout);
+    const { logs, success, startedAt, completedAt, duration } = await waitForJobAndGetLogs(
+      jobName,
+      options.namespace,
+      jobTimeout
+    );
 
     if (logArchivalEnabled) {
       try {
@@ -459,6 +463,9 @@ EOF`);
             deployUuid: options.deployUuid,
             buildUuid: options.buildId,
             engine: engineName,
+            startedAt,
+            completedAt,
+            duration,
             archivedAt: new Date().toISOString(),
           },
           logs

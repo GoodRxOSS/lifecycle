@@ -50,7 +50,8 @@ export class LogStreamingService {
     const podInfo = await getK8sJobStatusAndPod(jobName, namespace);
 
     // 4. Handle "Not Found" scenario — attempt archived log fallback
-    if (!podInfo || podInfo.status === 'NotFound') {
+    // Also covers jobs where the k8s Job still exists but the pod was cleaned up (podName is null)
+    if (!podInfo || podInfo.status === 'NotFound' || !podInfo.podName) {
       const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
       if (globalConfig.logArchival?.enabled && serviceName && jobName) {
         try {

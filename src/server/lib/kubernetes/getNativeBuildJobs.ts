@@ -139,7 +139,20 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
         const archivalService = getLogArchivalService();
         const archivedJobs = await archivalService.listArchivedJobs(namespace, 'build', serviceName);
         const liveJobNames = new Set(buildJobs.map((j) => j.jobName));
+        const archivedByJobName = new Map(archivedJobs.map((j) => [j.jobName, j]));
 
+        // Upgrade live jobs whose pod is gone to 'archived' when an archive exists
+        for (const job of buildJobs) {
+          if (!job.podName && archivedByJobName.has(job.jobName)) {
+            const archived = archivedByJobName.get(job.jobName)!;
+            job.source = 'archived';
+            job.startedAt = job.startedAt ?? archived.startedAt;
+            job.completedAt = job.completedAt ?? archived.completedAt;
+            job.duration = job.duration ?? archived.duration;
+          }
+        }
+
+        // Add archived jobs not present in the live k8s list at all
         for (const archived of archivedJobs) {
           if (!liveJobNames.has(archived.jobName)) {
             buildJobs.push({
