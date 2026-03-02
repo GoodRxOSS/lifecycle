@@ -88,7 +88,7 @@ export const GITHUB_WEBHOOK_SECRET = getServerRuntimeConfig('GITHUB_WEBHOOK_SECR
 
 export const JOB_VERSION = getServerRuntimeConfig('JOB_VERSION', 'default');
 
-export const LOG_LEVEL = getServerRuntimeConfig('LOG_LEVEL', 'debug');
+export const LOG_LEVEL = getServerRuntimeConfig('LOG_LEVEL', 'info');
 
 export const FASTLY_TOKEN = getServerRuntimeConfig('FASTLY_TOKEN', 'changeme');
 
