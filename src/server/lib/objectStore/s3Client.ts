@@ -14,20 +14,35 @@
  * limitations under the License.
  */
 
-import { Client } from 'minio';
-import { MINIO_ENDPOINT, MINIO_PORT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_USE_SSL } from 'shared/config';
+import { S3Client } from '@aws-sdk/client-s3';
+import {
+  OBJECT_STORE_TYPE,
+  OBJECT_STORE_ENDPOINT,
+  OBJECT_STORE_PORT,
+  OBJECT_STORE_ACCESS_KEY,
+  OBJECT_STORE_SECRET_KEY,
+  OBJECT_STORE_USE_SSL,
+  OBJECT_STORE_REGION,
+} from 'shared/config';
 
-let _client: Client | null = null;
+let _client: S3Client | null = null;
 
-export function getMinioClient(): Client {
+export function getS3Client(): S3Client {
   if (!_client) {
-    _client = new Client({
-      endPoint: MINIO_ENDPOINT,
-      port: Number(MINIO_PORT),
-      useSSL: MINIO_USE_SSL === 'true',
-      accessKey: MINIO_ACCESS_KEY,
-      secretKey: MINIO_SECRET_KEY,
-    });
+    if (OBJECT_STORE_TYPE === 's3') {
+      _client = new S3Client({ region: OBJECT_STORE_REGION });
+    } else {
+      const protocol = OBJECT_STORE_USE_SSL === 'true' ? 'https' : 'http';
+      _client = new S3Client({
+        endpoint: `${protocol}://${OBJECT_STORE_ENDPOINT}:${OBJECT_STORE_PORT}`,
+        region: 'us-east-1',
+        forcePathStyle: true,
+        credentials: {
+          accessKeyId: OBJECT_STORE_ACCESS_KEY,
+          secretAccessKey: OBJECT_STORE_SECRET_KEY,
+        },
+      });
+    }
   }
   return _client;
 }

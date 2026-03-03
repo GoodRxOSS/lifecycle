@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.65.0",
+    "@aws-sdk/client-s3": "^3.1000.0",
     "@google/genai": "^1.38.0",
     "@heroui/react": "^2.8.5",
     "@kubernetes/client-node": "^0.22.3",
@@ -62,7 +63,6 @@
     "knex": "^2.4.2",
     "kubernetes-client": "^8.3.4",
     "lodash": "^4.17.21",
-    "minio": "^8.0.7",
     "module-alias": "^2.2.3",
     "moment": "^2.24.0",
     "mustache": "^4.1.0",
