@@ -73,7 +73,7 @@ interface DeployLogsListResponse {
  *                         example: abc123
  *                       status:
  *                         type: string
- *                         enum: [Active, Complete, Failed]
+ *                         enum: [Active, Complete, Failed, Pending]
  *                         description: Current status of the deployment job
  *                       startedAt:
  *                         type: string
@@ -96,6 +96,10 @@ interface DeployLogsListResponse {
  *                         type: string
  *                         enum: [helm, github]
  *                         description: Type of deployment (helm or github)
+ *                       source:
+ *                         type: string
+ *                         enum: [live, archived]
+ *                         description: Whether the job is from a live k8s resource or archived in object storage
  *       '400':
  *         description: Invalid parameters
  *       '404':

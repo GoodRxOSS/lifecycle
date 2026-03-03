@@ -27,6 +27,7 @@ module.exports = {
       '@google/genai',
       'google-auth-library',
       'gaxios',
+      '@aws-sdk/client-s3',
     ],
   },
   env: {
@@ -71,6 +72,14 @@ module.exports = {
     KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID,
     KEYCLOAK_JWKS_URL: process.env.KEYCLOAK_JWKS_URL,
     ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
+    OBJECT_STORE_TYPE: process.env.OBJECT_STORE_TYPE,
+    OBJECT_STORE_ENDPOINT: process.env.OBJECT_STORE_ENDPOINT,
+    OBJECT_STORE_PORT: process.env.OBJECT_STORE_PORT,
+    OBJECT_STORE_ACCESS_KEY: process.env.OBJECT_STORE_ACCESS_KEY,
+    OBJECT_STORE_SECRET_KEY: process.env.OBJECT_STORE_SECRET_KEY,
+    OBJECT_STORE_BUCKET: process.env.OBJECT_STORE_BUCKET,
+    OBJECT_STORE_USE_SSL: process.env.OBJECT_STORE_USE_SSL,
+    OBJECT_STORE_REGION: process.env.OBJECT_STORE_REGION,
   },
   typescript: {
     ignoreBuildErrors: true,

@@ -16,6 +16,8 @@
 
 import { getLogger } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
+import { getLogArchivalService } from 'server/services/logArchival';
+import GlobalConfigService from 'server/services/globalConfig';
 
 export interface BuildJobInfo {
   jobName: string;
@@ -28,6 +30,7 @@ export interface BuildJobInfo {
   engine: 'buildkit' | 'kaniko' | 'unknown';
   error?: string;
   podName?: string;
+  source?: 'live' | 'archived';
 }
 
 export async function getNativeBuildJobs(serviceName: string, namespace: string): Promise<BuildJobInfo[]> {
@@ -126,7 +129,51 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
         engine,
         error,
         podName,
+        source: 'live',
       });
+    }
+
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    if (globalConfig.logArchival?.enabled) {
+      try {
+        const archivalService = getLogArchivalService();
+        const archivedJobs = await archivalService.listArchivedJobs(namespace, 'build', serviceName);
+        const liveJobNames = new Set(buildJobs.map((j) => j.jobName));
+        const archivedByJobName = new Map(archivedJobs.map((j) => [j.jobName, j]));
+
+        // Upgrade live jobs whose pod is gone to 'archived' when an archive exists
+        for (const job of buildJobs) {
+          if (!job.podName && archivedByJobName.has(job.jobName)) {
+            const archived = archivedByJobName.get(job.jobName)!;
+            job.source = 'archived';
+            job.startedAt = job.startedAt ?? archived.startedAt;
+            job.completedAt = job.completedAt ?? archived.completedAt;
+            job.duration = job.duration ?? archived.duration;
+          }
+        }
+
+        // Add archived jobs not present in the live k8s list at all
+        for (const archived of archivedJobs) {
+          if (!liveJobNames.has(archived.jobName)) {
+            buildJobs.push({
+              jobName: archived.jobName,
+              buildUuid: archived.buildUuid || '',
+              sha: archived.sha,
+              status: archived.status,
+              startedAt: archived.startedAt,
+              completedAt: archived.completedAt,
+              duration: archived.duration,
+              engine: (archived.engine as BuildJobInfo['engine']) || 'unknown',
+              source: 'archived',
+            });
+          }
+        }
+      } catch (archiveError) {
+        getLogger().warn(
+          { error: archiveError },
+          `LogArchival: failed to list archived build jobs service=${serviceName}`
+        );
+      }
     }
 
     buildJobs.sort((a, b) => {

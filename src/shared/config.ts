@@ -145,3 +145,12 @@ export const DD_ENVS = {
 };
 export const ENVIRONMENT = getServerRuntimeConfig('ENVIRONMENT', 'production');
 export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:5001');
+
+export const OBJECT_STORE_TYPE = getServerRuntimeConfig('OBJECT_STORE_TYPE', 'minio');
+export const OBJECT_STORE_ENDPOINT = getServerRuntimeConfig('OBJECT_STORE_ENDPOINT', 'lifecycle-minio');
+export const OBJECT_STORE_PORT = getServerRuntimeConfig('OBJECT_STORE_PORT', 9000);
+export const OBJECT_STORE_ACCESS_KEY = getServerRuntimeConfig('OBJECT_STORE_ACCESS_KEY', 'minioadmin');
+export const OBJECT_STORE_SECRET_KEY = getServerRuntimeConfig('OBJECT_STORE_SECRET_KEY', 'minioadmin');
+export const OBJECT_STORE_BUCKET = getServerRuntimeConfig('OBJECT_STORE_BUCKET', 'lifecycle-logs');
+export const OBJECT_STORE_USE_SSL = getServerRuntimeConfig('OBJECT_STORE_USE_SSL', 'false');
+export const OBJECT_STORE_REGION = getServerRuntimeConfig('OBJECT_STORE_REGION', 'us-east-1');

@@ -18,6 +18,8 @@ import { getLogger } from 'server/lib/logger';
 import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
 import BuildService from 'server/services/build';
 import { LogStreamResponse, LogType } from './types/logStreaming';
+import GlobalConfigService from 'server/services/globalConfig';
+import { getLogArchivalService } from 'server/services/logArchival';
 
 export class LogStreamingService {
   private buildService: BuildService;
@@ -47,8 +49,28 @@ export class LogStreamingService {
     // 3. Fetch K8s Data
     const podInfo = await getK8sJobStatusAndPod(jobName, namespace);
 
-    // 4. Handle "Not Found" scenario immediately
-    if (!podInfo || podInfo.status === 'NotFound') {
+    // 4. Handle "Not Found" scenario — attempt archived log fallback
+    // Also covers jobs where the k8s Job still exists but the pod was cleaned up (podName is null)
+    if (!podInfo || podInfo.status === 'NotFound' || !podInfo.podName) {
+      const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+      if (globalConfig.logArchival?.enabled && serviceName && jobName) {
+        try {
+          const archivalService = getLogArchivalService();
+          const jobType = logType === 'deploy' ? 'deploy' : 'build';
+          const archivedLogs = await archivalService.getArchivedLogs(namespace, jobType, serviceName, jobName);
+          if (archivedLogs !== null) {
+            return {
+              status: 'Archived',
+              streamingRequired: false,
+              archivedLogs,
+              message: 'Logs retrieved from archive',
+            };
+          }
+        } catch (archiveError) {
+          getLogger().warn({ error: archiveError }, `LogArchival: failed to fetch archived logs jobName=${jobName}`);
+        }
+      }
+
       const response: LogStreamResponse = {
         status: 'NotFound',
         streamingRequired: false,

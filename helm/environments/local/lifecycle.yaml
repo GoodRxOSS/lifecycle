@@ -30,6 +30,22 @@ global:
     # Add any global env vars here if needed
     - name: PORT
       value: '80'
+    - name: OBJECT_STORE_TYPE
+      value: 'minio'
+    - name: OBJECT_STORE_ENDPOINT
+      value: 'minio.lifecycle-app.svc.cluster.local'
+    - name: OBJECT_STORE_PORT
+      value: '9000'
+    - name: OBJECT_STORE_ACCESS_KEY
+      value: 'minioadmin'
+    - name: OBJECT_STORE_SECRET_KEY
+      value: 'minioadmin'
+    - name: OBJECT_STORE_BUCKET
+      value: 'lifecycle-logs'
+    - name: OBJECT_STORE_USE_SSL
+      value: 'false'
+    - name: ALLOWED_ORIGINS
+      value: 'http://localhost:3000'
   envFrom:
     - secretRef:
         name: app-secrets
@@ -153,6 +169,20 @@ postgresql:
 
 redis:
   enabled: false
+
+minio:
+  enabled: false
+  defaultBuckets: 'lifecycle-logs'
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  persistence:
+    enabled: true
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
 
 rbac:
   create: true

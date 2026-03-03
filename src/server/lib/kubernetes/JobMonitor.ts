@@ -21,6 +21,9 @@ export interface JobStatus {
   logs: string;
   success: boolean;
   status?: 'succeeded' | 'failed' | 'superseded';
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
 }
 
 export interface MonitorOptions {
@@ -52,22 +55,25 @@ export class JobMonitor {
       // Get init container logs
       logs += await this.getInitContainerLogs(podName);
 
-      // Wait for main containers to be ready
+      // Wait for main containers to start (running or terminated)
       await this.waitForMainContainers(podName, timeoutSeconds, startTime);
 
-      // Get main container logs
-      logs += await this.getMainContainerLogs(podName, containerFilters);
-
-      // Wait for job completion
+      // Wait for job completion before fetching logs so we capture the full output
       await this.waitForJobCompletion();
 
+      // Get main container logs after job is done
+      logs += await this.getMainContainerLogs(podName, containerFilters);
+
       // Check final job status
-      const { success, status } = await this.getJobStatus(logPrefix);
+      const { success, status, startedAt, completedAt, duration } = await this.getJobStatus(logPrefix);
 
       return {
         logs,
         success,
         status,
+        startedAt,
+        completedAt,
+        duration,
       };
     } catch (error) {
       getLogger().error({ error }, `Job: monitor failed name=${this.jobName}`);
@@ -262,17 +268,34 @@ export class JobMonitor {
     }
   }
 
-  private async getJobStatus(
-    logPrefix?: string
-  ): Promise<{ success: boolean; status: 'succeeded' | 'failed' | 'superseded' }> {
+  private async getJobStatus(logPrefix?: string): Promise<{
+    success: boolean;
+    status: 'succeeded' | 'failed' | 'superseded';
+    startedAt?: string;
+    completedAt?: string;
+    duration?: number;
+  }> {
     let success = false;
     let status: 'succeeded' | 'failed' | 'superseded' = 'failed';
+    let startedAt: string | undefined;
+    let completedAt: string | undefined;
+    let duration: number | undefined;
 
     try {
-      const jobStatus = await shellPromise(
-        `kubectl get job ${this.jobName} -n ${this.namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'`
-      );
-      success = jobStatus.trim() === 'True';
+      const jobJson = await shellPromise(`kubectl get job ${this.jobName} -n ${this.namespace} -o json`);
+      const jobObj = JSON.parse(jobJson);
+      const jobStatus = jobObj?.status?.conditions?.find((c: any) => c.type === 'Complete' && c.status === 'True');
+      success = !!jobStatus;
+
+      if (jobObj?.status?.startTime) {
+        startedAt = new Date(jobObj.status.startTime).toISOString();
+      }
+      if (jobObj?.status?.completionTime) {
+        completedAt = new Date(jobObj.status.completionTime).toISOString();
+      }
+      if (startedAt && completedAt) {
+        duration = Math.floor((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 1000);
+      }
 
       if (!success) {
         const failedStatus = await shellPromise(
@@ -319,7 +342,7 @@ export class JobMonitor {
       getLogger().error({ error }, `Job: status check failed name=${this.jobName}`);
     }
 
-    return { success, status };
+    return { success, status, startedAt, completedAt, duration };
   }
 
   private sleep(ms: number): Promise<void> {
@@ -332,7 +355,14 @@ export class JobMonitor {
     namespace: string,
     logPrefixOrTimeout?: string | number,
     containerFilters?: string[]
-  ): Promise<{ logs: string; success: boolean; status?: string }> {
+  ): Promise<{
+    logs: string;
+    success: boolean;
+    status?: string;
+    startedAt?: string;
+    completedAt?: string;
+    duration?: number;
+  }> {
     const monitor = new JobMonitor(jobName, namespace);
 
     const options: MonitorOptions = {};
@@ -351,6 +381,9 @@ export class JobMonitor {
       logs: result.logs,
       success: result.success,
       status: result.status,
+      startedAt: result.startedAt,
+      completedAt: result.completedAt,
+      duration: result.duration,
     };
   }
 }

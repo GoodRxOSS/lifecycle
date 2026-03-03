@@ -92,6 +92,16 @@ interface BuildLogsListResponse {
  *                         type: string
  *                         enum: [buildkit, kaniko, unknown]
  *                         description: Build engine used
+ *                       podName:
+ *                         type: string
+ *                         description: Kubernetes pod name associated with the build job
+ *                       error:
+ *                         type: string
+ *                         description: Error message if the build job failed
+ *                       source:
+ *                         type: string
+ *                         enum: [live, archived]
+ *                         description: Whether the job is from a live k8s resource or archived in object storage
  *       '400':
  *         description: Invalid parameters
  *         content:

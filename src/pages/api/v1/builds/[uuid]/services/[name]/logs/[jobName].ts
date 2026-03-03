@@ -63,7 +63,7 @@
  *               properties:
  *                 status:
  *                   type: string
- *                   enum: [Active, Complete, Failed, NotFound, Pending]
+ *                   enum: [Active, Complete, Failed, NotFound, Pending, Archived]
  *                   description: Current status of the job
  *                 streamingRequired:
  *                   type: boolean
@@ -107,6 +107,9 @@
  *                 error:
  *                   type: string
  *                   description: Error message if applicable
+ *                 archivedLogs:
+ *                   type: string
+ *                   description: Full log content from object storage (only present when status is Archived)
  *       400:
  *         description: Bad request - missing or invalid parameters
  *         content:
@@ -161,6 +164,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getLogger, withLogContext } from 'server/lib/logger';
 import { LogStreamingService } from 'server/services/logStreaming';
+import type { LogType } from 'server/services/types/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
 
 const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse) => {
@@ -192,7 +196,7 @@ const unifiedLogStreamHandler = async (req: NextApiRequest, res: NextApiResponse
         uuid,
         jobName,
         name as string | undefined,
-        type as string | undefined
+        type as LogType | undefined
       );
 
       return res.status(200).json(response);
