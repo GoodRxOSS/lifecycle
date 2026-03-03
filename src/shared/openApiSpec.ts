@@ -103,7 +103,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         LogStreamResponse: {
           type: 'object',
           properties: {
-            status: { type: 'string', enum: ['Active', 'Complete', 'Failed', 'NotFound', 'Pending'] },
+            status: { type: 'string', enum: ['Active', 'Complete', 'Failed', 'NotFound', 'Pending', 'Archived'] },
             streamingRequired: { type: 'boolean' },
             podName: { type: 'string', nullable: true },
             websocket: { $ref: '#/components/schemas/WebSocketInfo' },
@@ -120,8 +120,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             message: { type: 'string' },
             error: { type: 'string' },
+            archivedLogs: {
+              type: 'string',
+              description: 'Full log content retrieved from object storage (only present when status is Archived)',
+            },
           },
-          required: ['status', 'streamingRequired', 'podName', 'websocket', 'containers', 'message', 'error'],
+          required: ['status', 'streamingRequired'],
         },
 
         /**
@@ -293,6 +297,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'string',
               enum: ['helm', 'github'],
               description: 'Type of deployment job',
+            },
+            source: {
+              type: 'string',
+              enum: ['live', 'archived'],
+              description: 'Whether the job is from a live k8s resource or archived in object storage',
             },
           },
           required: ['jobName', 'deployUuid', 'sha', 'status', 'deploymentType'],

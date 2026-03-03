@@ -182,5 +182,4 @@ export type SecretProvidersConfig = {
 
 export type LogArchivalConfig = {
   enabled: boolean;
-  retentionDays: number;
 };

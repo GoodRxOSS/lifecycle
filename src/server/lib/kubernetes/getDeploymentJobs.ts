@@ -135,6 +135,17 @@ export async function getDeploymentJobs(serviceName: string, namespace: string):
         const archivalService = getLogArchivalService();
         const archivedJobs = await archivalService.listArchivedJobs(namespace, 'deploy', serviceName);
         const liveJobNames = new Set(deploymentJobs.map((j) => j.jobName));
+        const archivedByJobName = new Map(archivedJobs.map((j) => [j.jobName, j]));
+
+        for (const job of deploymentJobs) {
+          if (!job.podName && archivedByJobName.has(job.jobName)) {
+            const archived = archivedByJobName.get(job.jobName)!;
+            job.source = 'archived';
+            job.startedAt = job.startedAt ?? archived.startedAt;
+            job.completedAt = job.completedAt ?? archived.completedAt;
+            job.duration = job.duration ?? archived.duration;
+          }
+        }
 
         for (const archived of archivedJobs) {
           if (!liveJobNames.has(archived.jobName)) {

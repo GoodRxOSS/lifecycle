@@ -14,9 +14,15 @@
  * limitations under the License.
  */
 
-import { Readable } from 'stream';
-import { getMinioClient } from 'server/lib/objectStore/s3Client';
-import { MINIO_BUCKET } from 'shared/config';
+import {
+  HeadBucketCommand,
+  CreateBucketCommand,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+} from '@aws-sdk/client-s3';
+import { getS3Client } from 'server/lib/objectStore/s3Client';
+import { OBJECT_STORE_BUCKET, OBJECT_STORE_TYPE } from 'shared/config';
 import { getLogger } from 'server/lib/logger';
 import { ArchivedJobMetadata } from './types/logArchival';
 
@@ -24,60 +30,57 @@ function objectPrefix(namespace: string, jobType: 'build' | 'deploy', serviceNam
   return `${namespace}/${jobType}/${serviceName}/${jobName}`;
 }
 
-async function streamToString(stream: Readable): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    stream.on('error', reject);
-  });
-}
-
 export class LogArchivalService {
   private bucket: string;
+  private bucketVerified = false;
 
   constructor() {
-    this.bucket = MINIO_BUCKET;
+    this.bucket = OBJECT_STORE_BUCKET;
   }
 
   async ensureBucket(): Promise<void> {
-    const client = getMinioClient();
-    const exists = await client.bucketExists(this.bucket);
-    if (!exists) {
-      await client.makeBucket(this.bucket);
-      getLogger().info(`LogArchival: created bucket=${this.bucket}`);
+    if (this.bucketVerified) return;
+    const client = getS3Client();
+    try {
+      await client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+      this.bucketVerified = true;
+    } catch (error) {
+      if (error?.name === 'NotFound' || error?.name === 'NoSuchBucket') {
+        if (OBJECT_STORE_TYPE === 's3') {
+          getLogger().warn(`LogArchival: bucket=${this.bucket} not found — ensure it is pre-provisioned`);
+          return;
+        }
+        await client.send(new CreateBucketCommand({ Bucket: this.bucket }));
+        getLogger().info(`LogArchival: created bucket=${this.bucket}`);
+        this.bucketVerified = true;
+      } else {
+        throw error;
+      }
     }
   }
 
-  async configureRetention(days: number): Promise<void> {
-    const client = getMinioClient();
-    const config = {
-      Rule: [
-        {
-          ID: 'lifecycle-log-expiration',
-          Status: 'Enabled',
-          Filter: { Prefix: '' },
-          Expiration: { Days: days },
-        },
-      ],
-    };
-    await client.setBucketLifecycle(this.bucket, config);
-    getLogger().info(`LogArchival: set retention days=${days} bucket=${this.bucket}`);
-  }
-
   async archiveLogs(metadata: ArchivedJobMetadata, logs: string): Promise<void> {
-    const client = getMinioClient();
+    await this.ensureBucket();
+    const client = getS3Client();
     const prefix = objectPrefix(metadata.namespace, metadata.jobType, metadata.serviceName, metadata.jobName);
 
-    const logsBuffer = Buffer.from(logs, 'utf8');
-    await client.putObject(this.bucket, `${prefix}/logs.txt`, logsBuffer, logsBuffer.length, {
-      'Content-Type': 'text/plain',
-    });
+    await client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: `${prefix}/logs.txt`,
+        Body: logs,
+        ContentType: 'text/plain',
+      })
+    );
 
-    const metaBuffer = Buffer.from(JSON.stringify(metadata, null, 2), 'utf8');
-    await client.putObject(this.bucket, `${prefix}/metadata.json`, metaBuffer, metaBuffer.length, {
-      'Content-Type': 'application/json',
-    });
+    await client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: `${prefix}/metadata.json`,
+        Body: JSON.stringify(metadata, null, 2),
+        ContentType: 'application/json',
+      })
+    );
 
     getLogger().info(
       `LogArchival: archived jobName=${metadata.jobName} jobType=${metadata.jobType} service=${metadata.serviceName}`
@@ -90,13 +93,17 @@ export class LogArchivalService {
     serviceName: string,
     jobName: string
   ): Promise<string | null> {
-    const client = getMinioClient();
+    const client = getS3Client();
     const key = `${objectPrefix(namespace, jobType, serviceName, jobName)}/logs.txt`;
     try {
-      const stream = await client.getObject(this.bucket, key);
-      return await streamToString(stream);
+      const response = await client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      if (!response.Body) {
+        getLogger().warn(`LogArchival: empty body for key=${key}`);
+        return null;
+      }
+      return await response.Body.transformToString();
     } catch (error) {
-      if (error?.code === 'NoSuchKey') return null;
+      if (error?.name === 'NoSuchKey') return null;
       getLogger().warn({ error }, `LogArchival: failed to fetch logs key=${key}`);
       return null;
     }
@@ -108,14 +115,18 @@ export class LogArchivalService {
     serviceName: string,
     jobName: string
   ): Promise<ArchivedJobMetadata | null> {
-    const client = getMinioClient();
+    const client = getS3Client();
     const key = `${objectPrefix(namespace, jobType, serviceName, jobName)}/metadata.json`;
     try {
-      const stream = await client.getObject(this.bucket, key);
-      const text = await streamToString(stream);
+      const response = await client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      if (!response.Body) {
+        getLogger().warn(`LogArchival: empty body for key=${key}`);
+        return null;
+      }
+      const text = await response.Body.transformToString();
       return JSON.parse(text) as ArchivedJobMetadata;
     } catch (error) {
-      if (error?.code === 'NoSuchKey') return null;
+      if (error?.name === 'NoSuchKey') return null;
       getLogger().warn({ error }, `LogArchival: failed to fetch metadata key=${key}`);
       return null;
     }
@@ -126,28 +137,33 @@ export class LogArchivalService {
     jobType: 'build' | 'deploy',
     serviceName: string
   ): Promise<ArchivedJobMetadata[]> {
-    const client = getMinioClient();
+    const client = getS3Client();
     const prefix = `${namespace}/${jobType}/${serviceName}/`;
     const results: ArchivedJobMetadata[] = [];
+    const allKeys: string[] = [];
 
     try {
-      const stream = client.listObjectsV2(this.bucket, prefix, true);
-      const keys: string[] = await new Promise((resolve, reject) => {
-        const collected: string[] = [];
-        stream.on('data', (obj) => {
-          if (obj.name?.endsWith('/metadata.json')) {
-            collected.push(obj.name);
-          }
-        });
-        stream.on('end', () => resolve(collected));
-        stream.on('error', reject);
-      });
+      let continuationToken: string | undefined;
+      do {
+        const response = await client.send(
+          new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: continuationToken })
+        );
+        const keys = (response.Contents ?? [])
+          .map((obj) => obj.Key)
+          .filter((key): key is string => key?.endsWith('/metadata.json') ?? false);
+        allKeys.push(...keys);
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+      } while (continuationToken);
 
       await Promise.all(
-        keys.map(async (key) => {
+        allKeys.map(async (key) => {
           try {
-            const metaStream = await client.getObject(this.bucket, key);
-            const text = await streamToString(metaStream);
+            const metaResponse = await client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+            if (!metaResponse.Body) {
+              getLogger().warn(`LogArchival: empty body for key=${key}`);
+              return;
+            }
+            const text = await metaResponse.Body.transformToString();
             results.push(JSON.parse(text) as ArchivedJobMetadata);
           } catch (err) {
             getLogger().warn({ error: err }, `LogArchival: failed to read metadata key=${key}`);
