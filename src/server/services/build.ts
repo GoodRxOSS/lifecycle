@@ -203,7 +203,9 @@ export default class BuildService extends BaseService {
           'createdAt',
           'updatedAt',
           'sha',
-          'initDockerImage'
+          'initDockerImage',
+          'env',
+          'initEnv'
         );
       })
       .modifyGraph('deploys.deployable', (b) => {
