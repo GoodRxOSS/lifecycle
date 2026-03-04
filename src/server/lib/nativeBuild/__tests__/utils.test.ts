@@ -24,9 +24,9 @@ describe('nativeBuild/utils', () => {
       expect(container.name).toBe('git-clone');
       expect(container.image).toBe('alpine/git:latest');
       expect(container.command).toEqual(['sh', '-c']);
-      expect(container.args[0]).toContain('git clone');
+      expect(container.args[0]).toContain('git fetch --depth 1 --progress origin abc123def456');
       expect(container.args[0]).toContain('owner/repo');
-      expect(container.args[0]).toContain('abc123def456');
+      expect(container.args[0]).toContain('git checkout FETCH_HEAD');
 
       expect(container.env).toEqual([
         { name: 'GIT_USERNAME', value: 'x-access-token' },
