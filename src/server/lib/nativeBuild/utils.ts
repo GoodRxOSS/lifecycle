@@ -222,8 +222,10 @@ export const GIT_USERNAME = 'x-access-token';
 export const MANIFEST_PATH = '/tmp/manifests';
 
 export function createCloneScript(repo: string, branch: string, sha?: string): string {
-  const cloneCmd = `git clone -b ${branch} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
-  const checkoutCmd = sha ? ` && cd /workspace && git checkout ${sha}` : '';
+  const cloneCmd = `git clone --depth 1 --single-branch --progress -b ${branch} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
+  const checkoutCmd = sha
+    ? ` && cd /workspace && git fetch --depth 1 --progress origin ${sha} && git checkout ${sha}`
+    : '';
   return `${cloneCmd}${checkoutCmd}`;
 }
 
@@ -234,9 +236,10 @@ export function createGitCloneContainer(repo: string, revision: string, gitUsern
     command: ['sh', '-c'],
     args: [
       `git config --global --add safe.directory /workspace && \
-       git clone https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace && \
-       cd /workspace && \
-       git checkout ${revision}`,
+       git init /workspace && cd /workspace && \
+       git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
+       git fetch --depth 1 --progress origin ${revision} && \
+       git checkout FETCH_HEAD`,
     ],
     env: [
       {
@@ -270,9 +273,10 @@ export function createRepoSpecificGitCloneContainer(
     command: ['sh', '-c'],
     args: [
       `git config --global --add safe.directory ${targetDir} && \
-       git clone https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git ${targetDir} && \
-       cd ${targetDir} && \
-       git checkout ${revision}`,
+       git init ${targetDir} && cd ${targetDir} && \
+       git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
+       git fetch --depth 1 --progress origin ${revision} && \
+       git checkout FETCH_HEAD`,
     ],
     env: [
       {
