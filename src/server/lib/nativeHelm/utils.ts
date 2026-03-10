@@ -226,7 +226,12 @@ export function constructHelmCommand(
       command += ` ${chartPath}`;
     }
   } else {
-    command += ` ${chartPath}`;
+    const isOciChart = chartRepoUrl?.startsWith('oci://');
+    if (isOciChart) {
+      command += ` ${chartRepoUrl}`;
+    } else {
+      command += ` ${chartPath}`;
+    }
   }
 
   command += ` --namespace ${namespace}`;
@@ -305,11 +310,11 @@ ls -la
 `;
   }
 
-  if (chartType === ChartType.PUBLIC) {
+  if (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART) {
     const isOciChart = chartRepoUrl?.startsWith('oci://');
 
     if (!isOciChart) {
-      if (chartPath.includes('/')) {
+      if (chartType === ChartType.PUBLIC && chartPath.includes('/')) {
         const [repoName] = chartPath.split('/');
         const repoUrl = getRepoUrl(repoName);
         script += `
