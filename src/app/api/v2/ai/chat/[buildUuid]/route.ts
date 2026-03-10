@@ -37,6 +37,7 @@ import { isBrokenCircuitError } from 'cockatiel';
 import type { AIChatSSEEvent, SSEErrorEvent } from 'shared/types/aiChat';
 
 export const dynamic = 'force-dynamic';
+const SSE_HEARTBEAT_INTERVAL_MS = 25000;
 
 /**
  * @openapi
@@ -52,7 +53,8 @@ export const dynamic = 'force-dynamic';
  *       The response uses the `text/event-stream` content type. Each event is a JSON object
  *       sent as `data: {JSON}\n\n`. Clients should use the EventSource API or a streaming
  *       fetch with an AbortController. The connection is kept alive via the `Connection: keep-alive`
- *       header. Clients can cancel by aborting the request.
+ *       header. The server may also emit SSE comment heartbeats (for example `: ping`) to keep
+ *       intermediary proxies from treating the stream as idle. Clients can cancel by aborting the request.
  *
  *
  *       **SSE event types (by `type` field):**
@@ -251,14 +253,30 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
   let writerClosed = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-  const sendEvent = (data: AIChatSSEEvent | SSEErrorEvent) => {
+  const stopHeartbeat = () => {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
+  const writeSSEPayload = (payload: string) => {
     if (writerClosed) return;
     try {
-      writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => {});
+      writer.write(encoder.encode(payload)).catch(() => {
+        writerClosed = true;
+        stopHeartbeat();
+      });
     } catch {
       writerClosed = true;
+      stopHeartbeat();
     }
+  };
+
+  const sendEvent = (data: AIChatSSEEvent | SSEErrorEvent) => {
+    writeSSEPayload(`data: ${JSON.stringify(data)}\n\n`);
   };
 
   const MAX_STORED_JSON_LENGTH = 8000;
@@ -273,6 +291,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
   };
 
   req.signal.addEventListener('abort', () => {
+    stopHeartbeat();
     writerClosed = true;
     try {
       writer.close();
@@ -280,6 +299,11 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
       // already closed
     }
   });
+
+  heartbeatTimer = setInterval(() => {
+    // SSE comments keep idle ingress connections alive without affecting clients.
+    writeSSEPayload(': ping\n\n');
+  }, SSE_HEARTBEAT_INTERVAL_MS);
 
   (async () => {
     try {
@@ -636,6 +660,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         modelName: 'AI model',
       });
     } finally {
+      stopHeartbeat();
       writerClosed = true;
       try {
         await writer.close();
