@@ -42,6 +42,7 @@ import {
   validateHelmConfiguration,
   resolveHelmReleaseConflicts,
 } from './utils';
+import { detectRegistryAuth, RegistryAuthConfig } from './registryAuth';
 import { HELM_IMAGE_PREFIX } from './constants';
 import {
   createCloneScript,
@@ -72,7 +73,8 @@ export async function createHelmContainer(
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
-  chartVersion?: string
+  chartVersion?: string,
+  registryAuth?: RegistryAuthConfig
 ): Promise<any> {
   const script = generateHelmInstallScript(
     repoName,
@@ -85,7 +87,8 @@ export async function createHelmContainer(
     args,
     chartRepoUrl,
     defaultArgs,
-    chartVersion
+    chartVersion,
+    registryAuth
   );
 
   return {
@@ -133,6 +136,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
   const chartVersion = mergedHelmConfig.chart?.version;
   const helmArgs = mergedHelmConfig.args;
   const defaultArgs = mergedHelmConfig.nativeHelm?.defaultArgs;
+  const registryAuth = detectRegistryAuth(chartRepoUrl);
 
   const helmContainer = await createHelmContainer(
     repository?.fullName || 'no-repo',
@@ -146,7 +150,8 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     helmArgs,
     chartRepoUrl,
     defaultArgs,
-    chartVersion
+    chartVersion,
+    registryAuth
   );
 
   const volumeConfig = {
@@ -186,6 +191,7 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     volumes: volumeConfig.volumes,
     deployMetadata,
     includeGitClone: shouldIncludeGitClone,
+    registryAuth,
   });
 
   return yaml.dump(job);

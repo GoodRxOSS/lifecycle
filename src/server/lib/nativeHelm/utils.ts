@@ -17,6 +17,7 @@
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_SECONDS } from './constants';
+import { RegistryAuthConfig, generateRegistryLoginScript } from './registryAuth';
 import { mergeKeyValueArrays, getResourceType } from 'shared/utils';
 import { merge } from 'lodash';
 import { renderTemplate, generateTolerationsCustomValues, generateNodeSelector } from 'server/lib/helm/utils';
@@ -279,7 +280,8 @@ export function generateHelmInstallScript(
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
-  chartVersion?: string
+  chartVersion?: string,
+  registryAuth?: RegistryAuthConfig
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -331,6 +333,13 @@ helm repo update
 `;
       }
     }
+  }
+
+  if (registryAuth) {
+    script += `
+${generateRegistryLoginScript(registryAuth)}
+
+`;
   }
 
   script += `

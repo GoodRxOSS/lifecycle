@@ -16,6 +16,7 @@
 
 import { V1Job } from '@kubernetes/client-node';
 import { normalizeKubernetesLabelValue } from './utils';
+import { RegistryAuthConfig, createRegistryAuthInitContainer } from 'server/lib/nativeHelm/registryAuth';
 
 export interface JobConfig {
   name: string;
@@ -174,6 +175,7 @@ export interface HelmJobConfig {
     deployableId: string;
   };
   includeGitClone?: boolean;
+  registryAuth?: RegistryAuthConfig;
 }
 
 export function createHelmJob(config: HelmJobConfig): V1Job {
@@ -209,6 +211,10 @@ export function createHelmJob(config: HelmJobConfig): V1Job {
       },
       volumeMounts: [{ name: 'helm-workspace', mountPath: '/workspace' }],
     });
+  }
+
+  if (config.registryAuth) {
+    initContainers.push(createRegistryAuthInitContainer(config.registryAuth));
   }
 
   const containers = config.containers.map((container) => ({

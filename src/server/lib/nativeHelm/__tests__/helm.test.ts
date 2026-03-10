@@ -16,6 +16,7 @@
 
 import { shouldUseNativeHelm, createHelmContainer } from '../helm';
 import { determineChartType, constructHelmCommand, ChartType, constructHelmCustomValues } from '../utils';
+import { RegistryAuthConfig } from '../registryAuth';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -754,6 +755,55 @@ describe('Native Helm', () => {
       expect(customValues).not.toContain('SHOULD_NOT_APPEAR');
       expect(customValues).toContain('fullnameOverride=test-uuid');
       expect(customValues).toContain('commonLabels.name=build-123');
+    });
+  });
+
+  describe('createHelmContainer with ECR registry auth', () => {
+    it('should prepend registry login script for ECR OCI charts', async () => {
+      const registryAuth: RegistryAuthConfig = {
+        type: 'ecr',
+        registry: '441168312025.dkr.ecr.us-west-2.amazonaws.com',
+        region: 'us-west-2',
+      };
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://441168312025.dkr.ecr.us-west-2.amazonaws.com/my-chart',
+        undefined,
+        undefined,
+        registryAuth
+      );
+
+      expect(result.args[0]).toContain(
+        'cat /workspace/.helm/ecr-token | helm registry login "441168312025.dkr.ecr.us-west-2.amazonaws.com" --username AWS --password-stdin'
+      );
+      expect(result.args[0]).toContain('helm upgrade --install');
+    });
+
+    it('should not include registry login script when registryAuth is absent', async () => {
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://registry-1.docker.io/bitnamicharts/postgresql'
+      );
+
+      expect(result.args[0]).not.toContain('helm registry login');
+      expect(result.args[0]).toContain('helm upgrade --install');
     });
   });
 
