@@ -527,6 +527,7 @@ describe('Native Helm', () => {
       expect(result.env).toEqual([
         { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
         { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
+        { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
       ]);
       expect(result.command).toEqual(['/bin/sh', '-c']);
       expect(result.args).toHaveLength(1);

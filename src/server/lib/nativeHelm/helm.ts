@@ -92,14 +92,9 @@ export async function createHelmContainer(
     name: 'helm-deploy',
     image: `${HELM_IMAGE_PREFIX}:${helmVersion}`,
     env: [
-      {
-        name: 'HELM_CACHE_HOME',
-        value: '/workspace/.helm/cache',
-      },
-      {
-        name: 'HELM_CONFIG_HOME',
-        value: '/workspace/.helm/config',
-      },
+      { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
+      { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
+      { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
     ],
     command: ['/bin/sh', '-c'],
     args: [script],
