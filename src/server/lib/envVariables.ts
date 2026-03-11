@@ -205,6 +205,8 @@ export abstract class EnvironmentVariables {
       buildSHA: build.sha,
       pullRequestNumber: build.pullRequest?.pullRequestNumber,
       namespace: build.namespace,
+      branchName: build.pullRequest?.branchName,
+      repoName: build.pullRequest?.fullName,
     });
 
     return availableEnv;

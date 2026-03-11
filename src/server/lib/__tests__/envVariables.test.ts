@@ -149,4 +149,33 @@ describe('envVariables - cloud secret pattern preservation', () => {
       expect(result).toBe('DB={{aws:db:pass}} HOST=localhost GCP={{gcp:api:token}} PORT=5432');
     });
   });
+
+  describe('general template variables', () => {
+    it('renders branchName and repoName variables', () => {
+      const template = '{"BRANCH":"{{{branchName}}}","REPO":"{{{repoName}}}"}';
+      const data = { branchName: 'feat/my-feature', repoName: 'myorg/myrepo' };
+
+      const result = preserveAndRestoreSecretPatterns(template, data);
+
+      expect(result).toBe('{"BRANCH":"feat/my-feature","REPO":"myorg/myrepo"}');
+    });
+
+    it('renders branchName and repoName alongside other variables', () => {
+      const template = '{{{branchName}}} {{{repoName}}} {{{buildUUID}}}';
+      const data = { branchName: 'main', repoName: 'org/repo', buildUUID: 'uuid-123' };
+
+      const result = preserveAndRestoreSecretPatterns(template, data);
+
+      expect(result).toBe('main org/repo uuid-123');
+    });
+
+    it('renders empty string when branchName or repoName are undefined', () => {
+      const template = '{{{branchName}}} {{{repoName}}}';
+      const data = {};
+
+      const result = preserveAndRestoreSecretPatterns(template, data);
+
+      expect(result).toBe(' ');
+    });
+  });
 });

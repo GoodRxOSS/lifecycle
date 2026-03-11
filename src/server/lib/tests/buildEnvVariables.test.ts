@@ -459,6 +459,8 @@ describe('EnvironmentVariables', () => {
             buildSHA: 'abcdef',
             pullRequestNumber: '12345',
             namespace: 'testns',
+            branchName: 'feat/my-feature',
+            repoName: 'myorg/myrepo',
           }
         )
       ).toEqual({
@@ -531,6 +533,8 @@ describe('EnvironmentVariables', () => {
         buildUUID: 'mock-test-12345',
         pullRequestNumber: '12345',
         namespace: 'testns',
+        branchName: 'feat/my-feature',
+        repoName: 'myorg/myrepo',
       });
     });
   });
