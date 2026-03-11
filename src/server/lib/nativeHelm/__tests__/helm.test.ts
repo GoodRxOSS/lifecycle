@@ -16,6 +16,7 @@
 
 import { shouldUseNativeHelm, createHelmContainer } from '../helm';
 import { determineChartType, constructHelmCommand, ChartType, constructHelmCustomValues } from '../utils';
+import { RegistryAuthConfig } from '../registryAuth';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -145,7 +146,7 @@ describe('Native Helm', () => {
       const deploy = {
         deployable: {
           helm: {
-            chart: { name: 'bitnami/postgresql' },
+            chart: { name: 'prometheus-community/prometheus' },
           },
         },
       } as Deploy;
@@ -374,10 +375,12 @@ describe('Native Helm', () => {
         ['values.yaml'],
         ChartType.PUBLIC,
         undefined,
-        'oci://registry-1.docker.io/bitnamicharts/postgresql'
+        'oci://ghcr.io/prometheus-community/helm-charts/prometheus'
       );
 
-      expect(result).toContain('helm upgrade --install my-release oci://registry-1.docker.io/bitnamicharts/postgresql');
+      expect(result).toContain(
+        'helm upgrade --install my-release oci://ghcr.io/prometheus-community/helm-charts/prometheus'
+      );
       expect(result).toContain('--namespace my-namespace');
       expect(result).toContain('--set "key=value"');
       expect(result).toContain('-f values.yaml');
@@ -409,22 +412,22 @@ describe('Native Helm', () => {
     it('should add chart version for PUBLIC charts when version is specified', () => {
       const result = constructHelmCommand(
         'upgrade --install',
-        'bitnami/postgresql',
+        'prometheus-community/prometheus',
         'my-release',
         'my-namespace',
-        ['auth.username=postgres_user'],
+        ['server.replicaCount=2'],
         [],
         ChartType.PUBLIC,
         undefined,
-        'https://charts.bitnami.com/bitnami',
+        'https://prometheus-community.github.io/helm-charts',
         undefined,
-        '12.9.0'
+        '25.11.0'
       );
 
-      expect(result).toContain('helm upgrade --install my-release bitnami/postgresql');
+      expect(result).toContain('helm upgrade --install my-release prometheus-community/prometheus');
       expect(result).toContain('--namespace my-namespace');
-      expect(result).toContain('--version 12.9.0');
-      expect(result).toContain('--set "auth.username=postgres_user"');
+      expect(result).toContain('--version 25.11.0');
+      expect(result).toContain('--set "server.replicaCount=2"');
     });
 
     it('should not add chart version for LOCAL charts even when version is specified', () => {
@@ -450,17 +453,17 @@ describe('Native Helm', () => {
     it('should not add chart version for PUBLIC charts when version is not specified', () => {
       const result = constructHelmCommand(
         'upgrade --install',
-        'bitnami/postgresql',
+        'prometheus-community/prometheus',
         'my-release',
         'my-namespace',
         [],
         [],
         ChartType.PUBLIC,
         undefined,
-        'https://charts.bitnami.com/bitnami'
+        'https://prometheus-community.github.io/helm-charts'
       );
 
-      expect(result).toContain('helm upgrade --install my-release bitnami/postgresql');
+      expect(result).toContain('helm upgrade --install my-release prometheus-community/prometheus');
       expect(result).toContain('--namespace my-namespace');
       expect(result).not.toContain('--version');
     });
@@ -527,6 +530,7 @@ describe('Native Helm', () => {
       expect(result.env).toEqual([
         { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
         { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
+        { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
       ]);
       expect(result.command).toEqual(['/bin/sh', '-c']);
       expect(result.args).toHaveLength(1);
@@ -756,37 +760,86 @@ describe('Native Helm', () => {
     });
   });
 
+  describe('createHelmContainer with ECR registry auth', () => {
+    it('should prepend registry login script for ECR OCI charts', async () => {
+      const registryAuth: RegistryAuthConfig = {
+        type: 'ecr',
+        registry: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+        region: 'us-west-2',
+      };
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/my-chart',
+        undefined,
+        undefined,
+        registryAuth
+      );
+
+      expect(result.args[0]).toContain(
+        'cat /workspace/.helm/ecr-token | helm registry login "123456789012.dkr.ecr.us-west-2.amazonaws.com" --username AWS --password-stdin'
+      );
+      expect(result.args[0]).toContain('helm upgrade --install');
+    });
+
+    it('should not include registry login script when registryAuth is absent', async () => {
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://ghcr.io/prometheus-community/helm-charts/prometheus'
+      );
+
+      expect(result.args[0]).not.toContain('helm registry login');
+      expect(result.args[0]).toContain('helm upgrade --install');
+    });
+  });
+
   describe('Chart Version Integration', () => {
     it('should include chart version from global config for PUBLIC charts', async () => {
       mockGetAllConfigs.mockResolvedValue({
-        postgresql: {
+        prometheus: {
           version: '3.7.2',
           chart: {
-            name: 'postgresql',
-            repoUrl: 'https://charts.bitnami.com/bitnami',
-            version: '12.9.0',
-            values: ['auth.username=postgres_user'],
+            name: 'prometheus',
+            repoUrl: 'https://prometheus-community.github.io/helm-charts',
+            version: '25.11.0',
+            values: ['server.replicaCount=2'],
           },
         },
       });
 
       const result = await createHelmContainer(
         'no-repo',
-        'postgresql',
+        'prometheus',
         'test-release',
         'test-namespace',
         '3.12.0',
-        ['auth.username=postgres_user'],
+        ['server.replicaCount=2'],
         [],
         ChartType.PUBLIC,
         undefined,
-        'https://charts.bitnami.com/bitnami',
+        'https://prometheus-community.github.io/helm-charts',
         undefined,
-        '12.9.0'
+        '25.11.0'
       );
 
-      expect(result.args[0]).toContain('--version 12.9.0');
-      expect(result.args[0]).toContain('bitnami/postgresql');
+      expect(result.args[0]).toContain('--version 25.11.0');
+      expect(result.args[0]).toContain('helm-charts/prometheus');
     });
 
     it('should include chart version from global config for ORG_CHART', async () => {
