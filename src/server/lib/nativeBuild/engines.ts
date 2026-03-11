@@ -90,7 +90,7 @@ export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
 const ENGINES: Record<string, BuildEngine> = {
   buildkit: {
     name: 'buildkit',
-    image: 'moby/buildkit:v0.12.0',
+    image: 'moby/buildkit:v0.21.0',
     command: ['/bin/sh', '-c'],
     createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain, secretEnvKeys }) => {
       const buildctlArgs = [
@@ -106,7 +106,7 @@ const ENGINES: Record<string, BuildEngine> = {
         '--output',
         `type=image,name=${destination},push=true,registry.insecure=true,oci-mediatypes=false`,
         '--export-cache',
-        `type=registry,ref=${cacheRef},mode=min,compression=zstd,insecure=true`,
+        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true,insecure=true`,
         '--import-cache',
         `type=registry,ref=${cacheRef},insecure=true`,
       ];
