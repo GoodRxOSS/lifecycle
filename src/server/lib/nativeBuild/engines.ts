@@ -106,7 +106,7 @@ const ENGINES: Record<string, BuildEngine> = {
         '--output',
         `type=image,name=${destination},push=true,registry.insecure=true,oci-mediatypes=false`,
         '--export-cache',
-        `type=registry,ref=${cacheRef},mode=min,compression=zstd,oci-mediatypes=true,insecure=true`,
+        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true,insecure=true`,
         '--import-cache',
         `type=registry,ref=${cacheRef},insecure=true`,
       ];

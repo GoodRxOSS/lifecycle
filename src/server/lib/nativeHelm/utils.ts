@@ -17,6 +17,7 @@
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_SECONDS } from './constants';
+import { RegistryAuthConfig, generateRegistryLoginScript } from './registryAuth';
 import { mergeKeyValueArrays, getResourceType } from 'shared/utils';
 import { merge } from 'lodash';
 import { renderTemplate, generateTolerationsCustomValues, generateNodeSelector } from 'server/lib/helm/utils';
@@ -226,7 +227,12 @@ export function constructHelmCommand(
       command += ` ${chartPath}`;
     }
   } else {
-    command += ` ${chartPath}`;
+    const isOciChart = chartRepoUrl?.startsWith('oci://');
+    if (isOciChart) {
+      command += ` ${chartRepoUrl}`;
+    } else {
+      command += ` ${chartPath}`;
+    }
   }
 
   command += ` --namespace ${namespace}`;
@@ -274,7 +280,8 @@ export function generateHelmInstallScript(
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
-  chartVersion?: string
+  chartVersion?: string,
+  registryAuth?: RegistryAuthConfig
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -305,11 +312,11 @@ ls -la
 `;
   }
 
-  if (chartType === ChartType.PUBLIC) {
+  if (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART) {
     const isOciChart = chartRepoUrl?.startsWith('oci://');
 
     if (!isOciChart) {
-      if (chartPath.includes('/')) {
+      if (chartType === ChartType.PUBLIC && chartPath.includes('/')) {
         const [repoName] = chartPath.split('/');
         const repoUrl = getRepoUrl(repoName);
         script += `
@@ -326,6 +333,13 @@ helm repo update
 `;
       }
     }
+  }
+
+  if (registryAuth) {
+    script += `
+${generateRegistryLoginScript(registryAuth)}
+
+`;
   }
 
   script += `
