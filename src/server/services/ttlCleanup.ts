@@ -187,10 +187,10 @@ export default class TTLCleanupService extends Service {
 
         const daysExpired = Math.floor((now - expireTime) / (1000 * 60 * 60 * 24));
 
-        const buildUUID = labels['lfc/uuid'];
+        let buildUUID = labels['lfc/uuid'];
         if (!buildUUID) {
-          getLogger().warn(`TTL: namespace missing uuid label namespace=${nsName}`);
-          continue;
+          buildUUID = nsName.replace('env-', '');
+          getLogger().warn(`TTL: namespace missing uuid label, derived from name namespace=${nsName}`);
         }
 
         updateLogContext({ buildUuid: buildUUID });

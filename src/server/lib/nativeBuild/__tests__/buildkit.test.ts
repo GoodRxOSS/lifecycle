@@ -246,8 +246,8 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('build-method: "native"');
 
     // Check annotations
-    expect(fullCommand).toContain('lifecycle.io/dockerfile: "Dockerfile"');
-    expect(fullCommand).toContain('lifecycle.io/ecr-repo: "test-repo"');
+    expect(fullCommand).toContain('lfc/dockerfile: "Dockerfile"');
+    expect(fullCommand).toContain('lfc/ecr-repo: "test-repo"');
   });
 });
 
