@@ -82,7 +82,11 @@ async function generateTTLLabels({
   ttl: boolean;
   buildUUID: string;
 }): Promise<{ labels: Record<string, string>; logMessage: string }> {
-  const baseLabels = { 'lfc/uuid': uuid };
+  const baseLabels: Record<string, string> = {
+    'lfc/uuid': uuid,
+    'lfc/type': staticEnv ? 'static' : 'ephemeral',
+    'app.kubernetes.io/managed-by': 'lifecycle',
+  };
 
   // Static or TTL disabled - only set enable flag
   if (staticEnv || !ttl) {
@@ -117,16 +121,27 @@ async function generateTTLLabels({
  * Generates patch operations for updating TTL labels on existing namespace
  */
 async function generateTTLPatch({
+  uuid,
+  staticEnv,
   ttl,
   buildUUID,
 }: {
+  uuid: string;
+  staticEnv: boolean;
   ttl: boolean;
   buildUUID: string;
 }): Promise<{ patch: any[]; logMessage: string }> {
+  const basePatch = [
+    { op: 'add', path: '/metadata/labels/lfc~1uuid', value: uuid },
+    { op: 'add', path: '/metadata/labels/lfc~1type', value: staticEnv ? 'static' : 'ephemeral' },
+    { op: 'add', path: '/metadata/labels/app.kubernetes.io~1managed-by', value: 'lifecycle' },
+  ];
+
   // TTL disabled - only update enable flag
   if (!ttl) {
     return {
       patch: [
+        ...basePatch,
         {
           op: 'add',
           path: '/metadata/labels/lfc~1ttl-enable',
@@ -143,6 +158,7 @@ async function generateTTLPatch({
 
   return {
     patch: [
+      ...basePatch,
       {
         op: 'add',
         path: '/metadata/labels/lfc~1ttl-enable',
@@ -213,22 +229,18 @@ export async function createOrUpdateNamespace({
   };
 
   if (await namespaceExists(client, name)) {
-    // Only update TTL labels if not static env
-    if (!staticEnv) {
-      const { patch, logMessage: patchMessage } = await generateTTLPatch({
-        ttl,
-        buildUUID,
-      });
+    const { patch, logMessage: patchMessage } = await generateTTLPatch({
+      uuid,
+      staticEnv,
+      ttl: staticEnv ? false : ttl,
+      buildUUID,
+    });
 
-      await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
-        headers: { 'Content-Type': 'application/json-patch+json' },
-      });
-      getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
-      return;
-    } else {
-      getLogger({ namespace: name }).info('Deploy: skipped namespace update reason=static');
-      return;
-    }
+    await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
+      headers: { 'Content-Type': 'application/json-patch+json' },
+    });
+    getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
+    return;
   }
 
   try {

@@ -70,7 +70,7 @@ export function createKubernetesJob(config: JobConfig): V1Job {
         ...labels,
       },
       annotations: {
-        'lifecycle.io/triggered-at': new Date().toISOString(),
+        'lfc/triggered-at': new Date().toISOString(),
         ...annotations,
       },
     },
@@ -145,8 +145,8 @@ export function createBuildJob(config: BuildJobConfig): V1Job {
       'build-method': 'native',
     },
     annotations: {
-      'lifecycle.io/dockerfile': config.dockerfilePath,
-      'lifecycle.io/ecr-repo': config.ecrRepo,
+      'lfc/dockerfile': config.dockerfilePath,
+      'lfc/ecr-repo': config.ecrRepo,
     },
     podAnnotations: config.podAnnotations,
     initContainers: config.initContainers,

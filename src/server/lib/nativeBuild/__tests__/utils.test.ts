@@ -73,11 +73,9 @@ describe('nativeBuild/utils', () => {
       expect(manifest.metadata.labels['build-method']).toBe('native');
 
       // Check annotations
-      expect(manifest.metadata.annotations['lifecycle.io/dockerfile']).toBe('Dockerfile');
-      expect(manifest.metadata.annotations['lifecycle.io/ecr-repo']).toBe(
-        '123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo'
-      );
-      expect(manifest.metadata.annotations['lifecycle.io/triggered-at']).toBeDefined();
+      expect(manifest.metadata.annotations['lfc/dockerfile']).toBe('Dockerfile');
+      expect(manifest.metadata.annotations['lfc/ecr-repo']).toBe('123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo');
+      expect(manifest.metadata.annotations['lfc/triggered-at']).toBeDefined();
 
       // Check spec
       expect(manifest.spec.ttlSecondsAfterFinished).toBeUndefined(); // No TTL by default for non-static builds

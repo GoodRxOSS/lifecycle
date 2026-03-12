@@ -39,7 +39,6 @@ export async function ensureNamespaceExists(namespace: string): Promise<void> {
           name: namespace,
           labels: {
             'app.kubernetes.io/managed-by': 'lifecycle',
-            'lifecycle.io/type': 'ephemeral',
           },
         },
       });
@@ -208,9 +207,9 @@ export function getBuildLabels(
 
 export function getBuildAnnotations(dockerfilePath: string, ecrRepo: string): Record<string, string> {
   return {
-    'lifecycle.io/dockerfile': dockerfilePath,
-    'lifecycle.io/ecr-repo': ecrRepo,
-    'lifecycle.io/triggered-at': new Date().toISOString(),
+    'lfc/dockerfile': dockerfilePath,
+    'lfc/ecr-repo': ecrRepo,
+    'lfc/triggered-at': new Date().toISOString(),
   };
 }
 
