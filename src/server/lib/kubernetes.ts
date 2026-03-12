@@ -226,7 +226,17 @@ export async function createOrUpdateNamespace({
       getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
       return;
     } else {
-      getLogger({ namespace: name }).info('Deploy: skipped namespace update reason=static');
+      await client.patchNamespace(
+        name,
+        [{ op: 'add', path: '/metadata/labels/lfc~1ttl-enable', value: 'false' }],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { headers: { 'Content-Type': 'application/json-patch+json' } }
+      );
+      getLogger({ namespace: name }).info('Deploy: patched namespace TTL disabled (static env)');
       return;
     }
   }
