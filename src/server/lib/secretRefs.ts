@@ -31,7 +31,7 @@ export interface ValidationResult {
   error?: string;
 }
 
-const SECRET_REF_REGEX = /^\{\{(aws|gcp):([^:}]+)(?::([^}]+))?\}\}$/;
+const SECRET_REF_REGEX = /^\{\{(aws|gcp|barbican|vault|onepassword):([^:}]+)(?::([^}]+))?\}\}$/;
 
 export function isSecretRef(value: string): boolean {
   if (!value || typeof value !== 'string') {
@@ -65,7 +65,7 @@ export function parseSecretRef(value: string): SecretRef | null {
 
 export function validateSecretRef(
   ref: SecretRef,
-  secretProviders: SecretProvidersConfig | undefined
+  secretProviders: SecretProvidersConfig | undefined,
 ): ValidationResult {
   if (!secretProviders) {
     return { valid: false, error: `Secret provider '${ref.provider}' not configured` };
