@@ -82,7 +82,7 @@ describe('externalSecret', () => {
         providerConfig,
       });
 
-      expect(manifest.apiVersion).toBe('external-secrets.io/v1beta1');
+      expect(manifest.apiVersion).toBe('external-secrets.io/v1');
       expect(manifest.kind).toBe('ExternalSecret');
       expect(manifest.metadata.name).toBe('api-server-aws-secrets');
       expect(manifest.metadata.namespace).toBe('lfc-abc123');
