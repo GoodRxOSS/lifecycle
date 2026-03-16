@@ -759,6 +759,14 @@ export default class DeployableService extends BaseService {
     filterGithubRepositoryId?: number
   ) {
     try {
+      let filterRepositoryFullName: string | null = null;
+      if (filterGithubRepositoryId) {
+        const filterRepo = await this.db.models.Repository.query().findOne({
+          githubRepositoryId: filterGithubRepositoryId,
+        });
+        filterRepositoryFullName = filterRepo?.fullName?.toLowerCase() ?? null;
+      }
+
       const attribution = async (
         services: YamlService.DependencyService[],
         yamlConfig: YamlService.LifecycleConfig,
@@ -825,8 +833,13 @@ export default class DeployableService extends BaseService {
                     let deploy: Deploy;
                     // Service defined in remote repo. Need to fetch remote YAML
                     if (yamlEnvService?.repository != null) {
-                      // Skip remote dependency YAML fetches when filtering by specific repository
-                      if (filterGithubRepositoryId) {
+                      // Skip remote services that don't match the triggering repository.
+                      // This avoids re-fetching all remote YAMLs on a targeted push, while
+                      // still updating the service whose repo actually changed.
+                      if (
+                        filterRepositoryFullName &&
+                        yamlEnvService.repository.toLowerCase() !== filterRepositoryFullName
+                      ) {
                         getLogger({ buildUUID, service: yamlEnvService.name }).debug(
                           'Skipping remote YAML fetch for filtered deploy'
                         );
