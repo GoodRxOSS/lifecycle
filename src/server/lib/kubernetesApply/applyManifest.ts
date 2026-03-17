@@ -19,6 +19,7 @@ import { HttpError } from '@kubernetes/client-node';
 import { Deploy } from 'server/models';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
+import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 
 export interface KubernetesApplyJobConfig {
   deploy: Deploy;
@@ -35,7 +36,11 @@ export async function createKubernetesApplyJob({
   kc.loadFromDefault();
   const batchApi = kc.makeApiClient(k8s.BatchV1Api);
   const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
-  const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
+  const jobName = buildDeployJobName({
+    deployUuid: deploy.uuid,
+    jobId,
+    shortSha,
+  });
   const serviceName = deploy.deployable?.name || deploy.service?.name || '';
 
   getLogger().info(`Job: creating name=${jobName} service=${serviceName}`);

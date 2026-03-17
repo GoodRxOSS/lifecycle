@@ -14,14 +14,48 @@
  * limitations under the License.
  */
 
-import { shouldUseNativeHelm, createHelmContainer } from '../helm';
+import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy } from '../helm';
+import * as nativeHelmUtils from '../utils';
 import { determineChartType, constructHelmCommand, ChartType, constructHelmCustomValues } from '../utils';
 import { RegistryAuthConfig } from '../registryAuth';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
+import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
+import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
+import { shellPromise } from 'server/lib/shell';
+import { getLogArchivalService } from 'server/services/logArchival';
 
 jest.mock('server/services/globalConfig');
+jest.mock('../utils', () => {
+  const originalModule = jest.requireActual('../utils');
+  return {
+    ...originalModule,
+    determineChartType: jest.fn(originalModule.determineChartType),
+    getHelmConfiguration: jest.fn(originalModule.getHelmConfiguration),
+    mergeHelmConfigWithGlobal: jest.fn(originalModule.mergeHelmConfigWithGlobal),
+    resolveHelmReleaseConflicts: jest.fn(originalModule.resolveHelmReleaseConflicts),
+  };
+});
 jest.mock('server/lib/kubernetes');
+jest.mock('server/lib/random', () => ({
+  randomAlphanumeric: jest.fn().mockReturnValue('k4hlde'),
+}));
+jest.mock('server/lib/shell', () => ({
+  shellPromise: jest.fn(),
+}));
+jest.mock('server/lib/nativeBuild/utils', () => {
+  const originalModule = jest.requireActual('server/lib/nativeBuild/utils');
+  return {
+    ...originalModule,
+    waitForJobAndGetLogs: jest.fn(),
+  };
+});
+jest.mock('server/services/logArchival', () => ({
+  getLogArchivalService: jest.fn(),
+}));
+jest.mock('server/lib/kubernetes/common/serviceAccount', () => ({
+  ensureServiceAccountForJob: jest.fn().mockResolvedValue('deploy-sa'),
+}));
 jest.mock('server/lib/helm/utils', () => {
   const originalModule = jest.requireActual('server/lib/helm/utils');
   return {
@@ -892,6 +926,90 @@ describe('Native Helm', () => {
 
       expect(result.args[0]).toContain('--version 2.0.9');
       expect(result.args[0]).toContain('helm-app');
+    });
+  });
+
+  describe('nativeHelmDeploy', () => {
+    it('uses the canonical deploy job name for monitoring and archival', async () => {
+      const deploy = {
+        uuid: 'cyclerx-cosmosdb-emulator-crimson-tooth-697165',
+        sha: '28e350a123456789',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'cyclerx-cosmosdb-emulator',
+          repository: { fullName: 'GoodRx/example' },
+        },
+        build: {
+          uuid: 'crimson-tooth-697165',
+          namespace: 'testns',
+          isStatic: false,
+          pullRequest: { repository: { fullName: 'GoodRx/example' } },
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn().mockReturnValue({
+          patch: jest.fn().mockResolvedValue(undefined),
+        }),
+      } as unknown as Deploy;
+
+      const archiveLogs = jest.fn().mockResolvedValue(undefined);
+
+      mockGetAllConfigs.mockResolvedValue({
+        logArchival: { enabled: true },
+      });
+
+      (nativeHelmUtils.resolveHelmReleaseConflicts as jest.Mock).mockResolvedValue(undefined);
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: 'prometheus-community/prometheus',
+        releaseName: deploy.uuid,
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockResolvedValue({
+        chart: { name: 'prometheus-community/prometheus' },
+        nativeHelm: {},
+      });
+
+      (shellPromise as jest.Mock).mockResolvedValue('');
+      (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+        logs: 'helm logs',
+        success: true,
+        status: 'succeeded',
+        startedAt: '2026-03-17T00:00:00.000Z',
+        completedAt: '2026-03-17T00:01:00.000Z',
+        duration: 60,
+      });
+      (getLogArchivalService as jest.Mock).mockReturnValue({
+        archiveLogs,
+      });
+
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((fn: TimerHandler) => {
+        if (typeof fn === 'function') {
+          fn();
+        }
+        return 0 as any;
+      }) as typeof setTimeout);
+
+      const result = await nativeHelmDeploy(deploy, { namespace: 'testns' });
+      const expectedJobName = buildDeployJobName({
+        deployUuid: deploy.uuid,
+        jobId: 'k4hlde',
+        shortSha: '28e350a',
+      });
+
+      expect(waitForJobAndGetLogs).toHaveBeenCalledWith(expectedJobName, 'testns', `[HELM ${deploy.uuid}]`);
+      expect(archiveLogs).toHaveBeenCalledWith(expect.objectContaining({ jobName: expectedJobName }), 'helm logs');
+      expect(result).toEqual({
+        completed: true,
+        logs: 'helm logs',
+        status: 'succeeded',
+      });
+
+      setTimeoutSpy.mockRestore();
     });
   });
 });

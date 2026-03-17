@@ -44,6 +44,7 @@ import {
 } from './utils';
 import { detectRegistryAuth, RegistryAuthConfig } from './registryAuth';
 import { HELM_IMAGE_PREFIX } from './constants';
+import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import {
   createCloneScript,
   waitForJobAndGetLogs,
@@ -110,7 +111,11 @@ export async function createHelmContainer(
   };
 }
 
-export async function generateHelmManifest(deploy: Deploy, jobId: string, options: HelmDeployOptions): Promise<string> {
+export async function generateHelmManifest(
+  deploy: Deploy,
+  jobName: string,
+  options: HelmDeployOptions
+): Promise<string> {
   await deploy.$fetchGraph('deployable.repository');
   await deploy.$fetchGraph('build');
 
@@ -164,12 +169,6 @@ export async function generateHelmManifest(deploy: Deploy, jobId: string, option
     ],
   };
 
-  const shortSha = deploy.sha ? deploy.sha.substring(0, 7) : 'no-sha';
-  let jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
-  if (jobName.endsWith('-')) {
-    jobName = jobName.slice(0, -1);
-  }
-
   const deployMetadata = {
     sha: deploy.sha || '',
     branch: deploy.branchName || '',
@@ -211,13 +210,13 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
 
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
-  const manifest = await generateHelmManifest(deploy, jobId, options);
-
   const shortSha = deploy.sha ? deploy.sha.substring(0, 7) : 'no-sha';
-  let jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`.substring(0, 63);
-  if (jobName.endsWith('-')) {
-    jobName = jobName.slice(0, -1);
-  }
+  const jobName = buildDeployJobName({
+    deployUuid: deploy.uuid,
+    jobId,
+    shortSha,
+  });
+  const manifest = await generateHelmManifest(deploy, jobName, options);
 
   const localPath = `${MANIFEST_PATH}/helm/${deploy.uuid}-helm-${shortSha}`;
   await fs.promises.mkdir(`${MANIFEST_PATH}/helm/`, { recursive: true });

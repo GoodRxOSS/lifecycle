@@ -16,11 +16,29 @@
 
 import { DeploymentManager } from '../deploymentManager/deploymentManager';
 import { Deploy } from 'server/models';
+import { buildDeployJobName } from '../kubernetes/jobNames';
 // import { deployHelm } from '../helm';
 
 jest.mock('../helm', () => ({
   deployHelm: jest.fn().mockResolvedValue(void 0),
 }));
+jest.mock('../kubernetesApply/applyManifest', () => ({
+  createKubernetesApplyJob: jest.fn().mockResolvedValue(void 0),
+  monitorKubernetesJob: jest.fn().mockResolvedValue({ success: true, message: 'ok' }),
+}));
+jest.mock('../kubernetes/common/serviceAccount', () => ({
+  ensureServiceAccountForJob: jest.fn().mockResolvedValue(void 0),
+}));
+jest.mock('../kubernetes', () => ({
+  waitForDeployPodReady: jest.fn().mockResolvedValue(true),
+}));
+jest.mock('server/services/deploy', () => {
+  return jest.fn().mockImplementation(() => ({
+    patchAndUpdateActivityFeed: jest.fn().mockResolvedValue(void 0),
+  }));
+});
+
+import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
 
 // todo: add more tests for the below scenarios
 // let deploysWithoutDependencies: Deploy[];
@@ -173,4 +191,46 @@ describe('DeploymentManager', () => {
   //     expect(deployHelm).toHaveBeenCalledTimes(2);
   //   });
   // });
+
+  describe('deployManifests', () => {
+    it('monitors the canonical truncated deploy job name for long deploy uuids', async () => {
+      const deploy = {
+        uuid: 'cyclerx-cosmosdb-emulator-crimson-tooth-697165',
+        sha: '28e350a123456789',
+        manifest: 'apiVersion: v1\nkind: ConfigMap',
+        runUUID: 'run-1',
+        build: {
+          namespace: 'testns',
+        },
+        deployable: {
+          name: 'cyclerx-cosmosdb-emulator',
+          type: 'github',
+          deploymentDependsOn: [],
+        },
+        service: {
+          type: 'github',
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Deploy;
+
+      deploymentManager = new DeploymentManager([deploy]);
+
+      await deploymentManager['deployManifests'](deploy);
+
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith({
+        deploy,
+        namespace: 'testns',
+        jobId: expect.any(String),
+      });
+
+      const createdJobId = (createKubernetesApplyJob as jest.Mock).mock.calls[0][0].jobId;
+      const expectedJobName = buildDeployJobName({
+        deployUuid: deploy.uuid,
+        jobId: createdJobId,
+        shortSha: '28e350a',
+      });
+
+      expect(monitorKubernetesJob).toHaveBeenCalledWith(expectedJobName, 'testns');
+    });
+  });
 });
