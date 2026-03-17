@@ -49,4 +49,18 @@ describe('buildDeployJobName', () => {
     expect(jobName).not.toContain('--deploy-');
     expect(jobName.endsWith('-')).toBe(false);
   });
+
+  it('returns a truncated suffix when suffix length alone exceeds maxLength', () => {
+    // suffix = 'deploy-k4hlde-28e350a' (21 chars); maxLength=14 → maxPrefixLength = 14-21-1 = -8
+    // falls back to suffix.substring(0, 14) = 'deploy-k4hlde-' → trailing dash stripped
+    const jobName = buildDeployJobName({
+      deployUuid: 'some-service',
+      jobId: 'k4hlde',
+      shortSha: '28e350a',
+      maxLength: 14,
+    });
+
+    expect(jobName).toBe('deploy-k4hlde');
+    expect(jobName.endsWith('-')).toBe(false);
+  });
 });
