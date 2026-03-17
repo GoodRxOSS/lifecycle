@@ -83,7 +83,7 @@ export function createKubernetesJob(config: JobConfig): V1Job {
           labels: {
             'app.kubernetes.io/name': appName,
             'app.kubernetes.io/component': component,
-            ...(labels['lc-service'] && { 'lc-service': labels['lc-service'] }),
+            ...labels,
           },
           ...(Object.keys(podAnnotations).length > 0 && { annotations: podAnnotations }),
         },

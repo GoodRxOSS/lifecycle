@@ -33,6 +33,7 @@ export type GlobalConfig = {
   orgChart: OrgChart;
   auroraRestoreSettings: DatabaseSettings;
   rdsRestoreSettings: DatabaseSettings;
+  rdsDefaults?: RdsDefaults;
   serviceAccount: RoleSettings;
   features: Record<string, boolean>;
   app_setup: AppSetup;
@@ -69,6 +70,32 @@ export type DatabaseSettings = {
   };
   instanceSize: string;
   restoreSize: string;
+};
+
+export type RdsSourceTag = {
+  key: string;
+  value?: string;
+};
+
+export type RdsDefaultsConfig = {
+  image: string;
+  vpcId: string;
+  accountId: string;
+  region: string;
+  securityGroupIds: string[];
+  subnetGroupName: string;
+  engine: string;
+  engineVersion: string;
+  sourceTag: RdsSourceTag;
+  additionalTags?: Record<string, string>;
+  instanceSize: string;
+  restoreSize: string;
+  jobTimeout?: number;
+};
+
+export type RdsDefaults = {
+  aurora: RdsDefaultsConfig;
+  rds: RdsDefaultsConfig;
 };
 
 export type DomainDefaults = {

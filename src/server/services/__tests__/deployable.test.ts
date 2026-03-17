@@ -394,5 +394,99 @@ describe('Deployable Service', () => {
         helm: undefined,
       });
     });
+
+    test('Generates from Rds Service Type Configuration', async () => {
+      const rdsService: YamlService.RdsService = {
+        name: 'pharmacy-db',
+        rds: {
+          type: 'aurora',
+          sourceTag: {
+            value: 'phm-aurora',
+          },
+          engineVersion: '8.0.mysql_aurora.3.08.2',
+          additionalTags: {
+            'app-short': 'phm',
+            owner: 'pharmacy',
+          },
+        },
+      };
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        rdsService
+      );
+
+      expect(result).toEqual({
+        name: 'pharmacy-db',
+        serviceId: null,
+        type: 'rds',
+        buildUUID: 'unit-test-12345',
+        buildId: 100,
+        repositoryId: '1234567890',
+        branchName: 'unit-test',
+        defaultUUID: lifecycleDefaults.defaultUUID,
+        dockerfilePath: serviceDefaults.dockerfilePath,
+        command: null,
+        arguments: null,
+        env: {},
+        envLens: false,
+        port: undefined,
+        initArguments: null,
+        initCommand: null,
+        initDockerfilePath: null,
+        initEnv: {},
+        dockerImage: undefined,
+        defaultTag: undefined,
+        afterBuildPipelineId: undefined,
+        appShort: undefined,
+        ecr: 'lfc/lifecycle-deployments',
+        builder: {},
+        public: false,
+        capacityType: 'SPOT',
+        cpuLimit: null,
+        cpuRequest: '10m',
+        memoryLimit: null,
+        memoryRequest: '100Mi',
+        readinessFailureThreshold: 30,
+        readinessHttpGetPath: '/__lbheartbeat__',
+        readinessHttpGetPort: 8080,
+        readinessInitialDelaySeconds: 0,
+        readinessPeriodSeconds: 10,
+        readinessSuccessThreshold: 1,
+        readinessTcpSocketPort: 8090,
+        readinessTimeoutSeconds: 1,
+        host: domainDefaults.http,
+        acmARN: 'arn:aws:acm:us-west-2:account-id:certificate/ceritifcate-id',
+        defaultInternalHostname: `pharmacy-db-${lifecycleDefaults.defaultUUID}`,
+        defaultPublicUrl: `pharmacy-db-${lifecycleDefaults.defaultUUID}.${domainDefaults.http}`,
+        ipWhitelist: '{ 70.52.40.40/32,160.72.36.84/32 }',
+        hostPortMapping: {},
+        ingressAnnotations: {},
+        pathPortMapping: {},
+        grpc: false,
+        grpcHost: domainDefaults.grpc,
+        defaultGrpcHost: `pharmacy-db-${lifecycleDefaults.defaultUUID}.${domainDefaults.grpc}`,
+        detatchAfterBuildPipeline: false,
+        deployPipelineId: null,
+        deployTrigger: null,
+        destroyPipelineId: null,
+        destroyTrigger: null,
+        dockerBuildPipelineName: lifecycleDefaults.buildPipeline,
+        runtimeName: '',
+        serviceDisksYaml: null,
+        nodeSelector: null,
+        nodeAffinity: null,
+        active: undefined,
+        defaultBranchName: undefined,
+        dependsOnDeployableName: undefined,
+        kedaScaleToZero: null,
+        deploymentDependsOn: [],
+        helm: undefined,
+      });
+    });
   });
 });

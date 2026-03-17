@@ -164,6 +164,30 @@ export interface AuroraRestoreServiceConfig extends Service {
   readonly command: string;
   readonly arguments: string;
 }
+
+export interface RdsService extends Service {
+  readonly rds: RdsServiceConfig;
+}
+
+export interface RdsServiceConfig {
+  readonly type: 'aurora' | 'rds';
+  readonly sourceTag: {
+    readonly key?: string;
+    readonly value: string;
+  };
+  readonly additionalTags?: Record<string, string>;
+  readonly image?: string;
+  readonly vpcId?: string;
+  readonly accountId?: string;
+  readonly region?: string;
+  readonly securityGroupIds?: string[];
+  readonly subnetGroupName?: string;
+  readonly engine?: string;
+  readonly engineVersion?: string;
+  readonly instanceSize?: string;
+  readonly restoreSize?: string;
+  readonly jobTimeout?: number;
+}
 export interface ConfigurationService extends Service {
   readonly configuration: {
     readonly defaultTag: string;
@@ -342,6 +366,10 @@ export function isAuroraRestoreService(service: Service): boolean {
   return (service as AuroraRestoreService)?.auroraRestore != null;
 }
 
+export function isRdsService(service: Service): boolean {
+  return (service as RdsService)?.rds != null;
+}
+
 /**
  * Determine if the given Lifecycle Service YAML model is a Aurora Restore Service type. Typescript has no runtime meta data to determine the interface type during runtime.
  * The only solution is looking for the combination of attributes to guess the type. If there is a better way to determine runtime type, Pull Request is very welcome.
@@ -383,6 +411,8 @@ export function getDeployType(service: Service): DeployTypes {
     result = DeployTypes.CONFIGURATION;
   } else if (isAuroraRestoreService(service)) {
     result = DeployTypes.AURORA_RESTORE;
+  } else if (isRdsService(service)) {
+    result = DeployTypes.RDS;
   } else if (isHelmService(service)) {
     result = DeployTypes.HELM;
   }
@@ -680,6 +710,11 @@ export function getAppDockerConfig(
   }
 
   return result;
+}
+
+export function getRdsConfig(service: Service): RdsServiceConfig | undefined {
+  if (getDeployType(service) !== DeployTypes.RDS) return;
+  return (service as RdsService).rds;
 }
 
 /**

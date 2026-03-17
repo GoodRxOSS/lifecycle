@@ -24,7 +24,13 @@ import { customAlphabet, nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
 import { Build, Deploy, Environment, Service, BuildServiceOverride } from 'server/models';
-import { BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
+import {
+  BuildPhaseInfraDeployTypes,
+  BuildStatus,
+  DeployStatus,
+  DeployTypes,
+  ExternalServiceDeployTypes,
+} from 'shared/constants';
 import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
 import BaseService from './_service';
@@ -46,6 +52,7 @@ import GlobalConfigService from './globalConfig';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
+import * as rdsJobs from 'server/lib/rds';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -920,9 +927,12 @@ export default class BuildService extends BaseService {
         await this.updateStatusAndComment(build, BuildStatus.TEARING_DOWN, build.runUUID, true, true).catch((error) => {
           getLogger().warn({ error }, `Build: status update failed status=${BuildStatus.TEARING_DOWN}`);
         });
-        await Promise.all([k8s.deleteBuild(build), cli.deleteBuild(build), uninstallHelmReleases(build)]).catch(
-          (error) => getLogger().error({ error }, 'Build: cleanup failed')
-        );
+        await Promise.all([
+          k8s.deleteBuild(build),
+          cli.deleteBuild(build),
+          rdsJobs.deleteBuild(build),
+          uninstallHelmReleases(build),
+        ]).catch((error) => getLogger().error({ error }, 'Build: cleanup failed'));
 
         await Promise.all(
           build.deploys.map(async (deploy) => {
@@ -1065,7 +1075,7 @@ export default class BuildService extends BaseService {
         return _.every(
           await Promise.all(
             deploys
-              .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
+              .filter((d) => d.active && BuildPhaseInfraDeployTypes.has(d.deployable.type))
               .map(async (deploy) => {
                 if (!deploy) {
                   getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
@@ -1085,7 +1095,7 @@ export default class BuildService extends BaseService {
         return _.every(
           await Promise.all(
             deploys
-              .filter((d) => d.active && CLIDeployTypes.has(d.service.type))
+              .filter((d) => d.active && BuildPhaseInfraDeployTypes.has(d.service.type))
               .map(async (deploy) => {
                 if (deploy === undefined) {
                   getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
@@ -1239,7 +1249,7 @@ export default class BuildService extends BaseService {
           if (
             deployType === DeployTypes.GITHUB ||
             deployType === DeployTypes.DOCKER ||
-            CLIDeployTypes.has(deployType)
+            ExternalServiceDeployTypes.has(deployType)
           ) {
             // Generate individual manifest for this deploy
             const manifest = k8s.generateDeployManifest({
@@ -1277,7 +1287,7 @@ export default class BuildService extends BaseService {
           (d) =>
             d.deployable.type === DeployTypes.GITHUB ||
             d.deployable.type === DeployTypes.DOCKER ||
-            CLIDeployTypes.has(d.deployable.type)
+            ExternalServiceDeployTypes.has(d.deployable.type)
         );
 
         if (githubTypeDeploys.length > 0) {
@@ -1321,7 +1331,7 @@ export default class BuildService extends BaseService {
             d.active &&
             (d.service.type === DeployTypes.GITHUB ||
               d.service.type === DeployTypes.DOCKER ||
-              CLIDeployTypes.has(d.service.type))
+              ExternalServiceDeployTypes.has(d.service.type))
         );
         const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace, serviceAccountName });
         if (manifest && manifest.replace(/---/g, '').trim().length > 0) {

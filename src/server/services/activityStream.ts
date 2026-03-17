@@ -29,6 +29,7 @@ import {
   CommentParser,
   DeployTypes,
   CLIDeployTypes,
+  ExternalServiceDeployTypes,
   PullRequestStatus,
 } from 'shared/constants';
 import {
@@ -769,7 +770,12 @@ export default class ActivityStream extends BaseService {
   private isGitHubKubernetesDeployment(deploy: Deploy): boolean {
     if (!deploy.deployable) return false;
     const deployType = deploy.deployable.type;
-    return deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType);
+    return (
+      deployType === DeployTypes.GITHUB ||
+      deployType === DeployTypes.DOCKER ||
+      ExternalServiceDeployTypes.has(deployType) ||
+      CLIDeployTypes.has(deployType)
+    );
   }
 
   /**
@@ -940,7 +946,7 @@ export default class ActivityStream extends BaseService {
         : serviceName;
 
       if (isSelectedDeployType == null || isSelectedDeployType(deploy, build.enableFullYaml, orgChartName)) {
-        if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
+        if ([DeployTypes.GITHUB, DeployTypes.HELM, DeployTypes.RDS].includes(serviceType) && deploy.active) {
           // Show Build Logs link if:
           // 1. It's a Codefresh build and buildLogs URL exists, OR
           // 2. It's a Native Build V2 deployment
@@ -948,7 +954,7 @@ export default class ActivityStream extends BaseService {
           if (deploy.buildLogs) {
             // Keep existing Codefresh build logs URL
             buildLogsColumn = deploy.buildLogs;
-          } else if (this.isNativeBuildDeployment(deploy)) {
+          } else if (this.isNativeBuildDeployment(deploy) || serviceType === DeployTypes.RDS) {
             // Always show Native Build logs link - we query Kubernetes directly
             const actualServiceName = deploy.deployable?.name || serviceName;
             buildLogsColumn = `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${actualServiceName}/buildLogs)`;

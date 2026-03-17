@@ -33,6 +33,26 @@ export interface AuroraRestoreService {
   arguments: string;
 }
 
+export interface RdsService {
+  type: 'aurora' | 'rds';
+  sourceTag: {
+    key?: string;
+    value: string;
+  };
+  additionalTags?: Record<string, string>;
+  image?: string;
+  vpcId?: string;
+  accountId?: string;
+  region?: string;
+  securityGroupIds?: string[];
+  subnetGroupName?: string;
+  engine?: string;
+  engineVersion?: string;
+  instanceSize?: string;
+  restoreSize?: string;
+  jobTimeout?: number;
+}
+
 export interface ConfigurationService {
   defaultTag: string;
   branchName: string;
@@ -106,6 +126,7 @@ export interface Service {
   configuration?: ConfigurationService;
   externalHttp?: ExternalHttpService;
   auroraRestore?: AuroraRestoreService;
+  rds?: RdsService;
 }
 
 export interface Webhook {

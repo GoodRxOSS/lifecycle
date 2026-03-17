@@ -18,7 +18,12 @@ import { getLogger } from './logger';
 import yaml from 'js-yaml';
 import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
-import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
+import {
+  ExternalServiceDeployTypes,
+  KubernetesDeployTypes,
+  MEDIUM_TYPE,
+  DEFAULT_TTL_INACTIVITY_DAYS,
+} from 'shared/constants';
 import { shellPromise } from './shell';
 import { flattenObject, waitUntil } from 'server/lib/utils';
 import { ServiceDiskConfig } from 'server/models/yaml';
@@ -622,7 +627,9 @@ export function generateManifest({
   // External Service only deployment
 
   const cliDeploys = deploys.filter((deploy) => {
-    return build.enableFullYaml ? CLIDeployTypes.has(deploy.deployable.type) : CLIDeployTypes.has(deploy.service.type);
+    return build.enableFullYaml
+      ? ExternalServiceDeployTypes.has(deploy.deployable.type)
+      : ExternalServiceDeployTypes.has(deploy.service.type);
   });
 
   const kubernetesDeploys = deploys.filter((deploy) => {
@@ -1756,7 +1763,7 @@ export function generateDeployManifest({
 
   // ExternalName service for CLI deploys
   // return the ExternalName service if we have a cname
-  if (CLIDeployTypes.has(deploy.deployable?.type)) {
+  if (ExternalServiceDeployTypes.has(deploy.deployable?.type)) {
     const externalHost = deploy.cname;
     if (externalHost) {
       return yaml.dump({

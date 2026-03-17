@@ -98,6 +98,15 @@ describe('Yaml Service', () => {
       auroraRestore:
         command: 'ls'
         arguments: '-arg foobar'
+    - name: 'rdsApp'
+      rds:
+        type: 'aurora'
+        sourceTag:
+          value: 'phm-aurora'
+        engineVersion: '8.0.mysql_aurora.3.08.2'
+        additionalTags:
+          app-short: 'phm'
+          owner: 'pharmacy'
     - name: 'configurationApp'
       configuration:
         defaultTag: 'main'
@@ -151,6 +160,14 @@ describe('Yaml Service', () => {
       const service = YamlService.getDeployingServicesByName(config, 'configurationApp');
 
       expect(YamlService.getDeployType(service)).toEqual(DeployTypes.CONFIGURATION);
+    });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getDeployType(service)).toEqual(DeployTypes.RDS);
     });
   });
 
@@ -287,6 +304,16 @@ describe('Yaml Service', () => {
 
       expect(YamlService.getEnvironmentVariables(service)).toEqual(undefined);
     });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      new YamlConfigValidator().validate_1_0_0(config);
+
+      const service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getEnvironmentVariables(service)).toEqual(undefined);
+    });
   });
 
   describe('getInitEnvironmentVariables', () => {
@@ -412,6 +439,16 @@ describe('Yaml Service', () => {
       new YamlConfigValidator().validate_1_0_0(config);
 
       const service = YamlService.getDeployingServicesByName(config, 'configurationApp');
+
+      expect(YamlService.getInitEnvironmentVariables(service)).toEqual(undefined);
+    });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      new YamlConfigValidator().validate_1_0_0(config);
+
+      const service = YamlService.getDeployingServicesByName(config, 'rdsApp');
 
       expect(YamlService.getInitEnvironmentVariables(service)).toEqual(undefined);
     });
