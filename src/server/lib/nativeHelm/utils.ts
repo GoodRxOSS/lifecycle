@@ -788,11 +788,7 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     }
 
     if (deploy.initDockerImage) {
-      const initVersion = constructImageVersion(deploy.initDockerImage);
-      customValues.push(
-        `${resourceType}.initImage=${deploy.initDockerImage}`,
-        `${resourceType}.version=${initVersion}`
-      );
+      customValues.push(`${resourceType}.initImage=${deploy.initDockerImage}`);
       Object.entries(initEnvVars).forEach(([key, value]) => {
         customValues.push(`${resourceType}.initEnv.${key}=${value}`);
       });

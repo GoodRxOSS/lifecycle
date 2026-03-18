@@ -688,8 +688,10 @@ describe('Native Helm', () => {
 
       expect(customValues).toContain('deployment.env.DB_HOST="postgres.internal"');
       expect(customValues).toContain('deployment.initEnv.INIT_DB_HOST=init-postgres.internal');
+      expect(customValues).toContain('deployment.initImage=repo/init:tag');
       expect(customValues).not.toContain('deployment.env.DB__HOST="postgres.internal"');
       expect(customValues).not.toContain('deployment.initEnv.INIT__DB__HOST=init-postgres.internal');
+      expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
     });
   });
 

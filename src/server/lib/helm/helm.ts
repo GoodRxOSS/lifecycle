@@ -140,7 +140,6 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
     version = constructImageVersion(deploy.initDockerImage);
     customValues.push(
       `${resourceType}.initImage=${deploy.initDockerImage}`,
-      `${resourceType}.version=${version}`,
       ...Object.entries(initEnvVars).map(
         ([key, value]) => `${resourceType}.initEnv.${key.replace(/_/g, '__')}=${value}`
       )
