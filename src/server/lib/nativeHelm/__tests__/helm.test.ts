@@ -581,10 +581,10 @@ describe('Native Helm', () => {
           defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
         },
         domainDefaults: {
-          http: 'lifecycle.lfc.goodrx.com',
-          altHttp: ['lifecycle.dev.goodrx.com'],
-          grpc: 'grpc.lifecycle.lfc.goodrx.com',
-          altGrpc: ['grpc-alt.lifecycle.lfc.goodrx.com'],
+          http: 'preview.lifecycle.com',
+          altHttp: ['preview-alt.lifecycle.com'],
+          grpc: 'grpc.preview.lifecycle.com',
+          altGrpc: ['grpc-alt.preview.lifecycle.com'],
         },
         'goodrx-app': {
           chart: {
@@ -619,8 +619,8 @@ describe('Native Helm', () => {
 
       const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
 
-      expect(customValues).toContain('ingress.host=test-uuid.lifecycle.lfc.goodrx.com');
-      expect(customValues).toContain('ingress.altHosts[0]=test-uuid.lifecycle.dev.goodrx.com');
+      expect(customValues).toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
       expect(customValues).toContain('ingress.ipAllowlist[0]=1.1.1.1/32');
       expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
     });
@@ -651,8 +651,8 @@ describe('Native Helm', () => {
 
       const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
 
-      expect(customValues).not.toContain('ingress.host=test-uuid.lifecycle.lfc.goodrx.com');
-      expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.lifecycle.dev.goodrx.com');
+      expect(customValues).not.toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
       expect(customValues.some((value) => value.startsWith('ingress.ipAllowlist['))).toBe(false);
     });
   });
