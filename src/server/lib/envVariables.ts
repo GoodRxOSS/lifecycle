@@ -68,7 +68,7 @@ export abstract class EnvironmentVariables {
     buildUUID: string,
     fullYamlSupport: boolean,
     build: Build,
-    additionalVariables?: Record<string, any>
+    additionalVariables?: Record<string, any>,
   ): Promise<Record<string, any>> {
     let availableEnv: Record<string, any>;
 
@@ -185,7 +185,7 @@ export abstract class EnvironmentVariables {
 
     if (build == null) {
       throw Error(
-        'Critical problem. Attempt retrieving environment Variables from empty build, which should NEVER happen.'
+        'Critical problem. Attempt retrieving environment Variables from empty build, which should NEVER happen.',
       );
     }
 
@@ -196,7 +196,7 @@ export abstract class EnvironmentVariables {
       throw new LifecycleError(
         build.runUUID,
         '',
-        'Critical problem. Missing associated deploys with the build, which should NEVER happen.'
+        'Critical problem. Missing associated deploys with the build, which should NEVER happen.',
       );
     }
 
@@ -219,7 +219,7 @@ export abstract class EnvironmentVariables {
    */
   async configurationServiceEnvironments(
     deploys: Deploy[],
-    fullYamlSupport: boolean
+    fullYamlSupport: boolean,
   ): Promise<Array<Record<string, any>>> {
     const configurationDeploys = deploys.filter((deploy) => {
       const serviceType: DeployTypes = fullYamlSupport ? deploy.deployable?.type : deploy.service?.type;
@@ -237,7 +237,7 @@ export abstract class EnvironmentVariables {
             .where('key', deploy.branchName)
             .first();
         }
-      })
+      }),
     );
 
     return _.compact(configurations.map((configuration) => (configuration ? configuration.data : null)));
@@ -262,7 +262,7 @@ export abstract class EnvironmentVariables {
     envString: Record<string, any>,
     availableEnv: Record<string, string>,
     useDefaultUUID: boolean,
-    namespace: string
+    namespace: string,
   ) {
     const str = JSON.stringify(envString || '').replace(/-/g, HYPHEN_REPLACEMENT);
     return await this.compileEnvironmentWithAvailableEnvironment(str, availableEnv, useDefaultUUID, namespace);
@@ -278,7 +278,7 @@ export abstract class EnvironmentVariables {
     environment: string,
     availableEnv: Record<string, any>,
     useDefaultUUID: boolean,
-    namespace: string
+    namespace: string,
   ) {
     return await this.customRender(environment, availableEnv, useDefaultUUID, namespace);
   }
@@ -306,7 +306,7 @@ export abstract class EnvironmentVariables {
    * @returns the rendered template
    */
   async customRender(template, data, useDefaultUUID = true, namespace: string) {
-    const secretPatternRegex = /\{\{(aws|gcp):([^}]+)\}\}/g;
+    const secretPatternRegex = /\{\{(aws|gcp|barbican|vault|onepassword):([^}]+)\}\}/g;
     const secretPlaceholders: Map<string, string> = new Map();
     let placeholderIndex = 0;
 
@@ -364,7 +364,7 @@ export abstract class EnvironmentVariables {
         if (captureGroup.includes('_internalHostname')) {
           template = template.replace(
             fullMatch,
-            this.buildHostname({ host: data[captureGroup], suffix, rest, namespace: nsForDeploy })
+            this.buildHostname({ host: data[captureGroup], suffix, rest, namespace: nsForDeploy }),
           );
         }
         continue;
@@ -378,14 +378,14 @@ export abstract class EnvironmentVariables {
         const defaultedInternalHostname = serviceToUpdate.replace(/_internalHostname$/, `-${defaultUuid}`);
         template = template.replace(
           fullMatch,
-          this.buildHostname({ host: defaultedInternalHostname, namespace: staticEnvNamespace, suffix, rest })
+          this.buildHostname({ host: defaultedInternalHostname, namespace: staticEnvNamespace, suffix, rest }),
         );
       }
       if (captureGroup.includes('_publicUrl')) {
         const serviceToUpdate = captureGroup.replace(HYPHEN_REPLACEMENT_REGEX, '-');
         const defaultedPublicUrl = serviceToUpdate.replace(
           /_publicUrl$/,
-          `-${globalConfig.lifecycleDefaults.defaultPublicUrl}`
+          `-${globalConfig.lifecycleDefaults.defaultPublicUrl}`,
         );
         getLogger().debug(`publicUrl for ${serviceToUpdate} defaulted to ${defaultedPublicUrl} using global_config`);
         template = template.replace(fullMatch, defaultedPublicUrl);
@@ -405,6 +405,6 @@ export abstract class EnvironmentVariables {
     // eslint-disable-next-line no-unused-vars
     build: Build,
     // eslint-disable-next-line no-unused-vars
-    webhook?: any
+    webhook?: any,
   ): Promise<Record<string, any>>;
 }
