@@ -690,6 +690,76 @@ export function createHelmJob(
   return jobSpec;
 }
 
+function addNativeHelmCustomValues(deploy: Deploy): string[] {
+  getLogger().debug(
+    `Helm: custom values kedaScaleToZeroType=${deploy?.kedaScaleToZero?.type} isStatic=${deploy?.build?.isStatic}`
+  );
+
+  if (
+    deploy?.kedaScaleToZero?.type === 'http' &&
+    deploy.build.isStatic == false &&
+    deploy?.build.isStatic != undefined
+  ) {
+    getLogger().debug('Helm: enabling autoscaling for KEDA scale-to-zero');
+    return ['autoscaling.enabled=true'];
+  }
+
+  return [];
+}
+
+async function constructGrpcMappings(deploy: Deploy): Promise<string[]> {
+  const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  const hosts = [domainDefaults.grpc, ...(domainDefaults?.altGrpc || [])];
+
+  const mappings: string[] = [];
+
+  hosts.forEach((host, index) => {
+    mappings.push(
+      `ambassadorMappings[${index}].name=${deploy.uuid}-${index}`,
+      `ambassadorMappings[${index}].env=lifecycle-${deploy.deployable.buildUUID}`,
+      `ambassadorMappings[${index}].service=${deploy.uuid}`,
+      `ambassadorMappings[${index}].version=${deploy.uuid}`,
+      `ambassadorMappings[${index}].host=${deploy.uuid}.${host}:443`,
+      `ambassadorMappings[${index}].port=${deploy.deployable.port}`
+    );
+  });
+
+  return mappings;
+}
+
+async function constructHttpIngressValues(deploy: Deploy): Promise<string[]> {
+  const ingressValues: string[] = [];
+  const { serviceDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+
+  ingressValues.push(`ingress.host=${deploy.uuid}.${domainDefaults.http}`);
+
+  if (domainDefaults?.altHttp) {
+    domainDefaults.altHttp.forEach((host, index) => {
+      ingressValues.push(`ingress.altHosts[${index}]=${deploy.uuid}.${host}`);
+    });
+  }
+
+  if (!deploy.deployable.helm.overrideDefaultIpWhitelist) {
+    const ipWhitelist = serviceDefaults.defaultIPWhiteList
+      .trim()
+      .slice(1, -1)
+      .split(',')
+      .map((ip, index) => `ingress.ipAllowlist[${index}]=${ip.trim()}`);
+    ingressValues.push(...ipWhitelist);
+  }
+
+  if (
+    deploy?.kedaScaleToZero?.type === 'http' &&
+    deploy.build.isStatic === false &&
+    deploy?.build.isStatic != undefined
+  ) {
+    ingressValues.push(`ingress.backendService=${deploy.uuid}-external-service`, 'ingress.port=8080');
+    getLogger().debug('Helm: redirecting ingress to KEDA proxy');
+  }
+
+  return ingressValues;
+}
+
 export async function constructHelmCustomValues(deploy: Deploy, chartType: ChartType): Promise<string[]> {
   let customValues: string[] = [];
   const { deployable, build } = deploy;
@@ -733,6 +803,19 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     Object.entries(appEnvVars).forEach(([key, value]) => {
       customValues.push(`${resourceType}.env.${key.replace(/_/g, '__')}="${value}"`);
     });
+
+    const isDisableIngressHost: boolean | undefined = helm?.disableIngressHost;
+    const grpc: boolean | undefined = helm?.grpc;
+    const ingressValues = await constructHttpIngressValues(deploy);
+
+    if (grpc) {
+      customValues.push(...(await constructGrpcMappings(deploy)));
+      if (isDisableIngressHost === false) {
+        customValues.push(...ingressValues, ...addNativeHelmCustomValues(deploy));
+      }
+    } else if (!isDisableIngressHost && resourceType === 'deployment') {
+      customValues.push(...ingressValues, ...addNativeHelmCustomValues(deploy));
+    }
 
     customValues.push(
       `env=lifecycle-${deployable.buildUUID}`,

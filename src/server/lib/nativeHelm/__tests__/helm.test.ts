@@ -573,6 +573,90 @@ describe('Native Helm', () => {
     });
   });
 
+  describe('constructHelmCustomValues for ORG_CHART ingress', () => {
+    beforeEach(() => {
+      mockGetOrgChartName.mockResolvedValue('goodrx-app');
+      mockGetAllConfigs.mockResolvedValue({
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
+        },
+        domainDefaults: {
+          http: 'lifecycle.lfc.goodrx.com',
+          altHttp: ['lifecycle.dev.goodrx.com'],
+          grpc: 'grpc.lifecycle.lfc.goodrx.com',
+          altGrpc: ['grpc-alt.lifecycle.lfc.goodrx.com'],
+        },
+        'goodrx-app': {
+          chart: {
+            values: [],
+          },
+        },
+      });
+    });
+
+    it('adds ingress host values for deployment-based org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'goodrx-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('ingress.host=test-uuid.lifecycle.lfc.goodrx.com');
+      expect(customValues).toContain('ingress.altHosts[0]=test-uuid.lifecycle.dev.goodrx.com');
+      expect(customValues).toContain('ingress.ipAllowlist[0]=1.1.1.1/32');
+      expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
+    });
+
+    it('respects disableIngressHost for org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'goodrx-app', values: [] },
+            docker: {
+              app: {},
+            },
+            disableIngressHost: true,
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).not.toContain('ingress.host=test-uuid.lifecycle.lfc.goodrx.com');
+      expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.lifecycle.dev.goodrx.com');
+      expect(customValues.some((value) => value.startsWith('ingress.ipAllowlist['))).toBe(false);
+    });
+  });
+
   describe('envMapping for LOCAL charts', () => {
     beforeEach(() => {
       mockGetAllConfigs.mockResolvedValue({});
