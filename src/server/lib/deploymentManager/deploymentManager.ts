@@ -23,6 +23,7 @@ import DeployService from 'server/services/deploy';
 import { getLogger, withLogContext } from 'server/lib/logger';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { waitForDeployPodReady } from '../kubernetes';
+import { buildDeployJobName } from '../kubernetes/jobNames';
 
 const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
 
@@ -164,7 +165,11 @@ export class DeploymentManager {
         });
 
         const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
-        const jobName = `${deploy.uuid}-deploy-${jobId}-${shortSha}`;
+        const jobName = buildDeployJobName({
+          deployUuid: deploy.uuid,
+          jobId,
+          shortSha,
+        });
         const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
 
         if (!result.success) {
