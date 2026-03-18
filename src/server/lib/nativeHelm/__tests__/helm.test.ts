@@ -575,7 +575,7 @@ describe('Native Helm', () => {
 
   describe('constructHelmCustomValues for ORG_CHART ingress', () => {
     beforeEach(() => {
-      mockGetOrgChartName.mockResolvedValue('goodrx-app');
+      mockGetOrgChartName.mockResolvedValue('lifecycle-app');
       mockGetAllConfigs.mockResolvedValue({
         serviceDefaults: {
           defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
@@ -586,7 +586,7 @@ describe('Native Helm', () => {
           grpc: 'grpc.preview.lifecycle.com',
           altGrpc: ['grpc-alt.preview.lifecycle.com'],
         },
-        'goodrx-app': {
+        'lifecycle-app': {
           chart: {
             values: [],
           },
@@ -605,7 +605,7 @@ describe('Native Helm', () => {
           buildUUID: 'build-123',
           port: 8080,
           helm: {
-            chart: { name: 'goodrx-app', values: [] },
+            chart: { name: 'lifecycle-app', values: [] },
             docker: {
               app: {},
             },
@@ -636,7 +636,7 @@ describe('Native Helm', () => {
           buildUUID: 'build-123',
           port: 8080,
           helm: {
-            chart: { name: 'goodrx-app', values: [] },
+            chart: { name: 'lifecycle-app', values: [] },
             docker: {
               app: {},
             },
