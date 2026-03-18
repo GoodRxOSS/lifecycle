@@ -655,6 +655,42 @@ describe('Native Helm', () => {
       expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
       expect(customValues.some((value) => value.startsWith('ingress.ipAllowlist['))).toBe(false);
     });
+
+    it('keeps underscore env keys intact for direct helm values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_HOST: 'postgres.internal',
+        },
+        initEnv: {
+          INIT_DB_HOST: 'init-postgres.internal',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('deployment.env.DB_HOST="postgres.internal"');
+      expect(customValues).toContain('deployment.initEnv.INIT_DB_HOST=init-postgres.internal');
+      expect(customValues).not.toContain('deployment.env.DB__HOST="postgres.internal"');
+      expect(customValues).not.toContain('deployment.initEnv.INIT__DB__HOST=init-postgres.internal');
+    });
   });
 
   describe('envMapping for LOCAL charts', () => {

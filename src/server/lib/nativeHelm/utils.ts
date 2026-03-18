@@ -794,14 +794,14 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
         `${resourceType}.version=${initVersion}`
       );
       Object.entries(initEnvVars).forEach(([key, value]) => {
-        customValues.push(`${resourceType}.initEnv.${key.replace(/_/g, '__')}=${value}`);
+        customValues.push(`${resourceType}.initEnv.${key}=${value}`);
       });
     } else {
       customValues.push(`${resourceType}.disableInit=true`);
     }
 
     Object.entries(appEnvVars).forEach(([key, value]) => {
-      customValues.push(`${resourceType}.env.${key.replace(/_/g, '__')}="${value}"`);
+      customValues.push(`${resourceType}.env.${key}="${value}"`);
     });
 
     const isDisableIngressHost: boolean | undefined = helm?.disableIngressHost;
