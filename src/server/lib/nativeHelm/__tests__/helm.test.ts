@@ -1023,13 +1023,13 @@ describe('Native Helm', () => {
         deployableId: 99,
         deployable: {
           name: 'cyclerx-cosmosdb-emulator',
-          repository: { fullName: 'GoodRx/example' },
+          repository: { fullName: 'Lifecycle/example' },
         },
         build: {
           uuid: 'crimson-tooth-697165',
           namespace: 'testns',
           isStatic: false,
-          pullRequest: { repository: { fullName: 'GoodRx/example' } },
+          pullRequest: { repository: { fullName: 'Lifecycle/example' } },
         },
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
         $query: jest.fn().mockReturnValue({
