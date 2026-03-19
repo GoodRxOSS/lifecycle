@@ -573,6 +573,128 @@ describe('Native Helm', () => {
     });
   });
 
+  describe('constructHelmCustomValues for ORG_CHART ingress', () => {
+    beforeEach(() => {
+      mockGetOrgChartName.mockResolvedValue('lifecycle-app');
+      mockGetAllConfigs.mockResolvedValue({
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+          altHttp: ['preview-alt.lifecycle.com'],
+          grpc: 'grpc.preview.lifecycle.com',
+          altGrpc: ['grpc-alt.preview.lifecycle.com'],
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+      });
+    });
+
+    it('adds ingress host values for deployment-based org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
+      expect(customValues).toContain('ingress.ipAllowlist[0]=1.1.1.1/32');
+      expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
+    });
+
+    it('respects disableIngressHost for org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+            disableIngressHost: true,
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).not.toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
+      expect(customValues.some((value) => value.startsWith('ingress.ipAllowlist['))).toBe(false);
+    });
+
+    it('keeps underscore env keys intact for direct helm values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_HOST: 'postgres.internal',
+        },
+        initEnv: {
+          INIT_DB_HOST: 'init-postgres.internal',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('deployment.env.DB_HOST="postgres.internal"');
+      expect(customValues).toContain('deployment.initEnv.INIT_DB_HOST=init-postgres.internal');
+      expect(customValues).toContain('deployment.initImage=repo/init:tag');
+      expect(customValues).not.toContain('deployment.env.DB__HOST="postgres.internal"');
+      expect(customValues).not.toContain('deployment.initEnv.INIT__DB__HOST=init-postgres.internal');
+      expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
+    });
+  });
+
   describe('envMapping for LOCAL charts', () => {
     beforeEach(() => {
       mockGetAllConfigs.mockResolvedValue({});
@@ -932,20 +1054,20 @@ describe('Native Helm', () => {
   describe('nativeHelmDeploy', () => {
     it('uses the canonical deploy job name for monitoring and archival', async () => {
       const deploy = {
-        uuid: 'cyclerx-cosmosdb-emulator-crimson-tooth-697165',
-        sha: '28e350a123456789',
+        uuid: 'sample-cosmos-emulator-preview-build-123456',
+        sha: 'abcdef1234567890',
         branchName: 'main',
         id: 42,
         deployableId: 99,
         deployable: {
-          name: 'cyclerx-cosmosdb-emulator',
-          repository: { fullName: 'GoodRx/example' },
+          name: 'sample-cosmos-emulator',
+          repository: { fullName: 'Lifecycle/example' },
         },
         build: {
-          uuid: 'crimson-tooth-697165',
+          uuid: 'preview-build-123456',
           namespace: 'testns',
           isStatic: false,
-          pullRequest: { repository: { fullName: 'GoodRx/example' } },
+          pullRequest: { repository: { fullName: 'Lifecycle/example' } },
         },
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
         $query: jest.fn().mockReturnValue({
@@ -998,7 +1120,7 @@ describe('Native Helm', () => {
       const expectedJobName = buildDeployJobName({
         deployUuid: deploy.uuid,
         jobId: 'k4hlde',
-        shortSha: '28e350a',
+        shortSha: 'abcdef1',
       });
 
       expect(waitForJobAndGetLogs).toHaveBeenCalledWith(expectedJobName, 'testns', `[HELM ${deploy.uuid}]`);

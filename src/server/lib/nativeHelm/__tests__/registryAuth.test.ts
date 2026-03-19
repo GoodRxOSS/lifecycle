@@ -62,8 +62,10 @@ describe('registryAuth', () => {
       expect(container.name).toBe('ecr-auth');
       expect(container.image).toBe('amazon/aws-cli:2.22.0');
       expect(container.command).toEqual(['/bin/sh', '-c']);
+      expect(container.args[0]).toContain('Fetching ECR auth token for 123456789012.dkr.ecr.us-west-2.amazonaws.com');
       expect(container.args[0]).toContain('aws ecr get-login-password --region us-west-2');
       expect(container.args[0]).toContain('/workspace/.helm/ecr-token');
+      expect(container.args[0]).toContain('Stored ECR auth token for 123456789012.dkr.ecr.us-west-2.amazonaws.com');
       expect(container.volumeMounts).toEqual([{ name: 'helm-workspace', mountPath: '/workspace' }]);
     });
   });

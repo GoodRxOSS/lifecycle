@@ -24,13 +24,22 @@ jest.mock('../helm', () => ({
 }));
 jest.mock('../kubernetesApply/applyManifest', () => ({
   createKubernetesApplyJob: jest.fn().mockResolvedValue(void 0),
-  monitorKubernetesJob: jest.fn().mockResolvedValue({ success: true, message: 'ok' }),
+  monitorKubernetesJob: jest.fn().mockResolvedValue({ success: true, message: 'ok', logs: 'apply logs' }),
 }));
 jest.mock('../kubernetes/common/serviceAccount', () => ({
   ensureServiceAccountForJob: jest.fn().mockResolvedValue(void 0),
 }));
 jest.mock('../kubernetes', () => ({
   waitForDeployPodReady: jest.fn().mockResolvedValue(true),
+}));
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(),
+  },
+}));
+jest.mock('server/services/logArchival', () => ({
+  getLogArchivalService: jest.fn(),
 }));
 jest.mock('server/services/deploy', () => {
   return jest.fn().mockImplementation(() => ({
@@ -39,6 +48,8 @@ jest.mock('server/services/deploy', () => {
 });
 
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
+import GlobalConfigService from 'server/services/globalConfig';
+import { getLogArchivalService } from 'server/services/logArchival';
 
 // todo: add more tests for the below scenarios
 // let deploysWithoutDependencies: Deploy[];
@@ -49,8 +60,18 @@ import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApp
 describe('DeploymentManager', () => {
   let deploys: Deploy[];
   let deploymentManager: DeploymentManager;
+  const mockGetAllConfigs = jest.fn();
+  const mockArchiveLogs = jest.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
+    jest.clearAllMocks();
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: mockGetAllConfigs,
+    });
+    mockGetAllConfigs.mockResolvedValue({ logArchival: { enabled: true } });
+    (getLogArchivalService as jest.Mock).mockReturnValue({
+      archiveLogs: mockArchiveLogs,
+    });
     deploys = [
       { deployable: { name: 'serviceA', deploymentDependsOn: [] } },
       { deployable: { name: 'serviceB', deploymentDependsOn: ['serviceA'] } },
@@ -195,15 +216,15 @@ describe('DeploymentManager', () => {
   describe('deployManifests', () => {
     it('monitors the canonical truncated deploy job name for long deploy uuids', async () => {
       const deploy = {
-        uuid: 'cyclerx-cosmosdb-emulator-crimson-tooth-697165',
-        sha: '28e350a123456789',
+        uuid: 'sample-cosmos-emulator-preview-build-123456',
+        sha: 'abcdef1234567890',
         manifest: 'apiVersion: v1\nkind: ConfigMap',
         runUUID: 'run-1',
         build: {
           namespace: 'testns',
         },
         deployable: {
-          name: 'cyclerx-cosmosdb-emulator',
+          name: 'sample-cosmos-emulator',
           type: 'github',
           deploymentDependsOn: [],
         },
@@ -227,10 +248,58 @@ describe('DeploymentManager', () => {
       const expectedJobName = buildDeployJobName({
         deployUuid: deploy.uuid,
         jobId: createdJobId,
-        shortSha: '28e350a',
+        shortSha: 'abcdef1',
       });
 
       expect(monitorKubernetesJob).toHaveBeenCalledWith(expectedJobName, 'testns');
+    });
+
+    it('archives kubernetes apply logs for non-helm deploys when log archival is enabled', async () => {
+      (monitorKubernetesJob as jest.Mock).mockResolvedValueOnce({
+        success: true,
+        message: 'ok',
+        logs: 'kubectl apply logs',
+        startedAt: '2026-03-19T17:02:53.000Z',
+        completedAt: '2026-03-19T17:02:57.000Z',
+        duration: 4,
+      });
+
+      const deploy = {
+        id: 42,
+        uuid: 'sample-webapi-preview-build-123456',
+        sha: 'abcdef1234567890',
+        manifest: 'apiVersion: v1\nkind: ConfigMap',
+        runUUID: 'run-1',
+        build: {
+          namespace: 'testns',
+        },
+        deployable: {
+          name: 'sample-webapi',
+          type: 'github',
+          deploymentDependsOn: [],
+        },
+        service: {
+          name: 'sample-webapi',
+          type: 'github',
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Deploy;
+
+      deploymentManager = new DeploymentManager([deploy]);
+
+      await deploymentManager['deployManifests'](deploy);
+
+      expect(mockArchiveLogs).toHaveBeenCalledWith(
+        expect.objectContaining({
+          jobType: 'deploy',
+          jobName: expect.stringContaining('sample-webapi-preview-build-123456-deploy-'),
+          serviceName: 'sample-webapi',
+          namespace: 'testns',
+          deployUuid: 'sample-webapi-preview-build-123456',
+          deploymentType: 'github',
+        }),
+        'kubectl apply logs'
+      );
     });
   });
 });

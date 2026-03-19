@@ -47,7 +47,11 @@ export function createRegistryAuthInitContainer(auth: RegistryAuthConfig): any {
         image: 'amazon/aws-cli:2.22.0',
         command: ['/bin/sh', '-c'],
         args: [
-          `mkdir -p /workspace/.helm && aws ecr get-login-password --region ${auth.region} > /workspace/.helm/ecr-token`,
+          `set -e
+echo "Fetching ECR auth token for ${auth.registry}"
+mkdir -p /workspace/.helm
+aws ecr get-login-password --region ${auth.region} > /workspace/.helm/ecr-token
+echo "Stored ECR auth token for ${auth.registry}"`,
         ],
         resources: {
           requests: { cpu: '100m', memory: '128Mi' },

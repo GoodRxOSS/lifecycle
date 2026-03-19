@@ -17,7 +17,7 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
-import { constructHelmDeploysBuildMetaData, grpcMapping } from 'server/lib/helm';
+import { constructHelmDeploysBuildMetaData, grpcMapping, helmOrgAppDeployStep } from 'server/lib/helm';
 import { Deploy } from 'server/models';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -26,6 +26,13 @@ jest.mock('server/lib/envVariables', () => ({
 }));
 
 jest.mock('server/services/globalConfig');
+jest.mock('server/lib/helm/utils', () => {
+  const originalModule = jest.requireActual('server/lib/helm/utils');
+  return {
+    ...originalModule,
+    renderTemplate: jest.fn().mockImplementation(async (_build, values) => values || []),
+  };
+});
 
 describe('Helm tests', () => {
   test('constructHelmDeploysBuildMetaData should return the correct metadata', async () => {
@@ -153,6 +160,73 @@ describe('Helm tests', () => {
         'ambassadorMappings[1].host=test-deploy-uuid.grpc-alt.example.com:443',
         'ambassadorMappings[1].port=8080',
       ]);
+    });
+  });
+
+  describe('helmOrgAppDeployStep', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    test('does not emit deployment.version when init image is present', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        lifecycleDefaults: {
+          deployCluster: 'test-cluster',
+          cfStepType: 'helm',
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+        },
+      });
+      const mockGetOrgChartName = jest.fn().mockResolvedValue('lifecycle-app');
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+        getOrgChartName: mockGetOrgChartName,
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_HOST: 'postgres.internal',
+        },
+        initEnv: {
+          INIT_DB_HOST: 'init-postgres.internal',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          namespace: 'env-test',
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn(),
+      } as unknown as Deploy;
+
+      const result = await helmOrgAppDeployStep(deploy);
+      const customValues = result.arguments.custom_values as string[];
+
+      expect(customValues).toContain('deployment.initImage=repo/init:tag');
+      expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
     });
   });
 });
