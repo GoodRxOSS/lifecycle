@@ -24,6 +24,8 @@ import { getLogger, withLogContext } from 'server/lib/logger';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { waitForDeployPodReady } from '../kubernetes';
 import { buildDeployJobName } from '../kubernetes/jobNames';
+import GlobalConfigService from 'server/services/globalConfig';
+import { getLogArchivalService } from 'server/services/logArchival';
 
 const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
 
@@ -134,6 +136,41 @@ export class DeploymentManager {
     return [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType);
   }
 
+  private async archiveDeployLogs(
+    deploy: Deploy,
+    jobName: string,
+    result: {
+      success: boolean;
+      logs?: string;
+      startedAt?: string;
+      completedAt?: string;
+      duration?: number;
+    }
+  ): Promise<void> {
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    if (!globalConfig.logArchival?.enabled || !result.logs) {
+      return;
+    }
+
+    await getLogArchivalService().archiveLogs(
+      {
+        jobName,
+        jobType: 'deploy',
+        serviceName: deploy.deployable?.name || deploy.service?.name || '',
+        namespace: deploy.build.namespace,
+        status: result.success ? 'Complete' : 'Failed',
+        sha: deploy.sha || '',
+        deployUuid: deploy.uuid,
+        deploymentType: 'github',
+        startedAt: result.startedAt,
+        completedAt: result.completedAt,
+        duration: result.duration,
+        archivedAt: new Date().toISOString(),
+      },
+      result.logs
+    );
+  }
+
   private async deployManifests(deploy: Deploy): Promise<void> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       const jobId = generateJobId();
@@ -171,6 +208,7 @@ export class DeploymentManager {
           shortSha,
         });
         const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
+        await this.archiveDeployLogs(deploy, jobName, result);
 
         if (!result.success) {
           throw new Error(result.message);

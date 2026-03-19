@@ -20,6 +20,7 @@ import { Deploy } from 'server/models';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
+import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
 
 export interface KubernetesApplyJobConfig {
   deploy: Deploy;
@@ -188,48 +189,30 @@ export async function monitorKubernetesJob(
   jobName: string,
   namespace: string,
   maxAttempts = 120
-): Promise<{ success: boolean; message: string }> {
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
-  const batchApi = kc.makeApiClient(k8s.BatchV1Api);
+): Promise<{
+  success: boolean;
+  message: string;
+  logs: string;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
+}> {
+  try {
+    const timeoutSeconds = maxAttempts * 5;
+    const result = await JobMonitor.waitForJobAndGetLogs(jobName, namespace, timeoutSeconds, ['kubectl-apply']);
 
-  let attempts = 0;
-
-  while (attempts < maxAttempts) {
-    try {
-      const job = await batchApi.readNamespacedJob(jobName, namespace);
-
-      if (job.body.status?.succeeded) {
-        return {
-          success: true,
-          message: 'Kubernetes resources applied successfully',
-        };
-      }
-
-      if (job.body.status?.failed) {
-        const conditions = job.body.status.conditions || [];
-        const failureReason =
-          conditions
-            .filter((c) => c.type === 'Failed')
-            .map((c) => c.message)
-            .join('; ') || 'Unknown failure reason';
-
-        return {
-          success: false,
-          message: `Kubernetes apply job failed: ${failureReason}`,
-        };
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      attempts++;
-    } catch (error) {
-      getLogger({ error }).error(`Job: monitor failed name=${jobName}`);
-      throw error;
-    }
+    return {
+      success: result.success,
+      message: result.success ? 'Kubernetes resources applied successfully' : 'Kubernetes apply job failed',
+      logs: result.logs,
+      status: result.status,
+      startedAt: result.startedAt,
+      completedAt: result.completedAt,
+      duration: result.duration,
+    };
+  } catch (error) {
+    getLogger({ error }).error(`Job: monitor failed name=${jobName}`);
+    throw error;
   }
-
-  return {
-    success: false,
-    message: 'Kubernetes apply job timed out after 10 minutes',
-  };
 }

@@ -1054,17 +1054,17 @@ describe('Native Helm', () => {
   describe('nativeHelmDeploy', () => {
     it('uses the canonical deploy job name for monitoring and archival', async () => {
       const deploy = {
-        uuid: 'cyclerx-cosmosdb-emulator-crimson-tooth-697165',
-        sha: '28e350a123456789',
+        uuid: 'sample-cosmos-emulator-preview-build-123456',
+        sha: 'abcdef1234567890',
         branchName: 'main',
         id: 42,
         deployableId: 99,
         deployable: {
-          name: 'cyclerx-cosmosdb-emulator',
+          name: 'sample-cosmos-emulator',
           repository: { fullName: 'Lifecycle/example' },
         },
         build: {
-          uuid: 'crimson-tooth-697165',
+          uuid: 'preview-build-123456',
           namespace: 'testns',
           isStatic: false,
           pullRequest: { repository: { fullName: 'Lifecycle/example' } },
@@ -1120,7 +1120,7 @@ describe('Native Helm', () => {
       const expectedJobName = buildDeployJobName({
         deployUuid: deploy.uuid,
         jobId: 'k4hlde',
-        shortSha: '28e350a',
+        shortSha: 'abcdef1',
       });
 
       expect(waitForJobAndGetLogs).toHaveBeenCalledWith(expectedJobName, 'testns', `[HELM ${deploy.uuid}]`);
