@@ -229,6 +229,24 @@ describe('buildkitBuild', () => {
     expect(result.jobName.length).toBeLessThanOrEqual(63); // Kubernetes name limit
   });
 
+  it('canonicalizes long job names without leaving a trailing dash', async () => {
+    const longNameOptions = {
+      ...mockOptions,
+      deployUuid: 'subs-process-cancellations-solitary-glitter-950234',
+      revision: '0d84142392d618abb9d2b900bea68152bd80754d',
+    };
+
+    const result = await buildkitBuild(mockDeploy, longNameOptions);
+
+    expect(result.jobName).toMatch(/^subs-process-cancellations-solitary-glitter-build-[a-z0-9]{5}-0d84142$/);
+    expect(result.jobName.endsWith('-')).toBe(false);
+    expect(result.jobName.length).toBeLessThanOrEqual(63);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    expect(applyCall[0]).toContain(`name: "${result.jobName}"`);
+  });
+
   it('sets proper job metadata and labels', async () => {
     await buildkitBuild(mockDeploy, mockOptions);
 

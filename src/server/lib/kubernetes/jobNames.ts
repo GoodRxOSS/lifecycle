@@ -23,13 +23,15 @@ interface BuildDeployJobNameOptions {
   maxLength?: number;
 }
 
-export function buildDeployJobName({
+function buildJobName({
   deployUuid,
-  jobId,
-  shortSha,
+  suffix,
   maxLength = KUBERNETES_NAME_MAX_LENGTH,
-}: BuildDeployJobNameOptions): string {
-  const suffix = `deploy-${jobId}-${shortSha}`;
+}: {
+  deployUuid: string;
+  suffix: string;
+  maxLength?: number;
+}): string {
   const fullName = `${deployUuid}-${suffix}`;
 
   if (fullName.length <= maxLength) {
@@ -44,4 +46,30 @@ export function buildDeployJobName({
 
   const truncatedPrefix = deployUuid.substring(0, maxPrefixLength).replace(/-+$/g, '');
   return truncatedPrefix ? `${truncatedPrefix}-${suffix}` : suffix;
+}
+
+export function buildDeployJobName({
+  deployUuid,
+  jobId,
+  shortSha,
+  maxLength = KUBERNETES_NAME_MAX_LENGTH,
+}: BuildDeployJobNameOptions): string {
+  return buildJobName({
+    deployUuid,
+    suffix: `deploy-${jobId}-${shortSha}`,
+    maxLength,
+  });
+}
+
+export function buildNativeBuildJobName({
+  deployUuid,
+  jobId,
+  shortSha,
+  maxLength = KUBERNETES_NAME_MAX_LENGTH,
+}: BuildDeployJobNameOptions): string {
+  return buildJobName({
+    deployUuid,
+    suffix: `build-${jobId}-${shortSha}`,
+    maxLength,
+  });
 }
