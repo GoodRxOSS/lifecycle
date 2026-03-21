@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { buildDeployJobName, KUBERNETES_NAME_MAX_LENGTH } from '../jobNames';
+import { buildDeployJobName, buildNativeBuildJobName, KUBERNETES_NAME_MAX_LENGTH } from '../jobNames';
 
 describe('buildDeployJobName', () => {
   it('preserves deploy job names that already fit', () => {
@@ -61,6 +61,53 @@ describe('buildDeployJobName', () => {
     });
 
     expect(jobName).toBe('deploy-k4hlde');
+    expect(jobName.endsWith('-')).toBe(false);
+  });
+});
+
+describe('buildNativeBuildJobName', () => {
+  it('preserves build job names that already fit', () => {
+    const jobName = buildNativeBuildJobName({
+      deployUuid: 'api-preview-build-123456',
+      jobId: 'k4hlde',
+      shortSha: 'abcdef1',
+    });
+
+    expect(jobName).toBe('api-preview-build-123456-build-k4hlde-abcdef1');
+  });
+
+  it('truncates only the prefix and preserves the full suffix', () => {
+    const jobName = buildNativeBuildJobName({
+      deployUuid: 'subs-process-cancellations-solitary-glitter-950234',
+      jobId: 'hd7k0',
+      shortSha: '0d84142',
+    });
+
+    expect(jobName).toHaveLength(KUBERNETES_NAME_MAX_LENGTH);
+    expect(jobName).toBe('subs-process-cancellations-solitary-glitter-build-hd7k0-0d84142');
+    expect(jobName.endsWith('build-hd7k0-0d84142')).toBe(true);
+  });
+
+  it('removes trailing separators after truncation', () => {
+    const jobName = buildNativeBuildJobName({
+      deployUuid: 'service-ending-with-dash------preview-build-123456',
+      jobId: 'job123',
+      shortSha: 'abcdef0',
+    });
+
+    expect(jobName).not.toContain('--build-');
+    expect(jobName.endsWith('-')).toBe(false);
+  });
+
+  it('returns a truncated suffix when suffix length alone exceeds maxLength', () => {
+    const jobName = buildNativeBuildJobName({
+      deployUuid: 'some-service',
+      jobId: 'k4hlde',
+      shortSha: 'abcdef1',
+      maxLength: 13,
+    });
+
+    expect(jobName).toBe('build-k4hlde');
     expect(jobName.endsWith('-')).toBe(false);
   });
 });

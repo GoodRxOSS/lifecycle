@@ -25,6 +25,7 @@ import {
   createRepoSpecificGitCloneContainer,
 } from './utils';
 import { createBuildJob } from '../kubernetes/jobFactory';
+import { buildNativeBuildJobName } from '../kubernetes/jobNames';
 import * as yaml from 'js-yaml';
 import { getLogArchivalService } from '../../services/logArchival';
 
@@ -293,7 +294,11 @@ export async function buildWithEngine(
   const shortRepoName = options.repo.split('/')[1] || options.repo;
   const jobId = Math.random().toString(36).substring(2, 7);
   const shortSha = options.revision.substring(0, 7);
-  const jobName = `${options.deployUuid}-build-${jobId}-${shortSha}`.substring(0, 63);
+  const jobName = buildNativeBuildJobName({
+    deployUuid: options.deployUuid,
+    jobId,
+    shortSha,
+  });
   const contextPath = `/workspace/repo-${shortRepoName}`;
 
   getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath}`);
