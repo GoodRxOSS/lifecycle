@@ -19,7 +19,7 @@ import BaseService from './_service';
 import { Environment, Repository, Service, PullRequest, Build, Deploy } from 'server/models';
 import Deployable from 'server/models/Deployable';
 import * as YamlService from 'server/models/yaml';
-import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
+import { CAPACITY_TYPE, DeployStatus, DeployTypes } from 'shared/constants';
 
 import { Builder, Helm, KedaScaleToZero } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
@@ -1048,6 +1048,10 @@ export default class DeployableService extends BaseService {
           buildId,
           Array.from(deployableServices.values())
         );
+
+        if (build?.enableFullYaml) {
+          await this.cleanupOrphanedDeploys(buildId, buildUUID, deployables, build);
+        }
       } else {
         getLogger({ buildUUID }).fatal('Pull Request cannot be undefined');
       }
@@ -1061,6 +1065,49 @@ export default class DeployableService extends BaseService {
     }
     getLogger({ buildUUID }).info(`Deployable: upserted count=${deployables.length}`);
     return deployables;
+  }
+
+  private async cleanupOrphanedDeploys(
+    buildId: number,
+    buildUUID: string,
+    currentDeployables: Deployable[],
+    build: Build
+  ): Promise<void> {
+    const currentNames = new Set(currentDeployables.map((d) => d.name));
+
+    const allExisting = await this.db.models.Deployable.query()
+      .where('buildUUID', buildUUID)
+      .where('buildId', buildId)
+      .catch((error) => {
+        getLogger({ buildUUID }).warn({ error }, 'Deployable: orphan check query failed');
+        return [] as Deployable[];
+      });
+
+    const orphanedDeployables = allExisting.filter((d) => !currentNames.has(d.name) && d.active !== false);
+
+    if (orphanedDeployables.length === 0) return;
+
+    const orphanNames = orphanedDeployables.map((d) => d.name).join(',');
+    getLogger({ buildUUID }).info(
+      `Deployable: orphans detected count=${orphanedDeployables.length} names=[${orphanNames}]`
+    );
+
+    const orphanIds = orphanedDeployables.map((d) => d.id);
+    const orphanDeploys = await this.db.models.Deploy.query()
+      .whereIn('deployableId', orphanIds)
+      .where('buildId', buildId)
+      .where('active', true)
+      .whereNot('status', DeployStatus.TORN_DOWN)
+      .catch((error) => {
+        getLogger({ buildUUID }).warn({ error }, 'Deployable: orphan deploys query failed');
+        return [] as Deploy[];
+      });
+
+    if (orphanDeploys.length === 0) return;
+
+    await this.db.services.Deploy.enqueueDeployCleanup(orphanDeploys, build.namespace).catch((error) => {
+      getLogger({ buildUUID }).warn({ error }, 'Deployable: enqueue orphan cleanup failed');
+    });
   }
 
   /**

@@ -38,6 +38,18 @@ import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import { SecretProcessor } from 'server/services/secretProcessor';
+import { Queue, Job } from 'bullmq';
+import { QUEUE_NAMES } from 'shared/config';
+import { redisClient } from 'server/lib/dependencies';
+import { uninstallHelmRelease } from 'server/lib/nativeHelm/utils';
+import { shellPromise } from 'server/lib/shell';
+import { JobDataWithContext } from 'server/lib/logger';
+import { BuildStatus } from 'shared/constants';
+
+interface DeployCleanupJob extends JobDataWithContext {
+  deployId: number;
+  namespace: string;
+}
 
 export interface DeployOptions {
   ownerId?: number;
@@ -1256,4 +1268,100 @@ export default class DeployService extends BaseService {
       },
     });
   }
+
+  deployCleanupQueue: Queue<DeployCleanupJob> = this.queueManager.registerQueue(QUEUE_NAMES.DEPLOY_CLEANUP, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 3,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  });
+
+  async enqueueDeployCleanup(deploys: Deploy[], namespace: string): Promise<void> {
+    await Promise.all(
+      deploys.map((deploy) =>
+        this.deployCleanupQueue.add('cleanup', {
+          deployId: deploy.id,
+          namespace,
+          ...extractContextForQueue(),
+        })
+      )
+    );
+  }
+
+  processDeployCleanupQueue = async (job: Job<DeployCleanupJob>): Promise<void> => {
+    const { deployId, namespace, correlationId } = job.data;
+
+    return withLogContext({ correlationId: correlationId || `deploy-cleanup-${deployId}` }, async () => {
+      const deploy = await Deploy.query()
+        .findById(deployId)
+        .withGraphFetched('[deployable, build.[pullRequest]]')
+        .catch(() => null);
+
+      if (!deploy) {
+        getLogger().warn({ deployId }, 'DeployCleanup: deploy not found, skipping');
+        return;
+      }
+
+      if (deploy.status === DeployStatus.TORN_DOWN || !deploy.active) {
+        getLogger().debug(
+          { deployId, deployUuid: deploy.uuid },
+          'DeployCleanup: already torn down or inactive, skipping'
+        );
+        return;
+      }
+
+      const deployType = deploy.deployable?.type ?? deploy.service?.type;
+      getLogger().info(
+        { deployId, deployUuid: deploy.uuid, deployType, namespace },
+        'DeployCleanup: tearing down orphaned deploy'
+      );
+
+      try {
+        if (deployType === DeployTypes.HELM) {
+          await uninstallHelmRelease(deploy.uuid, namespace);
+        } else if ([DeployTypes.GITHUB, DeployTypes.DOCKER].includes(deployType)) {
+          await shellPromise(`kubectl delete all,pvc -l deploy_uuid=${deploy.uuid} --namespace ${namespace}`).catch(
+            (error: Error) => {
+              if (!error.message?.includes('No resources found')) {
+                throw error;
+              }
+            }
+          );
+        }
+      } catch (error) {
+        getLogger().error({ error, deployId, deployUuid: deploy.uuid }, 'DeployCleanup: K8s resource cleanup failed');
+        throw error;
+      }
+
+      await deploy.$query().patch({ status: DeployStatus.TORN_DOWN, active: false });
+
+      if (deploy.deployable) {
+        await deploy.deployable.$query().patch({ active: false });
+      }
+
+      if (deploy.build?.githubDeployments) {
+        await this.db.services.GithubService.githubDeploymentQueue.add('deployment', {
+          deployId: deploy.id,
+          action: 'delete',
+          ...extractContextForQueue(),
+        });
+      }
+
+      if (deploy.build) {
+        await this.db.services.BuildService.updateStatusAndComment(
+          deploy.build,
+          deploy.build.status as BuildStatus,
+          deploy.build.runUUID,
+          true,
+          true
+        ).catch((error) => {
+          getLogger().warn({ error, deployId }, 'DeployCleanup: PR comment refresh failed');
+        });
+      }
+
+      getLogger().info({ deployId, deployUuid: deploy.uuid }, 'DeployCleanup: orphaned deploy torn down');
+    });
+  };
 }
