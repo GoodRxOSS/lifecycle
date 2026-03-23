@@ -44,6 +44,14 @@ jest.mock('server/services/globalConfig', () => ({
   },
 }));
 
+jest.mock('server/lib/nativeBuild', () => ({
+  buildWithNative: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('server/services/logArchival', () => ({
+  LogArchivalService: jest.fn().mockImplementation(() => ({})),
+}));
+
 jest.mock('server/lib/nativeHelm/utils', () => ({
   uninstallHelmRelease: jest.fn().mockResolvedValue(undefined),
 }));

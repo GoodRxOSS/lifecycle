@@ -127,6 +127,10 @@ export default class DeployService extends BaseService {
             patchFields.uuid = uuid;
             patchFields.branchName = deployable.commentBranchName ?? deployable.branchName;
             patchFields.tag = deployable.defaultTag;
+            if (deploy.status === DeployStatus.TORN_DOWN && deployable.active) {
+              patchFields.status = DeployStatus.PENDING;
+              patchFields.active = true;
+            }
           } else {
             deploy = await this.db.models.Deploy.create({
               buildId,

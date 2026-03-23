@@ -1152,6 +1152,12 @@ export default class DeployableService extends BaseService {
                   error,
                 }).error('Deployable: patch failed');
               });
+            deployable = await deployable.$query().catch((error) => {
+              getLogger({ buildUUID, service: deployableAttr.name, error }).error(
+                'Deployable: refresh after patch failed'
+              );
+              return deployable;
+            });
           } else {
             deployable = await this.db.models.Deployable.create(deployableAttr as object).catch((error) => {
               getLogger({
