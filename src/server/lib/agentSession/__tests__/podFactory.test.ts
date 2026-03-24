@@ -72,6 +72,15 @@ const baseOpts: AgentPodOpts = {
   },
 };
 
+function getInitContainer(pod: k8s.V1Pod, name: string): k8s.V1Container {
+  const container = pod.spec!.initContainers!.find((entry) => entry.name === name);
+  if (!container) {
+    throw new Error(`Init container not found: ${name}`);
+  }
+
+  return container;
+}
+
 describe('podFactory', () => {
   const originalTimeout = process.env.AGENT_POD_READY_TIMEOUT_MS;
   const originalPoll = process.env.AGENT_POD_READY_POLL_MS;
@@ -121,9 +130,12 @@ describe('podFactory', () => {
   describe('buildAgentPodSpec', () => {
     it('creates a pod with init and main containers', () => {
       const pod = buildAgentPodSpec(baseOpts);
-      expect(pod.spec!.initContainers).toHaveLength(1);
+      expect(pod.spec!.initContainers).toHaveLength(2);
       expect(pod.spec!.containers).toHaveLength(2);
-      expect(pod.spec!.initContainers![0].name).toBe('init-workspace');
+      expect(pod.spec!.initContainers!.map((container) => container.name)).toEqual([
+        'prepare-workspace',
+        'init-workspace',
+      ]);
       expect(pod.spec!.containers[0].name).toBe('agent');
       expect(pod.spec!.containers[1].name).toBe('editor');
     });
@@ -132,7 +144,7 @@ describe('podFactory', () => {
       const pod = buildAgentPodSpec(baseOpts);
       expect(pod.spec!.containers[0].command).toEqual(['sleep', 'infinity']);
       expect(pod.spec!.containers[0].imagePullPolicy).toBe('IfNotPresent');
-      expect(pod.spec!.initContainers![0].imagePullPolicy).toBe('IfNotPresent');
+      expect(getInitContainer(pod, 'init-workspace').imagePullPolicy).toBe('IfNotPresent');
     });
 
     it('mounts PVC as workspace volume', () => {
@@ -249,7 +261,7 @@ describe('podFactory', () => {
 
     it('passes user identity env vars to the init container', () => {
       const pod = buildAgentPodSpec(baseOpts);
-      expect(pod.spec!.initContainers![0].env).toEqual(
+      expect(getInitContainer(pod, 'init-workspace').env).toEqual(
         expect.arrayContaining([
           {
             name: 'GITHUB_TOKEN',
@@ -294,7 +306,7 @@ describe('podFactory', () => {
         forwardedAgentSecretServiceName: 'agent-env-abc123',
       });
 
-      expect(pod.spec!.initContainers![0].env).toEqual(
+      expect(getInitContainer(pod, 'init-workspace').env).toEqual(
         expect.arrayContaining([
           { name: 'PACKAGE_REGISTRY_TOKEN', value: 'plain-token' },
           {
@@ -327,7 +339,7 @@ describe('podFactory', () => {
     it('omits GitHub token secret refs when token forwarding is disabled', () => {
       const pod = buildAgentPodSpec({ ...baseOpts, hasGitHubToken: false });
       const agentEnv = pod.spec!.containers[0].env || [];
-      const initEnv = pod.spec!.initContainers![0].env || [];
+      const initEnv = getInitContainer(pod, 'init-workspace').env || [];
 
       expect(agentEnv.find((env) => env.name === 'GITHUB_TOKEN')).toBeUndefined();
       expect(agentEnv.find((env) => env.name === 'GH_TOKEN')).toBeUndefined();
@@ -337,7 +349,13 @@ describe('podFactory', () => {
 
     it('mounts writable /tmp in both init and main containers', () => {
       const pod = buildAgentPodSpec(baseOpts);
-      expect(pod.spec!.initContainers![0].volumeMounts).toEqual(
+      expect(getInitContainer(pod, 'prepare-workspace').volumeMounts).toEqual(
+        expect.arrayContaining([
+          { name: 'workspace', mountPath: '/workspace-volume' },
+          { name: 'tmp', mountPath: '/tmp' },
+        ])
+      );
+      expect(getInitContainer(pod, 'init-workspace').volumeMounts).toEqual(
         expect.arrayContaining([{ name: 'tmp', mountPath: '/tmp' }])
       );
       expect(pod.spec!.containers[0].volumeMounts).toEqual(
@@ -361,7 +379,8 @@ describe('podFactory', () => {
         },
       };
 
-      expect(pod.spec!.initContainers![0].resources).toEqual(expectedResources);
+      expect(getInitContainer(pod, 'prepare-workspace').resources).toEqual(expectedResources);
+      expect(getInitContainer(pod, 'init-workspace').resources).toEqual(expectedResources);
       expect(pod.spec!.containers[0].resources).toEqual(expectedResources);
       expect(pod.spec!.containers[1].resources).toEqual({
         requests: {
@@ -431,6 +450,31 @@ describe('podFactory', () => {
           }),
         })
       );
+    });
+
+    it('mounts the repo subpath at /workspace for shared workspace containers', () => {
+      const pod = buildAgentPodSpec(baseOpts);
+      const initWorkspaceMount = getInitContainer(pod, 'init-workspace').volumeMounts!.find(
+        (mount) => mount.name === 'workspace'
+      );
+      const agentWorkspaceMount = pod.spec!.containers[0].volumeMounts!.find((mount) => mount.name === 'workspace');
+      const editorWorkspaceMount = pod.spec!.containers[1].volumeMounts!.find((mount) => mount.name === 'workspace');
+
+      expect(initWorkspaceMount).toEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+        subPath: 'repo',
+      });
+      expect(agentWorkspaceMount).toEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+        subPath: 'repo',
+      });
+      expect(editorWorkspaceMount).toEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+        subPath: 'repo',
+      });
     });
 
     it('does not set runtimeClassName when gVisor not requested', () => {
