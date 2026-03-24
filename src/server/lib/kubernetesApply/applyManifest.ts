@@ -95,6 +95,7 @@ export async function createKubernetesApplyJob({
               kubectl apply -f /manifests/manifest.yaml
               
               if kubectl get deployment ${deploy.uuid} -n ${namespace} &>/dev/null; then
+                kubectl rollout restart deployment/${deploy.uuid} -n ${namespace}
                 kubectl rollout status deployment/${deploy.uuid} -n ${namespace} --timeout=300s
               fi
             `,
