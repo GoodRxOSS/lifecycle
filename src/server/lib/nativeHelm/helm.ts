@@ -41,7 +41,6 @@ import {
   getHelmConfiguration,
   generateHelmInstallScript,
   validateHelmConfiguration,
-  resolveHelmReleaseConflicts,
 } from './utils';
 import { detectRegistryAuth, RegistryAuthConfig } from './registryAuth';
 import { HELM_IMAGE_PREFIX } from './constants';
@@ -219,9 +218,6 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   const deployable = requireDeployable(deploy);
   const jobId = randomAlphanumeric(4).toLowerCase();
   const { namespace } = options;
-  const releaseName = deploy.uuid.toLowerCase();
-
-  await resolveHelmReleaseConflicts(releaseName, namespace);
 
   await ensureServiceAccountForJob(namespace, 'deploy');
 
