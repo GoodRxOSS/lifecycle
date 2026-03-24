@@ -19,11 +19,13 @@ import type {
   AgentSessionClaudeAttribution,
   AgentSessionClaudeConfig,
   AgentSessionClaudePermissions,
+  AgentSessionSchedulingConfig,
 } from 'server/services/types/globalConfig';
 
 export interface AgentSessionRuntimeConfig {
   image: string;
   editorImage: string;
+  nodeSelector?: Record<string, string>;
   claude: ResolvedAgentSessionClaudeConfig;
 }
 
@@ -67,6 +69,22 @@ function normalizeAttributionTemplate(template: unknown, fallback: string): stri
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null): Record<string, string> | undefined {
+  const nodeSelector = scheduling?.nodeSelector;
+
+  if (!nodeSelector || typeof nodeSelector !== 'object' || Array.isArray(nodeSelector)) {
+    return undefined;
+  }
+
+  const normalized = Object.fromEntries(
+    Object.entries(nodeSelector)
+      .filter(([key, value]) => typeof key === 'string' && key.trim() && typeof value === 'string' && value.trim())
+      .map(([key, value]) => [key.trim(), value.trim()])
+  );
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 export function resolveAgentSessionClaudeConfigFromDefaults(
@@ -145,6 +163,7 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
   return {
     image,
     editorImage,
+    nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
     claude: resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude),
   };
 }

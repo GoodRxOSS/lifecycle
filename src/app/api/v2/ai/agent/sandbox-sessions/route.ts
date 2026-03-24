@@ -277,6 +277,7 @@ const postHandler = async (req: NextRequest) => {
         model: body.model,
         agentImage: runtimeConfig.image,
         editorImage: runtimeConfig.editorImage,
+        nodeSelector: runtimeConfig.nodeSelector,
       } as SandboxSessionLaunchJob,
       {
         jobId: launchId,
