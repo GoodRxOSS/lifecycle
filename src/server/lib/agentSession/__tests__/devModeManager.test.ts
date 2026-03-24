@@ -122,7 +122,7 @@ describe('DevModeManager', () => {
                   image: 'node:20-slim',
                   command: ['/bin/sh', '-c', 'pnpm dev'],
                   workingDir: '/workspace',
-                  volumeMounts: [{ name: 'workspace', mountPath: '/workspace' }],
+                  volumeMounts: [{ name: 'workspace', mountPath: '/workspace', subPath: 'repo' }],
                 }),
               ],
             },
@@ -152,7 +152,7 @@ describe('DevModeManager', () => {
     const patchBody = mockPatchDeployment.mock.calls[0][2];
     expect(patchBody.spec.template.spec.containers[0].workingDir).toBe('/workspace/my-express-app');
     expect(patchBody.spec.template.spec.containers[0].volumeMounts).toEqual([
-      { name: 'workspace', mountPath: '/workspace' },
+      { name: 'workspace', mountPath: '/workspace', subPath: 'repo' },
     ]);
   });
 
@@ -301,7 +301,7 @@ describe('DevModeManager', () => {
                   command: ['/bin/sh', '-c', 'npm run dev'],
                   workingDir: '/workspace/my-express-app',
                   volumeMounts: [
-                    { name: 'workspace', mountPath: '/workspace' },
+                    { name: 'workspace', mountPath: '/workspace', subPath: 'repo' },
                     { name: 'config-volume', mountPath: '/config' },
                   ],
                 },
@@ -413,7 +413,7 @@ describe('DevModeManager', () => {
                   workingDir: '/workspace/grpc-echo',
                   env: [],
                   volumeMounts: [
-                    { name: 'workspace', mountPath: '/workspace' },
+                    { name: 'workspace', mountPath: '/workspace', subPath: 'repo' },
                     { name: 'config-volume', mountPath: '/config' },
                   ],
                 },
@@ -492,7 +492,7 @@ describe('DevModeManager', () => {
                   command: ['/bin/sh', '-c', 'go run ./server.go'],
                   workingDir: '/workspace/grpc-echo',
                   volumeMounts: [
-                    { name: 'workspace', mountPath: '/workspace' },
+                    { name: 'workspace', mountPath: '/workspace', subPath: 'repo' },
                     { name: 'config-volume', mountPath: '/config' },
                   ],
                 },
@@ -546,7 +546,7 @@ describe('DevModeManager', () => {
                   command: ['/bin/sh', '-c', 'go run ./server.go'],
                   workingDir: '/workspace/grpc-echo',
                   env: [{ name: 'DEV_ONLY', value: 'true' }],
-                  volumeMounts: [{ name: 'workspace', mountPath: '/workspace' }],
+                  volumeMounts: [{ name: 'workspace', mountPath: '/workspace', subPath: 'repo' }],
                 },
               ],
               volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } }],
