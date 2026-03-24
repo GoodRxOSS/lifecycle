@@ -433,6 +433,7 @@ const postHandler = async (req: NextRequest) => {
       namespace,
       agentImage: runtimeConfig.image,
       editorImage: runtimeConfig.editorImage,
+      nodeSelector: runtimeConfig.nodeSelector,
     });
 
     return successResponse(
