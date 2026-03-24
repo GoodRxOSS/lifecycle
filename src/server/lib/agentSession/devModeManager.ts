@@ -17,9 +17,9 @@
 import * as k8s from '@kubernetes/client-node';
 import { DevConfig } from 'server/models/yaml/YamlService';
 import { getLogger } from 'server/lib/logger';
+import { AGENT_WORKSPACE_ROOT, AGENT_WORKSPACE_SUBPATH } from './workspace';
 
 const logger = getLogger();
-const AGENT_WORKSPACE_ROOT = '/workspace';
 const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-deployment-snapshot';
 const DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-service-snapshot';
 
@@ -253,7 +253,9 @@ export class DevModeManager {
                 workingDir: workDir,
                 env: Object.entries(devConfig.env || {}).map(([name, value]) => ({ name, value })),
                 // Mount the shared repo root once and let workingDir target the service subdirectory.
-                volumeMounts: [{ name: 'workspace', mountPath: AGENT_WORKSPACE_ROOT }],
+                volumeMounts: [
+                  { name: 'workspace', mountPath: AGENT_WORKSPACE_ROOT, subPath: AGENT_WORKSPACE_SUBPATH },
+                ],
               },
             ],
           },
