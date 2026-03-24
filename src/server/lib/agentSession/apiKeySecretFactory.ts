@@ -51,7 +51,6 @@ export async function createAgentApiKeySecret(
       ...(githubToken
         ? {
             GITHUB_TOKEN: githubToken,
-            GH_TOKEN: githubToken,
           }
         : {}),
     },
