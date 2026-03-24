@@ -40,7 +40,6 @@ import {
   getHelmConfiguration,
   generateHelmInstallScript,
   validateHelmConfiguration,
-  resolveHelmReleaseConflicts,
 } from './utils';
 import { detectRegistryAuth, RegistryAuthConfig } from './registryAuth';
 import { HELM_IMAGE_PREFIX } from './constants';
@@ -71,6 +70,8 @@ export async function createHelmContainer(
   customValues: string[],
   valuesFiles: string[],
   chartType: ChartType,
+  serviceName: string,
+  jobName: string,
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
@@ -99,6 +100,8 @@ export async function createHelmContainer(
       { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
       { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
       { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
+      { name: 'LC_SERVICE_NAME', value: serviceName },
+      { name: 'LC_JOB_NAME', value: jobName },
     ],
     command: ['/bin/sh', '-c'],
     args: [script],
@@ -152,6 +155,8 @@ export async function generateHelmManifest(
     helmConfig.customValues,
     helmConfig.valuesFiles,
     helmConfig.chartType,
+    deploy.deployable.name,
+    jobName,
     helmArgs,
     chartRepoUrl,
     defaultArgs,
@@ -202,13 +207,8 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
 
   const jobId = randomAlphanumeric(4).toLowerCase();
   const { namespace } = options;
-  const releaseName = deploy.uuid.toLowerCase();
 
-  await resolveHelmReleaseConflicts(releaseName, namespace);
-
-  await ensureServiceAccountForJob(options.namespace, 'deploy');
-
-  await new Promise((resolve) => setTimeout(resolve, 2000));
+  await ensureServiceAccountForJob(namespace, 'deploy');
 
   const shortSha = deploy.sha ? deploy.sha.substring(0, 7) : 'no-sha';
   const jobName = buildDeployJobName({
@@ -223,7 +223,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   await fs.promises.writeFile(localPath, manifest, 'utf8');
   await shellPromise(`kubectl apply -f ${localPath}`);
 
-  const jobResult = await waitForJobAndGetLogs(jobName, options.namespace, `[HELM ${deploy.uuid}]`);
+  const jobResult = await waitForJobAndGetLogs(jobName, namespace, `[HELM ${deploy.uuid}]`);
 
   await deploy.$query().patch({ buildOutput: jobResult.logs });
 
@@ -236,7 +236,7 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
           jobName,
           jobType: 'deploy',
           serviceName: deploy.deployable.name,
-          namespace: options.namespace,
+          namespace,
           status: jobResult.success ? 'Complete' : 'Failed',
           sha: deploy.sha || '',
           deployUuid: deploy.uuid,

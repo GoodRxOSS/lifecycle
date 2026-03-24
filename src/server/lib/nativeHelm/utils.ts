@@ -28,158 +28,7 @@ import {
 } from 'server/lib/kubernetes/rbac';
 import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
 import { getLogger } from 'server/lib/logger';
-import { shellPromise } from 'server/lib/shell';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
-
-export interface HelmReleaseState {
-  status: 'deployed' | 'pending-install' | 'pending-upgrade' | 'pending-rollback' | 'failed' | 'unknown';
-  revision: number;
-  description: string;
-}
-
-export async function getHelmReleaseStatus(releaseName: string, namespace: string): Promise<HelmReleaseState | null> {
-  try {
-    const helmStatusOutput = await shellPromise(`helm status ${releaseName} -n ${namespace} --output json`);
-    const status = JSON.parse(helmStatusOutput);
-
-    return {
-      status: status.info?.status || 'unknown',
-      revision: status.version || 0,
-      description: status.info?.description || '',
-    };
-  } catch (error) {
-    if (error.message?.includes('release: not found')) {
-      return null;
-    }
-    getLogger().warn({ error }, `Helm: release status fetch failed name=${releaseName}`);
-    return null;
-  }
-}
-
-export async function isReleaseBlocked(releaseState: HelmReleaseState | null): Promise<boolean> {
-  if (!releaseState) return false;
-
-  const blockedStates = ['pending-install', 'pending-upgrade', 'pending-rollback'];
-  return blockedStates.includes(releaseState.status);
-}
-
-export async function uninstallHelmRelease(releaseName: string, namespace: string): Promise<void> {
-  getLogger().debug(`Helm: uninstalling release namespace=${namespace}`);
-
-  try {
-    await shellPromise(`helm uninstall ${releaseName} -n ${namespace} --wait --timeout 5m`);
-    getLogger().debug('Helm: release uninstalled');
-  } catch (error) {
-    if (error.message?.includes('release: not found')) {
-      getLogger().debug('Helm: release not found, skipping uninstall');
-      return;
-    }
-    throw error;
-  }
-}
-
-export async function killHelmJobsAndPods(releaseName: string, namespace: string): Promise<void> {
-  const log = getLogger();
-  log.debug('Helm: checking existing jobs');
-
-  try {
-    const existingJobs = await shellPromise(
-      `kubectl get jobs -n ${namespace} -l lc-uuid=${releaseName},app.kubernetes.io/name=native-helm -o json`
-    );
-    const jobsData = JSON.parse(existingJobs);
-
-    if (jobsData.items && jobsData.items.length > 0) {
-      log.warn(`Found ${jobsData.items.length} existing job(s), terminating`);
-
-      for (const job of jobsData.items) {
-        const jobName = job.metadata.name;
-
-        try {
-          await shellPromise(
-            `kubectl annotate job ${jobName} -n ${namespace} ` +
-              `lifecycle.goodrx.com/termination-reason=superseded-by-retry ` +
-              `lifecycle.goodrx.com/termination-time="${new Date().toISOString()}" ` +
-              `--overwrite`
-          );
-        } catch (annotateError) {
-          log.warn({ error: annotateError }, `Failed to annotate job: jobName=${jobName}`);
-        }
-
-        const podsOutput = await shellPromise(`kubectl get pods -n ${namespace} -l job-name=${jobName} -o json`);
-        const podsData = JSON.parse(podsOutput);
-
-        if (podsData.items && podsData.items.length > 0) {
-          for (const pod of podsData.items) {
-            const podName = pod.metadata.name;
-            try {
-              await shellPromise(`kubectl delete pod ${podName} -n ${namespace} --force --grace-period=0`);
-            } catch (podError) {
-              log.warn({ error: podError }, `Failed to delete pod: podName=${podName}`);
-            }
-          }
-        }
-
-        try {
-          await shellPromise(`kubectl delete job ${jobName} -n ${namespace} --force --grace-period=0`);
-        } catch (jobError) {
-          log.warn({ error: jobError }, `Failed to delete job: jobName=${jobName}`);
-        }
-      }
-    }
-  } catch (error) {
-    log.warn({ error }, 'Error checking for existing jobs');
-  }
-}
-
-export async function resolveHelmReleaseConflicts(releaseName: string, namespace: string): Promise<void> {
-  const log = getLogger();
-  log.debug('Helm: resolving conflicts');
-
-  await killHelmJobsAndPods(releaseName, namespace);
-
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  const releaseState = await getHelmReleaseStatus(releaseName, namespace);
-
-  if (!releaseState) {
-    return;
-  }
-
-  if (await isReleaseBlocked(releaseState)) {
-    log.warn(`Release blocked: status=${releaseState.status}, uninstalling`);
-
-    await uninstallHelmRelease(releaseName, namespace);
-
-    const maxWaitTime = 30000;
-    const pollInterval = 2000;
-    const startTime = Date.now();
-
-    while (Date.now() - startTime < maxWaitTime) {
-      const currentState = await getHelmReleaseStatus(releaseName, namespace);
-      if (!currentState) {
-        return;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
-    }
-
-    throw new Error(`Helm release ${releaseName} uninstall timed out after ${maxWaitTime / 1000} seconds`);
-  }
-}
-
-export async function checkIfJobWasSuperseded(jobName: string, namespace: string): Promise<boolean> {
-  try {
-    const annotations = await shellPromise(
-      `kubectl get job ${jobName} -n ${namespace} ` +
-        `-o jsonpath='{.metadata.annotations.lifecycle\\.goodrx\\.com/termination-reason}'`
-    );
-
-    return annotations === 'superseded-by-retry';
-  } catch (error) {
-    getLogger().debug({ error }, `Helm: job supersession check failed jobName=${jobName}`);
-    return false;
-  }
-}
 
 export interface HelmDeployOptions {
   namespace: string;
@@ -297,11 +146,56 @@ export function generateHelmInstallScript(
     chartVersion
   );
 
-  let script = `
-set -e
-echo "Starting helm deployment for ${releaseName}"
-
-`;
+  let script = [
+    'set -e',
+    `echo "Starting helm deployment for ${releaseName}"`,
+    '',
+    'apk add --no-cache -q jq',
+    '',
+    'KUBE_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)',
+    'KUBE_API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"',
+    'KUBE_CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt',
+    'SERVICE_NAME="${LC_SERVICE_NAME}"',
+    'MY_JOB_NAME="${LC_JOB_NAME}"',
+    'WAIT_TIMEOUT=900',
+    'POLL_INTERVAL=10',
+    '',
+    'echo "Checking for prior deploy jobs for service=${SERVICE_NAME}"',
+    '',
+    'my_created=$(curl -s --cacert "$KUBE_CA" \\',
+    '  -H "Authorization: Bearer $KUBE_TOKEN" \\',
+    `  "\${KUBE_API}/apis/batch/v1/namespaces/${namespace}/jobs/\${MY_JOB_NAME}" \\`,
+    "  | jq -r '.metadata.creationTimestamp')",
+    '',
+    'wait_start=$(date +%s)',
+    'while true; do',
+    '  elapsed=$(( $(date +%s) - wait_start ))',
+    '  if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then',
+    '    echo "ERROR: Timed out after ${WAIT_TIMEOUT}s waiting for prior deploy jobs to complete"',
+    '    exit 1',
+    '  fi',
+    '',
+    '  blocking_jobs=$(curl -s --cacert "$KUBE_CA" \\',
+    '    -H "Authorization: Bearer $KUBE_TOKEN" \\',
+    `    "\${KUBE_API}/apis/batch/v1/namespaces/${namespace}/jobs?labelSelector=service=\${SERVICE_NAME},app.kubernetes.io/name=native-helm" \\`,
+    '    | jq -r --arg my_name "$MY_JOB_NAME" --arg my_ts "$my_created" \'',
+    '      [.items[] |',
+    '        select(.metadata.name != $my_name) |',
+    '        select(.metadata.creationTimestamp < $my_ts or',
+    '              (.metadata.creationTimestamp == $my_ts and .metadata.name < $my_name)) |',
+    '        select(.status.active > 0)',
+    '      | .metadata.name] | join(" ")\')',
+    '',
+    '  if [ -z "$blocking_jobs" ]; then',
+    '    echo "No prior deploy jobs in progress, proceeding"',
+    '    break',
+    '  fi',
+    '',
+    '  echo "Waiting for prior deploy jobs to complete: $blocking_jobs (${elapsed}s/${WAIT_TIMEOUT}s)"',
+    '  sleep $POLL_INTERVAL',
+    'done',
+    '',
+  ].join('\n');
 
   if (repoName !== 'no-repo' && repoName.includes('/')) {
     script += `cd /workspace

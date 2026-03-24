@@ -33,7 +33,6 @@ jest.mock('../utils', () => {
     determineChartType: jest.fn(originalModule.determineChartType),
     getHelmConfiguration: jest.fn(originalModule.getHelmConfiguration),
     mergeHelmConfigWithGlobal: jest.fn(originalModule.mergeHelmConfigWithGlobal),
-    resolveHelmReleaseConflicts: jest.fn(originalModule.resolveHelmReleaseConflicts),
   };
 });
 jest.mock('server/lib/kubernetes');
@@ -553,6 +552,8 @@ describe('Native Helm', () => {
         ['key=value'],
         ['values.yaml'],
         ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
         '--force --timeout 60m0s --wait',
         'https://charts.example.com',
         '--wait --timeout 30m',
@@ -565,6 +566,8 @@ describe('Native Helm', () => {
         { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
         { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
         { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
+        { name: 'LC_SERVICE_NAME', value: 'my-service' },
+        { name: 'LC_JOB_NAME', value: 'my-job-name' },
       ]);
       expect(result.command).toEqual(['/bin/sh', '-c']);
       expect(result.args).toHaveLength(1);
@@ -933,6 +936,8 @@ describe('Native Helm', () => {
         [],
         [],
         ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
         undefined,
         'oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/my-chart',
         undefined,
@@ -956,6 +961,8 @@ describe('Native Helm', () => {
         [],
         [],
         ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
         undefined,
         'oci://ghcr.io/prometheus-community/helm-charts/prometheus'
       );
@@ -988,6 +995,8 @@ describe('Native Helm', () => {
         ['server.replicaCount=2'],
         [],
         ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
         undefined,
         'https://prometheus-community.github.io/helm-charts',
         undefined,
@@ -1040,6 +1049,8 @@ describe('Native Helm', () => {
         ['deployment.appImage=myapp:v1.2.3', 'version=v1.2.3'],
         [],
         ChartType.ORG_CHART,
+        'my-service',
+        'my-job-name',
         undefined,
         'cm://h.cfcr.io/helm/default',
         undefined,
@@ -1081,7 +1092,6 @@ describe('Native Helm', () => {
         logArchival: { enabled: true },
       });
 
-      (nativeHelmUtils.resolveHelmReleaseConflicts as jest.Mock).mockResolvedValue(undefined);
       (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
         chartType: ChartType.PUBLIC,
         customValues: [],
