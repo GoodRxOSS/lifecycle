@@ -30,11 +30,7 @@ function getAccessMode(): 'ReadWriteMany' | 'ReadWriteOnce' {
     return configured;
   }
 
-  if (process.env.ENVIRONMENT === 'dev' || process.env.APP_ENV === 'dev' || process.env.NODE_ENV === 'development') {
-    return 'ReadWriteOnce';
-  }
-
-  return 'ReadWriteMany';
+  return 'ReadWriteOnce';
 }
 
 export async function createAgentPvc(
