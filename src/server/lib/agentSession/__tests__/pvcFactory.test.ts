@@ -62,7 +62,7 @@ describe('pvcFactory', () => {
   });
 
   describe('createAgentPvc', () => {
-    it('creates a PVC with ReadWriteMany access mode', async () => {
+    it('creates a PVC with ReadWriteOnce access mode by default', async () => {
       mockCreatePvc.mockResolvedValue({ body: { metadata: { name: 'test-pvc' } } });
 
       await createAgentPvc('test-ns', 'test-pvc', '10Gi');
@@ -71,7 +71,7 @@ describe('pvcFactory', () => {
       const [ns, pvcBody] = mockCreatePvc.mock.calls[0];
       expect(ns).toBe('test-ns');
       expect(pvcBody.metadata.name).toBe('test-pvc');
-      expect(pvcBody.spec.accessModes).toEqual(['ReadWriteMany']);
+      expect(pvcBody.spec.accessModes).toEqual(['ReadWriteOnce']);
       expect(pvcBody.spec.resources.requests.storage).toBe('10Gi');
     });
 
@@ -95,13 +95,13 @@ describe('pvcFactory', () => {
     });
 
     it('honors AGENT_SESSION_PVC_ACCESS_MODE when configured', async () => {
-      process.env.AGENT_SESSION_PVC_ACCESS_MODE = 'ReadWriteOnce';
+      process.env.AGENT_SESSION_PVC_ACCESS_MODE = 'ReadWriteMany';
       mockCreatePvc.mockResolvedValue({ body: { metadata: { name: 'test-pvc' } } });
 
       await createAgentPvc('test-ns', 'test-pvc');
 
       const [, pvcBody] = mockCreatePvc.mock.calls[0];
-      expect(pvcBody.spec.accessModes).toEqual(['ReadWriteOnce']);
+      expect(pvcBody.spec.accessModes).toEqual(['ReadWriteMany']);
     });
   });
 
