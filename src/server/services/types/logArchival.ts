@@ -17,6 +17,7 @@
 export interface ArchivedJobMetadata {
   jobName: string;
   jobType: 'build' | 'deploy';
+  jobKind?: 'native-build' | 'rds';
   serviceName: string;
   namespace: string;
   status: 'Complete' | 'Failed';
@@ -28,5 +29,6 @@ export interface ArchivedJobMetadata {
   deployUuid?: string;
   buildUuid?: string;
   deploymentType?: 'helm' | 'github';
+  rdsType?: 'aurora' | 'rds';
   archivedAt: string;
 }

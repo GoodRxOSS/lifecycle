@@ -157,6 +157,21 @@ services:
       expect(result.text).toContain('(externalHttp)');
     });
 
+    it('detects rds type', () => {
+      const yaml = `
+services:
+  - name: svc
+    rds:
+      type: aurora
+      sourceTag:
+        value: phm-aurora
+`;
+      const result = summarizeLifecycleYaml(yaml);
+      expect(result.text).toContain('(rds)');
+      expect(result.text).toContain('Type: aurora');
+      expect(result.text).toContain('SourceTag: phm-aurora');
+    });
+
     it('prefers helm over codefresh when both present', () => {
       const yaml = `
 services:

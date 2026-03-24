@@ -224,6 +224,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             engine: {
               $ref: '#/components/schemas/NativeBuildEngine',
             },
+            jobKind: {
+              type: 'string',
+              enum: ['native-build', 'rds'],
+            },
+            rdsType: {
+              type: 'string',
+              enum: ['aurora', 'rds'],
+            },
             podName: {
               type: 'string',
               description: 'Kubernetes pod name associated with the build job',

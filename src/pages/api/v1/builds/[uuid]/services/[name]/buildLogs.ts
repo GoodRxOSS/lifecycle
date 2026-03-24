@@ -92,6 +92,14 @@ interface BuildLogsListResponse {
  *                         type: string
  *                         enum: [buildkit, kaniko, unknown]
  *                         description: Build engine used
+ *                       jobKind:
+ *                         type: string
+ *                         enum: [native-build, rds]
+ *                         description: Build-stage job kind
+ *                       rdsType:
+ *                         type: string
+ *                         enum: [aurora, rds]
+ *                         description: RDS subtype for RDS jobs
  *                       podName:
  *                         type: string
  *                         description: Kubernetes pod name associated with the build job

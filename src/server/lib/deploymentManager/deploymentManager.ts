@@ -16,7 +16,7 @@
 
 import { Deploy } from 'server/models';
 import { deployHelm } from '../helm';
-import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
+import { DeployStatus, DeployTypes, CLIDeployTypes, ExternalServiceDeployTypes } from 'shared/constants';
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
 import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
@@ -133,7 +133,7 @@ export class DeploymentManager {
   private shouldDeployWithKubernetes(deploy: Deploy): boolean {
     const deployType = deploy.deployable?.type || deploy.service?.type;
     // Note: only the below types have Kubernetes manifests
-    return [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType);
+    return [DeployTypes.GITHUB, DeployTypes.DOCKER, ...Array.from(ExternalServiceDeployTypes)].includes(deployType);
   }
 
   private async archiveDeployLogs(
@@ -223,7 +223,8 @@ export class DeploymentManager {
           runUUID
         );
 
-        const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
+        const cliDeploy =
+          ExternalServiceDeployTypes.has(deploy.deployable.type) || CLIDeployTypes.has(deploy.deployable.type);
         const isReady = cliDeploy ? true : await waitForDeployPodReady(deploy);
 
         if (isReady) {

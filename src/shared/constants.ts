@@ -20,6 +20,7 @@ export enum DeployTypes {
   GITHUB = 'github',
   EXTERNAL_HTTP = 'externalHTTP',
   AURORA_RESTORE = 'aurora-restore',
+  RDS = 'rds',
   CODEFRESH = 'codefresh',
   CONFIGURATION = 'configuration',
   HELM = 'helm',
@@ -30,6 +31,7 @@ export const DEPLOY_TYPES = [
   'github',
   'externalHttp',
   'auroraRestore',
+  'rds',
   'rdsRestore',
   'codefresh',
   'configuration',
@@ -41,6 +43,7 @@ export const DEPLOY_TYPES_DICTIONARY = {
   github: 'github',
   extneralHttp: 'externalHttp',
   auroraRestore: 'auroraRestore',
+  rds: 'rds',
   rdsRestore: 'rds-restore',
   codefresh: 'codefresh',
   configuration: 'configuration',
@@ -50,6 +53,10 @@ export const DEPLOY_TYPES_DICTIONARY = {
 export const HelmDeployTypes = new Set([DeployTypes.HELM]);
 
 export const CLIDeployTypes = new Set([DeployTypes.AURORA_RESTORE, DeployTypes.CODEFRESH]);
+
+export const BuildPhaseInfraDeployTypes = new Set([DeployTypes.AURORA_RESTORE, DeployTypes.CODEFRESH, DeployTypes.RDS]);
+
+export const ExternalServiceDeployTypes = new Set([DeployTypes.AURORA_RESTORE, DeployTypes.RDS]);
 
 export const KubernetesDeployTypes = new Set([DeployTypes.DOCKER, DeployTypes.GITHUB]);
 

@@ -98,6 +98,15 @@ describe('Yaml Service', () => {
       auroraRestore:
         command: 'ls'
         arguments: '-arg foobar'
+    - name: 'rdsApp'
+      rds:
+        type: 'aurora'
+        sourceTag:
+          value: 'phm-aurora'
+        engineVersion: '8.0.mysql_aurora.3.08.2'
+        additionalTags:
+          app-short: 'phm'
+          owner: 'pharmacy'
     - name: 'configurationApp'
       configuration:
         defaultTag: 'main'
@@ -212,6 +221,24 @@ describe('Yaml Service', () => {
     });
   });
 
+  describe('isRdsService', () => {
+    test('Non-RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'githubApp');
+
+      expect(YamlService.isRdsService(service)).toEqual(false);
+    });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.isRdsService(service)).toEqual(true);
+    });
+  });
+
   describe('getDeployType', () => {
     test('GithubService', () => {
       const parser = new YamlConfigParser();
@@ -259,6 +286,14 @@ describe('Yaml Service', () => {
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'configurationApp');
 
       expect(YamlService.getDeployType(service)).toEqual(DeployTypes.CONFIGURATION);
+    });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getDeployType(service)).toEqual(DeployTypes.RDS);
     });
   });
 
@@ -395,6 +430,16 @@ describe('Yaml Service', () => {
 
       expect(YamlService.getEnvironmentVariables(service)).toEqual(undefined);
     });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      new YamlConfigValidator().validate_1_0_0(config);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getEnvironmentVariables(service)).toEqual(undefined);
+    });
   });
 
   describe('getInitEnvironmentVariables', () => {
@@ -522,6 +567,36 @@ describe('Yaml Service', () => {
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'configurationApp');
 
       expect(YamlService.getInitEnvironmentVariables(service)).toEqual(undefined);
+    });
+
+    test('RdsService', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      new YamlConfigValidator().validate_1_0_0(config);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getInitEnvironmentVariables(service)).toEqual(undefined);
+    });
+
+    test('getRdsConfig should return rds config', () => {
+      const parser = new YamlConfigParser();
+      const config: YamlService.LifecycleConfig = parser.parseYamlConfigFromString(lifecycleConfigContent);
+      new YamlConfigValidator().validate_1_0_0(config);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'rdsApp');
+
+      expect(YamlService.getRdsConfig(service)).toEqual({
+        type: 'aurora',
+        sourceTag: {
+          value: 'phm-aurora',
+        },
+        engineVersion: '8.0.mysql_aurora.3.08.2',
+        additionalTags: {
+          'app-short': 'phm',
+          owner: 'pharmacy',
+        },
+      });
     });
 
     test('isAfterBuildPipelineId should return value', () => {

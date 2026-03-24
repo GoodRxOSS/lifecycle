@@ -38,6 +38,7 @@ import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import { SecretProcessor } from 'server/services/secretProcessor';
+import { runRdsJob } from 'server/lib/rds';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -433,6 +434,78 @@ export default class DeployService extends BaseService {
     );
   }
 
+  async deployRds(deploy: Deploy): Promise<boolean> {
+    return withLogContext(
+      { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
+      async () => {
+        try {
+          await deploy.reload();
+          await deploy.$fetchGraph('[build, deployable]');
+
+          if (!deploy.deployable) {
+            getLogger().error('RDS: deployable missing reason=legacyServiceConfigUnsupported');
+            return false;
+          }
+
+          if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
+            getLogger().info('RDS: skipped reason=alreadyBuilt');
+            return true;
+          }
+
+          const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+          if (existingDbEndpoint) {
+            getLogger().info('RDS: skipped reason=exists');
+            await deploy.$query().patch({
+              cname: existingDbEndpoint,
+              status: DeployStatus.BUILT,
+              statusMessage: 'RDS resource already exists',
+            });
+            return true;
+          }
+
+          await deploy.$query().patch({
+            status: DeployStatus.BUILDING,
+            statusMessage: 'Running RDS restore job',
+            runUUID: nanoid(),
+          });
+
+          const result = await runRdsJob(deploy, 'restore');
+          if (!result.success) {
+            await deploy.$query().patch({
+              status: DeployStatus.ERROR,
+              statusMessage: 'RDS restore job failed',
+            });
+            return false;
+          }
+
+          const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
+          if (!dbEndpoint) {
+            await deploy.$query().patch({
+              status: DeployStatus.ERROR,
+              statusMessage: 'RDS restore completed but endpoint could not be resolved',
+            });
+            return false;
+          }
+
+          await deploy.$query().patch({
+            cname: dbEndpoint,
+            status: DeployStatus.BUILT,
+            statusMessage: 'RDS restore completed',
+          });
+          getLogger().info('RDS: restored');
+          return true;
+        } catch (error) {
+          getLogger().error({ error }, 'RDS: restore failed');
+          await deploy.$query().patch({
+            status: DeployStatus.ERROR,
+            statusMessage: 'RDS restore failed',
+          });
+          return false;
+        }
+      }
+    );
+  }
+
   async deployCodefresh(deploy: Deploy): Promise<boolean> {
     return withLogContext(
       { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
@@ -549,16 +622,22 @@ export default class DeployService extends BaseService {
     if (deploy.deployable != null) {
       if (deploy.deployable.type === DeployTypes.AURORA_RESTORE) {
         return this.deployAurora(deploy);
+      } else if (deploy.deployable.type === DeployTypes.RDS) {
+        return this.deployRds(deploy);
       } else if (deploy.deployable.type === DeployTypes.CODEFRESH) {
         return this.deployCodefresh(deploy);
       }
     } else if (deploy.service != null) {
       if (deploy.service.type === DeployTypes.AURORA_RESTORE) {
         return this.deployAurora(deploy);
+      } else if (deploy.service.type === DeployTypes.RDS) {
+        return this.deployRds(deploy);
       } else if (deploy.service.type === DeployTypes.CODEFRESH) {
         return this.deployCodefresh(deploy);
       }
     }
+
+    return false;
   }
 
   /**

@@ -28,6 +28,8 @@ export interface BuildJobInfo {
   completedAt?: string;
   duration?: number;
   engine: 'buildkit' | 'kaniko' | 'unknown';
+  jobKind?: 'native-build' | 'rds';
+  rdsType?: 'aurora' | 'rds';
   error?: string;
   podName?: string;
   source?: 'live' | 'archived';
@@ -40,17 +42,26 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
   const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    const labelSelector = `lc-service=${serviceName},app.kubernetes.io/component=build`;
-    const jobListResponse = await batchV1Api.listNamespacedJob(
-      namespace,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      labelSelector
-    );
+    const [nativeJobListResponse, rdsJobListResponse] = await Promise.all([
+      batchV1Api.listNamespacedJob(
+        namespace,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        `lc-service=${serviceName},app.kubernetes.io/component=build`
+      ),
+      batchV1Api.listNamespacedJob(
+        namespace,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        `lfc/service=${serviceName},lfc/job-kind=rds`
+      ),
+    ]);
 
-    const jobs = jobListResponse.body.items || [];
+    const jobs = [...(nativeJobListResponse.body.items || []), ...(rdsJobListResponse.body.items || [])];
 
     const buildJobs: BuildJobInfo[] = [];
 
@@ -58,9 +69,11 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
       const jobName = job.metadata?.name || '';
       const labels = job.metadata?.labels || {};
 
-      const buildUuid = labels['lc-deploy-uuid'] || '';
+      const buildUuid = labels['lfc/build-uuid'] || labels['lc-uuid'] || labels['lc-deploy-uuid'] || '';
       const sha = labels['git-sha'] || '';
       const engine = (labels['builder-engine'] || 'unknown') as BuildJobInfo['engine'];
+      const jobKind = (labels['lfc/job-kind'] || 'native-build') as BuildJobInfo['jobKind'];
+      const rdsType = labels['lfc/rds-type'] as BuildJobInfo['rdsType'];
 
       let status: BuildJobInfo['status'] = 'Pending';
       let error: string | undefined;
@@ -127,6 +140,8 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
         completedAt: completedAt ? new Date(completedAt).toISOString() : undefined,
         duration,
         engine,
+        jobKind,
+        rdsType,
         error,
         podName,
         source: 'live',
@@ -164,6 +179,8 @@ export async function getNativeBuildJobs(serviceName: string, namespace: string)
               completedAt: archived.completedAt,
               duration: archived.duration,
               engine: (archived.engine as BuildJobInfo['engine']) || 'unknown',
+              jobKind: archived.jobKind || 'native-build',
+              rdsType: archived.rdsType,
               source: 'archived',
             });
           }

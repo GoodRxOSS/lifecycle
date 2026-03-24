@@ -198,6 +198,41 @@ const schema_1_0_0 = {
             },
             required: ['command', 'arguments'],
           },
+          rds: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              type: { type: 'string', enum: ['aurora', 'rds'] },
+              sourceTag: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  key: { type: 'string' },
+                  value: { type: 'string' },
+                },
+                required: ['value'],
+              },
+              additionalTags: {
+                type: 'object',
+                additionalProperties: { type: 'string' },
+              },
+              image: { type: 'string' },
+              vpcId: { type: 'string' },
+              accountId: { type: 'string' },
+              region: { type: 'string' },
+              securityGroupIds: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+              subnetGroupName: { type: 'string' },
+              engine: { type: 'string' },
+              engineVersion: { type: 'string' },
+              instanceSize: { type: 'string' },
+              restoreSize: { type: 'string' },
+              jobTimeout: { type: 'number' },
+            },
+            required: ['type', 'sourceTag'],
+          },
           configuration: {
             type: 'object',
             additionalProperties: false,

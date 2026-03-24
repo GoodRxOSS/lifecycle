@@ -41,6 +41,8 @@ interface BuildJobInfo {
   completedAt?: string;
   duration?: number;
   engine: 'buildkit' | 'kaniko' | 'unknown';
+  jobKind?: 'native-build' | 'rds';
+  rdsType?: 'aurora' | 'rds';
   error?: string;
   podName?: string;
 }
@@ -278,6 +280,7 @@ export default function BuildLogsList() {
   const getContainerDisplayName = (containerName: string): string => {
     if (containerName === 'git-clone') return 'Clone Repository';
     if (containerName === 'buildkit' || containerName === 'kaniko') return 'Build';
+    if (containerName === 'rds-runner') return 'RDS Runner';
     if (containerName.includes('[init]')) return containerName;
     return containerName;
   };
@@ -296,7 +299,7 @@ export default function BuildLogsList() {
       ) : builds.length === 0 ? (
         <EmptyState
           title="No builds found"
-          description="No build jobs have been created for this service yet."
+          description="No build-stage jobs have been created for this service yet."
         />
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: '600px 1fr', gap: '24px', alignItems: 'stretch', flex: 1, minHeight: 0 }}>
@@ -304,7 +307,7 @@ export default function BuildLogsList() {
             jobs={builds}
             selectedJob={selectedJob}
             onJobSelect={handleJobSelect}
-            title="Build History"
+            title="Build Job History"
             statusTextMap={{ Active: 'Building' }}
           />
 

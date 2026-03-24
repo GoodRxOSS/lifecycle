@@ -699,6 +699,43 @@ services:
       command: ''
       # @param services.auroraRestore.arguments (required)
       arguments: ''
+    # @param services.rds
+    rds:
+      # @param services.rds.type (required)
+      type: ''
+      # @param services.rds.sourceTag (required)
+      sourceTag:
+        # @param services.rds.sourceTag.key
+        key: ''
+        # @param services.rds.sourceTag.value (required)
+        value: ''
+      # @param services.rds.additionalTags
+      additionalTags:
+
+      # @param services.rds.image
+      image: ''
+      # @param services.rds.vpcId
+      vpcId: ''
+      # @param services.rds.accountId
+      accountId: ''
+      # @param services.rds.region
+      region: ''
+      # @param services.rds.securityGroupIds
+      securityGroupIds:
+        # @param services.rds.securityGroupIds[]
+        - ''
+      # @param services.rds.subnetGroupName
+      subnetGroupName: ''
+      # @param services.rds.engine
+      engine: ''
+      # @param services.rds.engineVersion
+      engineVersion: ''
+      # @param services.rds.instanceSize
+      instanceSize: ''
+      # @param services.rds.restoreSize
+      restoreSize: ''
+      # @param services.rds.jobTimeout
+      jobTimeout: 0
     # @param services.configuration
     configuration:
       # @param services.configuration.defaultTag (required)

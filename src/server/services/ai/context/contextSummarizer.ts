@@ -29,6 +29,7 @@ const SERVICE_TYPE_KEYS = [
   'docker',
   'externalHttp',
   'auroraRestore',
+  'rds',
   'configuration',
 ] as const;
 
@@ -138,6 +139,12 @@ function extractAuroraRestoreLines(block: Record<string, any>, lines: string[]):
   if (block.arguments) lines.push(`  Arguments: ${block.arguments}`);
 }
 
+function extractRdsLines(block: Record<string, any>, lines: string[]): void {
+  if (block.type) lines.push(`  Type: ${block.type}`);
+  if (block.sourceTag?.value) lines.push(`  SourceTag: ${block.sourceTag.value}`);
+  if (block.engineVersion) lines.push(`  EngineVersion: ${block.engineVersion}`);
+}
+
 function extractConfigurationLines(block: Record<string, any>, lines: string[]): void {
   if (block.defaultTag) lines.push(`  DefaultTag: ${block.defaultTag}`);
   if (block.branchName) lines.push(`  Branch: ${block.branchName}`);
@@ -231,6 +238,9 @@ export function summarizeLifecycleYaml(rawYaml: string): LifecycleYamlSummary {
               break;
             case 'auroraRestore':
               extractAuroraRestoreLines(block, serviceLines);
+              break;
+            case 'rds':
+              extractRdsLines(block, serviceLines);
               break;
             case 'configuration':
               extractConfigurationLines(block, serviceLines);
