@@ -115,6 +115,7 @@ export interface AgentPodOpts {
   useGvisor?: boolean;
   buildUuid?: string;
   userIdentity?: RequestUserIdentity;
+  nodeSelector?: Record<string, string>;
 }
 
 function buildAgentResources(): k8s.V1ResourceRequirements {
@@ -188,7 +189,7 @@ function buildGitHubTokenEnv(secretName: string, enabled?: boolean): k8s.V1EnvVa
       valueFrom: {
         secretKeyRef: {
           name: secretName,
-          key: 'GH_TOKEN',
+          key: 'GITHUB_TOKEN',
         },
       },
     },
@@ -271,6 +272,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     },
     spec: {
       ...(useGvisor ? { runtimeClassName: 'gvisor' } : {}),
+      ...(opts.nodeSelector ? { nodeSelector: opts.nodeSelector } : {}),
       securityContext: {
         runAsUser: 1000,
         runAsGroup: 1000,
