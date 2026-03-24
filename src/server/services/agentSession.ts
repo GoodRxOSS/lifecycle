@@ -40,6 +40,7 @@ import {
   renderAgentSessionClaudeAttribution,
 } from 'server/lib/agentSession/runtimeConfig';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
+import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
 
 const logger = getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
@@ -355,7 +356,7 @@ export default class AgentSessionService {
         repoUrl: opts.repoUrl,
         branch: opts.branch,
         revision: opts.revision,
-        workspacePath: '/workspace',
+        workspacePath: AGENT_WORKSPACE_ROOT,
         installCommand: combinedInstallCommand,
         claudePermissions: claudeConfig.permissions,
         claudeCommitAttribution,
