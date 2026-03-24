@@ -62,6 +62,40 @@ describe('runtimeConfig', () => {
     });
   });
 
+  it('returns the configured agent scheduling when present', async () => {
+    getAllConfigs.mockResolvedValue({
+      agentSessionDefaults: {
+        image: 'lifecycle-agent:sha-123',
+        editorImage: 'codercom/code-server:4.98.2',
+        scheduling: {
+          nodeSelector: {
+            'app-long': 'deployments-m7i',
+            pool: 'agents',
+          },
+        },
+      },
+    });
+
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
+      image: 'lifecycle-agent:sha-123',
+      editorImage: 'codercom/code-server:4.98.2',
+      nodeSelector: {
+        'app-long': 'deployments-m7i',
+        pool: 'agents',
+      },
+      claude: {
+        permissions: {
+          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
+          deny: [],
+        },
+        attribution: {
+          commitTemplate: 'Generated with ({appName})',
+          prTemplate: 'Generated with ({appName})',
+        },
+      },
+    });
+  });
+
   it('returns the configured Claude settings when present', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
