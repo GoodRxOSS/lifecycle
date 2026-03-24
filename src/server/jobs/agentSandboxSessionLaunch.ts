@@ -47,6 +47,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     model,
     agentImage,
     editorImage,
+    nodeSelector,
   } = job.data;
 
   const reportProgress = async (stage: SandboxLaunchStage, message: string): Promise<void> => {
@@ -67,6 +68,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       model,
       agentImage,
       editorImage,
+      nodeSelector,
       onProgress: reportProgress,
     });
 

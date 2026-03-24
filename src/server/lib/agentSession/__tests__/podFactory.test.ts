@@ -178,6 +178,25 @@ describe('podFactory', () => {
       expect(pod.spec!.securityContext!.seccompProfile).toEqual({ type: 'RuntimeDefault' });
     });
 
+    it('does not set a nodeSelector by default', () => {
+      const pod = buildAgentPodSpec(baseOpts);
+
+      expect(pod.spec!.nodeSelector).toBeUndefined();
+    });
+
+    it('applies a configured nodeSelector when provided', () => {
+      const pod = buildAgentPodSpec({
+        ...baseOpts,
+        nodeSelector: {
+          'app-long': 'deployments-m7i',
+        },
+      });
+
+      expect(pod.spec!.nodeSelector).toEqual({
+        'app-long': 'deployments-m7i',
+      });
+    });
+
     it('sets ANTHROPIC_API_KEY from a secret and CLAUDE_MODEL as an env var', () => {
       const pod = buildAgentPodSpec(baseOpts);
       const envVars = pod.spec!.containers[0].env;
@@ -196,7 +215,7 @@ describe('podFactory', () => {
             name: 'GH_TOKEN',
             valueFrom: {
               secretKeyRef: {
-                key: 'GH_TOKEN',
+                key: 'GITHUB_TOKEN',
                 name: 'agent-secret-abc123',
               },
             },
@@ -245,7 +264,7 @@ describe('podFactory', () => {
             name: 'GH_TOKEN',
             valueFrom: {
               secretKeyRef: {
-                key: 'GH_TOKEN',
+                key: 'GITHUB_TOKEN',
                 name: 'agent-secret-abc123',
               },
             },
