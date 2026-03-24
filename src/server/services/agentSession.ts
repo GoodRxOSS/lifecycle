@@ -167,6 +167,7 @@ export interface CreateSessionOptions {
   namespace: string;
   agentImage: string;
   editorImage: string;
+  nodeSelector?: Record<string, string>;
 }
 
 export default class AgentSessionService {
@@ -365,6 +366,7 @@ export default class AgentSessionService {
         useGvisor,
         buildUuid: opts.buildUuid,
         userIdentity: opts.userIdentity,
+        nodeSelector: opts.nodeSelector,
       });
 
       const devModeManager = new DevModeManager();

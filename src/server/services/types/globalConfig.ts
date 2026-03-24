@@ -69,9 +69,14 @@ export type AgentSessionClaudeConfig = {
   appendSystemPrompt?: string;
 };
 
+export type AgentSessionSchedulingConfig = {
+  nodeSelector?: Record<string, string> | null;
+};
+
 export type AgentSessionDefaults = {
   image?: string | null;
   editorImage?: string | null;
+  scheduling?: AgentSessionSchedulingConfig;
   claude?: AgentSessionClaudeConfig;
 };
 
