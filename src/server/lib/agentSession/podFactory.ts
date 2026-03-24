@@ -21,8 +21,10 @@ import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
+import { AGENT_WORKSPACE_SUBPATH } from './workspace';
 
 export const AGENT_EDITOR_PORT = parseInt(process.env.AGENT_EDITOR_PORT || '13337', 10);
+const AGENT_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -196,6 +198,14 @@ function buildGitHubTokenEnv(secretName: string, enabled?: boolean): k8s.V1EnvVa
   ];
 }
 
+function buildWorkspaceVolumeMount(workspacePath: string): k8s.V1VolumeMount {
+  return {
+    name: 'workspace',
+    mountPath: workspacePath,
+    subPath: AGENT_WORKSPACE_SUBPATH,
+  };
+}
+
 export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   const {
     podName,
@@ -240,6 +250,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   const editorResources = buildEditorResources();
   const userEnv = buildUserIdentityEnv(userIdentity);
   const githubTokenEnv = buildGitHubTokenEnv(apiKeySecretName, hasGitHubToken);
+  const workspaceVolumeMount = buildWorkspaceVolumeMount(workspacePath);
   const forwardedAgentEnv = opts.forwardedAgentEnv || {};
   const forwardedAgentSecretEnv = buildPodEnvWithSecrets(
     forwardedAgentEnv,
@@ -284,6 +295,32 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
       },
       initContainers: [
         {
+          name: 'prepare-workspace',
+          image,
+          imagePullPolicy: 'IfNotPresent',
+          command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
+          resources,
+          securityContext: {
+            ...securityContext,
+            readOnlyRootFilesystem: false,
+          },
+          volumeMounts: [
+            {
+              name: 'workspace',
+              mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
+            },
+            {
+              name: 'tmp',
+              mountPath: '/tmp',
+            },
+          ],
+          env: [
+            { name: 'TMPDIR', value: '/tmp' },
+            { name: 'TMP', value: '/tmp' },
+            { name: 'TEMP', value: '/tmp' },
+          ],
+        },
+        {
           name: 'init-workspace',
           image,
           imagePullPolicy: 'IfNotPresent',
@@ -294,10 +331,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
             readOnlyRootFilesystem: false,
           },
           volumeMounts: [
-            {
-              name: 'workspace',
-              mountPath: workspacePath,
-            },
+            workspaceVolumeMount,
             {
               name: 'claude-config',
               mountPath: '/home/claude/.claude',
@@ -347,10 +381,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
             ...userEnv,
           ],
           volumeMounts: [
-            {
-              name: 'workspace',
-              mountPath: workspacePath,
-            },
+            workspaceVolumeMount,
             {
               name: 'claude-config',
               mountPath: '/home/claude/.claude',
@@ -392,10 +423,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
             periodSeconds: 5,
           },
           volumeMounts: [
-            {
-              name: 'workspace',
-              mountPath: workspacePath,
-            },
+            workspaceVolumeMount,
             {
               name: 'editor-home',
               mountPath: '/home/coder',
