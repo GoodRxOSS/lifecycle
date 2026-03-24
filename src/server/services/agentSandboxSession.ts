@@ -69,6 +69,7 @@ export interface LaunchSandboxSessionOptions {
   model?: string;
   agentImage: string;
   editorImage: string;
+  nodeSelector?: Record<string, string>;
   onProgress?: (stage: SandboxLaunchStage, message: string) => Promise<void> | void;
 }
 
@@ -170,6 +171,7 @@ export default class AgentSandboxSessionService extends BaseService {
         namespace: sandboxBuild.namespace,
         agentImage: opts.agentImage,
         editorImage: opts.editorImage,
+        nodeSelector: opts.nodeSelector,
         userIdentity: opts.userIdentity,
       });
 
