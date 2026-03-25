@@ -690,7 +690,7 @@ export default class ActivityStream extends BaseService {
       }
       message = `### 💻✨ Your environment ${deployStatus}.\n`;
       if (LIFECYCLE_UI_URL) {
-        message += `View details [here](${LIFECYCLE_UI_URL}/build/${uuid})\n`;
+        message += `View details [here](${LIFECYCLE_UI_URL}/environments/${uuid})\n`;
       }
       if (!hasDeployLabelPresent && !isBot && isPending && isOpen) {
         message += await createDeployMessage();
@@ -781,7 +781,7 @@ export default class ActivityStream extends BaseService {
     let message = '';
 
     const nextStepsList = LIFECYCLE_UI_URL
-      ? `### Next steps:\n\n- Review the [Lifecycle UI](${LIFECYCLE_UI_URL}/build/${build.uuid})\n`
+      ? `### Next steps:\n\n- Review the [Lifecycle UI](${LIFECYCLE_UI_URL}/environments/${build.uuid})\n`
       : '';
     const isBot = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
     const isBuilding = [BuildStatus.BUILDING, BuildStatus.BUILT].includes(build.status as BuildStatus);
