@@ -22,6 +22,7 @@ import { AGENT_WORKSPACE_ROOT, AGENT_WORKSPACE_SUBPATH } from './workspace';
 const logger = getLogger();
 const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-deployment-snapshot';
 const DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-service-snapshot';
+const DEV_MODE_HPA_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-hpa-snapshot';
 const SAME_NODE_SELECTOR_KEY = 'kubernetes.io/hostname';
 
 export interface DevModeOptions {
@@ -51,9 +52,16 @@ export interface DevModeServiceSnapshot {
   ports: k8s.V1ServicePort[] | null;
 }
 
+export interface DevModeHorizontalPodAutoscalerSnapshot {
+  hpaName: string;
+  minReplicas: number | null;
+  maxReplicas: number;
+}
+
 export interface DevModeResourceSnapshot {
   deployment: DevModeDeploymentSnapshot;
   service: DevModeServiceSnapshot | null;
+  horizontalPodAutoscaler?: DevModeHorizontalPodAutoscalerSnapshot | null;
 }
 
 interface AppliedDeploymentTemplate {
@@ -102,12 +110,14 @@ export class DevModeManager {
   private kc: k8s.KubeConfig;
   private appsApi: k8s.AppsV1Api;
   private coreApi: k8s.CoreV1Api;
+  private autoscalingApi: k8s.AutoscalingV2Api;
 
   constructor() {
     this.kc = new k8s.KubeConfig();
     this.kc.loadFromDefault();
     this.appsApi = this.kc.makeApiClient(k8s.AppsV1Api);
     this.coreApi = this.kc.makeApiClient(k8s.CoreV1Api);
+    this.autoscalingApi = this.kc.makeApiClient(k8s.AutoscalingV2Api);
   }
 
   async enableDevMode(opts: DevModeOptions): Promise<DevModeResourceSnapshot> {
@@ -116,12 +126,84 @@ export class DevModeManager {
     const service = opts.devConfig.ports?.length
       ? await this.resolveService(opts.namespace, opts.serviceName, resolvedDeploymentName, deployment)
       : null;
-    const snapshot = this.captureSnapshot(deployment, service);
+    const horizontalPodAutoscaler = await this.resolveHorizontalPodAutoscaler(opts.namespace, resolvedDeploymentName);
+    const snapshot = this.captureSnapshot(deployment, service, horizontalPodAutoscaler);
 
-    await this.patchDeployment(opts, deployment);
+    let deploymentPatched = false;
+    let servicePatched = false;
+    let horizontalPodAutoscalerPatched = false;
 
-    if (service) {
-      await this.patchService(opts, service);
+    try {
+      if (horizontalPodAutoscaler && snapshot.horizontalPodAutoscaler) {
+        await this.patchHorizontalPodAutoscaler(opts.namespace, horizontalPodAutoscaler);
+        horizontalPodAutoscalerPatched = true;
+      }
+
+      await this.patchDeployment(opts, deployment, snapshot.deployment, snapshot.horizontalPodAutoscaler ?? null);
+      deploymentPatched = true;
+
+      if (service) {
+        await this.patchService(opts, service);
+        servicePatched = true;
+      }
+    } catch (error) {
+      const cleanupTasks: Array<Promise<void>> = [];
+
+      if (servicePatched && snapshot.service) {
+        cleanupTasks.push(
+          (async () => {
+            const liveService = await this.resolveService(
+              opts.namespace,
+              opts.serviceName,
+              resolvedDeploymentName,
+              deployment
+            ).catch(() => null);
+
+            if (liveService) {
+              await this.restoreServiceFromSnapshot(opts.namespace, liveService, snapshot.service!).catch(() => {});
+            }
+          })()
+        );
+      }
+
+      if (deploymentPatched) {
+        cleanupTasks.push(
+          (async () => {
+            const liveDeployment = await this.resolveDeployment(opts.namespace, resolvedDeploymentName).catch(
+              () => null
+            );
+
+            if (liveDeployment) {
+              await this.restoreDeploymentFromSnapshot(opts.namespace, liveDeployment, snapshot.deployment).catch(
+                () => {}
+              );
+            }
+          })()
+        );
+      }
+
+      if (horizontalPodAutoscalerPatched && snapshot.horizontalPodAutoscaler) {
+        cleanupTasks.push(
+          (async () => {
+            const liveHorizontalPodAutoscaler = await this.resolveHorizontalPodAutoscaler(
+              opts.namespace,
+              resolvedDeploymentName,
+              snapshot.horizontalPodAutoscaler?.hpaName
+            ).catch(() => null);
+
+            if (liveHorizontalPodAutoscaler) {
+              await this.restoreHorizontalPodAutoscalerFromSnapshot(
+                opts.namespace,
+                liveHorizontalPodAutoscaler,
+                snapshot.horizontalPodAutoscaler!
+              ).catch(() => {});
+            }
+          })()
+        );
+      }
+
+      await Promise.all(cleanupTasks);
+      throw error;
     }
 
     logger.info(`Enabled dev mode: deployment=${resolvedDeploymentName} namespace=${opts.namespace}`);
@@ -136,6 +218,8 @@ export class DevModeManager {
   ): Promise<void> {
     const deployment = await this.resolveDeployment(namespace, deploymentName);
     const resolvedDeploymentName = deployment.metadata?.name || deploymentName;
+    const horizontalPodAutoscalerSnapshot =
+      snapshot?.horizontalPodAutoscaler ?? this.getHorizontalPodAutoscalerSnapshot(deployment);
 
     if (snapshot?.deployment) {
       await this.restoreDeploymentFromSnapshot(namespace, deployment, snapshot.deployment);
@@ -154,6 +238,30 @@ export class DevModeManager {
       } catch (error) {
         logger.warn(
           `Failed to revert service ports during dev mode cleanup: service=${serviceName} namespace=${namespace} err=${
+            (error as Error).message
+          }`
+        );
+      }
+    }
+
+    if (horizontalPodAutoscalerSnapshot) {
+      try {
+        const horizontalPodAutoscaler = await this.resolveHorizontalPodAutoscaler(
+          namespace,
+          resolvedDeploymentName,
+          horizontalPodAutoscalerSnapshot.hpaName
+        );
+
+        if (horizontalPodAutoscaler) {
+          await this.restoreHorizontalPodAutoscalerFromSnapshot(
+            namespace,
+            horizontalPodAutoscaler,
+            horizontalPodAutoscalerSnapshot
+          );
+        }
+      } catch (error) {
+        logger.warn(
+          `Failed to restore HorizontalPodAutoscaler during dev mode cleanup: deployment=${resolvedDeploymentName} namespace=${namespace} err=${
             (error as Error).message
           }`
         );
@@ -234,12 +342,42 @@ export class DevModeManager {
     );
   }
 
-  private async patchDeployment(opts: DevModeOptions, existing: k8s.V1Deployment): Promise<void> {
+  private async resolveHorizontalPodAutoscaler(
+    namespace: string,
+    deploymentName: string,
+    preferredName?: string
+  ): Promise<k8s.V2HorizontalPodAutoscaler | null> {
+    if (preferredName) {
+      try {
+        const response = await this.autoscalingApi.readNamespacedHorizontalPodAutoscaler(preferredName, namespace);
+        return response.body;
+      } catch (error) {
+        if (!isNotFoundError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    const { body } = await this.autoscalingApi.listNamespacedHorizontalPodAutoscaler(namespace);
+    return (
+      body.items.find(
+        (horizontalPodAutoscaler) =>
+          horizontalPodAutoscaler.spec?.scaleTargetRef?.kind === 'Deployment' &&
+          horizontalPodAutoscaler.spec?.scaleTargetRef?.name === deploymentName
+      ) || null
+    );
+  }
+
+  private async patchDeployment(
+    opts: DevModeOptions,
+    existing: k8s.V1Deployment,
+    deploymentSnapshot: DevModeDeploymentSnapshot,
+    horizontalPodAutoscalerSnapshot: DevModeHorizontalPodAutoscalerSnapshot | null
+  ): Promise<void> {
     const { namespace, pvcName, devConfig, requiredNodeName } = opts;
     const deploymentName = existing.metadata?.name || opts.deploymentName;
     const workDir = devConfig.workDir || '/workspace';
     const existingContainerName = existing.spec?.template?.spec?.containers?.[0]?.name || deploymentName;
-    const deploymentSnapshot = this.buildDeploymentSnapshot(existing, existingContainerName);
     const nodeSelector = requiredNodeName
       ? {
           ...(existing.spec?.template?.spec?.nodeSelector || {}),
@@ -251,6 +389,9 @@ export class DevModeManager {
       metadata: {
         annotations: {
           [DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION]: JSON.stringify(deploymentSnapshot),
+          [DEV_MODE_HPA_SNAPSHOT_ANNOTATION]: horizontalPodAutoscalerSnapshot
+            ? JSON.stringify(horizontalPodAutoscalerSnapshot)
+            : null,
         },
       },
       spec: {
@@ -288,6 +429,34 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
+  }
+
+  private async patchHorizontalPodAutoscaler(
+    namespace: string,
+    existing: k8s.V2HorizontalPodAutoscaler
+  ): Promise<void> {
+    const hpaName = existing.metadata?.name;
+    if (!hpaName) {
+      return;
+    }
+
+    await this.autoscalingApi.patchNamespacedHorizontalPodAutoscaler(
+      hpaName,
+      namespace,
+      {
+        spec: {
+          minReplicas: 1,
+          maxReplicas: 1,
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
+    );
+    logger.info(`Pinned HorizontalPodAutoscaler to a single replica: hpa=${hpaName} namespace=${namespace}`);
   }
 
   private async patchService(opts: DevModeOptions, existing: k8s.V1Service): Promise<void> {
@@ -539,57 +708,68 @@ export class DevModeManager {
     };
   }
 
-  private getDeploymentSnapshot(existing: k8s.V1Deployment): DevModeDeploymentSnapshot | null {
-    const annotation = existing.metadata?.annotations?.[DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION];
+  private buildHorizontalPodAutoscalerSnapshot(
+    existing: k8s.V2HorizontalPodAutoscaler
+  ): DevModeHorizontalPodAutoscalerSnapshot {
+    return {
+      hpaName: existing.metadata?.name || '',
+      minReplicas: existing.spec?.minReplicas ?? null,
+      maxReplicas: existing.spec?.maxReplicas ?? 1,
+    };
+  }
+
+  private parseAnnotationSnapshot<T>(annotation: string | undefined): T | null {
     if (!annotation) {
       return null;
     }
 
     try {
-      return JSON.parse(annotation) as DevModeDeploymentSnapshot;
+      return JSON.parse(annotation) as T;
     } catch (error) {
-      logger.warn({ error }, 'Failed to parse dev mode deployment snapshot annotation');
+      logger.warn({ error }, 'Failed to parse dev mode snapshot annotation');
       return null;
     }
+  }
+
+  private getDeploymentSnapshot(existing: k8s.V1Deployment): DevModeDeploymentSnapshot | null {
+    return this.parseAnnotationSnapshot<DevModeDeploymentSnapshot>(
+      existing.metadata?.annotations?.[DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION]
+    );
   }
 
   private getServiceSnapshot(existing: k8s.V1Service): DevModeServiceSnapshot | null {
-    const annotation = existing.metadata?.annotations?.[DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION];
-    if (!annotation) {
-      return null;
-    }
-
-    try {
-      return JSON.parse(annotation) as DevModeServiceSnapshot;
-    } catch (error) {
-      logger.warn({ error }, 'Failed to parse dev mode service snapshot annotation');
-      return null;
-    }
+    return this.parseAnnotationSnapshot<DevModeServiceSnapshot>(
+      existing.metadata?.annotations?.[DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION]
+    );
   }
 
-  private captureSnapshot(deployment: k8s.V1Deployment, service: k8s.V1Service | null): DevModeResourceSnapshot {
+  private getHorizontalPodAutoscalerSnapshot(
+    existing: k8s.V1Deployment
+  ): DevModeHorizontalPodAutoscalerSnapshot | null {
+    return this.parseAnnotationSnapshot<DevModeHorizontalPodAutoscalerSnapshot>(
+      existing.metadata?.annotations?.[DEV_MODE_HPA_SNAPSHOT_ANNOTATION]
+    );
+  }
+
+  private captureSnapshot(
+    deployment: k8s.V1Deployment,
+    service: k8s.V1Service | null,
+    horizontalPodAutoscaler: k8s.V2HorizontalPodAutoscaler | null
+  ): DevModeResourceSnapshot {
     const container =
       deployment.spec?.template?.spec?.containers?.[0] ||
       ({ name: deployment.metadata?.name || 'container' } as k8s.V1Container);
 
     return {
-      deployment: {
-        deploymentName: deployment.metadata?.name || '',
-        containerName: container.name || deployment.metadata?.name || 'container',
-        replicas: this.cloneValue(deployment.spec?.replicas ?? null),
-        image: container.image || null,
-        command: this.cloneValue(container.command ?? null),
-        workingDir: container.workingDir ?? null,
-        env: this.cloneValue(container.env ?? null),
-        volumeMounts: this.cloneValue(container.volumeMounts ?? null),
-        volumes: this.cloneValue(deployment.spec?.template?.spec?.volumes ?? null),
-        nodeSelector: this.cloneValue(deployment.spec?.template?.spec?.nodeSelector ?? null),
-      },
+      deployment: this.buildDeploymentSnapshot(deployment, container.name || deployment.metadata?.name || 'container'),
       service: service
         ? {
             serviceName: service.metadata?.name || '',
             ports: this.cloneValue(service.spec?.ports ?? null),
           }
+        : null,
+      horizontalPodAutoscaler: horizontalPodAutoscaler
+        ? this.buildHorizontalPodAutoscalerSnapshot(horizontalPodAutoscaler)
         : null,
     };
   }
@@ -618,6 +798,13 @@ export class DevModeManager {
       patch.push({
         op: 'remove',
         path: `/metadata/annotations/${DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION.replace('/', '~1')}`,
+      });
+    }
+
+    if (existing.metadata?.annotations?.[DEV_MODE_HPA_SNAPSHOT_ANNOTATION]) {
+      patch.push({
+        op: 'remove',
+        path: `/metadata/annotations/${DEV_MODE_HPA_SNAPSHOT_ANNOTATION.replace('/', '~1')}`,
       });
     }
 
@@ -686,6 +873,33 @@ export class DevModeManager {
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
     logger.info(`Restored service ports from snapshot: service=${serviceName} namespace=${namespace}`);
+  }
+
+  private async restoreHorizontalPodAutoscalerFromSnapshot(
+    namespace: string,
+    existing: k8s.V2HorizontalPodAutoscaler,
+    snapshot: DevModeHorizontalPodAutoscalerSnapshot
+  ): Promise<void> {
+    const hpaName = existing.metadata?.name || snapshot.hpaName;
+    const patch = {
+      spec: {
+        ...(snapshot.minReplicas !== null ? { minReplicas: snapshot.minReplicas } : { minReplicas: null }),
+        maxReplicas: snapshot.maxReplicas,
+      },
+    };
+
+    await this.autoscalingApi.patchNamespacedHorizontalPodAutoscaler(
+      hpaName,
+      namespace,
+      patch,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
+    );
+    logger.info(`Restored HorizontalPodAutoscaler from snapshot: hpa=${hpaName} namespace=${namespace}`);
   }
 
   private appendValuePatch(
