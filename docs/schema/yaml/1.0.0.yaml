@@ -77,6 +77,26 @@ environment:
       # @param environment.webhooks.env (required)
       env:
 
+  # @param environment.agentSession
+  agentSession:
+    # @param environment.agentSession.resources
+    resources:
+      # @param environment.agentSession.resources.agent
+      agent:
+        # @param environment.agentSession.resources.agent.requests
+        requests:
+
+        # @param environment.agentSession.resources.agent.limits
+        limits:
+
+      # @param environment.agentSession.resources.editor
+      editor:
+        # @param environment.agentSession.resources.editor.requests
+        requests:
+
+        # @param environment.agentSession.resources.editor.limits
+        limits:
+
 # @section services
 services:
   # @param services[]
