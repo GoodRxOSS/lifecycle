@@ -33,6 +33,12 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
+import {
+  AgentSessionStartupFailureStage,
+  PublicAgentSessionStartupFailure,
+  buildAgentSessionStartupFailure,
+  toPublicAgentSessionStartupFailure,
+} from './src/server/lib/agentSession/startupFailureState';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -88,6 +94,44 @@ type AgentSessionRuntime = {
 };
 
 const agentSessionRuntimes = new Map<string, AgentSessionRuntime>();
+
+function buildLocalAgentSessionFailure(
+  sessionId: string,
+  error: unknown,
+  stage: AgentSessionStartupFailureStage = 'connect_runtime'
+): PublicAgentSessionStartupFailure {
+  return toPublicAgentSessionStartupFailure(
+    buildAgentSessionStartupFailure({
+      sessionId,
+      error,
+      stage,
+    })
+  );
+}
+
+async function persistAgentRuntimeFailure(
+  sessionId: string,
+  error: unknown,
+  stage: AgentSessionStartupFailureStage = 'connect_runtime'
+): Promise<PublicAgentSessionStartupFailure> {
+  const AgentSessionService = (await import('./src/server/services/agentSession')).default;
+  return AgentSessionService.markSessionRuntimeFailure(sessionId, error, stage);
+}
+
+async function resolveAgentSessionFailureForClient(
+  sessionId: string | null,
+  error: unknown,
+  stage: AgentSessionStartupFailureStage = 'connect_runtime'
+): Promise<PublicAgentSessionStartupFailure> {
+  if (!sessionId) {
+    return buildLocalAgentSessionFailure('unknown-session', error, stage);
+  }
+
+  const AgentSessionService = (await import('./src/server/services/agentSession')).default;
+  const persistedFailure = await AgentSessionService.getSessionStartupFailure(sessionId);
+
+  return persistedFailure || buildLocalAgentSessionFailure(sessionId, error, stage);
+}
 
 function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<string, string> {
   if (!cookieHeader) {
@@ -476,14 +520,26 @@ async function getOrCreateAgentRuntime(
         }
 
         logger.error({ ...agentLogCtx, err }, 'Agent exec error');
-        broadcastAgentMessage(runtime!, { type: 'status', status: 'error' });
+        const failure = buildLocalAgentSessionFailure(sessionId, err);
+        void persistAgentRuntimeFailure(sessionId, err).catch((persistError) => {
+          logger.warn({ ...agentLogCtx, err: persistError }, 'Failed to persist agent runtime failure');
+        });
+        broadcastAgentMessage(runtime!, {
+          type: 'status',
+          status: 'error',
+          title: failure.title,
+          message: failure.message,
+        });
         closeAgentClients(runtime!, 1011, 'Agent exec error');
         disposeAgentRuntime(sessionId, runtime!, false);
       });
 
       broadcastAgentMessage(runtime!, { type: 'status', status: 'ready' });
     })()
-      .catch((error) => {
+      .catch(async (error) => {
+        await persistAgentRuntimeFailure(sessionId, error).catch((persistError) => {
+          logger.warn({ ...agentLogCtx, err: persistError }, 'Failed to persist agent runtime failure');
+        });
         disposeAgentRuntime(sessionId, runtime!, true);
         throw error;
       })
@@ -981,9 +1037,17 @@ app.prepare().then(() => {
         runtime.clients.delete(ws);
         scheduleAgentRuntimeCleanup(sessionId, runtime, agentLogCtx);
       }
+      const failure = await resolveAgentSessionFailureForClient(sessionId, error);
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.send(JSON.stringify({ type: 'status', status: 'error' }));
-        closeSocket(ws, 1008, `Connection error: ${error.message}`);
+        ws.send(
+          JSON.stringify({
+            type: 'status',
+            status: 'error',
+            title: failure.title,
+            message: failure.message,
+          })
+        );
+        closeSocket(ws, 1008, `${failure.title}: ${failure.message}`);
       }
     }
   });
