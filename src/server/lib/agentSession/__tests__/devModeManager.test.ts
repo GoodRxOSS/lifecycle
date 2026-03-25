@@ -113,7 +113,8 @@ describe('DevModeManager', () => {
             'lifecycle.goodrx.com/dev-mode-deployment-snapshot': expect.any(String),
           },
         },
-        spec: {
+        spec: expect.objectContaining({
+          replicas: 1,
           template: {
             spec: {
               nodeSelector: { 'kubernetes.io/hostname': 'agent-node-a' },
@@ -129,7 +130,7 @@ describe('DevModeManager', () => {
               ],
             },
           },
-        },
+        }),
       }),
       undefined,
       undefined,
@@ -303,6 +304,34 @@ describe('DevModeManager', () => {
     );
   });
 
+  it('captures the original replica count in the deployment snapshot', async () => {
+    mockReadDeployment.mockResolvedValue({
+      body: {
+        metadata: { name: 'my-app' },
+        spec: {
+          replicas: 3,
+          template: {
+            spec: {
+              containers: [{ name: 'web-app', image: 'registry.example/my-app:built' }],
+            },
+          },
+        },
+      },
+    });
+
+    const opts: DevModeOptions = {
+      namespace: 'test-ns',
+      deploymentName: 'my-app',
+      serviceName: 'my-app',
+      pvcName: 'agent-pvc-abc',
+      devConfig: { image: 'node:20-slim', command: 'pnpm dev' },
+    };
+
+    const snapshot = await manager.enableDevMode(opts);
+
+    expect(snapshot.deployment.replicas).toBe(3);
+  });
+
   it('removes dev-mode-only deployment fields not present in last-applied configuration', async () => {
     mockReadDeployment.mockResolvedValue({
       body: {
@@ -327,6 +356,7 @@ describe('DevModeManager', () => {
           },
         },
         spec: {
+          replicas: 1,
           template: {
             spec: {
               containers: [
@@ -361,6 +391,7 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/containers/0/workingDir' },
         { op: 'remove', path: '/spec/template/spec/containers/0/volumeMounts/0' },
         { op: 'remove', path: '/spec/template/spec/volumes/0' },
+        { op: 'remove', path: '/spec/replicas' },
         { op: 'remove', path: '/spec/template/spec/nodeSelector' },
       ],
       undefined,
@@ -380,6 +411,7 @@ describe('DevModeManager', () => {
           annotations: {
             'kubectl.kubernetes.io/last-applied-configuration': JSON.stringify({
               spec: {
+                replicas: 1,
                 template: {
                   spec: {
                     containers: [
@@ -398,6 +430,7 @@ describe('DevModeManager', () => {
           },
         },
         spec: {
+          replicas: 1,
           template: {
             spec: {
               containers: [
@@ -427,7 +460,9 @@ describe('DevModeManager', () => {
           name: 'grpc-echo-resolved',
           annotations: {
             'lifecycle.goodrx.com/dev-mode-deployment-snapshot': JSON.stringify({
+              deploymentName: 'grpc-echo-resolved',
               containerName: 'grpc-echo',
+              replicas: 3,
               image: 'registry.example/grpc-echo:built',
               env: [
                 { name: 'COMPONENT', value: 'app' },
@@ -440,6 +475,7 @@ describe('DevModeManager', () => {
           },
         },
         spec: {
+          replicas: 1,
           template: {
             spec: {
               nodeSelector: {
@@ -484,6 +520,7 @@ describe('DevModeManager', () => {
           path: '/spec/template/spec/containers/0/image',
           value: 'registry.example/grpc-echo:built',
         },
+        { op: 'replace', path: '/spec/replicas', value: 3 },
         { op: 'remove', path: '/spec/template/spec/containers/0/command' },
         { op: 'remove', path: '/spec/template/spec/containers/0/workingDir' },
         {
@@ -529,6 +566,7 @@ describe('DevModeManager', () => {
           },
         },
         spec: {
+          replicas: 1,
           template: {
             spec: {
               containers: [
@@ -585,6 +623,7 @@ describe('DevModeManager', () => {
           },
         },
         spec: {
+          replicas: 1,
           template: {
             spec: {
               containers: [
@@ -620,6 +659,7 @@ describe('DevModeManager', () => {
       deployment: {
         deploymentName: 'grpc-echo-resolved',
         containerName: 'lc-apps',
+        replicas: 2,
         image: 'registry.example/grpc-echo:built',
         command: null,
         workingDir: null,
@@ -643,6 +683,7 @@ describe('DevModeManager', () => {
           path: '/spec/template/spec/containers/0/image',
           value: 'registry.example/grpc-echo:built',
         },
+        { op: 'replace', path: '/spec/replicas', value: 2 },
         { op: 'remove', path: '/spec/template/spec/containers/0/command' },
         { op: 'remove', path: '/spec/template/spec/containers/0/workingDir' },
         { op: 'remove', path: '/spec/template/spec/containers/0/env' },
