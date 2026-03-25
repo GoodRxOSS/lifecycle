@@ -41,6 +41,15 @@ import {
 } from 'server/lib/agentSession/runtimeConfig';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
 import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
+import {
+  AgentSessionStartupFailureStage,
+  PublicAgentSessionStartupFailure,
+  buildAgentSessionStartupFailure,
+  clearAgentSessionStartupFailure,
+  getAgentSessionStartupFailure,
+  setAgentSessionStartupFailure,
+  toPublicAgentSessionStartupFailure,
+} from 'server/lib/agentSession/startupFailureState';
 
 const logger = getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
@@ -205,6 +214,44 @@ export interface CreateSessionOptions {
 }
 
 export default class AgentSessionService {
+  static async getSessionStartupFailure(sessionId: string): Promise<PublicAgentSessionStartupFailure | null> {
+    const redis = RedisClient.getInstance().getRedis();
+    const failure = await getAgentSessionStartupFailure(redis, sessionId);
+
+    return failure ? toPublicAgentSessionStartupFailure(failure) : null;
+  }
+
+  static async markSessionRuntimeFailure(
+    sessionId: string,
+    error: unknown,
+    stage: AgentSessionStartupFailureStage = 'connect_runtime'
+  ): Promise<PublicAgentSessionStartupFailure> {
+    const redis = RedisClient.getInstance().getRedis();
+    const failure = buildAgentSessionStartupFailure({
+      sessionId,
+      error,
+      stage,
+    });
+
+    await setAgentSessionStartupFailure(redis, failure).catch(() => {});
+    await redis.del(`${SESSION_REDIS_PREFIX}${sessionId}`).catch(() => {});
+
+    const session = await AgentSession.query()
+      .findOne({ uuid: sessionId })
+      .catch(() => null);
+    if (session && (session.status === 'starting' || session.status === 'active')) {
+      await AgentSession.query()
+        .findById(session.id)
+        .patch({
+          status: 'error',
+          endedAt: new Date().toISOString(),
+        } as unknown as Partial<AgentSession>)
+        .catch(() => {});
+    }
+
+    return toPublicAgentSessionStartupFailure(failure);
+  }
+
   static async enrichSessions(sessions: AgentSession[]): Promise<AgentSessionSummaryRecord[]> {
     if (sessions.length === 0) {
       return [];
@@ -332,6 +379,7 @@ export default class AgentSessionService {
     const model = opts.model || 'claude-sonnet-4-6';
     const mutatedDeploys: number[] = [];
     const devModeSnapshots: SessionSnapshotMap = {};
+    let failureStage: AgentSessionStartupFailureStage = 'create_session';
     let sessionPersisted = false;
     let session: AgentSession | null = null;
     const redis = RedisClient.getInstance().getRedis();
@@ -377,6 +425,7 @@ export default class AgentSessionService {
         .filter((command): command is string => Boolean(command));
       const combinedInstallCommand = installCommands.length > 0 ? installCommands.join('\n\n') : undefined;
 
+      failureStage = 'connect_runtime';
       const agentPod = await createAgentPod({
         podName,
         namespace: opts.namespace,
@@ -458,8 +507,16 @@ export default class AgentSessionService {
         status: 'active',
       } as AgentSession;
 
+      await clearAgentSessionStartupFailure(redis, sessionUuid).catch(() => {});
+
       return session!;
     } catch (err) {
+      const startupFailure = buildAgentSessionStartupFailure({
+        sessionId: sessionUuid,
+        error: err,
+        stage: failureStage,
+      });
+
       if (
         buildKind === BuildKind.ENVIRONMENT &&
         opts.buildUuid &&
@@ -472,6 +529,8 @@ export default class AgentSessionService {
       }
 
       logger.error(`Session creation failed, rolling back: sessionId=${sessionUuid} err=${(err as Error).message}`);
+
+      await setAgentSessionStartupFailure(redis, startupFailure).catch(() => {});
 
       const revertPromise =
         mutatedDeploys.length > 0
@@ -504,6 +563,7 @@ export default class AgentSessionService {
           .findById(session!.id)
           .patch({
             status: 'error',
+            endedAt: new Date().toISOString(),
             devModeSnapshots: {},
           } as unknown as Partial<AgentSession>)
           .catch(() => {});
@@ -520,6 +580,7 @@ export default class AgentSessionService {
             status: 'error',
             buildUuid: opts.buildUuid || null,
             buildKind,
+            endedAt: new Date().toISOString(),
             devModeSnapshots: {},
             forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
           } as unknown as Partial<AgentSession>)
@@ -551,7 +612,10 @@ export default class AgentSessionService {
         endedAt: new Date().toISOString(),
       });
 
-      await redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`);
+      await Promise.all([
+        redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`),
+        clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {}),
+      ]);
 
       const { default: BuildService } = await import('./build');
       const buildService = new BuildService();
@@ -585,6 +649,7 @@ export default class AgentSessionService {
     await Promise.all([
       deleteAgentRuntimeResources(session.namespace, session.podName, apiKeySecretName),
       cleanupForwardedAgentEnvSecrets(session.namespace, session.uuid, session.forwardedAgentSecretProviders),
+      clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {}),
     ]);
     await cleanupDevModePatches(session.namespace, session.devModeSnapshots, devModeDeploys);
     await deleteAgentPvc(session.namespace, session.pvcName);
