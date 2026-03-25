@@ -16,8 +16,21 @@
 
 import * as YamlService from 'server/models/yaml';
 
+export interface AgentSessionEnvironmentResourceRequirements {
+  readonly requests?: Record<string, string>;
+  readonly limits?: Record<string, string>;
+}
+
+export interface AgentSessionEnvironmentConfig {
+  readonly resources?: {
+    readonly agent?: AgentSessionEnvironmentResourceRequirements;
+    readonly editor?: AgentSessionEnvironmentResourceRequirements;
+  };
+}
+
 export interface Environment {
   readonly defaultServices?: YamlService.DependencyService[];
   readonly optionalServices?: YamlService.DependencyService[];
   readonly webhooks?: YamlService.Webhook[];
+  readonly agentSession?: AgentSessionEnvironmentConfig;
 }
