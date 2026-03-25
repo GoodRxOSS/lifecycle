@@ -36,6 +36,7 @@ export interface DevModeOptions {
 export interface DevModeDeploymentSnapshot {
   deploymentName: string;
   containerName: string;
+  replicas: number | null;
   image: string | null;
   command: string[] | null;
   workingDir: string | null;
@@ -57,6 +58,7 @@ export interface DevModeResourceSnapshot {
 
 interface AppliedDeploymentTemplate {
   spec?: {
+    replicas?: number;
     template?: {
       spec?: {
         nodeSelector?: Record<string, string>;
@@ -252,6 +254,7 @@ export class DevModeManager {
         },
       },
       spec: {
+        replicas: 1,
         template: {
           spec: {
             ...(nodeSelector ? { nodeSelector } : {}),
@@ -413,6 +416,7 @@ export class DevModeManager {
       }
     }
 
+    this.appendValuePatch(patch, '/spec/replicas', existing.spec?.replicas, desiredTemplate.spec?.replicas);
     this.appendValuePatch(
       patch,
       '/spec/template/spec/nodeSelector',
@@ -517,6 +521,7 @@ export class DevModeManager {
     return {
       deploymentName: existing.metadata?.name || '',
       containerName,
+      replicas: existing.spec?.replicas ?? null,
       image: liveContainer?.image || null,
       command: liveContainer?.command ? deepClone(liveContainer.command) : null,
       workingDir: liveContainer?.workingDir || null,
@@ -571,6 +576,7 @@ export class DevModeManager {
       deployment: {
         deploymentName: deployment.metadata?.name || '',
         containerName: container.name || deployment.metadata?.name || 'container',
+        replicas: this.cloneValue(deployment.spec?.replicas ?? null),
         image: container.image || null,
         command: this.cloneValue(container.command ?? null),
         workingDir: container.workingDir ?? null,
@@ -616,6 +622,7 @@ export class DevModeManager {
     }
 
     this.appendValuePatch(patch, `${containerPath}/image`, liveContainer.image, snapshot.image);
+    this.appendValuePatch(patch, '/spec/replicas', existing.spec?.replicas, snapshot.replicas);
     this.appendValuePatch(patch, `${containerPath}/command`, liveContainer.command, snapshot.command);
     this.appendValuePatch(patch, `${containerPath}/workingDir`, liveContainer.workingDir, snapshot.workingDir);
     this.appendValuePatch(patch, `${containerPath}/env`, liveContainer.env, snapshot.env);
