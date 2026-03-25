@@ -144,6 +144,7 @@ const mockEnableDevMode = jest.fn().mockResolvedValue({
     env: null,
     volumeMounts: null,
     volumes: null,
+    nodeSelector: null,
   },
   service: null,
 });
@@ -156,7 +157,7 @@ const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
 (isGvisorAvailable as jest.Mock).mockResolvedValue(false);
 (createAgentPvc as jest.Mock).mockResolvedValue({});
 (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
-(createAgentPod as jest.Mock).mockResolvedValue({});
+(createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
 (createAgentEditorService as jest.Mock).mockResolvedValue({});
 (deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
 (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
@@ -258,7 +259,7 @@ describe('AgentSessionService', () => {
     (isGvisorAvailable as jest.Mock).mockResolvedValue(false);
     (createAgentPvc as jest.Mock).mockResolvedValue({});
     (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
-    (createAgentPod as jest.Mock).mockResolvedValue({});
+    (createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
     (createAgentEditorService as jest.Mock).mockResolvedValue({});
     (deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
     (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
@@ -490,6 +491,7 @@ describe('AgentSessionService', () => {
           deploymentName: 'web-build-uuid',
           serviceName: 'web-build-uuid',
           namespace: 'test-ns',
+          requiredNodeName: 'agent-node-a',
         })
       );
       expect(mockEnableDevMode).toHaveBeenCalledWith(
@@ -497,6 +499,7 @@ describe('AgentSessionService', () => {
           deploymentName: 'api-build-uuid',
           serviceName: 'api-build-uuid',
           namespace: 'test-ns',
+          requiredNodeName: 'agent-node-a',
         })
       );
       expect(mockSessionQuery.patch).toHaveBeenCalledWith(
@@ -677,7 +680,7 @@ describe('AgentSessionService', () => {
       await expect(AgentSessionService.endSession('sess-1')).rejects.toThrow('Session not found or already ended');
     });
 
-    it('ends session, reverts deploys, deletes pod and pvc, updates DB and Redis', async () => {
+    it('ends session, triggers deploy restore, deletes pod and pvc, updates DB and Redis', async () => {
       const activeSession = {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -744,16 +747,8 @@ describe('AgentSessionService', () => {
 
       expect(DeploymentManager).toHaveBeenCalledWith(devModeDeploys);
       expect(deployManagerDeploy).toHaveBeenCalled();
-      expect(mockDisableDevMode).toHaveBeenCalledTimes(2);
-      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
-        1,
-        'test-ns',
-        'deploy-10',
-        'deploy-10',
-        activeSession.devModeSnapshots['10']
-      );
-      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
-        2,
+      expect(mockDisableDevMode).toHaveBeenCalledTimes(1);
+      expect(mockDisableDevMode).toHaveBeenCalledWith(
         'test-ns',
         'deploy-10',
         'deploy-10',
@@ -773,7 +768,7 @@ describe('AgentSessionService', () => {
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     });
 
-    it('starts runtime cleanup before deploy restore finishes and deletes PVC after restore', async () => {
+    it('returns after cleanup and restore trigger without waiting for redeploy to finish', async () => {
       const activeSession = {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -847,11 +842,14 @@ describe('AgentSessionService', () => {
       expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
-      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      await expect(endPromise).resolves.toBeUndefined();
+      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
+      expect(deployManagerDeploy).toHaveBeenCalledTimes(1);
+      expect(mockDisableDevMode).toHaveBeenCalledTimes(1);
 
       releaseDeploy();
-      await endPromise;
-      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mockDisableDevMode).toHaveBeenCalledTimes(2);
     });
 
     it('queues sandbox cleanup instead of waiting on synchronous build deletion', async () => {
