@@ -136,6 +136,39 @@ async function restoreDevModeDeploys(
   await cleanupDevModePatches(namespace, snapshots, deploys);
 }
 
+function triggerDevModeDeployRestore(
+  namespace: string,
+  snapshots: SessionSnapshotMap | null | undefined,
+  deploys: Deploy[]
+): void {
+  if (deploys.length === 0) {
+    return;
+  }
+
+  // Restore runs in the background after agent teardown so ending a session
+  // does not block on workload rollout/readiness.
+  void (async () => {
+    try {
+      await restoreDeploys(deploys);
+      await cleanupDevModePatches(namespace, snapshots, deploys);
+      logger.info(
+        `Background dev mode restore finished: namespace=${namespace} deploys=${deploys
+          .map((deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id)
+          .join(',')}`
+      );
+    } catch (error) {
+      logger.error(
+        {
+          error,
+          namespace,
+          deploys: deploys.map((deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id),
+        },
+        'Background dev mode restore failed after session end'
+      );
+    }
+  })();
+}
+
 async function deleteAgentRuntimeResources(
   namespace: string,
   podName: string,
@@ -344,7 +377,7 @@ export default class AgentSessionService {
         .filter((command): command is string => Boolean(command));
       const combinedInstallCommand = installCommands.length > 0 ? installCommands.join('\n\n') : undefined;
 
-      await createAgentPod({
+      const agentPod = await createAgentPod({
         podName,
         namespace: opts.namespace,
         pvcName,
@@ -369,6 +402,11 @@ export default class AgentSessionService {
         userIdentity: opts.userIdentity,
         nodeSelector: opts.nodeSelector,
       });
+      const agentNodeName = agentPod.spec?.nodeName || null;
+
+      if ((opts.services || []).length > 0 && !agentNodeName) {
+        throw new Error(`Agent pod ${podName} did not report a scheduled node`);
+      }
 
       const devModeManager = new DevModeManager();
       for (const svc of opts.services || []) {
@@ -379,6 +417,7 @@ export default class AgentSessionService {
           serviceName: resourceName,
           pvcName,
           devConfig: svc.devConfig,
+          requiredNodeName: agentNodeName || undefined,
         });
         mutatedDeploys.push(svc.deployId);
         devModeSnapshots[String(svc.deployId)] = snapshot;
@@ -543,17 +582,13 @@ export default class AgentSessionService {
       await Deploy.query().findById(deploy.id).patch({ devMode: false, devModeSessionId: null });
     }
 
-    const restorePromise =
-      devModeDeploys.length > 0
-        ? restoreDevModeDeploys(session.namespace, session.devModeSnapshots, devModeDeploys)
-        : Promise.resolve();
-
     await Promise.all([
-      restorePromise,
       deleteAgentRuntimeResources(session.namespace, session.podName, apiKeySecretName),
       cleanupForwardedAgentEnvSecrets(session.namespace, session.uuid, session.forwardedAgentSecretProviders),
     ]);
+    await cleanupDevModePatches(session.namespace, session.devModeSnapshots, devModeDeploys);
     await deleteAgentPvc(session.namespace, session.pvcName);
+    triggerDevModeDeployRestore(session.namespace, session.devModeSnapshots, devModeDeploys);
 
     await AgentSession.query().findById(session.id).patch({
       status: 'ended',
