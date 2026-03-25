@@ -27,9 +27,11 @@ jest.mock('server/services/globalConfig', () => ({
 
 import {
   AgentSessionRuntimeConfigError,
+  mergeAgentSessionResources,
   renderAgentSessionClaudeAttribution,
   resolveAgentSessionClaudeConfig,
   resolveAgentSessionClaudeConfigFromDefaults,
+  resolveAgentSessionResourcesFromDefaults,
   resolveAgentSessionRuntimeConfig,
 } from '../runtimeConfig';
 
@@ -49,6 +51,28 @@ describe('runtimeConfig', () => {
     await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
       image: 'lifecycle-agent:sha-123',
       editorImage: 'codercom/code-server:4.98.2',
+      resources: {
+        agent: {
+          requests: {
+            cpu: '500m',
+            memory: '1Gi',
+          },
+          limits: {
+            cpu: '2',
+            memory: '4Gi',
+          },
+        },
+        editor: {
+          requests: {
+            cpu: '250m',
+            memory: '512Mi',
+          },
+          limits: {
+            cpu: '1',
+            memory: '1Gi',
+          },
+        },
+      },
       claude: {
         permissions: {
           allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
@@ -82,6 +106,92 @@ describe('runtimeConfig', () => {
       nodeSelector: {
         'app-long': 'deployments-m7i',
         pool: 'agents',
+      },
+      resources: {
+        agent: {
+          requests: {
+            cpu: '500m',
+            memory: '1Gi',
+          },
+          limits: {
+            cpu: '2',
+            memory: '4Gi',
+          },
+        },
+        editor: {
+          requests: {
+            cpu: '250m',
+            memory: '512Mi',
+          },
+          limits: {
+            cpu: '1',
+            memory: '1Gi',
+          },
+        },
+      },
+      claude: {
+        permissions: {
+          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
+          deny: [],
+        },
+        attribution: {
+          commitTemplate: 'Generated with ({appName})',
+          prTemplate: 'Generated with ({appName})',
+        },
+      },
+    });
+  });
+
+  it('returns configured agent and editor resources when present', async () => {
+    getAllConfigs.mockResolvedValue({
+      agentSessionDefaults: {
+        image: 'lifecycle-agent:sha-123',
+        editorImage: 'codercom/code-server:4.98.2',
+        resources: {
+          agent: {
+            requests: {
+              cpu: '900m',
+            },
+            limits: {
+              memory: '6Gi',
+            },
+          },
+          editor: {
+            requests: {
+              memory: '768Mi',
+            },
+            limits: {
+              cpu: '1500m',
+            },
+          },
+        },
+      },
+    });
+
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
+      image: 'lifecycle-agent:sha-123',
+      editorImage: 'codercom/code-server:4.98.2',
+      resources: {
+        agent: {
+          requests: {
+            cpu: '900m',
+            memory: '1Gi',
+          },
+          limits: {
+            cpu: '2',
+            memory: '6Gi',
+          },
+        },
+        editor: {
+          requests: {
+            cpu: '250m',
+            memory: '768Mi',
+          },
+          limits: {
+            cpu: '1500m',
+            memory: '1Gi',
+          },
+        },
       },
       claude: {
         permissions: {
@@ -137,6 +247,44 @@ describe('runtimeConfig', () => {
         prTemplate: 'Generated with ({appName})',
       },
       appendSystemPrompt: undefined,
+    });
+  });
+
+  it('merges lifecycle resource overrides over runtime defaults', () => {
+    expect(
+      mergeAgentSessionResources(resolveAgentSessionResourcesFromDefaults(), {
+        agent: {
+          requests: {
+            cpu: '1200m',
+          },
+        },
+        editor: {
+          limits: {
+            memory: '2Gi',
+          },
+        },
+      })
+    ).toEqual({
+      agent: {
+        requests: {
+          cpu: '1200m',
+          memory: '1Gi',
+        },
+        limits: {
+          cpu: '2',
+          memory: '4Gi',
+        },
+      },
+      editor: {
+        requests: {
+          cpu: '250m',
+          memory: '512Mi',
+        },
+        limits: {
+          cpu: '1',
+          memory: '2Gi',
+        },
+      },
     });
   });
 
