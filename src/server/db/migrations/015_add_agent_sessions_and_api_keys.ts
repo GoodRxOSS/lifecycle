@@ -21,6 +21,28 @@ export async function up(knex: Knex): Promise<void> {
   const defaultAgentSessionDefaults = {
     image: process.env.AGENT_IMAGE || null,
     editorImage: process.env.AGENT_EDITOR_IMAGE || null,
+    resources: {
+      agent: {
+        requests: {
+          cpu: process.env.AGENT_POD_CPU_REQUEST || '500m',
+          memory: process.env.AGENT_POD_MEMORY_REQUEST || '1Gi',
+        },
+        limits: {
+          cpu: process.env.AGENT_POD_CPU_LIMIT || '2',
+          memory: process.env.AGENT_POD_MEMORY_LIMIT || '4Gi',
+        },
+      },
+      editor: {
+        requests: {
+          cpu: process.env.AGENT_EDITOR_CPU_REQUEST || '250m',
+          memory: process.env.AGENT_EDITOR_MEMORY_REQUEST || '512Mi',
+        },
+        limits: {
+          cpu: process.env.AGENT_EDITOR_CPU_LIMIT || '1',
+          memory: process.env.AGENT_EDITOR_MEMORY_LIMIT || '1Gi',
+        },
+      },
+    },
     claude: {
       permissions: {
         allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
