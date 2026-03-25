@@ -19,6 +19,24 @@ import { deployment } from './deployment';
 import { docker } from './docker';
 import { webhooks } from './webhooks';
 
+const resourceRequirements = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    requests: { type: 'object', additionalProperties: { type: 'string' } },
+    limits: { type: 'object', additionalProperties: { type: 'string' } },
+  },
+};
+
+const agentSessionResources = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    agent: resourceRequirements,
+    editor: resourceRequirements,
+  },
+};
+
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
   type: 'object',
@@ -33,6 +51,13 @@ const schema_1_0_0 = {
         autoDeploy: { type: 'boolean' },
         githubDeployments: { type: 'boolean' },
         useGithubStatusComment: { type: 'boolean' },
+        agentSession: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            resources: agentSessionResources,
+          },
+        },
         defaultServices: {
           type: 'array',
           minItems: 1,

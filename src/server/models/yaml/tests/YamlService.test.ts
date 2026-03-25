@@ -105,6 +105,40 @@ describe('Yaml Service', () => {
 `;
 
   describe('validation', () => {
+    test('accepts environment-level agent session resource overrides', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+environment:
+  agentSession:
+    resources:
+      agent:
+        requests:
+          cpu: '1200m'
+        limits:
+          memory: '6Gi'
+      editor:
+        requests:
+          memory: '768Mi'
+        limits:
+          cpu: '1500m'
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+
     test('accepts forwardEnvVarsToAgent in dev config', () => {
       const parser = new YamlConfigParser();
       const config = parser.parseYamlConfigFromString(`---

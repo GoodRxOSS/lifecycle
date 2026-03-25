@@ -21,14 +21,16 @@ import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import {
   AgentSessionRuntimeConfigError,
+  mergeAgentSessionResources,
   resolveAgentSessionRuntimeConfig,
 } from 'server/lib/agentSession/runtimeConfig';
 import AgentSessionService, { ActiveEnvironmentSessionError } from 'server/services/agentSession';
 import {
-  loadAgentSessionServiceCandidates,
+  resolveAgentSessionServiceCandidates,
   resolveRequestedAgentSessionServices,
 } from 'server/services/agentSessionCandidates';
 import Build from 'server/models/Build';
+import { fetchLifecycleConfig, type LifecycleConfig } from 'server/models/yaml';
 import type { DevConfig } from 'server/models/yaml/YamlService';
 import { BuildKind } from 'shared/constants';
 
@@ -56,6 +58,27 @@ function repoNameFromRepoUrl(repoUrl?: string | null) {
 
   const normalized = repoUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
   return normalized || null;
+}
+
+async function resolveLifecycleConfigForSession({
+  buildContext,
+  repoUrl,
+  branch,
+}: {
+  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null;
+  repoUrl?: string | null;
+  branch?: string | null;
+}): Promise<LifecycleConfig | null> {
+  if (buildContext?.pullRequest?.fullName && buildContext.pullRequest.branchName) {
+    return fetchLifecycleConfig(buildContext.pullRequest.fullName, buildContext.pullRequest.branchName);
+  }
+
+  const repositoryName = repoNameFromRepoUrl(repoUrl);
+  if (!repositoryName || !branch) {
+    return null;
+  }
+
+  return fetchLifecycleConfig(repositoryName, branch);
 }
 
 function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
@@ -93,7 +116,10 @@ async function resolveBuildContext(buildUuid: string) {
 
 async function resolveRequestedServices(
   buildUuid: string | undefined,
-  requestedServices: unknown[] | undefined
+  requestedServices: unknown[] | undefined,
+  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null,
+  lifecycleConfig: LifecycleConfig | null,
+  lifecycleConfigError?: unknown
 ): Promise<ResolvedSessionService[]> {
   if (!Array.isArray(requestedServices) || requestedServices.length === 0) {
     return [];
@@ -107,19 +133,30 @@ async function resolveRequestedServices(
     throw new Error('buildUuid is required when services are specified');
   }
 
+  if (!buildContext) {
+    throw new Error('Build not found');
+  }
+
+  if (!lifecycleConfig) {
+    throw lifecycleConfigError instanceof Error
+      ? lifecycleConfigError
+      : new Error('Lifecycle config not found for build');
+  }
+
   const requestedNames = requestedServices.filter((service): service is string => typeof service === 'string');
   if (requestedNames.length !== requestedServices.length) {
     throw new Error('services must be an array of service names');
   }
 
-  return resolveRequestedAgentSessionServices(await loadAgentSessionServiceCandidates(buildUuid), requestedNames).map(
-    ({ name, deployId, devConfig, baseDeploy }) => ({
-      name,
-      deployId,
-      devConfig,
-      resourceName: baseDeploy.uuid || undefined,
-    })
-  );
+  return resolveRequestedAgentSessionServices(
+    resolveAgentSessionServiceCandidates(buildContext.deploys || [], lifecycleConfig),
+    requestedNames
+  ).map(({ name, deployId, devConfig, baseDeploy }) => ({
+    name,
+    deployId,
+    devConfig,
+    resourceName: baseDeploy.uuid || undefined,
+  }));
 }
 
 /**
@@ -391,23 +428,42 @@ const postHandler = async (req: NextRequest) => {
   let prNumber = body.prNumber;
   let namespace = body.namespace;
   let buildKind = BuildKind.ENVIRONMENT;
+  let buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null = null;
+  let lifecycleConfig: LifecycleConfig | null = null;
+  let lifecycleConfigError: unknown;
 
   if (buildUuid) {
-    const build = await resolveBuildContext(buildUuid);
-    if (!build?.pullRequest) {
+    buildContext = await resolveBuildContext(buildUuid);
+    if (!buildContext?.pullRequest) {
       return errorResponse(new Error('Build not found'), { status: 404 }, req);
     }
 
-    buildKind = build.kind || BuildKind.ENVIRONMENT;
-    repoUrl = repoUrl || `https://github.com/${build.pullRequest.fullName}.git`;
-    branch = branch || build.pullRequest.branchName;
-    prNumber = prNumber ?? build.pullRequest.pullRequestNumber;
-    namespace = namespace || build.namespace;
+    buildKind = buildContext.kind || BuildKind.ENVIRONMENT;
+    repoUrl = repoUrl || `https://github.com/${buildContext.pullRequest.fullName}.git`;
+    branch = branch || buildContext.pullRequest.branchName;
+    prNumber = prNumber ?? buildContext.pullRequest.pullRequestNumber;
+    namespace = namespace || buildContext.namespace;
+  }
+
+  try {
+    lifecycleConfig = await resolveLifecycleConfigForSession({
+      buildContext,
+      repoUrl,
+      branch,
+    });
+  } catch (error) {
+    lifecycleConfigError = error;
   }
 
   let resolvedServices: ResolvedSessionService[];
   try {
-    resolvedServices = await resolveRequestedServices(buildUuid, services);
+    resolvedServices = await resolveRequestedServices(
+      buildUuid,
+      services,
+      buildContext,
+      lifecycleConfig,
+      lifecycleConfigError
+    );
   } catch (err) {
     return errorResponse(err, { status: 400 }, req);
   }
@@ -434,6 +490,10 @@ const postHandler = async (req: NextRequest) => {
       agentImage: runtimeConfig.image,
       editorImage: runtimeConfig.editorImage,
       nodeSelector: runtimeConfig.nodeSelector,
+      resources: mergeAgentSessionResources(
+        runtimeConfig.resources,
+        lifecycleConfig?.environment?.agentSession?.resources
+      ),
     });
 
     return successResponse(

@@ -19,14 +19,27 @@ import type {
   AgentSessionClaudeAttribution,
   AgentSessionClaudeConfig,
   AgentSessionClaudePermissions,
+  AgentSessionResourcesConfig,
   AgentSessionSchedulingConfig,
+  ResourceRequirements,
 } from 'server/services/types/globalConfig';
 
 export interface AgentSessionRuntimeConfig {
   image: string;
   editorImage: string;
   nodeSelector?: Record<string, string>;
+  resources: ResolvedAgentSessionResources;
   claude: ResolvedAgentSessionClaudeConfig;
+}
+
+export interface ResolvedAgentSessionResourceRequirements {
+  requests: Record<string, string>;
+  limits: Record<string, string>;
+}
+
+export interface ResolvedAgentSessionResources {
+  agent: ResolvedAgentSessionResourceRequirements;
+  editor: ResolvedAgentSessionResourceRequirements;
 }
 
 export interface ResolvedAgentSessionClaudePermissions {
@@ -49,6 +62,26 @@ const DEFAULT_CLAUDE_PERMISSION_ALLOW = ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit
 const DEFAULT_CLAUDE_PERMISSION_DENY: string[] = [];
 const DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
 const DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
+const DEFAULT_AGENT_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+  requests: {
+    cpu: '500m',
+    memory: '1Gi',
+  },
+  limits: {
+    cpu: '2',
+    memory: '4Gi',
+  },
+};
+const DEFAULT_EDITOR_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+  requests: {
+    cpu: '250m',
+    memory: '512Mi',
+  },
+  limits: {
+    cpu: '1',
+    memory: '1Gi',
+  },
+};
 
 function normalizeStringArray(values: unknown, fallback: string[]): string[] {
   if (!Array.isArray(values)) {
@@ -71,6 +104,34 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(values)
+      .filter(([key, value]) => typeof key === 'string' && key.trim() && typeof value === 'string' && value.trim())
+      .map(([key, value]) => [key.trim(), value.trim()])
+  );
+}
+
+function mergeResourceRequirements(
+  fallback: ResolvedAgentSessionResourceRequirements,
+  overrides?: ResourceRequirements | null
+): ResolvedAgentSessionResourceRequirements {
+  return {
+    requests: {
+      ...fallback.requests,
+      ...normalizeResourceQuantityMap(overrides?.requests),
+    },
+    limits: {
+      ...fallback.limits,
+      ...normalizeResourceQuantityMap(overrides?.limits),
+    },
+  };
+}
+
 function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null): Record<string, string> | undefined {
   const nodeSelector = scheduling?.nodeSelector;
 
@@ -85,6 +146,25 @@ function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null)
   );
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+export function resolveAgentSessionResourcesFromDefaults(
+  resourceDefaults?: AgentSessionResourcesConfig | null
+): ResolvedAgentSessionResources {
+  return {
+    agent: mergeResourceRequirements(DEFAULT_AGENT_RESOURCES, resourceDefaults?.agent),
+    editor: mergeResourceRequirements(DEFAULT_EDITOR_RESOURCES, resourceDefaults?.editor),
+  };
+}
+
+export function mergeAgentSessionResources(
+  baseResources: ResolvedAgentSessionResources,
+  overrides?: AgentSessionResourcesConfig | null
+): ResolvedAgentSessionResources {
+  return {
+    agent: mergeResourceRequirements(baseResources.agent, overrides?.agent),
+    editor: mergeResourceRequirements(baseResources.editor, overrides?.editor),
+  };
 }
 
 export function resolveAgentSessionClaudeConfigFromDefaults(
@@ -164,6 +244,7 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
     image,
     editorImage,
     nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
+    resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
     claude: resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude),
   };
 }

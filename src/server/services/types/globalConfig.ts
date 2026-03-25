@@ -73,10 +73,21 @@ export type AgentSessionSchedulingConfig = {
   nodeSelector?: Record<string, string> | null;
 };
 
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+};
+
+export type AgentSessionResourcesConfig = {
+  agent?: ResourceRequirements | null;
+  editor?: ResourceRequirements | null;
+};
+
 export type AgentSessionDefaults = {
   image?: string | null;
   editorImage?: string | null;
   scheduling?: AgentSessionSchedulingConfig;
+  resources?: AgentSessionResourcesConfig;
   claude?: AgentSessionClaudeConfig;
 };
 
@@ -175,11 +186,6 @@ export type BuildDefaults = {
     healthCheckTimeout?: number;
     insecure?: boolean;
   };
-};
-
-export type ResourceRequirements = {
-  requests?: Record<string, string>;
-  limits?: Record<string, string>;
 };
 
 export type CommentToggleConfig = {

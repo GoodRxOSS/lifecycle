@@ -377,6 +377,42 @@ describe('AgentSessionService', () => {
       expect(session.status).toBe('active');
     });
 
+    it('passes resolved agent-session resources through to pod creation when provided', async () => {
+      const optsWithResources: CreateSessionOptions = {
+        ...baseOpts,
+        resources: {
+          agent: {
+            requests: {
+              cpu: '900m',
+              memory: '2Gi',
+            },
+            limits: {
+              cpu: '3',
+              memory: '6Gi',
+            },
+          },
+          editor: {
+            requests: {
+              cpu: '400m',
+              memory: '768Mi',
+            },
+            limits: {
+              cpu: '1500m',
+              memory: '2Gi',
+            },
+          },
+        },
+      };
+
+      await AgentSessionService.createSession(optsWithResources);
+
+      expect(createAgentPod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resources: optsWithResources.resources,
+        })
+      );
+    });
+
     it('passes forwarded service env through to the agent pod when configured', async () => {
       (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
         env: { PRIVATE_REGISTRY_TOKEN: 'plain-token' },

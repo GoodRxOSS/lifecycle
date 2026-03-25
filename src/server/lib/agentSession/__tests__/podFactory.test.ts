@@ -428,6 +428,75 @@ describe('podFactory', () => {
       });
     });
 
+    it('prefers explicit agent-session resource overrides when provided', () => {
+      const pod = buildAgentPodSpec({
+        ...baseOpts,
+        resources: {
+          agent: {
+            requests: {
+              cpu: '1',
+              memory: '2Gi',
+            },
+            limits: {
+              cpu: '4',
+              memory: '8Gi',
+            },
+          },
+          editor: {
+            requests: {
+              cpu: '500m',
+              memory: '1Gi',
+            },
+            limits: {
+              cpu: '2',
+              memory: '2Gi',
+            },
+          },
+        },
+      });
+
+      expect(getInitContainer(pod, 'prepare-workspace').resources).toEqual({
+        requests: {
+          cpu: '1',
+          memory: '2Gi',
+        },
+        limits: {
+          cpu: '4',
+          memory: '8Gi',
+        },
+      });
+      expect(getInitContainer(pod, 'init-workspace').resources).toEqual({
+        requests: {
+          cpu: '1',
+          memory: '2Gi',
+        },
+        limits: {
+          cpu: '4',
+          memory: '8Gi',
+        },
+      });
+      expect(pod.spec!.containers[0].resources).toEqual({
+        requests: {
+          cpu: '1',
+          memory: '2Gi',
+        },
+        limits: {
+          cpu: '4',
+          memory: '8Gi',
+        },
+      });
+      expect(pod.spec!.containers[1].resources).toEqual({
+        requests: {
+          cpu: '500m',
+          memory: '1Gi',
+        },
+        limits: {
+          cpu: '2',
+          memory: '2Gi',
+        },
+      });
+    });
+
     it('starts a code-server editor sidecar on the editor port', () => {
       const pod = buildAgentPodSpec(baseOpts);
 
