@@ -243,7 +243,7 @@ export class DeploymentManager {
           deploy,
           {
             status: DeployStatus.DEPLOY_FAILED,
-            statusMessage: `Kubernetes apply failed: ${error.message}`,
+            statusMessage: `Deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
           },
           runUUID
         );

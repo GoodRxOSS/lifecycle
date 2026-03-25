@@ -844,7 +844,7 @@ export function constructImageVersion(dockerImage: string): string {
 
 export function escapeHelmValue(value: string): string {
   // Escape forward slashes to prevent helm from interpreting them as nested paths
-  return value.replace(/\//g, '\\/');
+  return value.replace(/\//g, '\\/').replace(/,/g, '\\,');
 }
 
 export async function validateHelmConfiguration(deploy: Deploy): Promise<string[]> {
