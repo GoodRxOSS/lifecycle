@@ -22,6 +22,9 @@ const mockReadService = jest.fn();
 const mockListServices = jest.fn();
 const mockPatchDeployment = jest.fn();
 const mockPatchService = jest.fn();
+const mockReadHorizontalPodAutoscaler = jest.fn();
+const mockListHorizontalPodAutoscalers = jest.fn();
+const mockPatchHorizontalPodAutoscaler = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
@@ -42,6 +45,13 @@ jest.mock('@kubernetes/client-node', () => {
             readNamespacedService: mockReadService,
             listNamespacedService: mockListServices,
             patchNamespacedService: mockPatchService,
+          };
+        }
+        if (apiClass === actual.AutoscalingV2Api) {
+          return {
+            readNamespacedHorizontalPodAutoscaler: mockReadHorizontalPodAutoscaler,
+            listNamespacedHorizontalPodAutoscaler: mockListHorizontalPodAutoscalers,
+            patchNamespacedHorizontalPodAutoscaler: mockPatchHorizontalPodAutoscaler,
           };
         }
         return {};
@@ -87,8 +97,11 @@ describe('DevModeManager', () => {
       },
     });
     mockListServices.mockResolvedValue({ body: { items: [] } });
+    mockReadHorizontalPodAutoscaler.mockRejectedValue(new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404));
+    mockListHorizontalPodAutoscalers.mockResolvedValue({ body: { items: [] } });
     mockPatchDeployment.mockResolvedValue({});
     mockPatchService.mockResolvedValue({});
+    mockPatchHorizontalPodAutoscaler.mockResolvedValue({});
     manager = new DevModeManager();
   });
 
@@ -109,9 +122,9 @@ describe('DevModeManager', () => {
       'test-ns',
       expect.objectContaining({
         metadata: {
-          annotations: {
+          annotations: expect.objectContaining({
             'lifecycle.goodrx.com/dev-mode-deployment-snapshot': expect.any(String),
-          },
+          }),
         },
         spec: expect.objectContaining({
           replicas: 1,
@@ -332,6 +345,58 @@ describe('DevModeManager', () => {
     expect(snapshot.deployment.replicas).toBe(3);
   });
 
+  it('pins an attached HorizontalPodAutoscaler to a single replica during dev mode', async () => {
+    mockListHorizontalPodAutoscalers.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: { name: 'my-app-hpa' },
+            spec: {
+              minReplicas: 2,
+              maxReplicas: 5,
+              scaleTargetRef: { apiVersion: 'apps/v1', kind: 'Deployment', name: 'my-app' },
+            },
+          },
+        ],
+      },
+    });
+
+    const opts: DevModeOptions = {
+      namespace: 'test-ns',
+      deploymentName: 'my-app',
+      serviceName: 'my-app',
+      pvcName: 'agent-pvc-abc',
+      devConfig: { image: 'node:20-slim', command: 'pnpm dev' },
+    };
+
+    const snapshot = await manager.enableDevMode(opts);
+
+    expect(snapshot.horizontalPodAutoscaler).toEqual({
+      hpaName: 'my-app-hpa',
+      minReplicas: 2,
+      maxReplicas: 5,
+    });
+    expect(mockPatchHorizontalPodAutoscaler).toHaveBeenCalledWith(
+      'my-app-hpa',
+      'test-ns',
+      {
+        spec: {
+          minReplicas: 1,
+          maxReplicas: 1,
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
+    );
+    expect(mockPatchHorizontalPodAutoscaler.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPatchDeployment.mock.invocationCallOrder[0]
+    );
+  });
+
   it('removes dev-mode-only deployment fields not present in last-applied configuration', async () => {
     mockReadDeployment.mockResolvedValue({
       body: {
@@ -472,6 +537,11 @@ describe('DevModeManager', () => {
               volumes: [{ name: 'config-volume', emptyDir: {} }],
               nodeSelector: { 'app-long': 'deployments-m7i' },
             }),
+            'lifecycle.goodrx.com/dev-mode-hpa-snapshot': JSON.stringify({
+              hpaName: 'grpc-echo-hpa',
+              minReplicas: 2,
+              maxReplicas: 5,
+            }),
           },
         },
         spec: {
@@ -504,6 +574,16 @@ describe('DevModeManager', () => {
         },
       },
     });
+    mockReadHorizontalPodAutoscaler.mockResolvedValue({
+      body: {
+        metadata: { name: 'grpc-echo-hpa' },
+        spec: {
+          minReplicas: 1,
+          maxReplicas: 1,
+          scaleTargetRef: { apiVersion: 'apps/v1', kind: 'Deployment', name: 'grpc-echo-resolved' },
+        },
+      },
+    });
 
     await manager.disableDevMode('test-ns', 'grpc-echo');
 
@@ -514,6 +594,10 @@ describe('DevModeManager', () => {
         {
           op: 'remove',
           path: '/metadata/annotations/lifecycle.goodrx.com~1dev-mode-deployment-snapshot',
+        },
+        {
+          op: 'remove',
+          path: '/metadata/annotations/lifecycle.goodrx.com~1dev-mode-hpa-snapshot',
         },
         {
           op: 'replace',
@@ -553,6 +637,22 @@ describe('DevModeManager', () => {
       undefined,
       undefined,
       { headers: { 'Content-Type': 'application/json-patch+json' } }
+    );
+    expect(mockPatchHorizontalPodAutoscaler).toHaveBeenCalledWith(
+      'grpc-echo-hpa',
+      'test-ns',
+      {
+        spec: {
+          minReplicas: 2,
+          maxReplicas: 5,
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
   });
 
@@ -654,6 +754,16 @@ describe('DevModeManager', () => {
         },
       },
     });
+    mockReadHorizontalPodAutoscaler.mockResolvedValue({
+      body: {
+        metadata: { name: 'grpc-echo-hpa' },
+        spec: {
+          minReplicas: 1,
+          maxReplicas: 1,
+          scaleTargetRef: { apiVersion: 'apps/v1', kind: 'Deployment', name: 'grpc-echo-resolved' },
+        },
+      },
+    });
 
     await manager.disableDevMode('test-ns', 'grpc-echo', 'grpc-echo', {
       deployment: {
@@ -671,6 +781,11 @@ describe('DevModeManager', () => {
       service: {
         serviceName: 'grpc-echo-service',
         ports: [{ name: 'tcp', port: 8080, targetPort: 8080, protocol: 'TCP' }],
+      },
+      horizontalPodAutoscaler: {
+        hpaName: 'grpc-echo-hpa',
+        minReplicas: 2,
+        maxReplicas: 4,
       },
     });
 
@@ -721,6 +836,25 @@ describe('DevModeManager', () => {
       undefined,
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
+    );
+    expect(mockPatchHorizontalPodAutoscaler).toHaveBeenCalledWith(
+      'grpc-echo-hpa',
+      'test-ns',
+      {
+        spec: {
+          minReplicas: 2,
+          maxReplicas: 4,
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
+    );
+    expect(mockPatchDeployment.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPatchHorizontalPodAutoscaler.mock.invocationCallOrder[0]
     );
   });
 
