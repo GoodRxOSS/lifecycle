@@ -118,6 +118,10 @@ export interface AgentPodOpts {
   buildUuid?: string;
   userIdentity?: RequestUserIdentity;
   nodeSelector?: Record<string, string>;
+  resources?: {
+    agent?: k8s.V1ResourceRequirements;
+    editor?: k8s.V1ResourceRequirements;
+  };
 }
 
 function buildAgentResources(): k8s.V1ResourceRequirements {
@@ -246,8 +250,8 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   };
 
   const initScript = generateInitScript(initScriptOpts);
-  const resources = buildAgentResources();
-  const editorResources = buildEditorResources();
+  const resources = opts.resources?.agent || buildAgentResources();
+  const editorResources = opts.resources?.editor || buildEditorResources();
   const userEnv = buildUserIdentityEnv(userIdentity);
   const githubTokenEnv = buildGitHubTokenEnv(apiKeySecretName, hasGitHubToken);
   const workspaceVolumeMount = buildWorkspaceVolumeMount(workspacePath);
