@@ -21,6 +21,18 @@ export type LifecycleYamlConfigEnvironment = {
   optionalServices?: YamlService[];
   webhooks?: YamlWebhook[];
   enabledFeatures?: string[];
+  agentSession?: {
+    resources?: {
+      agent?: {
+        requests?: Record<string, string>;
+        limits?: Record<string, string>;
+      };
+      editor?: {
+        requests?: Record<string, string>;
+        limits?: Record<string, string>;
+      };
+    };
+  };
 };
 
 export type LifecycleYamlConfigOptions = {

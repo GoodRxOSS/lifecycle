@@ -19,6 +19,7 @@ import { customAlphabet, nanoid } from 'nanoid';
 import BaseService from './_service';
 import BuildService from './build';
 import AgentSessionService from './agentSession';
+import { mergeAgentSessionResources, type ResolvedAgentSessionResources } from 'server/lib/agentSession/runtimeConfig';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { getLogger } from 'server/lib/logger';
 import { Build, Deploy, Deployable } from 'server/models';
@@ -70,6 +71,7 @@ export interface LaunchSandboxSessionOptions {
   agentImage: string;
   editorImage: string;
   nodeSelector?: Record<string, string>;
+  resources: ResolvedAgentSessionResources;
   onProgress?: (stage: SandboxLaunchStage, message: string) => Promise<void> | void;
 }
 
@@ -92,7 +94,7 @@ export default class AgentSandboxSessionService extends BaseService {
   private readonly deployService = new DeployService(this.db, this.redis, this.redlock, this.queueManager);
 
   async launch(opts: LaunchSandboxSessionOptions): Promise<LaunchSandboxSessionResult> {
-    const { baseBuild, environmentSource, candidates } = await this.loadBaseBuildAndCandidates(opts);
+    const { baseBuild, environmentSource, lifecycleConfig, candidates } = await this.loadBaseBuildAndCandidates(opts);
     if (candidates.length === 0) {
       throw new Error(
         `No dev-mode sandboxable services were found in ${environmentSource.repo}:${environmentSource.branch}`
@@ -172,6 +174,7 @@ export default class AgentSandboxSessionService extends BaseService {
         agentImage: opts.agentImage,
         editorImage: opts.editorImage,
         nodeSelector: opts.nodeSelector,
+        resources: mergeAgentSessionResources(opts.resources, lifecycleConfig.environment?.agentSession?.resources),
         userIdentity: opts.userIdentity,
       });
 
@@ -238,6 +241,7 @@ export default class AgentSandboxSessionService extends BaseService {
     return {
       baseBuild,
       environmentSource,
+      lifecycleConfig,
       candidates: await this.resolveCandidateServices(baseBuild, lifecycleConfig, environmentSource),
     };
   }
