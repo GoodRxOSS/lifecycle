@@ -292,7 +292,12 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
   });
 
   if (jobResult.status !== 'succeeded') {
-    throw new Error(`Native helm deployment failed: ${jobResult.logs}`);
+    let errorMessage = 'Deployment failed';
+    if (jobResult.logs?.includes('timed out waiting for the condition')) {
+      errorMessage +=
+        ': Helm upgrade timed out. The deployed pods are not in a healthy state. Check Console > Pods for details';
+    }
+    throw new Error(errorMessage);
   }
 
   const { helm } = deployable;
@@ -430,7 +435,9 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
                 deploy,
                 {
                   status: DeployStatus.DEPLOY_FAILED,
-                  statusMessage: `Helm deployment failed: ${error.message}`,
+                  statusMessage: error.message.includes('timed out')
+                    ? error.message
+                    : `${error.message}. Check deploy logs in Console > Deploy tab for details.`,
                 },
                 runUUID
               );
