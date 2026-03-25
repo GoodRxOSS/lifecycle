@@ -99,6 +99,7 @@ describe('DevModeManager', () => {
       serviceName: 'my-app',
       pvcName: 'agent-pvc-abc',
       devConfig: { image: 'node:20-slim', command: 'pnpm dev', workDir: '/workspace' },
+      requiredNodeName: 'agent-node-a',
     };
 
     await manager.enableDevMode(opts);
@@ -115,6 +116,7 @@ describe('DevModeManager', () => {
         spec: {
           template: {
             spec: {
+              nodeSelector: { 'kubernetes.io/hostname': 'agent-node-a' },
               volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } }],
               containers: [
                 expect.objectContaining({
@@ -136,6 +138,38 @@ describe('DevModeManager', () => {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
+  });
+
+  it('merges the required agent node with an existing deployment nodeSelector', async () => {
+    mockReadDeployment.mockResolvedValue({
+      body: {
+        spec: {
+          template: {
+            spec: {
+              nodeSelector: { 'app-long': 'deployments-m7i' },
+              containers: [{ name: 'web-app' }],
+            },
+          },
+        },
+      },
+    });
+
+    const opts: DevModeOptions = {
+      namespace: 'test-ns',
+      deploymentName: 'my-app',
+      serviceName: 'my-app',
+      pvcName: 'agent-pvc-abc',
+      devConfig: { image: 'node:20-slim', command: 'pnpm dev', workDir: '/workspace' },
+      requiredNodeName: 'agent-node-a',
+    };
+
+    await manager.enableDevMode(opts);
+
+    const patchBody = mockPatchDeployment.mock.calls[0][2];
+    expect(patchBody.spec.template.spec.nodeSelector).toEqual({
+      'app-long': 'deployments-m7i',
+      'kubernetes.io/hostname': 'agent-node-a',
+    });
   });
 
   it('mounts the shared workspace root when workDir points at a service subdirectory', async () => {
@@ -306,6 +340,7 @@ describe('DevModeManager', () => {
                   ],
                 },
               ],
+              nodeSelector: { 'kubernetes.io/hostname': 'agent-node-a' },
               volumes: [
                 { name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } },
                 { name: 'config-volume', emptyDir: {} },
@@ -326,6 +361,7 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/containers/0/workingDir' },
         { op: 'remove', path: '/spec/template/spec/containers/0/volumeMounts/0' },
         { op: 'remove', path: '/spec/template/spec/volumes/0' },
+        { op: 'remove', path: '/spec/template/spec/nodeSelector' },
       ],
       undefined,
       undefined,
@@ -399,12 +435,17 @@ describe('DevModeManager', () => {
               ],
               volumeMounts: [{ name: 'config-volume', mountPath: '/config' }],
               volumes: [{ name: 'config-volume', emptyDir: {} }],
+              nodeSelector: { 'app-long': 'deployments-m7i' },
             }),
           },
         },
         spec: {
           template: {
             spec: {
+              nodeSelector: {
+                'app-long': 'deployments-m7i',
+                'kubernetes.io/hostname': 'agent-node-a',
+              },
               containers: [
                 {
                   name: 'grpc-echo',
@@ -463,6 +504,11 @@ describe('DevModeManager', () => {
           path: '/spec/template/spec/volumes',
           value: [{ name: 'config-volume', emptyDir: {} }],
         },
+        {
+          op: 'replace',
+          path: '/spec/template/spec/nodeSelector',
+          value: { 'app-long': 'deployments-m7i' },
+        },
       ],
       undefined,
       undefined,
@@ -497,6 +543,7 @@ describe('DevModeManager', () => {
                   ],
                 },
               ],
+              nodeSelector: { 'kubernetes.io/hostname': 'agent-node-a' },
               volumes: [
                 { name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } },
                 { name: 'config-volume', emptyDir: {} },
@@ -517,6 +564,7 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/containers/0/workingDir' },
         { op: 'remove', path: '/spec/template/spec/containers/0/volumeMounts/0' },
         { op: 'remove', path: '/spec/template/spec/volumes/0' },
+        { op: 'remove', path: '/spec/template/spec/nodeSelector' },
       ],
       undefined,
       undefined,
@@ -549,6 +597,10 @@ describe('DevModeManager', () => {
                   volumeMounts: [{ name: 'workspace', mountPath: '/workspace', subPath: 'repo' }],
                 },
               ],
+              nodeSelector: {
+                'app-long': 'deployments-m7i',
+                'kubernetes.io/hostname': 'agent-node-a',
+              },
               volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } }],
             },
           },
@@ -574,6 +626,7 @@ describe('DevModeManager', () => {
         env: null,
         volumeMounts: null,
         volumes: null,
+        nodeSelector: { 'app-long': 'deployments-m7i' },
       },
       service: {
         serviceName: 'grpc-echo-service',
@@ -595,6 +648,11 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/containers/0/env' },
         { op: 'remove', path: '/spec/template/spec/containers/0/volumeMounts' },
         { op: 'remove', path: '/spec/template/spec/volumes' },
+        {
+          op: 'replace',
+          path: '/spec/template/spec/nodeSelector',
+          value: { 'app-long': 'deployments-m7i' },
+        },
       ],
       undefined,
       undefined,

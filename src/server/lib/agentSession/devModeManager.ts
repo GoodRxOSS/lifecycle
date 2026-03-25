@@ -22,6 +22,7 @@ import { AGENT_WORKSPACE_ROOT, AGENT_WORKSPACE_SUBPATH } from './workspace';
 const logger = getLogger();
 const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-deployment-snapshot';
 const DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-service-snapshot';
+const SAME_NODE_SELECTOR_KEY = 'kubernetes.io/hostname';
 
 export interface DevModeOptions {
   namespace: string;
@@ -29,6 +30,7 @@ export interface DevModeOptions {
   serviceName: string;
   pvcName: string;
   devConfig: DevConfig;
+  requiredNodeName?: string;
 }
 
 export interface DevModeDeploymentSnapshot {
@@ -40,6 +42,7 @@ export interface DevModeDeploymentSnapshot {
   env: k8s.V1EnvVar[] | null;
   volumeMounts: k8s.V1VolumeMount[] | null;
   volumes: k8s.V1Volume[] | null;
+  nodeSelector: Record<string, string> | null;
 }
 
 export interface DevModeServiceSnapshot {
@@ -56,6 +59,7 @@ interface AppliedDeploymentTemplate {
   spec?: {
     template?: {
       spec?: {
+        nodeSelector?: Record<string, string>;
         containers?: Array<{
           name?: string;
           command?: string[];
@@ -229,11 +233,17 @@ export class DevModeManager {
   }
 
   private async patchDeployment(opts: DevModeOptions, existing: k8s.V1Deployment): Promise<void> {
-    const { namespace, pvcName, devConfig } = opts;
+    const { namespace, pvcName, devConfig, requiredNodeName } = opts;
     const deploymentName = existing.metadata?.name || opts.deploymentName;
     const workDir = devConfig.workDir || '/workspace';
     const existingContainerName = existing.spec?.template?.spec?.containers?.[0]?.name || deploymentName;
     const deploymentSnapshot = this.buildDeploymentSnapshot(existing, existingContainerName);
+    const nodeSelector = requiredNodeName
+      ? {
+          ...(existing.spec?.template?.spec?.nodeSelector || {}),
+          [SAME_NODE_SELECTOR_KEY]: requiredNodeName,
+        }
+      : undefined;
 
     const patch = {
       metadata: {
@@ -244,6 +254,7 @@ export class DevModeManager {
       spec: {
         template: {
           spec: {
+            ...(nodeSelector ? { nodeSelector } : {}),
             volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: pvcName } }],
             containers: [
               {
@@ -364,7 +375,7 @@ export class DevModeManager {
       desiredTemplate.spec?.template?.spec?.containers?.[liveContainerIndex];
     const desiredVolumes = desiredTemplate.spec?.template?.spec?.volumes || [];
 
-    const patch: Array<Record<string, string>> = [];
+    const patch: Array<Record<string, unknown>> = [];
 
     if (liveContainer.command && !desiredContainer?.command) {
       patch.push({ op: 'remove', path: `/spec/template/spec/containers/${liveContainerIndex}/command` });
@@ -401,6 +412,13 @@ export class DevModeManager {
         patch.push({ op: 'remove', path: `/spec/template/spec/volumes/${index}` });
       }
     }
+
+    this.appendValuePatch(
+      patch,
+      '/spec/template/spec/nodeSelector',
+      liveSpec?.nodeSelector,
+      desiredTemplate.spec?.template?.spec?.nodeSelector
+    );
 
     if (patch.length === 0) {
       return;
@@ -505,6 +523,7 @@ export class DevModeManager {
       env: liveContainer?.env ? deepClone(liveContainer.env) : null,
       volumeMounts: liveContainer?.volumeMounts ? deepClone(liveContainer.volumeMounts) : null,
       volumes: liveSpec?.volumes ? deepClone(liveSpec.volumes) : null,
+      nodeSelector: liveSpec?.nodeSelector ? deepClone(liveSpec.nodeSelector) : null,
     };
   }
 
@@ -558,6 +577,7 @@ export class DevModeManager {
         env: this.cloneValue(container.env ?? null),
         volumeMounts: this.cloneValue(container.volumeMounts ?? null),
         volumes: this.cloneValue(deployment.spec?.template?.spec?.volumes ?? null),
+        nodeSelector: this.cloneValue(deployment.spec?.template?.spec?.nodeSelector ?? null),
       },
       service: service
         ? {
@@ -605,6 +625,12 @@ export class DevModeManager {
       '/spec/template/spec/volumes',
       existing.spec?.template?.spec?.volumes,
       snapshot.volumes
+    );
+    this.appendValuePatch(
+      patch,
+      '/spec/template/spec/nodeSelector',
+      existing.spec?.template?.spec?.nodeSelector,
+      snapshot.nodeSelector
     );
 
     if (patch.length === 0) {
@@ -732,6 +758,18 @@ export class DevModeManager {
       const volume = liveVolumes[index];
       if (volume.name === 'workspace') {
         patch.push({ op: 'remove', path: `/spec/template/spec/volumes/${index}` });
+      }
+    }
+
+    const liveNodeSelector = liveSpec?.nodeSelector || {};
+    if (liveNodeSelector[SAME_NODE_SELECTOR_KEY]) {
+      if (Object.keys(liveNodeSelector).length === 1) {
+        patch.push({ op: 'remove', path: '/spec/template/spec/nodeSelector' });
+      } else {
+        patch.push({
+          op: 'remove',
+          path: `/spec/template/spec/nodeSelector/${SAME_NODE_SELECTOR_KEY.replace('/', '~1')}`,
+        });
       }
     }
 
