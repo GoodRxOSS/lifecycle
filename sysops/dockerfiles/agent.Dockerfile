@@ -15,6 +15,8 @@
 FROM node:20-slim
 
 ENV HOME=/home/claude
+ENV BUN_INSTALL=/home/claude/.bun
+ENV PATH=${BUN_INSTALL}/bin:${PATH}
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
 RUN apt-get update && apt-get install -y \
@@ -27,9 +29,12 @@ RUN apt-get update && apt-get install -y \
   golang-go \
   python3 \
   ripgrep \
+  unzip \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g pnpm @anthropic-ai/claude-code
+
+RUN curl -fsSL https://bun.sh/install | bash
 
 RUN mkdir -p /home/claude /workspace && \
   chown -R 1000:1000 /home/claude /workspace
