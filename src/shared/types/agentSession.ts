@@ -70,6 +70,11 @@ export type AgentWSServerMessage =
     }
   | { type: 'phase'; phase: AgentWSPhase; label: string; tool?: string }
   | { type: 'prompt'; message: string; promptId: string }
-  | { type: 'status'; status: 'connecting' | 'ready' | 'working' | 'idle' | 'error' | 'ended' }
+  | {
+      type: 'status';
+      status: 'connecting' | 'ready' | 'working' | 'idle' | 'error' | 'ended';
+      title?: string;
+      message?: string;
+    }
   | { type: 'heartbeat'; ts: number }
   | { type: 'dev_reload'; service: string; trigger: string };

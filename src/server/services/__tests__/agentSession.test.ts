@@ -138,6 +138,7 @@ const mockEnableDevMode = jest.fn().mockResolvedValue({
   deployment: {
     deploymentName: 'service',
     containerName: 'service',
+    replicas: null,
     image: 'node:20',
     command: null,
     workingDir: null,
@@ -246,12 +247,14 @@ describe('AgentSessionService', () => {
       deployment: {
         deploymentName: 'service',
         containerName: 'service',
+        replicas: null,
         image: 'node:20',
         command: null,
         workingDir: null,
         env: null,
         volumeMounts: null,
         volumes: null,
+        nodeSelector: null,
       },
       service: null,
     });
@@ -553,6 +556,11 @@ describe('AgentSessionService', () => {
 
       await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('pod creation failed');
 
+      expect(mockRedis.setex).toHaveBeenCalledWith(
+        'lifecycle:agent:session:startup-failure:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        3600,
+        expect.any(String)
+      );
       expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
       expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
@@ -694,12 +702,14 @@ describe('AgentSessionService', () => {
             deployment: {
               deploymentName: 'deploy-10',
               containerName: 'web',
+              replicas: null,
               image: 'node:20',
               command: null,
               workingDir: null,
               env: null,
               volumeMounts: null,
               volumes: null,
+              nodeSelector: null,
             },
             service: null,
           },
@@ -781,12 +791,14 @@ describe('AgentSessionService', () => {
             deployment: {
               deploymentName: 'deploy-10',
               containerName: 'web',
+              replicas: null,
               image: 'node:20',
               command: null,
               workingDir: null,
               env: null,
               volumeMounts: null,
               volumes: null,
+              nodeSelector: null,
             },
             service: null,
           },
@@ -923,6 +935,63 @@ describe('AgentSessionService', () => {
     });
   });
 
+  describe('session startup failures', () => {
+    it('returns the persisted runtime failure for a session', async () => {
+      mockRedis.get.mockResolvedValue(
+        JSON.stringify({
+          sessionId: 'sess-1',
+          stage: 'connect_runtime',
+          title: 'Agent pod failed to start',
+          message: 'init-workspace: ImagePullBackOff',
+          recordedAt: '2026-03-25T10:00:00.000Z',
+        })
+      );
+
+      const result = await AgentSessionService.getSessionStartupFailure('sess-1');
+
+      expect(mockRedis.get).toHaveBeenCalledWith('lifecycle:agent:session:startup-failure:sess-1');
+      expect(result).toEqual({
+        stage: 'connect_runtime',
+        title: 'Agent pod failed to start',
+        message: 'init-workspace: ImagePullBackOff',
+        recordedAt: '2026-03-25T10:00:00.000Z',
+      });
+    });
+
+    it('persists a runtime failure in Redis and marks the session errored', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 123,
+        uuid: 'sess-1',
+        status: 'active',
+      });
+
+      const result = await AgentSessionService.markSessionRuntimeFailure(
+        'sess-1',
+        new Error('Agent pod failed to start: init-workspace: ImagePullBackOff')
+      );
+
+      expect(mockRedis.setex).toHaveBeenCalledWith(
+        'lifecycle:agent:session:startup-failure:sess-1',
+        3600,
+        expect.any(String)
+      );
+      expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:sess-1');
+      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'error',
+          endedAt: expect.any(String),
+        })
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          stage: 'connect_runtime',
+          title: 'Agent pod failed to start',
+          message: 'init-workspace: ImagePullBackOff',
+        })
+      );
+    });
+  });
+
   describe('getActiveSessions', () => {
     it('returns active sessions for user', async () => {
       await AgentSessionService.getActiveSessions('user-123');
@@ -956,12 +1025,14 @@ describe('AgentSessionService', () => {
               deployment: {
                 deploymentName: 'api',
                 containerName: 'api',
+                replicas: null,
                 image: 'node:20',
                 command: null,
                 workingDir: null,
                 env: null,
                 volumeMounts: null,
                 volumes: null,
+                nodeSelector: null,
               },
               service: null,
             },
