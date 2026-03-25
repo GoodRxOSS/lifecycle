@@ -109,7 +109,7 @@ export function createBannerVars(options: BannerOptions[], deploy: Deploy): stri
     `window.LFC_BASE_URL = "${APP_HOST}";`,
     `window.LFC_DEPLOY_STATUS = "${deployStatus}";`,
     `window.LFC_CREATED_AT = "${createdAt}";`,
-    `window.LFC_DASHBOARD_URL = "${LIFECYCLE_UI_URL}/build/${uuid}";`,
+    `window.LFC_DASHBOARD_URL = "${LIFECYCLE_UI_URL}/environments/${uuid}";`,
   ].join('\n');
 }
 
@@ -123,7 +123,7 @@ export function ingressBannerSnippet(deploy: Deploy) {
       {
         label: 'UUID',
         value: uuid || '',
-        url: `${LIFECYCLE_UI_URL}/build/${uuid}`,
+        url: `${LIFECYCLE_UI_URL}/environments/${uuid}`,
       },
       {
         label: 'PR Owner',
