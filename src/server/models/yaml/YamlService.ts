@@ -36,6 +36,12 @@ export interface DevConfig {
   ports?: number[];
   env?: Record<string, string>;
   forwardEnvVarsToAgent?: string[];
+  agentSession?: {
+    readiness?: {
+      timeoutMs?: number;
+      pollMs?: number;
+    };
+  };
 }
 
 export interface Service {
