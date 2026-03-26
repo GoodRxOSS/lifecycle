@@ -447,6 +447,7 @@ async function getOrCreateAgentRuntime(
   namespace: string,
   podName: string,
   model: string,
+  appendSystemPrompt: string | undefined,
   agentLogCtx: Record<string, unknown>
 ): Promise<AgentSessionRuntime> {
   let runtime = agentSessionRuntimes.get(sessionId);
@@ -488,6 +489,7 @@ async function getOrCreateAgentRuntime(
         namespace,
         podName,
         model,
+        appendSystemPrompt,
         agentLogCtx
       )) as AgentExecConnection;
       runtime!.execConn = execConn;
@@ -555,17 +557,24 @@ async function getOrCreateAgentRuntime(
 }
 
 async function attachToAgentPodWithRetry(
-  attachToAgentPod: (namespace: string, podName: string, model: string) => Promise<AgentExecConnection>,
+  attachToAgentPod: (
+    namespace: string,
+    podName: string,
+    model: string,
+    container?: string,
+    appendSystemPrompt?: string
+  ) => Promise<AgentExecConnection>,
   namespace: string,
   podName: string,
   model: string,
+  appendSystemPrompt: string | undefined,
   agentLogCtx: Record<string, unknown>
 ): Promise<AgentExecConnection> {
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= AGENT_EXEC_ATTACH_MAX_ATTEMPTS; attempt++) {
     try {
-      return await attachToAgentPod(namespace, podName, model);
+      return await attachToAgentPod(namespace, podName, model, undefined, appendSystemPrompt);
     } catch (error: any) {
       lastError = error;
 
@@ -954,6 +963,7 @@ app.prepare().then(() => {
         activeSessionId,
         typeof tokenFromQuery === 'string' ? tokenFromQuery : null
       );
+      const appendSystemPrompt = await AgentSessionService.getSessionAppendSystemPrompt(activeSessionId);
 
       agentLogCtx.podName = session.podName;
       agentLogCtx.namespace = session.namespace;
@@ -964,6 +974,7 @@ app.prepare().then(() => {
         session.namespace,
         session.podName,
         session.model,
+        appendSystemPrompt,
         agentLogCtx
       );
 
