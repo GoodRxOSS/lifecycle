@@ -21,6 +21,7 @@ import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import {
   AgentSessionRuntimeConfigError,
+  mergeAgentSessionReadinessForServices,
   mergeAgentSessionResources,
   resolveAgentSessionRuntimeConfig,
 } from 'server/lib/agentSession/runtimeConfig';
@@ -530,6 +531,10 @@ const postHandler = async (req: NextRequest) => {
       agentImage: runtimeConfig.image,
       editorImage: runtimeConfig.editorImage,
       nodeSelector: runtimeConfig.nodeSelector,
+      readiness: mergeAgentSessionReadinessForServices(
+        runtimeConfig.readiness,
+        resolvedServices.map((service) => service.devConfig.agentSession?.readiness)
+      ),
       resources: mergeAgentSessionResources(
         runtimeConfig.resources,
         lifecycleConfig?.environment?.agentSession?.resources
