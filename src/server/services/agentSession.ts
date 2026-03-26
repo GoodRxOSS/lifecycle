@@ -45,6 +45,11 @@ import {
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
 import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
 import {
+  buildAgentSessionDynamicSystemPrompt,
+  combineAgentSessionAppendSystemPrompt,
+  resolveAgentSessionPromptContext,
+} from 'server/lib/agentSession/systemPrompt';
+import {
   AgentSessionStartupFailureStage,
   PublicAgentSessionStartupFailure,
   buildAgentSessionStartupFailure,
@@ -735,6 +740,31 @@ export default class AgentSessionService {
 
     const [enrichedSession] = await AgentSessionService.enrichSessions([session]);
     return enrichedSession || null;
+  }
+
+  static async getSessionAppendSystemPrompt(sessionId: string): Promise<string | undefined> {
+    const [session, claudeConfig] = await Promise.all([
+      AgentSession.query().findOne({ uuid: sessionId }).select('id', 'namespace', 'buildUuid'),
+      resolveAgentSessionClaudeConfig(),
+    ]);
+    const configuredPrompt = claudeConfig.appendSystemPrompt;
+
+    if (!session) {
+      return configuredPrompt;
+    }
+
+    try {
+      const context = await resolveAgentSessionPromptContext({
+        sessionDbId: session.id,
+        namespace: session.namespace,
+        buildUuid: session.buildUuid,
+      });
+
+      return combineAgentSessionAppendSystemPrompt(configuredPrompt, buildAgentSessionDynamicSystemPrompt(context));
+    } catch (error) {
+      logger.warn({ err: error, sessionId }, 'Failed to resolve dynamic agent session prompt context');
+      return configuredPrompt;
+    }
   }
 
   static async getActiveSessions(userId: string) {
