@@ -92,7 +92,8 @@ export async function attachToAgentPod(
   namespace: string,
   podName: string,
   model: string,
-  container = 'agent'
+  container = 'agent',
+  appendSystemPrompt?: string
 ): Promise<ExecConnection> {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
@@ -121,14 +122,14 @@ export async function attachToAgentPod(
 
   const stdin = new Readable({ read() {} });
   let closed = false;
-  const claudeConfig = await resolveAgentSessionClaudeConfig();
+  const resolvedAppendSystemPrompt = appendSystemPrompt ?? (await resolveAgentSessionClaudeConfig()).appendSystemPrompt;
 
   try {
     const ws = await exec.exec(
       namespace,
       podName,
       container,
-      ['sh', '-lc', buildClaudeExecScript(model, claudeConfig.appendSystemPrompt)],
+      ['sh', '-lc', buildClaudeExecScript(model, resolvedAppendSystemPrompt)],
       stdout,
       stderr,
       stdin,
