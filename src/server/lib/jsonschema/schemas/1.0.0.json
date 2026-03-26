@@ -203,6 +203,20 @@
                   }
                 }
               }
+            },
+            "readiness": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "pollMs": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
             }
           }
         }

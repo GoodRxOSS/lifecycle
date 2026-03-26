@@ -97,6 +97,12 @@ environment:
         # @param environment.agentSession.resources.editor.limits
         limits:
 
+    # @param environment.agentSession.readiness
+    readiness:
+      # @param environment.agentSession.readiness.timeoutMs
+      timeoutMs: 0
+      # @param environment.agentSession.readiness.pollMs
+      pollMs: 0
 # @section services
 services:
   # @param services[]

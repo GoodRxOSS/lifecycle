@@ -27,10 +27,12 @@ jest.mock('server/services/globalConfig', () => ({
 
 import {
   AgentSessionRuntimeConfigError,
+  mergeAgentSessionReadiness,
   mergeAgentSessionResources,
   renderAgentSessionClaudeAttribution,
   resolveAgentSessionClaudeConfig,
   resolveAgentSessionClaudeConfigFromDefaults,
+  resolveAgentSessionReadinessFromDefaults,
   resolveAgentSessionResourcesFromDefaults,
   resolveAgentSessionRuntimeConfig,
 } from '../runtimeConfig';
@@ -51,6 +53,10 @@ describe('runtimeConfig', () => {
     await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
       image: 'lifecycle-agent:sha-123',
       editorImage: 'codercom/code-server:4.98.2',
+      readiness: {
+        timeoutMs: 60000,
+        pollMs: 2000,
+      },
       resources: {
         agent: {
           requests: {
@@ -106,6 +112,10 @@ describe('runtimeConfig', () => {
       nodeSelector: {
         'app-long': 'deployments-m7i',
         pool: 'agents',
+      },
+      readiness: {
+        timeoutMs: 60000,
+        pollMs: 2000,
       },
       resources: {
         agent: {
@@ -171,6 +181,10 @@ describe('runtimeConfig', () => {
     await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
       image: 'lifecycle-agent:sha-123',
       editorImage: 'codercom/code-server:4.98.2',
+      readiness: {
+        timeoutMs: 60000,
+        pollMs: 2000,
+      },
       resources: {
         agent: {
           requests: {
@@ -189,6 +203,60 @@ describe('runtimeConfig', () => {
           },
           limits: {
             cpu: '1500m',
+            memory: '1Gi',
+          },
+        },
+      },
+      claude: {
+        permissions: {
+          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
+          deny: [],
+        },
+        attribution: {
+          commitTemplate: 'Generated with ({appName})',
+          prTemplate: 'Generated with ({appName})',
+        },
+      },
+    });
+  });
+
+  it('returns configured readiness settings when present', async () => {
+    getAllConfigs.mockResolvedValue({
+      agentSessionDefaults: {
+        image: 'lifecycle-agent:sha-123',
+        editorImage: 'codercom/code-server:4.98.2',
+        readiness: {
+          timeoutMs: 120000,
+          pollMs: 500,
+        },
+      },
+    });
+
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
+      image: 'lifecycle-agent:sha-123',
+      editorImage: 'codercom/code-server:4.98.2',
+      readiness: {
+        timeoutMs: 120000,
+        pollMs: 500,
+      },
+      resources: {
+        agent: {
+          requests: {
+            cpu: '500m',
+            memory: '1Gi',
+          },
+          limits: {
+            cpu: '2',
+            memory: '4Gi',
+          },
+        },
+        editor: {
+          requests: {
+            cpu: '250m',
+            memory: '512Mi',
+          },
+          limits: {
+            cpu: '1',
             memory: '1Gi',
           },
         },
@@ -285,6 +353,17 @@ describe('runtimeConfig', () => {
           memory: '2Gi',
         },
       },
+    });
+  });
+
+  it('merges lifecycle readiness overrides over runtime defaults', () => {
+    expect(
+      mergeAgentSessionReadiness(resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 2000 }), {
+        timeoutMs: 120000,
+      })
+    ).toEqual({
+      timeoutMs: 120000,
+      pollMs: 2000,
     });
   });
 

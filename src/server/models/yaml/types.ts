@@ -22,6 +22,10 @@ export type LifecycleYamlConfigEnvironment = {
   webhooks?: YamlWebhook[];
   enabledFeatures?: string[];
   agentSession?: {
+    readiness?: {
+      timeoutMs?: number;
+      pollMs?: number;
+    };
     resources?: {
       agent?: {
         requests?: Record<string, string>;

@@ -22,6 +22,10 @@ export interface AgentSessionEnvironmentResourceRequirements {
 }
 
 export interface AgentSessionEnvironmentConfig {
+  readonly readiness?: {
+    readonly timeoutMs?: number;
+    readonly pollMs?: number;
+  };
   readonly resources?: {
     readonly agent?: AgentSessionEnvironmentResourceRequirements;
     readonly editor?: AgentSessionEnvironmentResourceRequirements;

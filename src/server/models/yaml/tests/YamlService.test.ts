@@ -111,6 +111,9 @@ describe('Yaml Service', () => {
 version: '1.0.0'
 environment:
   agentSession:
+    readiness:
+      timeoutMs: 120000
+      pollMs: 500
     resources:
       agent:
         requests:

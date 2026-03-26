@@ -19,7 +19,12 @@ import { customAlphabet, nanoid } from 'nanoid';
 import BaseService from './_service';
 import BuildService from './build';
 import AgentSessionService from './agentSession';
-import { mergeAgentSessionResources, type ResolvedAgentSessionResources } from 'server/lib/agentSession/runtimeConfig';
+import {
+  mergeAgentSessionReadiness,
+  mergeAgentSessionResources,
+  type ResolvedAgentSessionReadinessConfig,
+  type ResolvedAgentSessionResources,
+} from 'server/lib/agentSession/runtimeConfig';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { getLogger } from 'server/lib/logger';
 import { Build, Deploy, Deployable } from 'server/models';
@@ -71,6 +76,7 @@ export interface LaunchSandboxSessionOptions {
   agentImage: string;
   editorImage: string;
   nodeSelector?: Record<string, string>;
+  readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
   onProgress?: (stage: SandboxLaunchStage, message: string) => Promise<void> | void;
 }
@@ -174,6 +180,7 @@ export default class AgentSandboxSessionService extends BaseService {
         agentImage: opts.agentImage,
         editorImage: opts.editorImage,
         nodeSelector: opts.nodeSelector,
+        readiness: mergeAgentSessionReadiness(opts.readiness, lifecycleConfig.environment?.agentSession?.readiness),
         resources: mergeAgentSessionResources(opts.resources, lifecycleConfig.environment?.agentSession?.resources),
         userIdentity: opts.userIdentity,
       });
