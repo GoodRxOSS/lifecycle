@@ -73,6 +73,11 @@ export type AgentSessionSchedulingConfig = {
   nodeSelector?: Record<string, string> | null;
 };
 
+export type AgentSessionReadinessConfig = {
+  timeoutMs?: number | string | null;
+  pollMs?: number | string | null;
+};
+
 export type ResourceRequirements = {
   requests?: Record<string, string>;
   limits?: Record<string, string>;
@@ -87,6 +92,7 @@ export type AgentSessionDefaults = {
   image?: string | null;
   editorImage?: string | null;
   scheduling?: AgentSessionSchedulingConfig;
+  readiness?: AgentSessionReadinessConfig;
   resources?: AgentSessionResourcesConfig;
   claude?: AgentSessionClaudeConfig;
 };
