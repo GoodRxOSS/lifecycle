@@ -32,6 +32,21 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
 function getPodStartupFailure(pod: k8s.V1Pod): string | null {
   const statuses = [...(pod.status?.initContainerStatuses || []), ...(pod.status?.containerStatuses || [])];
 
@@ -119,6 +134,10 @@ export interface AgentPodOpts {
   userIdentity?: RequestUserIdentity;
   nodeSelector?: Record<string, string>;
   serviceAccountName?: string;
+  readiness?: {
+    timeoutMs: number;
+    pollMs: number;
+  };
   resources?: {
     agent?: k8s.V1ResourceRequirements;
     editor?: k8s.V1ResourceRequirements;
@@ -518,9 +537,20 @@ function summarizeLogLine(logs: string | null): string | null {
   return firstLine || null;
 }
 
-async function waitForAgentPodReady(coreApi: k8s.CoreV1Api, namespace: string, podName: string): Promise<k8s.V1Pod> {
-  const readyTimeoutMs = parseInt(process.env.AGENT_POD_READY_TIMEOUT_MS || '60000', 10);
-  const readyPollMs = parseInt(process.env.AGENT_POD_READY_POLL_MS || '2000', 10);
+async function waitForAgentPodReady(
+  coreApi: k8s.CoreV1Api,
+  namespace: string,
+  podName: string,
+  readiness?: AgentPodOpts['readiness']
+): Promise<k8s.V1Pod> {
+  const readyTimeoutMs =
+    normalizeNonNegativeInteger(readiness?.timeoutMs) ??
+    normalizeNonNegativeInteger(process.env.AGENT_POD_READY_TIMEOUT_MS) ??
+    60000;
+  const readyPollMs =
+    normalizeNonNegativeInteger(readiness?.pollMs) ??
+    normalizeNonNegativeInteger(process.env.AGENT_POD_READY_POLL_MS) ??
+    2000;
   const deadline = Date.now() + readyTimeoutMs;
   let lastObservedState = 'pending';
 
@@ -592,7 +622,7 @@ export async function createAgentPod(opts: AgentPodOpts): Promise<k8s.V1Pod> {
   const pod = buildAgentPodSpec(opts);
 
   await coreApi.createNamespacedPod(opts.namespace, pod);
-  const result = await waitForAgentPodReady(coreApi, opts.namespace, opts.podName);
+  const result = await waitForAgentPodReady(coreApi, opts.namespace, opts.podName, opts.readiness);
   logger.info(`podFactory: created pod name=${opts.podName} namespace=${opts.namespace}`);
   return result;
 }

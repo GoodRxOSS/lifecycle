@@ -633,6 +633,65 @@ describe('podFactory', () => {
         200
       );
     });
+
+    it('prefers explicit readiness overrides over process env defaults', async () => {
+      mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
+      mockReadPod.mockResolvedValue({
+        body: {
+          status: {
+            phase: 'Running',
+            initContainerStatuses: [
+              {
+                name: 'prepare-workspace',
+                state: {
+                  terminated: {
+                    reason: 'Completed',
+                    exitCode: 0,
+                  },
+                },
+              },
+              {
+                name: 'init-workspace',
+                state: {
+                  terminated: {
+                    reason: 'Completed',
+                    exitCode: 0,
+                  },
+                },
+              },
+            ],
+            containerStatuses: [
+              {
+                name: 'agent',
+                state: {
+                  running: {
+                    startedAt: '2026-03-26T00:00:00Z',
+                  },
+                },
+              },
+              {
+                name: 'editor',
+                state: {
+                  running: {
+                    startedAt: '2026-03-26T00:00:01Z',
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      await expect(
+        createAgentPod({
+          ...baseOpts,
+          readiness: {
+            timeoutMs: 1,
+            pollMs: 0,
+          },
+        })
+      ).rejects.toThrow('Agent pod did not become ready within 1ms');
+    });
   });
 
   describe('deleteAgentPod', () => {

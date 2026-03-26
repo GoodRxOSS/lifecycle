@@ -37,6 +37,15 @@ const agentSessionResources = {
   },
 };
 
+const agentSessionReadiness = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    timeoutMs: { type: 'integer', minimum: 0 },
+    pollMs: { type: 'integer', minimum: 0 },
+  },
+};
+
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
   type: 'object',
@@ -243,6 +252,13 @@ const schema_1_0_0 = {
               ports: { type: 'array', items: { type: 'number' } },
               env: { type: 'object' },
               forwardEnvVarsToAgent: { type: 'array', items: { type: 'string' } },
+              agentSession: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  readiness: agentSessionReadiness,
+                },
+              },
             },
             required: ['image', 'command'],
           },

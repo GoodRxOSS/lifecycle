@@ -19,6 +19,7 @@ import type {
   AgentSessionClaudeAttribution,
   AgentSessionClaudeConfig,
   AgentSessionClaudePermissions,
+  AgentSessionReadinessConfig,
   AgentSessionResourcesConfig,
   AgentSessionSchedulingConfig,
   ResourceRequirements,
@@ -28,8 +29,14 @@ export interface AgentSessionRuntimeConfig {
   image: string;
   editorImage: string;
   nodeSelector?: Record<string, string>;
+  readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
   claude: ResolvedAgentSessionClaudeConfig;
+}
+
+export interface ResolvedAgentSessionReadinessConfig {
+  timeoutMs: number;
+  pollMs: number;
 }
 
 export interface ResolvedAgentSessionResourceRequirements {
@@ -62,6 +69,8 @@ const DEFAULT_CLAUDE_PERMISSION_ALLOW = ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit
 const DEFAULT_CLAUDE_PERMISSION_DENY: string[] = [];
 const DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
 const DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
+const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
+const DEFAULT_AGENT_READY_POLL_MS = 2000;
 const DEFAULT_AGENT_RESOURCES: ResolvedAgentSessionResourceRequirements = {
   requests: {
     cpu: '500m',
@@ -102,6 +111,21 @@ function normalizeAttributionTemplate(template: unknown, fallback: string): stri
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
@@ -146,6 +170,51 @@ function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null)
   );
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function getDefaultReadinessConfig(): ResolvedAgentSessionReadinessConfig {
+  return {
+    timeoutMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_TIMEOUT_MS) ?? DEFAULT_AGENT_READY_TIMEOUT_MS,
+    pollMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_POLL_MS) ?? DEFAULT_AGENT_READY_POLL_MS,
+  };
+}
+
+export function resolveAgentSessionReadinessFromDefaults(
+  readinessDefaults?: AgentSessionReadinessConfig | null
+): ResolvedAgentSessionReadinessConfig {
+  const defaults = getDefaultReadinessConfig();
+
+  return {
+    timeoutMs: normalizeNonNegativeInteger(readinessDefaults?.timeoutMs) ?? defaults.timeoutMs,
+    pollMs: normalizeNonNegativeInteger(readinessDefaults?.pollMs) ?? defaults.pollMs,
+  };
+}
+
+export function mergeAgentSessionReadiness(
+  baseReadiness: ResolvedAgentSessionReadinessConfig,
+  overrides?: AgentSessionReadinessConfig | null
+): ResolvedAgentSessionReadinessConfig {
+  return {
+    timeoutMs: normalizeNonNegativeInteger(overrides?.timeoutMs) ?? baseReadiness.timeoutMs,
+    pollMs: normalizeNonNegativeInteger(overrides?.pollMs) ?? baseReadiness.pollMs,
+  };
+}
+
+export function mergeAgentSessionReadinessForServices(
+  baseReadiness: ResolvedAgentSessionReadinessConfig,
+  overrides: Array<AgentSessionReadinessConfig | null | undefined>
+): ResolvedAgentSessionReadinessConfig {
+  const timeoutOverrides = overrides
+    .map((override) => normalizeNonNegativeInteger(override?.timeoutMs))
+    .filter((value): value is number => value !== undefined);
+  const pollOverrides = overrides
+    .map((override) => normalizeNonNegativeInteger(override?.pollMs))
+    .filter((value): value is number => value !== undefined);
+
+  return {
+    timeoutMs: timeoutOverrides.length > 0 ? Math.max(...timeoutOverrides) : baseReadiness.timeoutMs,
+    pollMs: pollOverrides.length > 0 ? Math.min(...pollOverrides) : baseReadiness.pollMs,
+  };
 }
 
 export function resolveAgentSessionResourcesFromDefaults(
@@ -244,6 +313,7 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
     image,
     editorImage,
     nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
+    readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),
     resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
     claude: resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude),
   };
