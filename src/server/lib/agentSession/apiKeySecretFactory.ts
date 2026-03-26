@@ -29,7 +29,8 @@ export async function createAgentApiKeySecret(
   secretName: string,
   apiKey: string,
   githubToken?: string | null,
-  buildUuid?: string
+  buildUuid?: string,
+  forwardedEnv?: Record<string, string>
 ): Promise<k8s.V1Secret> {
   const logger = getLogger();
   const coreApi = getCoreApi();
@@ -53,6 +54,7 @@ export async function createAgentApiKeySecret(
             GITHUB_TOKEN: githubToken,
           }
         : {}),
+      ...(forwardedEnv || {}),
     },
   };
 
