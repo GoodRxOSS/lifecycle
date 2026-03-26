@@ -33,6 +33,36 @@ describe('secretEnvBuilder', () => {
       ]);
     });
 
+    it('can source regular env vars from a default secret', () => {
+      const env = {
+        APP_ENV: 'production',
+        SERVICE_URL: 'https://example.com',
+      };
+
+      const result = buildPodEnvWithSecrets(env, [], 'service', 'agent-secret-abc123');
+
+      expect(result).toEqual([
+        {
+          name: 'APP_ENV',
+          valueFrom: {
+            secretKeyRef: {
+              name: 'agent-secret-abc123',
+              key: 'APP_ENV',
+            },
+          },
+        },
+        {
+          name: 'SERVICE_URL',
+          valueFrom: {
+            secretKeyRef: {
+              name: 'agent-secret-abc123',
+              key: 'SERVICE_URL',
+            },
+          },
+        },
+      ]);
+    });
+
     it('returns secret refs as secretKeyRef', () => {
       const env = {
         DB_PASSWORD: '{{aws:myapp/db:password}}',
@@ -83,6 +113,39 @@ describe('secretEnvBuilder', () => {
 
       const apiKey = result.find((e) => e.name === 'API_KEY') as PodEnvEntry;
       expect(apiKey.valueFrom?.secretKeyRef?.name).toBe('api-server-aws-secrets');
+    });
+
+    it('sources plain env vars from the default secret while leaving secret refs on provider secrets', () => {
+      const env = {
+        APP_ENV: 'production',
+        DB_PASSWORD: '{{aws:myapp/db:password}}',
+      };
+      const secretRefs: SecretRefWithEnvKey[] = [
+        { envKey: 'DB_PASSWORD', provider: 'aws', path: 'myapp/db', key: 'password' },
+      ];
+
+      const result = buildPodEnvWithSecrets(env, secretRefs, 'api-server', 'agent-secret-abc123');
+
+      expect(result).toEqual([
+        {
+          name: 'APP_ENV',
+          valueFrom: {
+            secretKeyRef: {
+              name: 'agent-secret-abc123',
+              key: 'APP_ENV',
+            },
+          },
+        },
+        {
+          name: 'DB_PASSWORD',
+          valueFrom: {
+            secretKeyRef: {
+              name: 'api-server-aws-secrets',
+              key: 'DB_PASSWORD',
+            },
+          },
+        },
+      ]);
     });
 
     it('handles multiple providers', () => {
