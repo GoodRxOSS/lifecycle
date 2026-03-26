@@ -139,6 +139,31 @@ services:
       expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
     });
 
+    test('accepts service-level agent session readiness overrides in dev config', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+      agentSession:
+        readiness:
+          timeoutMs: 120000
+          pollMs: 500
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+
     test('accepts forwardEnvVarsToAgent in dev config', () => {
       const parser = new YamlConfigParser();
       const config = parser.parseYamlConfigFromString(`---

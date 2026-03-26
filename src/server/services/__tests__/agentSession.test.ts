@@ -420,6 +420,24 @@ describe('AgentSessionService', () => {
       );
     });
 
+    it('passes resolved agent-session readiness through to pod creation when provided', async () => {
+      const optsWithReadiness: CreateSessionOptions = {
+        ...baseOpts,
+        readiness: {
+          timeoutMs: 120000,
+          pollMs: 500,
+        },
+      };
+
+      await AgentSessionService.createSession(optsWithReadiness);
+
+      expect(createAgentPod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          readiness: optsWithReadiness.readiness,
+        })
+      );
+    });
+
     it('passes forwarded service env through to the agent pod when configured', async () => {
       (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
         env: { PRIVATE_REGISTRY_TOKEN: 'plain-token' },
