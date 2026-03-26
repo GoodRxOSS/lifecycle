@@ -93,7 +93,12 @@ jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
-      getAllConfigs: jest.fn().mockResolvedValue({}),
+      getAllConfigs: jest.fn().mockResolvedValue({
+        lifecycleDefaults: {
+          defaultUUID: 'sample-env-0',
+          defaultPublicUrl: 'sample-env.example.test',
+        },
+      }),
       getOrgChartName: jest.fn().mockResolvedValue('org-chart'),
       getGithubAppName: jest.fn().mockResolvedValue('sample-lifecycle-app'),
     })),
@@ -582,6 +587,76 @@ describe('AgentSessionService', () => {
           devModeSnapshots: expect.objectContaining({
             '1': expect.any(Object),
             '2': expect.any(Object),
+          }),
+        })
+      );
+    });
+
+    it('renders dev env templates with the shared build env renderer before enabling dev mode', async () => {
+      const buildContext = {
+        uuid: 'sample-build-123',
+        namespace: 'sample-ns',
+        enableFullYaml: true,
+        enabledFeatures: [],
+        pullRequest: {
+          pullRequestNumber: 42,
+          branchName: 'feature/sample-change',
+          fullName: 'sample-org/sample-repo',
+        },
+        deploys: [
+          {
+            active: true,
+            publicUrl: 'sample-service-sample-env.example.test',
+            deployable: {
+              name: 'sample-service',
+              type: 'github',
+              buildUUID: 'sample-build-123',
+            },
+          },
+        ],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+
+      (Build.query as jest.Mock) = jest
+        .fn()
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({
+            withGraphFetched: jest.fn().mockResolvedValue(buildContext),
+          }),
+        })
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({
+            select: jest.fn().mockResolvedValue({ namespace: 'static-env-ns' }),
+          }),
+        });
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'sample-build-123',
+        services: [
+          {
+            name: 'sample-service',
+            deployId: 1,
+            devConfig: {
+              image: 'node:20',
+              command: 'pnpm dev',
+              env: {
+                ASSET_PREFIX: 'https://{{sample-service_publicUrl}}',
+              },
+            },
+          },
+        ],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(buildContext.$fetchGraph).toHaveBeenCalledWith('[deploys.[service, deployable], pullRequest]');
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          devConfig: expect.objectContaining({
+            env: {
+              ASSET_PREFIX: 'https://sample-service-sample-env.example.test',
+            },
           }),
         })
       );
