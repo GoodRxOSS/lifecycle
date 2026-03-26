@@ -37,6 +37,7 @@ import { extractContextForQueue, getLogger } from 'server/lib/logger';
 import { BuildKind } from 'shared/constants';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import {
+  type ResolvedAgentSessionReadinessConfig,
   type ResolvedAgentSessionResources,
   resolveAgentSessionClaudeConfig,
   renderAgentSessionClaudeAttribution,
@@ -247,6 +248,7 @@ export interface CreateSessionOptions {
   agentImage: string;
   editorImage: string;
   nodeSelector?: Record<string, string>;
+  readiness?: ResolvedAgentSessionReadinessConfig;
   resources?: ResolvedAgentSessionResources;
 }
 
@@ -502,6 +504,7 @@ export default class AgentSessionService {
         buildUuid: opts.buildUuid,
         userIdentity: opts.userIdentity,
         nodeSelector: opts.nodeSelector,
+        readiness: opts.readiness,
         serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
       });

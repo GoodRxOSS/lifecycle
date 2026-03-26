@@ -21,6 +21,10 @@ export async function up(knex: Knex): Promise<void> {
   const defaultAgentSessionDefaults = {
     image: process.env.AGENT_IMAGE || null,
     editorImage: process.env.AGENT_EDITOR_IMAGE || null,
+    readiness: {
+      timeoutMs: parseInt(process.env.AGENT_POD_READY_TIMEOUT_MS || '60000', 10),
+      pollMs: parseInt(process.env.AGENT_POD_READY_POLL_MS || '2000', 10),
+    },
     resources: {
       agent: {
         requests: {
