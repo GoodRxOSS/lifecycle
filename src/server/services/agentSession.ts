@@ -17,8 +17,10 @@
 import 'server/lib/dependencies';
 import * as k8s from '@kubernetes/client-node';
 import { v4 as uuid } from 'uuid';
+import type Database from 'server/database';
 import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
+import Configuration from 'server/models/Configuration';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
@@ -34,7 +36,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { DevConfig } from 'server/models/yaml/YamlService';
 import RedisClient from 'server/lib/redisClient';
 import { extractContextForQueue, getLogger } from 'server/lib/logger';
-import { BuildKind } from 'shared/constants';
+import { BuildKind, FeatureFlags } from 'shared/constants';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import {
   type ResolvedAgentSessionReadinessConfig,
@@ -58,6 +60,7 @@ import {
   setAgentSessionStartupFailure,
   toPublicAgentSessionStartupFailure,
 } from 'server/lib/agentSession/startupFailureState';
+import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
 const logger = getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
@@ -140,6 +143,7 @@ async function attachStartupFailures<T extends { uuid: string; status: AgentSess
 }
 
 type SessionSnapshotMap = Record<string, DevModeResourceSnapshot>;
+type SessionService = NonNullable<CreateSessionOptions['services']>[number];
 
 function getSessionSnapshot(
   snapshots: SessionSnapshotMap | null | undefined,
@@ -147,6 +151,59 @@ function getSessionSnapshot(
 ): DevModeResourceSnapshot | null {
   const snapshot = snapshots?.[String(deployId)];
   return snapshot ?? null;
+}
+
+async function resolveTemplatedDevConfigEnvs(
+  buildUuid: string | undefined,
+  namespace: string,
+  services: CreateSessionOptions['services']
+): Promise<CreateSessionOptions['services']> {
+  if (!buildUuid || !services?.length) {
+    return services;
+  }
+
+  const hasTemplatedEnv = services.some((service) =>
+    Object.values(service.devConfig.env || {}).some((value) => typeof value === 'string' && value.includes('{{'))
+  );
+  if (!hasTemplatedEnv) {
+    return services;
+  }
+
+  const build = await Build.query()
+    .findOne({ uuid: buildUuid })
+    .withGraphFetched('[deploys.[service, deployable], pullRequest]');
+  if (!build) {
+    throw new Error('Build not found');
+  }
+
+  const envResolver = new BuildEnvironmentVariables({
+    models: {
+      Build,
+      Configuration,
+    },
+  } as unknown as Database);
+  const availableEnv = envResolver.cleanup(await envResolver.availableEnvironmentVariablesForBuild(build));
+  const useDefaultUUID =
+    !Array.isArray(build.enabledFeatures) || !build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
+  const resolvedNamespace = build.namespace || namespace;
+
+  return Promise.all(
+    services.map(async (service): Promise<SessionService> => {
+      if (!service.devConfig.env) {
+        return service;
+      }
+
+      return {
+        ...service,
+        devConfig: {
+          ...service.devConfig,
+          env: envResolver.parseTemplateData(
+            await envResolver.compileEnv(service.devConfig.env, availableEnv, useDefaultUUID, resolvedNamespace)
+          ),
+        },
+      };
+    })
+  );
 }
 
 async function cleanupDevModePatches(
@@ -436,8 +493,9 @@ export default class AgentSessionService {
       githubAppName
     );
     const claudePrAttribution = renderAgentSessionClaudeAttribution(claudeConfig.attribution.prTemplate, githubAppName);
+    const resolvedServices = await resolveTemplatedDevConfigEnvs(opts.buildUuid, opts.namespace, opts.services);
     const forwardedAgentEnv = await resolveForwardedAgentEnv(
-      opts.services,
+      resolvedServices,
       opts.namespace,
       sessionUuid,
       opts.buildUuid
@@ -479,7 +537,7 @@ export default class AgentSessionService {
       ]);
 
       const useGvisor = await isGvisorAvailable();
-      const installCommands = (opts.services || [])
+      const installCommands = (resolvedServices || [])
         .map((service) => service.devConfig.installCommand)
         .filter((command): command is string => Boolean(command));
       const combinedInstallCommand = installCommands.length > 0 ? installCommands.join('\n\n') : undefined;
@@ -515,12 +573,12 @@ export default class AgentSessionService {
       });
       const agentNodeName = agentPod.spec?.nodeName || null;
 
-      if ((opts.services || []).length > 0 && !agentNodeName) {
+      if ((resolvedServices || []).length > 0 && !agentNodeName) {
         throw new Error(`Agent pod ${podName} did not report a scheduled node`);
       }
 
       const devModeManager = new DevModeManager();
-      for (const svc of opts.services || []) {
+      for (const svc of resolvedServices || []) {
         const resourceName = svc.resourceName || svc.name;
         const snapshot = await devModeManager.enableDevMode({
           namespace: opts.namespace,
