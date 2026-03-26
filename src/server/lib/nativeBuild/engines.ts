@@ -369,6 +369,12 @@ export async function buildWithEngine(
     cacheRef = appendServiceNameToCacheRef(cacheRef, serviceName);
   }
 
+  // Append deployUuid to isolate cache per environment/PR and prevent concurrent write corruption
+  if (cacheRegistry && !cacheRegistry.includes('ecr') && options.deployUuid) {
+    const suffix = cacheRef.includes(':cache') ? ':cache' : '/cache';
+    cacheRef = cacheRef.replace(suffix, `/${options.deployUuid}${suffix}`);
+  }
+
   const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;
   containers.push(
     createBuildContainer(

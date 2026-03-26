@@ -154,14 +154,37 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    // Check cache uses local distribution registry with service name to avoid collisions
+    // Check cache uses local distribution registry with service name and deployUuid for isolation
     expect(fullCommand).toContain(
-      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service:cache'
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/test-service-abc123:cache'
     );
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');
     expect(fullCommand).toContain('memory: "2Gi"');
+  });
+
+  it('includes deployUuid in cache ref for cache isolation', async () => {
+    const configWithCache = {
+      ...mockGlobalConfig,
+      buildDefaults: {
+        ...mockGlobalConfig.buildDefaults,
+        cacheRegistry: 'lifecycle-distribution.lifecycle-app.svc.cluster.local',
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(configWithCache),
+    });
+
+    await buildkitBuild(mockDeploy, mockOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain(
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/test-service-abc123:cache'
+    );
   });
 
   it('handles init dockerfile build', async () => {
