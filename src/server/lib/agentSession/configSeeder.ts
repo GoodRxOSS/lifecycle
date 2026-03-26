@@ -100,13 +100,20 @@ export function generateInitScript(opts: InitScriptOpts): string {
   }
 
   lines.push(
-    `git clone --branch "${escapeDoubleQuotedShell(branch)}" --single-branch "${escapeDoubleQuotedShell(
-      repoUrl
-    )}" "${escapeDoubleQuotedShell(workspacePath)}"`,
+    `git clone --progress --depth 50 --branch "${escapeDoubleQuotedShell(
+      branch
+    )}" --single-branch "${escapeDoubleQuotedShell(repoUrl)}" "${escapeDoubleQuotedShell(workspacePath)}"`,
     `cd "${escapeDoubleQuotedShell(workspacePath)}"`
   );
 
   if (revision) {
+    lines.push(
+      `if ! git rev-parse --verify --quiet "${escapeDoubleQuotedShell(revision)}^{commit}" >/dev/null; then`,
+      `  git fetch --unshallow origin "${escapeDoubleQuotedShell(
+        branch
+      )}" || git fetch origin "${escapeDoubleQuotedShell(branch)}"`,
+      'fi'
+    );
     lines.push(`git checkout "${escapeDoubleQuotedShell(revision)}"`);
   }
 
