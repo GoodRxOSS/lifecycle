@@ -206,6 +206,7 @@ async function resolveRequestedServices(
  *                       - createdAt
  *                       - updatedAt
  *                       - endedAt
+ *                       - startupFailure
  *                       - websocketUrl
  *                       - editorUrl
  *                     properties:
@@ -256,6 +257,25 @@ async function resolveRequestedServices(
  *                         type: string
  *                         nullable: true
  *                         format: date-time
+ *                       startupFailure:
+ *                         type: object
+ *                         nullable: true
+ *                         required:
+ *                           - stage
+ *                           - title
+ *                           - message
+ *                           - recordedAt
+ *                         properties:
+ *                           stage:
+ *                             type: string
+ *                             enum: [create_session, connect_runtime]
+ *                           title:
+ *                             type: string
+ *                           message:
+ *                             type: string
+ *                           recordedAt:
+ *                             type: string
+ *                             format: date-time
  *                       websocketUrl:
  *                         type: string
  *                       editorUrl:
@@ -324,6 +344,7 @@ async function resolveRequestedServices(
  *                     - createdAt
  *                     - updatedAt
  *                     - endedAt
+ *                     - startupFailure
  *                   properties:
  *                     id:
  *                       type: string
@@ -376,6 +397,25 @@ async function resolveRequestedServices(
  *                       type: string
  *                       nullable: true
  *                       format: date-time
+ *                     startupFailure:
+ *                       type: object
+ *                       nullable: true
+ *                       required:
+ *                         - stage
+ *                         - title
+ *                         - message
+ *                         - recordedAt
+ *                       properties:
+ *                         stage:
+ *                           type: string
+ *                           enum: [create_session, connect_runtime]
+ *                         title:
+ *                           type: string
+ *                         message:
+ *                           type: string
+ *                         recordedAt:
+ *                           type: string
+ *                           format: date-time
  *                 error:
  *                   nullable: true
  *       '400':
@@ -503,6 +543,7 @@ const postHandler = async (req: NextRequest) => {
         repo: repoNameFromRepoUrl(repoUrl),
         branch,
         services: resolvedServices.map((service) => service.name),
+        startupFailure: null,
       }),
       { status: 201 },
       req
