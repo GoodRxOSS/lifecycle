@@ -70,7 +70,7 @@ export async function createKubernetesApplyJob({
     },
     spec: {
       ttlSecondsAfterFinished: 86400,
-      backoffLimit: 3,
+      backoffLimit: 0,
       template: {
         metadata: {
           labels: {
@@ -81,7 +81,7 @@ export async function createKubernetesApplyJob({
           },
         },
         spec: {
-          restartPolicy: 'OnFailure',
+          restartPolicy: 'Never',
           serviceAccountName: await getServiceAccountName(),
           containers: [
             {
