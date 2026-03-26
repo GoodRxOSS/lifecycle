@@ -81,6 +81,7 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                     - createdAt
  *                     - updatedAt
  *                     - endedAt
+ *                     - startupFailure
  *                     - websocketUrl
  *                     - editorUrl
  *                   properties:
@@ -121,6 +122,25 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                       type: string
  *                       nullable: true
  *                       format: date-time
+ *                     startupFailure:
+ *                       type: object
+ *                       nullable: true
+ *                       required:
+ *                         - stage
+ *                         - title
+ *                         - message
+ *                         - recordedAt
+ *                       properties:
+ *                         stage:
+ *                           type: string
+ *                           enum: [create_session, connect_runtime]
+ *                         title:
+ *                           type: string
+ *                         message:
+ *                           type: string
+ *                         recordedAt:
+ *                           type: string
+ *                           format: date-time
  *                     websocketUrl:
  *                       type: string
  *                     editorUrl:

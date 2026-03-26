@@ -118,6 +118,7 @@ export interface AgentPodOpts {
   buildUuid?: string;
   userIdentity?: RequestUserIdentity;
   nodeSelector?: Record<string, string>;
+  serviceAccountName?: string;
   resources?: {
     agent?: k8s.V1ResourceRequirements;
     editor?: k8s.V1ResourceRequirements;
@@ -259,7 +260,8 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   const forwardedAgentSecretEnv = buildPodEnvWithSecrets(
     forwardedAgentEnv,
     opts.forwardedAgentSecretRefs || [],
-    opts.forwardedAgentSecretServiceName || podName
+    opts.forwardedAgentSecretServiceName || podName,
+    apiKeySecretName
   );
 
   const securityContext: k8s.V1SecurityContext = {
@@ -288,6 +290,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     spec: {
       ...(useGvisor ? { runtimeClassName: 'gvisor' } : {}),
       ...(opts.nodeSelector ? { nodeSelector: opts.nodeSelector } : {}),
+      ...(opts.serviceAccountName ? { serviceAccountName: opts.serviceAccountName } : {}),
       securityContext: {
         runAsUser: 1000,
         runAsGroup: 1000,

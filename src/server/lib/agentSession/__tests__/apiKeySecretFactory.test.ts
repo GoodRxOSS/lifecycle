@@ -63,6 +63,22 @@ describe('apiKeySecretFactory', () => {
     );
   });
 
+  it('stores forwarded plain env values in the session secret', async () => {
+    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', 'sk-ant-test-key', null, undefined, {
+      PRIVATE_REGISTRY_TOKEN: 'plain-token',
+    });
+
+    expect(mockCreateSecret).toHaveBeenCalledWith(
+      'test-ns',
+      expect.objectContaining({
+        stringData: {
+          ANTHROPIC_API_KEY: 'sk-ant-test-key',
+          PRIVATE_REGISTRY_TOKEN: 'plain-token',
+        },
+      })
+    );
+  });
+
   it('omits the GitHub token keys when no token is provided', async () => {
     await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', 'sk-ant-test-key');
 
