@@ -26,6 +26,7 @@ jest.mock('server/lib/agentSession/pvcFactory');
 jest.mock('server/lib/agentSession/apiKeySecretFactory');
 jest.mock('server/lib/agentSession/podFactory');
 jest.mock('server/lib/agentSession/editorServiceFactory');
+jest.mock('server/lib/agentSession/serviceAccountFactory');
 jest.mock('server/lib/agentSession/gvisorCheck');
 jest.mock('server/lib/agentSession/configSeeder');
 jest.mock('server/lib/agentSession/devModeManager');
@@ -107,6 +108,7 @@ import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFacto
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
 import { createAgentPod, deleteAgentPod } from 'server/lib/agentSession/podFactory';
 import { createAgentEditorService, deleteAgentEditorService } from 'server/lib/agentSession/editorServiceFactory';
+import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
@@ -160,6 +162,7 @@ const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
 (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
 (createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
 (createAgentEditorService as jest.Mock).mockResolvedValue({});
+(ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
 (deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
 (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
 (deleteAgentApiKeySecret as jest.Mock).mockResolvedValue(undefined);
@@ -264,6 +267,7 @@ describe('AgentSessionService', () => {
     (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
     (createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
     (createAgentEditorService as jest.Mock).mockResolvedValue({});
+    (ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
     (deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
     (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
     (deleteAgentApiKeySecret as jest.Mock).mockResolvedValue(undefined);
@@ -329,12 +333,14 @@ describe('AgentSessionService', () => {
       const session = await AgentSessionService.createSession(baseOpts);
 
       expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', undefined);
+      expect(ensureAgentSessionServiceAccount).toHaveBeenCalledWith('test-ns');
       expect(createAgentApiKeySecret).toHaveBeenCalledWith(
         'test-ns',
         'agent-secret-aaaaaaaa',
         'sk-ant-test-key',
         undefined,
-        undefined
+        undefined,
+        {}
       );
       expect(createAgentPod).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -343,6 +349,7 @@ describe('AgentSessionService', () => {
           pvcName: 'agent-pvc-aaaaaaaa',
           image: 'lifecycle-agent:latest',
           apiKeySecretName: 'agent-secret-aaaaaaaa',
+          serviceAccountName: 'agent-sa',
           hasGitHubToken: false,
           model: 'claude-sonnet-4-6',
           claudePermissions: {
@@ -438,6 +445,16 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
+      expect(createAgentApiKeySecret).toHaveBeenCalledWith(
+        'test-ns',
+        'agent-secret-aaaaaaaa',
+        'sk-ant-test-key',
+        undefined,
+        undefined,
+        {
+          PRIVATE_REGISTRY_TOKEN: 'plain-token',
+        }
+      );
       expect(createAgentPod).toHaveBeenCalledWith(
         expect.objectContaining({
           forwardedAgentEnv: { PRIVATE_REGISTRY_TOKEN: 'plain-token' },
@@ -494,7 +511,8 @@ describe('AgentSessionService', () => {
         'agent-secret-aaaaaaaa',
         'sk-ant-test-key',
         'gho_test_token',
-        undefined
+        undefined,
+        {}
       );
       expect(createAgentPod).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -597,15 +615,11 @@ describe('AgentSessionService', () => {
         3600,
         expect.any(String)
       );
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
-      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
-      expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith(
-        'test-ns',
-        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-        []
-      );
+      expect(deleteAgentEditorService).not.toHaveBeenCalled();
+      expect(deleteAgentPod).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+      expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
       expect(mockSessionQuery.patch).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }));
     });
 
@@ -664,7 +678,7 @@ describe('AgentSessionService', () => {
       );
     });
 
-    it('starts agent runtime cleanup before deploy restore finishes during rollback', async () => {
+    it('retains failed agent resources while deploy restore finishes during rollback', async () => {
       const optsWithServices: CreateSessionOptions = {
         ...baseOpts,
         services: [{ name: 'web', deployId: 1, devConfig: { image: 'node:20', command: 'pnpm dev' } }],
@@ -696,14 +710,17 @@ describe('AgentSessionService', () => {
       const rollbackPromise = AgentSessionService.createSession(optsWithServices);
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(deleteAgentPod).not.toHaveBeenCalled();
+      expect(deleteAgentEditorService).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
       expect(deleteAgentPvc).not.toHaveBeenCalled();
 
       releaseDeploy();
       await expect(rollbackPromise).rejects.toThrow('snapshot persist failed');
-      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
+      expect(deleteAgentPod).not.toHaveBeenCalled();
+      expect(deleteAgentEditorService).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
     });
   });
 
@@ -812,6 +829,46 @@ describe('AgentSessionService', () => {
       ]);
       expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended', devModeSnapshots: {} }));
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    });
+
+    it('cleans up a failed session when explicitly ended', async () => {
+      const failedSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'error',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
+        forwardedAgentSecretProviders: ['aws'],
+        devModeSnapshots: {},
+        buildUuid: null,
+      };
+      (AgentSession.query as jest.Mock) = jest
+        .fn()
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockResolvedValue(failedSession),
+        })
+        .mockReturnValueOnce({
+          findById: jest.fn().mockReturnValue({
+            patch: mockSessionQuery.patch,
+          }),
+        });
+
+      await AgentSessionService.endSession('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+
+      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith('test-ns', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', [
+        'aws',
+      ]);
+      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
+      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'ended',
+          endedAt: expect.any(String),
+        })
+      );
     });
 
     it('returns after cleanup and restore trigger without waiting for redeploy to finish', async () => {
@@ -966,6 +1023,41 @@ describe('AgentSessionService', () => {
         expect.objectContaining({
           id: 'sess-1',
           status: 'active',
+          startupFailure: null,
+        })
+      );
+    });
+
+    it('attaches persisted startup failure details for errored sessions', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 1,
+        uuid: 'sess-1',
+        status: 'error',
+        buildUuid: null,
+        devModeSnapshots: {},
+      });
+      mockRedis.get.mockResolvedValueOnce(
+        JSON.stringify({
+          sessionId: 'sess-1',
+          stage: 'connect_runtime',
+          title: 'Agent pod failed to start',
+          message: 'init-workspace: ImagePullBackOff',
+          recordedAt: '2026-03-25T10:00:00.000Z',
+        })
+      );
+
+      const result = await AgentSessionService.getSession('sess-1');
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          id: 'sess-1',
+          status: 'error',
+          startupFailure: {
+            stage: 'connect_runtime',
+            title: 'Agent pod failed to start',
+            message: 'init-workspace: ImagePullBackOff',
+            recordedAt: '2026-03-25T10:00:00.000Z',
+          },
         })
       );
     });
@@ -1152,12 +1244,61 @@ describe('AgentSessionService', () => {
           repo: 'example-org/example-repo',
           branch: 'feature/live',
           services: ['grpc-echo'],
+          startupFailure: null,
         }),
         expect.objectContaining({
           id: 'sess-ended',
           repo: 'example-org/example-repo',
           branch: 'feature/sandbox',
           services: ['lc-test-gh-type'],
+          startupFailure: null,
+        }),
+      ]);
+    });
+
+    it('attaches persisted startup failures to errored sessions in the list response', async () => {
+      const sessions = [
+        {
+          id: 101,
+          uuid: 'sess-error',
+          userId: 'user-123',
+          buildUuid: null,
+          status: 'error',
+          devModeSnapshots: {},
+        },
+      ];
+
+      const sessionsQuery = {
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest
+          .fn()
+          .mockImplementationOnce(() => sessionsQuery)
+          .mockImplementationOnce(() => Promise.resolve(sessions)),
+      };
+      (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(sessionsQuery);
+
+      mockRedis.get.mockResolvedValueOnce(
+        JSON.stringify({
+          sessionId: 'sess-error',
+          stage: 'connect_runtime',
+          title: 'Agent pod failed to start',
+          message: 'init-workspace: ImagePullBackOff',
+          recordedAt: '2026-03-25T10:00:00.000Z',
+        })
+      );
+
+      const result = await AgentSessionService.getSessions('user-123', { includeEnded: true });
+
+      expect(result).toEqual([
+        expect.objectContaining({
+          id: 'sess-error',
+          status: 'error',
+          startupFailure: {
+            stage: 'connect_runtime',
+            title: 'Agent pod failed to start',
+            message: 'init-workspace: ImagePullBackOff',
+            recordedAt: '2026-03-25T10:00:00.000Z',
+          },
         }),
       ]);
     });

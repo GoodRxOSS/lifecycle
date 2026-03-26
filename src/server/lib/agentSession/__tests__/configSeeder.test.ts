@@ -24,11 +24,22 @@ describe('configSeeder', () => {
       workspacePath: '/workspace',
     };
 
-    it('contains git clone with branch', () => {
+    it('contains git clone with progress, shallow depth, and branch', () => {
       const script = generateInitScript(baseOpts);
-      expect(script).toContain('git clone --branch "feature/test"');
+      expect(script).toContain('git clone --progress --depth 50 --branch "feature/test"');
       expect(script).toContain('"https://github.com/org/repo.git"');
       expect(script).toContain('"/workspace"');
+    });
+
+    it('unshallows the branch before checkout when a revision is requested', () => {
+      const script = generateInitScript({
+        ...baseOpts,
+        revision: 'abc123def456',
+      });
+
+      expect(script).toContain('git rev-parse --verify --quiet "abc123def456^{commit}" >/dev/null');
+      expect(script).toContain('git fetch --unshallow origin "feature/test" || git fetch origin "feature/test"');
+      expect(script).toContain('git checkout "abc123def456"');
     });
 
     it('marks the workspace as a safe git directory before checkout steps', () => {
