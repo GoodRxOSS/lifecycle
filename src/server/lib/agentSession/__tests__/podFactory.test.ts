@@ -209,6 +209,15 @@ describe('podFactory', () => {
       });
     });
 
+    it('applies a configured service account when provided', () => {
+      const pod = buildAgentPodSpec({
+        ...baseOpts,
+        serviceAccountName: 'agent-sa',
+      });
+
+      expect(pod.spec!.serviceAccountName).toBe('agent-sa');
+    });
+
     it('sets ANTHROPIC_API_KEY from a secret and CLAUDE_MODEL as an env var', () => {
       const pod = buildAgentPodSpec(baseOpts);
       const envVars = pod.spec!.containers[0].env;
@@ -308,7 +317,15 @@ describe('podFactory', () => {
 
       expect(getInitContainer(pod, 'init-workspace').env).toEqual(
         expect.arrayContaining([
-          { name: 'PACKAGE_REGISTRY_TOKEN', value: 'plain-token' },
+          {
+            name: 'PACKAGE_REGISTRY_TOKEN',
+            valueFrom: {
+              secretKeyRef: {
+                name: 'agent-secret-abc123',
+                key: 'PACKAGE_REGISTRY_TOKEN',
+              },
+            },
+          },
           {
             name: 'PRIVATE_REGISTRY_TOKEN',
             valueFrom: {
@@ -322,7 +339,15 @@ describe('podFactory', () => {
       );
       expect(pod.spec!.containers[0].env).toEqual(
         expect.arrayContaining([
-          { name: 'PACKAGE_REGISTRY_TOKEN', value: 'plain-token' },
+          {
+            name: 'PACKAGE_REGISTRY_TOKEN',
+            valueFrom: {
+              secretKeyRef: {
+                name: 'agent-secret-abc123',
+                key: 'PACKAGE_REGISTRY_TOKEN',
+              },
+            },
+          },
           {
             name: 'PRIVATE_REGISTRY_TOKEN',
             valueFrom: {

@@ -34,7 +34,8 @@ export interface PodEnvEntry {
 export function buildPodEnvWithSecrets(
   env: Record<string, string> | null | undefined,
   secretRefs: SecretRefWithEnvKey[],
-  serviceName: string
+  serviceName: string,
+  defaultSecretName?: string
 ): PodEnvEntry[] {
   if (!env) {
     return [];
@@ -57,6 +58,16 @@ export function buildPodEnvWithSecrets(
         valueFrom: {
           secretKeyRef: {
             name: secretName,
+            key: name,
+          },
+        },
+      });
+    } else if (defaultSecretName) {
+      entries.push({
+        name,
+        valueFrom: {
+          secretKeyRef: {
+            name: defaultSecretName,
             key: name,
           },
         },
