@@ -24,6 +24,7 @@ import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFacto
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
 import { createAgentPod, deleteAgentPod } from 'server/lib/agentSession/podFactory';
 import { createAgentEditorService, deleteAgentEditorService } from 'server/lib/agentSession/editorServiceFactory';
+import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
 import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeManager';
@@ -59,13 +60,17 @@ const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environme
 const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, service, build.[pullRequest.[repository]]]';
 const SESSION_DEPLOY_GRAPH = '[deployable, repository, service]';
 
-type AgentSessionSummaryRecord = AgentSession & {
+type AgentSessionSummaryRecordBase = AgentSession & {
   id: string;
   uuid: string;
   baseBuildUuid: string | null;
   repo: string | null;
   branch: string | null;
   services: string[];
+};
+
+type AgentSessionSummaryRecord = AgentSessionSummaryRecordBase & {
+  startupFailure: PublicAgentSessionStartupFailure | null;
 };
 
 type ActiveEnvironmentSessionSummary = {
@@ -96,6 +101,36 @@ async function restoreDeploys(deploys: Deploy[]): Promise<void> {
 
   const { DeploymentManager } = await import('server/lib/deploymentManager/deploymentManager');
   await new DeploymentManager(deploys).deploy();
+}
+
+async function attachStartupFailures<T extends { uuid: string; status: AgentSession['status'] }>(
+  sessions: T[]
+): Promise<Array<T & { startupFailure: PublicAgentSessionStartupFailure | null }>> {
+  if (sessions.length === 0) {
+    return [];
+  }
+
+  const errorSessions = sessions.filter((session) => session.status === 'error');
+  if (errorSessions.length === 0) {
+    return sessions.map((session) => ({
+      ...session,
+      startupFailure: null,
+    }));
+  }
+
+  const redis = RedisClient.getInstance().getRedis();
+  const failures = await Promise.all(
+    errorSessions.map(async (session) => {
+      const failure = await getAgentSessionStartupFailure(redis, session.uuid).catch(() => null);
+      return [session.uuid, failure ? toPublicAgentSessionStartupFailure(failure) : null] as const;
+    })
+  );
+  const failureBySessionId = new Map(failures);
+
+  return sessions.map((session) => ({
+    ...session,
+    startupFailure: failureBySessionId.get(session.uuid) ?? null,
+  }));
 }
 
 type SessionSnapshotMap = Record<string, DevModeResourceSnapshot>;
@@ -303,7 +338,7 @@ export default class AgentSessionService {
 
     const snapshotDeployById = new Map(snapshotDeploys.map((deploy) => [deploy.id, deploy]));
 
-    return sessions.map((session) => {
+    const enrichedSessions = sessions.map((session) => {
       const build = session.buildUuid ? buildByUuid.get(session.buildUuid) : null;
       const sessionDeploys =
         liveDeploysBySessionId.get(session.id) ||
@@ -337,8 +372,10 @@ export default class AgentSessionService {
           build?.baseBuild?.pullRequest?.branchName ||
           null,
         services,
-      } as AgentSessionSummaryRecord;
+      } as AgentSessionSummaryRecordBase;
     });
+
+    return attachStartupFailures(enrichedSessions);
   }
 
   static async getEnvironmentActiveSession(
@@ -398,6 +435,11 @@ export default class AgentSessionService {
       sessionUuid,
       opts.buildUuid
     );
+    const forwardedPlainAgentEnv = Object.fromEntries(
+      Object.entries(forwardedAgentEnv.env).filter(
+        ([envKey]) => !forwardedAgentEnv.secretRefs.some((secretRef) => secretRef.envKey === envKey)
+      )
+    );
 
     try {
       session = await AgentSession.query().insertAndFetch({
@@ -416,9 +458,17 @@ export default class AgentSessionService {
       } as unknown as Partial<AgentSession>);
       sessionPersisted = true;
 
-      await Promise.all([
+      const [, , agentServiceAccountName] = await Promise.all([
         createAgentPvc(opts.namespace, pvcName, '10Gi', opts.buildUuid),
-        createAgentApiKeySecret(opts.namespace, apiKeySecretName, apiKey, opts.githubToken, opts.buildUuid),
+        createAgentApiKeySecret(
+          opts.namespace,
+          apiKeySecretName,
+          apiKey,
+          opts.githubToken,
+          opts.buildUuid,
+          forwardedPlainAgentEnv
+        ),
+        ensureAgentSessionServiceAccount(opts.namespace),
       ]);
 
       const useGvisor = await isGvisorAvailable();
@@ -452,6 +502,7 @@ export default class AgentSessionService {
         buildUuid: opts.buildUuid,
         userIdentity: opts.userIdentity,
         nodeSelector: opts.nodeSelector,
+        serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
       });
       const agentNodeName = agentPod.spec?.nodeName || null;
@@ -534,6 +585,35 @@ export default class AgentSessionService {
       logger.error(`Session creation failed, rolling back: sessionId=${sessionUuid} err=${(err as Error).message}`);
 
       await setAgentSessionStartupFailure(redis, startupFailure).catch(() => {});
+      const endedAt = new Date().toISOString();
+
+      if (sessionPersisted) {
+        await AgentSession.query()
+          .findById(session!.id)
+          .patch({
+            status: 'error',
+            endedAt,
+          } as unknown as Partial<AgentSession>)
+          .catch(() => {});
+      } else {
+        await AgentSession.query()
+          .insert({
+            uuid: sessionUuid,
+            userId: opts.userId,
+            ownerGithubUsername: opts.userIdentity?.githubUsername || null,
+            podName,
+            namespace: opts.namespace,
+            pvcName,
+            model,
+            status: 'error',
+            buildUuid: opts.buildUuid || null,
+            buildKind,
+            endedAt,
+            devModeSnapshots: {},
+            forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
+          } as unknown as Partial<AgentSession>)
+          .catch(() => {});
+      }
 
       const revertPromise =
         mutatedDeploys.length > 0
@@ -554,38 +634,13 @@ export default class AgentSessionService {
             })()
           : Promise.resolve();
 
-      await Promise.all([
-        revertPromise,
-        deleteAgentRuntimeResources(opts.namespace, podName, apiKeySecretName).catch(() => {}),
-        cleanupForwardedAgentEnvSecrets(opts.namespace, sessionUuid, forwardedAgentEnv.secretProviders).catch(() => {}),
-      ]);
-      await deleteAgentPvc(opts.namespace, pvcName).catch(() => {});
+      await revertPromise;
 
-      if (sessionPersisted) {
+      if (sessionPersisted && Object.keys(devModeSnapshots).length > 0) {
         await AgentSession.query()
           .findById(session!.id)
           .patch({
-            status: 'error',
-            endedAt: new Date().toISOString(),
             devModeSnapshots: {},
-          } as unknown as Partial<AgentSession>)
-          .catch(() => {});
-      } else {
-        await AgentSession.query()
-          .insert({
-            uuid: sessionUuid,
-            userId: opts.userId,
-            ownerGithubUsername: opts.userIdentity?.githubUsername || null,
-            podName,
-            namespace: opts.namespace,
-            pvcName,
-            model,
-            status: 'error',
-            buildUuid: opts.buildUuid || null,
-            buildKind,
-            endedAt: new Date().toISOString(),
-            devModeSnapshots: {},
-            forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
           } as unknown as Partial<AgentSession>)
           .catch(() => {});
       }
@@ -596,7 +651,7 @@ export default class AgentSessionService {
 
   static async endSession(sessionId: string): Promise<void> {
     const session = await AgentSession.query().findOne({ uuid: sessionId });
-    if (!session || (session.status !== 'active' && session.status !== 'starting')) {
+    if (!session || (session.status !== 'active' && session.status !== 'starting' && session.status !== 'error')) {
       throw new Error('Session not found or already ended');
     }
 
