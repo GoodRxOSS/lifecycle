@@ -1425,6 +1425,26 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "agentSession": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pollMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
               }
             },
             "required": [
