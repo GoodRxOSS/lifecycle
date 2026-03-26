@@ -43,6 +43,7 @@ export interface NativeBuildOptions {
   namespace: string;
   buildId: string;
   deployUuid: string;
+  buildUuid?: string;
   serviceAccount?: string;
   jobTimeout?: number;
   cacheRegistry?: string;
@@ -194,16 +195,10 @@ buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
   },
 };
 
-/**
- * Appends service name to cache reference for non-ECR registries to avoid cache collisions
- * @param cacheRef - Cache reference (e.g., 'registry/repo:cache' or 'registry/repo/cache')
- * @param serviceName - Service name to append (e.g., 'psp-web')
- * @returns Modified cache reference with service name (e.g., 'registry/repo/psp-web:cache')
- */
-function appendServiceNameToCacheRef(cacheRef: string, serviceName: string): string {
-  // Insert service name before the cache suffix (supports :cache and /cache)
+function appendCacheRefSegments(cacheRef: string, serviceName: string, buildUuid?: string): string {
   const suffix = cacheRef.includes(':cache') ? ':cache' : '/cache';
-  return cacheRef.replace(suffix, `/${serviceName}${suffix}`);
+  const segments = [serviceName, buildUuid].filter(Boolean).join('/');
+  return cacheRef.replace(suffix, `/${segments}${suffix}`);
 }
 
 function createBuildContainer(
@@ -364,15 +359,8 @@ export async function buildWithEngine(
   const containers = [];
   let cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
 
-  // For non-ECR registries (like local distribution), append service name to avoid cache collisions
   if (cacheRegistry && !cacheRegistry.includes('ecr') && !cacheRef.includes(`/${serviceName}`)) {
-    cacheRef = appendServiceNameToCacheRef(cacheRef, serviceName);
-  }
-
-  // Append deployUuid to isolate cache per environment/PR and prevent concurrent write corruption
-  if (cacheRegistry && !cacheRegistry.includes('ecr') && options.deployUuid) {
-    const suffix = cacheRef.includes(':cache') ? ':cache' : '/cache';
-    cacheRef = cacheRef.replace(suffix, `/${options.deployUuid}${suffix}`);
+    cacheRef = appendCacheRefSegments(cacheRef, serviceName, options.buildUuid);
   }
 
   const mainDestination = `${options.ecrDomain}/${options.ecrRepo}:${options.tag}`;

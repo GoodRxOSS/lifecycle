@@ -79,6 +79,7 @@ describe('buildkitBuild', () => {
     branch: 'main',
     namespace: 'env-test-123',
     buildId: '456',
+    buildUuid: 'abc123',
     deployUuid: 'test-service-abc123',
     jobTimeout: 1800,
   };
@@ -156,7 +157,7 @@ describe('buildkitBuild', () => {
 
     // Check cache uses local distribution registry with service name and deployUuid for isolation
     expect(fullCommand).toContain(
-      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/test-service-abc123:cache'
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/abc123:cache'
     );
 
     // Check custom resources are applied
@@ -164,7 +165,7 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('memory: "2Gi"');
   });
 
-  it('includes deployUuid in cache ref for cache isolation', async () => {
+  it('includes buildUuid in cache ref for cache isolation', async () => {
     const configWithCache = {
       ...mockGlobalConfig,
       buildDefaults: {
@@ -183,7 +184,7 @@ describe('buildkitBuild', () => {
     const fullCommand = applyCall[0];
 
     expect(fullCommand).toContain(
-      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/test-service-abc123:cache'
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/abc123:cache'
     );
   });
 
