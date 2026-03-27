@@ -138,6 +138,7 @@ export interface AgentPodOpts {
     timeoutMs: number;
     pollMs: number;
   };
+  skipWorkspaceBootstrap?: boolean;
   resources?: {
     agent?: k8s.V1ResourceRequirements;
     editor?: k8s.V1ResourceRequirements;
@@ -251,6 +252,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     claudePrAttribution,
     useGvisor,
     userIdentity,
+    skipWorkspaceBootstrap,
   } = opts;
 
   const initScriptOpts: InitScriptOpts = {
@@ -319,65 +321,69 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
           type: 'RuntimeDefault',
         },
       },
-      initContainers: [
-        {
-          name: 'prepare-workspace',
-          image,
-          imagePullPolicy: 'IfNotPresent',
-          command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
-          resources,
-          securityContext: {
-            ...securityContext,
-            readOnlyRootFilesystem: false,
-          },
-          volumeMounts: [
-            {
-              name: 'workspace',
-              mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
-            },
-            {
-              name: 'tmp',
-              mountPath: '/tmp',
-            },
-          ],
-          env: [
-            { name: 'TMPDIR', value: '/tmp' },
-            { name: 'TMP', value: '/tmp' },
-            { name: 'TEMP', value: '/tmp' },
-          ],
-        },
-        {
-          name: 'init-workspace',
-          image,
-          imagePullPolicy: 'IfNotPresent',
-          command: ['sh', '-c', initScript],
-          resources,
-          securityContext: {
-            ...securityContext,
-            readOnlyRootFilesystem: false,
-          },
-          volumeMounts: [
-            workspaceVolumeMount,
-            {
-              name: 'claude-config',
-              mountPath: '/home/claude/.claude',
-            },
-            {
-              name: 'tmp',
-              mountPath: '/tmp',
-            },
-          ],
-          env: [
-            { name: 'HOME', value: '/home/claude/.claude' },
-            { name: 'TMPDIR', value: '/tmp' },
-            { name: 'TMP', value: '/tmp' },
-            { name: 'TEMP', value: '/tmp' },
-            ...forwardedAgentSecretEnv,
-            ...githubTokenEnv,
-            ...userEnv,
-          ],
-        },
-      ],
+      ...(skipWorkspaceBootstrap
+        ? {}
+        : {
+            initContainers: [
+              {
+                name: 'prepare-workspace',
+                image,
+                imagePullPolicy: 'IfNotPresent',
+                command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
+                resources,
+                securityContext: {
+                  ...securityContext,
+                  readOnlyRootFilesystem: false,
+                },
+                volumeMounts: [
+                  {
+                    name: 'workspace',
+                    mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
+                  },
+                  {
+                    name: 'tmp',
+                    mountPath: '/tmp',
+                  },
+                ],
+                env: [
+                  { name: 'TMPDIR', value: '/tmp' },
+                  { name: 'TMP', value: '/tmp' },
+                  { name: 'TEMP', value: '/tmp' },
+                ],
+              },
+              {
+                name: 'init-workspace',
+                image,
+                imagePullPolicy: 'IfNotPresent',
+                command: ['sh', '-c', initScript],
+                resources,
+                securityContext: {
+                  ...securityContext,
+                  readOnlyRootFilesystem: false,
+                },
+                volumeMounts: [
+                  workspaceVolumeMount,
+                  {
+                    name: 'claude-config',
+                    mountPath: '/home/claude/.claude',
+                  },
+                  {
+                    name: 'tmp',
+                    mountPath: '/tmp',
+                  },
+                ],
+                env: [
+                  { name: 'HOME', value: '/home/claude/.claude' },
+                  { name: 'TMPDIR', value: '/tmp' },
+                  { name: 'TMP', value: '/tmp' },
+                  { name: 'TEMP', value: '/tmp' },
+                  ...forwardedAgentSecretEnv,
+                  ...githubTokenEnv,
+                  ...userEnv,
+                ],
+              },
+            ],
+          }),
       containers: [
         {
           name: 'agent',
