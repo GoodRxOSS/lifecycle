@@ -1240,6 +1240,7 @@ export function generateDeployManifests(
         'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
         'tags.datadoghq.com/service': serviceName,
         'tags.datadoghq.com/version': buildUUID,
+        'lc-service': serviceName,
       };
 
       /**
@@ -1253,6 +1254,7 @@ export function generateDeployManifests(
         'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
         'tags.datadoghq.com/service': serviceName,
         'tags.datadoghq.com/version': buildUUID,
+        'lc-service': serviceName,
       };
 
       if (build.isStatic) getLogger().info('Build: static environment=true');
@@ -1875,6 +1877,8 @@ function generateSingleDeploymentManifest({
     'tags.datadoghq.com/version': build.uuid,
   };
 
+  const lcService = serviceName || name;
+
   // Handle init container if present
   if (deploy.initDockerImage) {
     const initEnvObj = _.merge(
@@ -2211,6 +2215,7 @@ function generateSingleDeploymentManifest({
         dd_name: `lifecycle-${build.uuid}`,
         'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
         ...datadogLabels,
+        'lc-service': lcService,
       },
     },
     spec: {
@@ -2236,6 +2241,7 @@ function generateSingleDeploymentManifest({
             dd_name: `lifecycle-${build.uuid}`,
             'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
             ...datadogLabels,
+            'lc-service': lcService,
           },
         },
         spec: {

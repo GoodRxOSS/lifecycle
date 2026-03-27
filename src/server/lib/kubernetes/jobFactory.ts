@@ -185,6 +185,7 @@ export function createHelmJob(config: HelmJobConfig): V1Job {
   const labels: Record<string, string> = {
     'lc-uuid': config.buildUUID,
     service: config.serviceName,
+    'lc-service': config.serviceName,
   };
 
   if (config.deployMetadata) {
