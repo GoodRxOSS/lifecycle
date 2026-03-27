@@ -79,6 +79,7 @@ describe('buildkitBuild', () => {
     branch: 'main',
     namespace: 'env-test-123',
     buildId: '456',
+    buildUuid: 'abc123',
     deployUuid: 'test-service-abc123',
     jobTimeout: 1800,
   };
@@ -154,14 +155,39 @@ describe('buildkitBuild', () => {
     // Check custom endpoint is used
     expect(fullCommand).toContain('value: "tcp://buildkit-custom.svc.cluster.local:1234"');
 
-    // Check cache uses local distribution registry with service name to avoid collisions
+    // Check cache uses local distribution registry with service name and buildUuid for isolation
     expect(fullCommand).toContain(
-      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service:cache'
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service/abc123:cache'
     );
 
     // Check custom resources are applied
     expect(fullCommand).toContain('cpu: "1"');
     expect(fullCommand).toContain('memory: "2Gi"');
+  });
+
+  it('falls back to service-name-only cache ref when buildUuid is not provided', async () => {
+    const configWithCache = {
+      ...mockGlobalConfig,
+      buildDefaults: {
+        ...mockGlobalConfig.buildDefaults,
+        cacheRegistry: 'lifecycle-distribution.lifecycle-app.svc.cluster.local',
+      },
+    };
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(configWithCache),
+    });
+
+    const optionsWithoutBuildUuid = { ...mockOptions, buildUuid: undefined };
+    await buildkitBuild(mockDeploy, optionsWithoutBuildUuid);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain(
+      'ref=lifecycle-distribution.lifecycle-app.svc.cluster.local/test-repo/test-service:cache'
+    );
+    expect(fullCommand).not.toContain('test-service/abc123:cache');
   });
 
   it('handles init dockerfile build', async () => {

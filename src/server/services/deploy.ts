@@ -1105,6 +1105,7 @@ export default class DeployService extends BaseService {
             envVars: filteredEnvVars,
             namespace: deploy.build.namespace,
             buildId: String(deploy.build.id),
+            buildUuid: deploy.build.uuid,
             deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
             resources: deployable.builder?.resources,
