@@ -117,6 +117,7 @@ export const QUEUE_NAMES = {
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
   LABEL: `label_${JOB_VERSION}`,
   AGENT_SESSION_CLEANUP: 'agent_session_cleanup',
+  AGENT_SESSION_PREWARM: 'agent_session_prewarm',
   AGENT_SANDBOX_SESSION_LAUNCH: 'agent_sandbox_session_launch',
 } as const;
 
