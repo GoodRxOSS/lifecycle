@@ -359,6 +359,7 @@ export async function buildWithEngine(
   const containers = [];
   let cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
 
+  // Scope cache per service + build-uuid to prevent concurrent PR builds from corrupting shared cache entries
   if (cacheRegistry && !cacheRegistry.includes('ecr') && !cacheRef.includes(`/${serviceName}`)) {
     cacheRef = appendCacheRefSegments(cacheRef, serviceName, options.buildUuid);
   }
