@@ -97,6 +97,12 @@ environment:
         # @param environment.agentSession.resources.editor.limits
         limits:
 
+    # @param environment.agentSession.prewarm
+    prewarm:
+      # @param environment.agentSession.prewarm.services
+      services:
+        # @param environment.agentSession.prewarm.services[]
+        - ''
 # @section services
 services:
   # @param services[]

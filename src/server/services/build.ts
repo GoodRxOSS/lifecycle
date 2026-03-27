@@ -44,6 +44,7 @@ import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
 import IngressService from './ingress';
+import AgentPrewarmService from './agentPrewarm';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
@@ -1237,6 +1238,16 @@ export default class BuildService extends BaseService {
           namespace: build.namespace,
           role: serviceAccount?.role,
         });
+        if (build.kind === BuildKind.ENVIRONMENT && build.uuid) {
+          await new AgentPrewarmService(this.db, this.redis, this.redlock, this.queueManager)
+            .queueBuildPrewarm(build.uuid)
+            .catch((error) => {
+              getLogger().warn(
+                { error, buildUuid: build.uuid, namespace: build.namespace },
+                'Agent prewarm queueing failed before deployment rollout'
+              );
+            });
+        }
 
         const allDeploys = await Deploy.query()
           .where({

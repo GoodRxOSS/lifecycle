@@ -37,6 +37,17 @@ const agentSessionResources = {
   },
 };
 
+const agentSessionPrewarm = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    services: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+};
+
 const agentSessionReadiness = {
   type: 'object',
   additionalProperties: false,
@@ -65,6 +76,7 @@ const schema_1_0_0 = {
           additionalProperties: false,
           properties: {
             resources: agentSessionResources,
+            prewarm: agentSessionPrewarm,
           },
         },
         defaultServices: {
