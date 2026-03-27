@@ -334,6 +334,48 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description Information about a pod within a build environment, including its service name.
+         */
+        EnvironmentPodInfo: {
+          allOf: [
+            { $ref: '#/components/schemas/DeploymentPodInfo' },
+            {
+              type: 'object',
+              properties: {
+                serviceName: { type: 'string', description: 'The service this pod belongs to.' },
+              },
+              required: ['serviceName'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/pods
+         */
+        GetEnvironmentPodsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    pods: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/EnvironmentPodInfo' },
+                    },
+                  },
+                  required: ['pods'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description The specific success response for
          * PUT /api/v2/builds/{uuid}/services/{name}/redeploy
          */

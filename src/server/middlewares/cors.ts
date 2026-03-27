@@ -19,9 +19,13 @@ import type { Middleware } from './chain';
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) => o.trim()) ?? [];
 
+console.log('allowedOrigins :::::::', allowedOrigins);
 export const corsMiddleware: Middleware = async (request, next) => {
   const origin = request.headers.get('origin');
   const isAllowedOrigin = origin && allowedOrigins.includes(origin);
+  console.log('origin', origin);
+  console.log('isAllowedOrigin', isAllowedOrigin);
+  console.log('allowedOrigins', allowedOrigins);
 
   const corsHeaders: Record<string, string> = {
     'Access-Control-Allow-Origin': isAllowedOrigin ? origin : allowedOrigins[0],
