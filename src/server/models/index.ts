@@ -33,6 +33,7 @@ import ConversationMessage from './ConversationMessage';
 import MessageFeedback from './MessageFeedback';
 import ConversationFeedback from './ConversationFeedback';
 import AgentSession from './AgentSession';
+import AgentPrewarm from './AgentPrewarm';
 import UserApiKey from './UserApiKey';
 
 export interface IModels {
@@ -55,6 +56,7 @@ export interface IModels {
   MessageFeedback: typeof MessageFeedback;
   ConversationFeedback: typeof ConversationFeedback;
   AgentSession: typeof AgentSession;
+  AgentPrewarm: typeof AgentPrewarm;
   UserApiKey: typeof UserApiKey;
 }
 
@@ -78,5 +80,6 @@ export {
   MessageFeedback,
   ConversationFeedback,
   AgentSession,
+  AgentPrewarm,
   UserApiKey,
 };

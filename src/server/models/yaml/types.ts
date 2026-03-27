@@ -32,6 +32,9 @@ export type LifecycleYamlConfigEnvironment = {
         limits?: Record<string, string>;
       };
     };
+    prewarm?: {
+      services?: string[];
+    };
   };
 };
 

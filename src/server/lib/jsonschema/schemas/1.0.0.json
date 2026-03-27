@@ -203,6 +203,18 @@
                   }
                 }
               }
+            },
+            "prewarm": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "services": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         }
