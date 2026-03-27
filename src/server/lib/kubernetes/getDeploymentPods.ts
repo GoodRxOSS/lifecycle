@@ -95,6 +95,20 @@ function podAgeSeconds(pod: k8s.V1Pod): number {
   return Math.max(0, Math.floor((Date.now() - new Date(created).getTime()) / 1000));
 }
 
+function isTerminalPod(pod: k8s.V1Pod): boolean {
+  if (pod.metadata?.deletionTimestamp) {
+    return true;
+  }
+
+  const phase = pod.status?.phase;
+  if (phase === 'Succeeded' || phase === 'Failed') {
+    return true;
+  }
+
+  const appContainerStatuses = pod.status?.containerStatuses ?? [];
+  return appContainerStatuses.length > 0 && appContainerStatuses.every((status) => Boolean(status.state?.terminated));
+}
+
 function containerState(cs?: k8s.V1ContainerStatus): { state: ContainerState; reason?: string } {
   if (!cs) return { state: 'Unknown' };
 
@@ -207,26 +221,28 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
       labelSelector
     );
 
-    const pods = podResp.body.items ?? [];
+    const pods = (podResp.body.items ?? []).filter((pod) => !isTerminalPod(pod));
 
     if (pods.length === 0) {
       return [];
     }
 
-    return pods.map((pod) => {
-      const ageSeconds = podAgeSeconds(pod);
-      const containers = extractContainers(pod);
+    return pods
+      .map((pod) => {
+        const ageSeconds = podAgeSeconds(pod);
+        const containers = extractContainers(pod);
 
-      return {
-        podName: pod.metadata?.name ?? '',
-        status: podStatus(pod),
-        restarts: podRestarts(pod),
-        ageSeconds,
-        age: formatAge(ageSeconds),
-        ready: podReady(pod),
-        containers,
-      };
-    });
+        return {
+          podName: pod.metadata?.name ?? '',
+          status: podStatus(pod),
+          restarts: podRestarts(pod),
+          ageSeconds,
+          age: formatAge(ageSeconds),
+          ready: podReady(pod),
+          containers,
+        };
+      })
+      .sort((left, right) => left.ageSeconds - right.ageSeconds);
   } catch (error) {
     getLogger().error({ error }, `K8s: failed to list workload pods service=${deploymentName}`);
     throw error;
