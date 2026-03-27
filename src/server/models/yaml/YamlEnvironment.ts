@@ -26,6 +26,9 @@ export interface AgentSessionEnvironmentConfig {
     readonly agent?: AgentSessionEnvironmentResourceRequirements;
     readonly editor?: AgentSessionEnvironmentResourceRequirements;
   };
+  readonly prewarm?: {
+    readonly services?: string[];
+  };
 }
 
 export interface Environment {

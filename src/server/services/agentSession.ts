@@ -61,6 +61,7 @@ import {
   toPublicAgentSessionStartupFailure,
 } from 'server/lib/agentSession/startupFailureState';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
+import AgentPrewarmService from './agentPrewarm';
 
 const logger = getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
@@ -289,6 +290,29 @@ async function deleteAgentRuntimeResources(
   ]);
 }
 
+async function resolveCompatiblePrewarm(buildUuid: string | undefined, requestedServices: string[], revision?: string) {
+  if (!buildUuid) {
+    return null;
+  }
+
+  return new AgentPrewarmService().getCompatibleReadyPrewarm({
+    buildUuid,
+    requestedServices,
+    revision,
+  });
+}
+
+async function resolveSessionPrewarmByPvc(buildUuid: string | null, pvcName: string) {
+  if (!buildUuid) {
+    return null;
+  }
+
+  return new AgentPrewarmService().getReadyPrewarmByPvc({
+    buildUuid,
+    pvcName,
+  });
+}
+
 function isUniqueConstraintError(error: unknown, constraintName: string): boolean {
   const knexError = error as { code?: string; constraint?: string };
   return knexError?.code === '23505' && knexError?.constraint === constraintName;
@@ -477,7 +501,6 @@ export default class AgentSessionService {
     const sessionUuid = uuid();
     const buildKind = opts.buildKind || BuildKind.ENVIRONMENT;
     const podName = `agent-${sessionUuid.slice(0, 8)}`;
-    const pvcName = `agent-pvc-${sessionUuid.slice(0, 8)}`;
     const apiKeySecretName = `agent-secret-${sessionUuid.slice(0, 8)}`;
     const model = opts.model || 'claude-sonnet-4-6';
     const mutatedDeploys: number[] = [];
@@ -494,6 +517,9 @@ export default class AgentSessionService {
     );
     const claudePrAttribution = renderAgentSessionClaudeAttribution(claudeConfig.attribution.prTemplate, githubAppName);
     const resolvedServices = await resolveTemplatedDevConfigEnvs(opts.buildUuid, opts.namespace, opts.services);
+    const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
+    const compatiblePrewarm = await resolveCompatiblePrewarm(opts.buildUuid, resolvedServiceNames, opts.revision);
+    const pvcName = compatiblePrewarm?.pvcName || `agent-pvc-${sessionUuid.slice(0, 8)}`;
     const forwardedAgentEnv = await resolveForwardedAgentEnv(
       resolvedServices,
       opts.namespace,
@@ -524,7 +550,7 @@ export default class AgentSessionService {
       sessionPersisted = true;
 
       const [, , agentServiceAccountName] = await Promise.all([
-        createAgentPvc(opts.namespace, pvcName, '10Gi', opts.buildUuid),
+        compatiblePrewarm ? Promise.resolve(null) : createAgentPvc(opts.namespace, pvcName, '10Gi', opts.buildUuid),
         createAgentApiKeySecret(
           opts.namespace,
           apiKeySecretName,
@@ -568,6 +594,7 @@ export default class AgentSessionService {
         userIdentity: opts.userIdentity,
         nodeSelector: opts.nodeSelector,
         readiness: opts.readiness,
+        skipWorkspaceBootstrap: Boolean(compatiblePrewarm),
         serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
       });
@@ -702,6 +729,12 @@ export default class AgentSessionService {
 
       await revertPromise;
 
+      await Promise.all([
+        deleteAgentRuntimeResources(opts.namespace, podName, apiKeySecretName).catch(() => {}),
+        cleanupForwardedAgentEnvSecrets(opts.namespace, sessionUuid, forwardedAgentEnv.secretProviders).catch(() => {}),
+        compatiblePrewarm ? Promise.resolve() : deleteAgentPvc(opts.namespace, pvcName).catch(() => {}),
+      ]);
+
       if (sessionPersisted && Object.keys(devModeSnapshots).length > 0) {
         await AgentSession.query()
           .findById(session!.id)
@@ -770,13 +803,17 @@ export default class AgentSessionService {
       await Deploy.query().findById(deploy.id).patch({ devMode: false, devModeSessionId: null });
     }
 
+    const reusablePrewarm = await resolveSessionPrewarmByPvc(session.buildUuid, session.pvcName);
+
     await Promise.all([
       deleteAgentRuntimeResources(session.namespace, session.podName, apiKeySecretName),
       cleanupForwardedAgentEnvSecrets(session.namespace, session.uuid, session.forwardedAgentSecretProviders),
       clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {}),
     ]);
     await cleanupDevModePatches(session.namespace, session.devModeSnapshots, devModeDeploys);
-    await deleteAgentPvc(session.namespace, session.pvcName);
+    if (!reusablePrewarm) {
+      await deleteAgentPvc(session.namespace, session.pvcName);
+    }
     triggerDevModeDeployRestore(session.namespace, session.devModeSnapshots, devModeDeploys);
 
     await AgentSession.query().findById(session.id).patch({

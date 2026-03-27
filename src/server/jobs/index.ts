@@ -21,6 +21,7 @@ import RedisClient from 'server/lib/redisClient';
 import QueueManager from 'server/lib/queueManager';
 import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, QUEUE_NAMES } from 'shared/config';
 import { processAgentSessionCleanup } from './agentSessionCleanup';
+import { processAgentSessionPrewarm } from './agentSessionPrewarm';
 import { processAgentSandboxSessionLaunch } from './agentSandboxSessionLaunch';
 
 let isBootstrapped = false;
@@ -108,6 +109,11 @@ export default function bootstrapJobs(services: IServices) {
   queueManager.registerWorker(QUEUE_NAMES.AGENT_SESSION_CLEANUP, processAgentSessionCleanup, {
     connection: redisClient.getConnection(),
     concurrency: 1,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.AGENT_SESSION_PREWARM, processAgentSessionPrewarm, {
+    connection: redisClient.getConnection(),
+    concurrency: 2,
   });
 
   queueManager.registerWorker(QUEUE_NAMES.AGENT_SANDBOX_SESSION_LAUNCH, processAgentSandboxSessionLaunch, {

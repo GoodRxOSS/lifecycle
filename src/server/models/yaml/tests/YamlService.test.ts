@@ -139,6 +139,44 @@ services:
       expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
     });
 
+    test('accepts environment-level agent session prewarm service lists', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+environment:
+  agentSession:
+    prewarm:
+      services:
+        - agent-app
+        - api
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+  - name: 'api'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev:api'
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/api/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+
     test('accepts service-level agent session readiness overrides in dev config', () => {
       const parser = new YamlConfigParser();
       const config = parser.parseYamlConfigFromString(`---
