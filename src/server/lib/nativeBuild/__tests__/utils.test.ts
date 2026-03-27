@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { createGitCloneContainer, createBuildJobManifest } from '../utils';
+import { createGitCloneContainer, createBuildJobManifest, createJob } from '../utils';
 
 describe('nativeBuild/utils', () => {
   describe('createGitCloneContainer', () => {
@@ -112,6 +112,30 @@ describe('nativeBuild/utils', () => {
 
       const manifest = createBuildJobManifest(options);
       expect(manifest.spec.ttlSecondsAfterFinished).toBe(86400); // 24 hours for static builds
+    });
+  });
+
+  describe('createJob', () => {
+    it('coerces numeric env var values to strings', () => {
+      const job = createJob(
+        'test-job',
+        'test-ns',
+        'test-sa',
+        'alpine:latest',
+        ['sh', '-c'],
+        ['echo hello'],
+        { APP_NAME: 'my-app', APP_PORT: 8080, WORKERS: 4 } as any,
+        { app: 'test' },
+        { note: 'test' }
+      );
+
+      const envVars = job.spec!.template.spec!.containers![0].env!;
+      for (const envVar of envVars) {
+        expect(typeof envVar.value).toBe('string');
+      }
+      expect(envVars).toContainEqual({ name: 'APP_PORT', value: '8080' });
+      expect(envVars).toContainEqual({ name: 'WORKERS', value: '4' });
+      expect(envVars).toContainEqual({ name: 'APP_NAME', value: 'my-app' });
     });
   });
 });
