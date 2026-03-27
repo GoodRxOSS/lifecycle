@@ -40,7 +40,7 @@ export interface PodInfo {
   containers: ContainerInfo[];
 }
 
-function loadKubeConfig(): k8s.KubeConfig {
+export function loadKubeConfig(): k8s.KubeConfig {
   const kc = new k8s.KubeConfig();
   try {
     kc.loadFromCluster();
@@ -56,14 +56,14 @@ function buildLabelSelector(matchLabels: Record<string, string>): string {
     .join(',');
 }
 
-function formatAge(seconds: number): string {
+export function formatAge(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 172800) return `${Math.floor(seconds / 3600)}h`;
   return `${Math.floor(seconds / 86400)}d`;
 }
 
-function podStatus(pod: k8s.V1Pod): string {
+export function podStatus(pod: k8s.V1Pod): string {
   const phase = pod.status?.phase ?? 'Unknown';
   const statuses = pod.status?.containerStatuses ?? [];
 
@@ -78,18 +78,18 @@ function podStatus(pod: k8s.V1Pod): string {
   return phase;
 }
 
-function podRestarts(pod: k8s.V1Pod): number {
+export function podRestarts(pod: k8s.V1Pod): number {
   return (pod.status?.containerStatuses ?? []).reduce((sum, cs) => sum + (cs.restartCount ?? 0), 0);
 }
 
-function podReady(pod: k8s.V1Pod): string {
+export function podReady(pod: k8s.V1Pod): string {
   const statuses = pod.status?.containerStatuses ?? [];
   const total = statuses.length;
   const ready = statuses.filter((s) => s.ready).length;
   return `${ready}/${total}`;
 }
 
-function podAgeSeconds(pod: k8s.V1Pod): number {
+export function podAgeSeconds(pod: k8s.V1Pod): number {
   const created = pod.metadata?.creationTimestamp;
   if (!created) return 0;
   return Math.max(0, Math.floor((Date.now() - new Date(created).getTime()) / 1000));
@@ -105,7 +105,7 @@ function containerState(cs?: k8s.V1ContainerStatus): { state: ContainerState; re
   return { state: 'Unknown' };
 }
 
-function extractContainers(pod: k8s.V1Pod): ContainerInfo[] {
+export function extractContainers(pod: k8s.V1Pod): ContainerInfo[] {
   const containers: ContainerInfo[] = [];
 
   // Init containers
