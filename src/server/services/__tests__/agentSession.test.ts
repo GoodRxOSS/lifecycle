@@ -18,6 +18,9 @@ import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 
 mockRedisClient();
 
+const mockGetCompatibleReadyPrewarm = jest.fn();
+const mockGetReadyPrewarmByPvc = jest.fn();
+
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/Build');
 jest.mock('server/models/Deploy');
@@ -33,6 +36,13 @@ jest.mock('server/lib/agentSession/devModeManager');
 jest.mock('server/lib/agentSession/forwardedEnv');
 jest.mock('server/lib/kubernetes/networkPolicyFactory');
 jest.mock('server/services/userApiKey');
+jest.mock('server/services/agentPrewarm', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    getCompatibleReadyPrewarm: mockGetCompatibleReadyPrewarm,
+    getReadyPrewarmByPvc: mockGetReadyPrewarmByPvc,
+  })),
+}));
 jest.mock('server/lib/nativeHelm/helm', () => ({
   deployHelm: jest.fn().mockResolvedValue(undefined),
 }));
@@ -283,6 +293,8 @@ describe('AgentSessionService', () => {
     }));
     mockedBuildServiceModule.deleteQueueAdd.mockResolvedValue(undefined);
     mockedBuildServiceModule.deleteBuild.mockResolvedValue(undefined);
+    mockGetCompatibleReadyPrewarm.mockResolvedValue(null);
+    mockGetReadyPrewarmByPvc.mockResolvedValue(null);
     (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
       env: {},
       secretRefs: [],
@@ -387,6 +399,64 @@ describe('AgentSessionService', () => {
         expect.any(String)
       );
       expect(session.status).toBe('active');
+    });
+
+    it('reuses a compatible ready prewarm PVC and skips workspace bootstrap', async () => {
+      mockGetCompatibleReadyPrewarm.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        services: ['web'],
+        status: 'ready',
+      });
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        services: [{ name: 'web', deployId: 1, devConfig: { image: 'node:20', command: 'pnpm dev' } }],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith({
+        buildUuid: 'build-123',
+        requestedServices: ['web'],
+        revision: undefined,
+      });
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(createAgentPod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'agent-prewarm-pvc-1234',
+          skipWorkspaceBootstrap: true,
+        })
+      );
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'agent-prewarm-pvc-1234',
+        })
+      );
+    });
+
+    it('falls back to the cold path when no compatible prewarm is available', async () => {
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        services: [{ name: 'api', deployId: 2, devConfig: { image: 'node:20', command: 'pnpm dev' } }],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith({
+        buildUuid: 'build-123',
+        requestedServices: ['api'],
+        revision: undefined,
+      });
+      expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', 'build-123');
+      expect(createAgentPod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'agent-pvc-aaaaaaaa',
+          skipWorkspaceBootstrap: false,
+        })
+      );
     });
 
     it('passes resolved agent-session resources through to pod creation when provided', async () => {
@@ -708,11 +778,15 @@ describe('AgentSessionService', () => {
         3600,
         expect.any(String)
       );
-      expect(deleteAgentEditorService).not.toHaveBeenCalled();
-      expect(deleteAgentPod).not.toHaveBeenCalled();
-      expect(deleteAgentPvc).not.toHaveBeenCalled();
-      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
-      expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
+      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith(
+        'test-ns',
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        []
+      );
       expect(mockSessionQuery.patch).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }));
     });
 
@@ -810,10 +884,10 @@ describe('AgentSessionService', () => {
 
       releaseDeploy();
       await expect(rollbackPromise).rejects.toThrow('snapshot persist failed');
-      expect(deleteAgentPod).not.toHaveBeenCalled();
-      expect(deleteAgentEditorService).not.toHaveBeenCalled();
-      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
-      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
     });
   });
 
@@ -839,6 +913,7 @@ describe('AgentSessionService', () => {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'active',
+        buildUuid: null,
         namespace: 'test-ns',
         podName: 'agent-sess1',
         pvcName: 'agent-pvc-sess1',
@@ -924,17 +999,71 @@ describe('AgentSessionService', () => {
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     });
 
+    it('preserves a reused prewarm PVC when ending the session', async () => {
+      mockGetReadyPrewarmByPvc.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        status: 'ready',
+      });
+
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        buildUuid: 'build-123',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+
+      const patchMock = jest.fn().mockResolvedValue(1);
+
+      let agentQueryCount = 0;
+      (AgentSession.query as jest.Mock) = jest.fn().mockImplementation(() => {
+        agentQueryCount++;
+        if (agentQueryCount === 1) {
+          return { findOne: jest.fn().mockResolvedValue(activeSession) };
+        }
+        return { findById: jest.fn().mockReturnValue({ patch: patchMock }) };
+      });
+
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue({ kind: 'environment' }),
+        }),
+      });
+
+      (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue([]),
+        }),
+      });
+
+      await AgentSessionService.endSession('sess-1');
+
+      expect(mockGetReadyPrewarmByPvc).toHaveBeenCalledWith({
+        buildUuid: 'build-123',
+        pvcName: 'agent-prewarm-pvc-1234',
+      });
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended', devModeSnapshots: {} }));
+    });
+
     it('cleans up a failed session when explicitly ended', async () => {
       const failedSession = {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'error',
+        buildUuid: null,
         namespace: 'test-ns',
         podName: 'agent-sess1',
         pvcName: 'agent-pvc-sess1',
         forwardedAgentSecretProviders: ['aws'],
         devModeSnapshots: {},
-        buildUuid: null,
       };
       (AgentSession.query as jest.Mock) = jest
         .fn()
