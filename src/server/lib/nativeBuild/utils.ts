@@ -93,7 +93,7 @@ export function createJob(
   },
   ttlSecondsAfterFinished?: number
 ): V1Job {
-  const env = Object.entries(envVars).map(([name, value]) => ({ name, value }));
+  const env = Object.entries(envVars).map(([name, value]) => ({ name, value: String(value) }));
 
   return {
     apiVersion: 'batch/v1',

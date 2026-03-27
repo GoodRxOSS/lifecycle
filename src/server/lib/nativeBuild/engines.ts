@@ -248,7 +248,7 @@ function createBuildContainer(
     image: engine.image,
     command: engine.command,
     args,
-    env: Object.entries(containerEnvVars).map(([envName, value]) => ({ name: envName, value })),
+    env: Object.entries(containerEnvVars).map(([envName, value]) => ({ name: envName, value: String(value) })),
     volumeMounts,
     resources,
   };

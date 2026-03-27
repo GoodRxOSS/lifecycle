@@ -247,6 +247,24 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('build-arg:NODE_ENV=production');
   });
 
+  it('coerces numeric env var values to strings for Kubernetes compatibility', async () => {
+    const optionsWithNumericEnv = {
+      ...mockOptions,
+      envVars: { APP_PORT: 3000, REPLICAS: 2, APP_NAME: 'my-app' } as any,
+    };
+
+    await buildkitBuild(mockDeploy, optionsWithNumericEnv);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('value: "3000"');
+    expect(fullCommand).toContain('value: "2"');
+    expect(fullCommand).toContain('value: "my-app"');
+    expect(fullCommand).not.toMatch(/value: [0-9]/);
+  });
+
   it('uses correct job naming pattern', async () => {
     const result = await buildkitBuild(mockDeploy, mockOptions);
 
