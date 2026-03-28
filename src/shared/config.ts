@@ -116,6 +116,7 @@ export const QUEUE_NAMES = {
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
   LABEL: `label_${JOB_VERSION}`,
+  DEPLOY_CLEANUP: `deploy_cleanup_${JOB_VERSION}`,
 } as const;
 
 export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');
