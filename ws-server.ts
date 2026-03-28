@@ -349,7 +349,12 @@ function closeSocket(ws: WebSocket, code: number, reason: string) {
   }
 
   const safeReason = Buffer.byteLength(reason, 'utf8') > 123 ? 'Connection error' : reason;
-  ws.close(code, safeReason);
+  if (isSendableCloseCode(code)) {
+    ws.close(code, safeReason);
+    return;
+  }
+
+  ws.close(1000, safeReason);
 }
 
 function buildClaudeUserMessage(content: string): string {

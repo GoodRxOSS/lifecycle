@@ -25,7 +25,12 @@ import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFacto
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
-import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
+import {
+  AGENT_WORKSPACE_ROOT,
+  normalizeAgentWorkspaceRepo,
+  type AgentSessionSelectedService,
+  type AgentSessionWorkspaceRepo,
+} from 'server/lib/agentSession/workspace';
 import { createAgentPrewarmJob, monitorAgentPrewarmJob } from 'server/lib/agentSession/prewarmJobFactory';
 import {
   resolveAgentSessionRuntimeConfig,
@@ -47,6 +52,9 @@ type ResolvedPrewarmService = {
   name: string;
   deployId: number;
   devConfig: DevConfig;
+  repo: string;
+  branch: string;
+  revision?: string | null;
 };
 
 type ResolvedBuildPrewarmPlan = {
@@ -58,6 +66,8 @@ type ResolvedBuildPrewarmPlan = {
   revision?: string;
   configuredServiceNames: string[];
   services: ResolvedPrewarmService[];
+  workspaceRepos: AgentSessionWorkspaceRepo[];
+  serviceRefs: AgentSessionSelectedService[];
 };
 
 export interface AgentPrewarmQueueJob {
@@ -240,6 +250,8 @@ export default class AgentPrewarmService extends BaseService {
       jobName,
       status: 'running',
       services: plan.configuredServiceNames,
+      workspaceRepos: plan.workspaceRepos,
+      serviceRefs: plan.serviceRefs,
       errorMessage: null,
     } as unknown as Partial<AgentPrewarm>);
 
@@ -272,6 +284,7 @@ export default class AgentPrewarmService extends BaseService {
         branch: plan.branch,
         revision: plan.revision,
         workspacePath: AGENT_WORKSPACE_ROOT,
+        workspaceRepos: plan.workspaceRepos,
         installCommand,
         forwardedAgentEnv: forwardedAgentEnv.env,
         forwardedAgentSecretRefs: forwardedAgentEnv.secretRefs,
@@ -373,17 +386,61 @@ export default class AgentPrewarmService extends BaseService {
       name: service.name,
       deployId: service.deployId,
       devConfig: service.devConfig,
+      repo: service.repo || repositoryFullName,
+      branch: service.branch || build.pullRequest?.branchName || null,
+      revision: service.revision || revision || null,
     }));
+
+    const workspaceRepoMap = new Map<string, AgentSessionWorkspaceRepo>();
+    for (const service of services) {
+      if (!service.repo || !service.branch) {
+        return null;
+      }
+
+      const existing = workspaceRepoMap.get(service.repo);
+      if (existing && (existing.branch !== service.branch || existing.revision !== (service.revision || null))) {
+        return null;
+      }
+
+      workspaceRepoMap.set(
+        service.repo,
+        normalizeAgentWorkspaceRepo(
+          {
+            repo: service.repo,
+            repoUrl: `https://github.com/${service.repo}.git`,
+            branch: service.branch,
+            revision: service.revision || null,
+          },
+          true
+        )
+      );
+    }
+
+    if (workspaceRepoMap.size !== 1) {
+      return null;
+    }
+
+    const [workspaceRepo] = [...workspaceRepoMap.values()];
 
     return {
       buildUuid,
       namespace,
-      repo: repositoryFullName,
-      repoUrl: `https://github.com/${repositoryFullName}.git`,
-      branch: build.pullRequest.branchName,
-      revision: revision || undefined,
+      repo: workspaceRepo.repo,
+      repoUrl: workspaceRepo.repoUrl,
+      branch: workspaceRepo.branch,
+      revision: workspaceRepo.revision || undefined,
       configuredServiceNames,
       services,
+      workspaceRepos: [workspaceRepo],
+      serviceRefs: services.map((service) => ({
+        name: service.name,
+        deployId: service.deployId,
+        repo: service.repo,
+        branch: service.branch,
+        revision: service.revision || null,
+        workspacePath: workspaceRepo.mountPath,
+        workDir: null,
+      })),
     };
   }
 

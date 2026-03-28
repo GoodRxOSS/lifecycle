@@ -16,7 +16,7 @@
 
 import Build from 'server/models/Build';
 import type { Deploy } from 'server/models';
-import { fetchLifecycleConfig, type LifecycleConfig } from 'server/models/yaml';
+import { fetchLifecycleConfig, getDeployingServicesByName, type LifecycleConfig } from 'server/models/yaml';
 import {
   getDeployType,
   hasLifecycleManagedDockerBuild,
@@ -31,47 +31,186 @@ export interface AgentSessionServiceCandidate {
   detail?: string;
   deployId: number;
   devConfig: DevConfig;
+  repo: string;
+  branch: string;
+  revision?: string | null;
   baseDeploy: Deploy;
+}
+
+export interface RequestedAgentSessionServiceRef {
+  name: string;
+  repo?: string | null;
+  branch?: string | null;
+}
+
+type AgentSessionCandidateBuildContext = {
+  pullRequest?: {
+    fullName?: string | null;
+    branchName?: string | null;
+  } | null;
+  deploys?: Deploy[] | null;
+};
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeRepoKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function buildLifecycleConfigCacheKey(repo: string, branch: string): string {
+  return `${normalizeRepoKey(repo)}::${branch.trim()}`;
+}
+
+async function fetchCachedLifecycleConfig(
+  repo: string,
+  branch: string,
+  cache: Map<string, Promise<LifecycleConfig | null>>
+): Promise<LifecycleConfig | null> {
+  const cacheKey = buildLifecycleConfigCacheKey(repo, branch);
+  let promise = cache.get(cacheKey);
+
+  if (!promise) {
+    promise = fetchLifecycleConfig(repo, branch).catch(() => null);
+    cache.set(cacheKey, promise);
+  }
+
+  return promise;
+}
+
+async function resolveCandidateForDeploy(
+  deploy: Deploy,
+  buildSource: { repo?: string; branch?: string },
+  lifecycleConfigCache: Map<string, Promise<LifecycleConfig | null>>
+): Promise<AgentSessionServiceCandidate | null> {
+  const serviceName =
+    normalizeOptionalString(deploy.deployable?.name) ||
+    normalizeOptionalString(deploy.service?.name) ||
+    normalizeOptionalString(deploy.uuid);
+  const repo = normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo;
+  const branch = normalizeOptionalString(deploy.branchName) || buildSource.branch;
+
+  if (!deploy.active || !deploy.id || !serviceName || !repo || !branch) {
+    return null;
+  }
+
+  const lifecycleConfig = await fetchCachedLifecycleConfig(repo, branch, lifecycleConfigCache);
+  if (!lifecycleConfig) {
+    return null;
+  }
+
+  const yamlService = getDeployingServicesByName(lifecycleConfig, serviceName);
+  if (!yamlService || !isSessionSelectableService(yamlService)) {
+    return null;
+  }
+
+  return {
+    name: yamlService.name,
+    type: getDeployType(yamlService),
+    detail: deploy.status,
+    deployId: deploy.id,
+    devConfig: yamlService.dev!,
+    repo,
+    branch,
+    revision: normalizeOptionalString(deploy.sha) || null,
+    baseDeploy: deploy,
+  };
 }
 
 export async function loadAgentSessionServiceCandidates(buildUuid: string): Promise<AgentSessionServiceCandidate[]> {
   const build = await Build.query()
     .findOne({ uuid: buildUuid })
-    .withGraphFetched('[pullRequest, deploys.[deployable]]');
+    .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
   if (!build?.pullRequest) {
     throw new Error('Build not found');
   }
 
-  const lifecycleConfig = await fetchLifecycleConfig(build.pullRequest.fullName, build.pullRequest.branchName);
-  if (!lifecycleConfig) {
-    throw new Error('Lifecycle config not found for build');
-  }
-
-  return resolveAgentSessionServiceCandidates(build.deploys || [], lifecycleConfig);
+  return resolveAgentSessionServiceCandidatesForBuild(build);
 }
 
 export function resolveRequestedAgentSessionServices(
   candidates: AgentSessionServiceCandidate[],
-  requestedServices: string[]
+  requestedServices: Array<string | RequestedAgentSessionServiceRef>
 ): AgentSessionServiceCandidate[] {
-  const candidatesByName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
   const missingServices: string[] = [];
+  const ambiguousServices: string[] = [];
 
-  const resolved = requestedServices.flatMap((serviceName) => {
-    const candidate = candidatesByName.get(serviceName);
-    if (!candidate) {
-      missingServices.push(serviceName);
+  const resolved = requestedServices.flatMap((requestedService) => {
+    const serviceName = typeof requestedService === 'string' ? requestedService : requestedService.name;
+    const requestedRepo =
+      typeof requestedService === 'string' ? undefined : normalizeOptionalString(requestedService.repo);
+    const requestedBranch =
+      typeof requestedService === 'string' ? undefined : normalizeOptionalString(requestedService.branch);
+    const matches = candidates.filter((candidate) => {
+      if (candidate.name !== serviceName) {
+        return false;
+      }
+
+      if (requestedRepo && normalizeRepoKey(candidate.repo) !== normalizeRepoKey(requestedRepo)) {
+        return false;
+      }
+
+      if (requestedBranch && candidate.branch !== requestedBranch) {
+        return false;
+      }
+
+      return true;
+    });
+
+    if (matches.length === 0) {
+      missingServices.push(
+        requestedRepo && requestedBranch ? `${serviceName} (${requestedRepo}:${requestedBranch})` : serviceName
+      );
       return [];
     }
 
-    return [candidate];
+    if (matches.length > 1) {
+      ambiguousServices.push(
+        requestedRepo
+          ? `${serviceName} (${requestedRepo}${requestedBranch ? `:${requestedBranch}` : ''})`
+          : `${serviceName} (${matches.map((match) => `${match.repo}:${match.branch}`).join(', ')})`
+      );
+      return [];
+    }
+
+    return [matches[0]];
   });
 
   if (missingServices.length > 0) {
     throw new Error(`Unknown services for build: ${missingServices.join(', ')}`);
   }
 
+  if (ambiguousServices.length > 0) {
+    throw new Error(
+      `Multiple services matched the request; specify repo to disambiguate: ${ambiguousServices.join(', ')}`
+    );
+  }
+
   return resolved;
+}
+
+export async function resolveAgentSessionServiceCandidatesForBuild(
+  build: AgentSessionCandidateBuildContext
+): Promise<AgentSessionServiceCandidate[]> {
+  const buildSource = {
+    repo: normalizeOptionalString(build.pullRequest?.fullName),
+    branch: normalizeOptionalString(build.pullRequest?.branchName),
+  };
+  const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
+  const candidates = await Promise.all(
+    (build.deploys || []).map((deploy) => resolveCandidateForDeploy(deploy, buildSource, lifecycleConfigCache))
+  );
+
+  return candidates
+    .filter((candidate): candidate is AgentSessionServiceCandidate => Boolean(candidate))
+    .sort((left, right) => {
+      if (left.name === right.name) {
+        return `${left.repo}:${left.branch}`.localeCompare(`${right.repo}:${right.branch}`);
+      }
+
+      return left.name.localeCompare(right.name);
+    });
 }
 
 export function resolveAgentSessionServiceCandidates(
@@ -101,6 +240,9 @@ export function resolveAgentSessionServiceCandidates(
         detail: baseDeploy.status,
         deployId: baseDeploy.id,
         devConfig: service.dev!,
+        repo: normalizeOptionalString(baseDeploy.repository?.fullName) || '',
+        branch: normalizeOptionalString(baseDeploy.branchName) || '',
+        revision: normalizeOptionalString(baseDeploy.sha) || null,
         baseDeploy,
       },
     ];

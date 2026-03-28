@@ -45,6 +45,8 @@ const randomSha = customAlphabet('1234567890abcdef', 6);
 export interface SandboxServiceCandidate {
   name: string;
   type: DeployTypes;
+  repo: string;
+  branch: string;
 }
 
 interface ResolvedSandboxService {
@@ -113,8 +115,17 @@ export default class AgentSandboxSessionService extends BaseService {
       return {
         status: 'needs_service_selection',
         services: candidates
-          .map((candidate) => ({ name: candidate.name, type: getDeployTypeFromBaseDeploy(candidate.baseDeploy) }))
-          .sort((a, b) => a.name.localeCompare(b.name)),
+          .map((candidate) => ({
+            name: candidate.name,
+            type: getDeployTypeFromBaseDeploy(candidate.baseDeploy),
+            repo: candidate.serviceRepo,
+            branch: candidate.serviceBranch,
+          }))
+          .sort((a, b) =>
+            a.name === b.name
+              ? `${a.repo}:${a.branch}`.localeCompare(`${b.repo}:${b.branch}`)
+              : a.name.localeCompare(b.name)
+          ),
       };
     }
 
@@ -169,6 +180,9 @@ export default class AgentSandboxSessionService extends BaseService {
             deployId: sandboxDeploy.id,
             devConfig: selectedService.devConfig,
             resourceName: sandboxDeploy.uuid || undefined,
+            repo: selectedService.serviceRepo,
+            branch: selectedService.baseDeploy.branchName || selectedService.serviceBranch,
+            revision: selectedService.baseDeploy.sha || undefined,
           },
         ],
         model: opts.model,
@@ -216,8 +230,14 @@ export default class AgentSandboxSessionService extends BaseService {
       .map((candidate) => ({
         name: candidate.name,
         type: getDeployTypeFromBaseDeploy(candidate.baseDeploy),
+        repo: candidate.serviceRepo,
+        branch: candidate.serviceBranch,
       }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) =>
+        a.name === b.name
+          ? `${a.repo}:${a.branch}`.localeCompare(`${b.repo}:${b.branch}`)
+          : a.name.localeCompare(b.name)
+      );
   }
 
   private async loadBaseBuildAndCandidates({

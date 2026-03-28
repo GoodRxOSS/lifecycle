@@ -20,7 +20,7 @@ import { generateInitScript, InitScriptOpts } from './configSeeder';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
-import { AGENT_WORKSPACE_SUBPATH } from './workspace';
+import { AGENT_WORKSPACE_SUBPATH, type AgentSessionWorkspaceRepo } from './workspace';
 import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
 
 const AGENT_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
@@ -33,10 +33,11 @@ export interface AgentPrewarmJobOpts {
   image: string;
   apiKeySecretName: string;
   hasGitHubToken?: boolean;
-  repoUrl: string;
-  branch: string;
+  repoUrl?: string;
+  branch?: string;
   revision?: string;
   workspacePath: string;
+  workspaceRepos?: AgentSessionWorkspaceRepo[];
   installCommand?: string;
   forwardedAgentEnv?: Record<string, string>;
   forwardedAgentSecretRefs?: SecretRefWithEnvKey[];
@@ -68,6 +69,7 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
     branch: opts.branch,
     revision: opts.revision,
     workspacePath: opts.workspacePath,
+    workspaceRepos: opts.workspaceRepos,
     installCommand: opts.installCommand,
     useGitHubToken: opts.hasGitHubToken,
   };

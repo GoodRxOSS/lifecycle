@@ -93,6 +93,10 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                             type: string
  *                           type:
  *                             type: string
+ *                           repo:
+ *                             type: string
+ *                           branch:
+ *                             type: string
  *                 error:
  *                   nullable: true
  *       '400':
