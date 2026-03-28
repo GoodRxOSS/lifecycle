@@ -21,6 +21,52 @@ import MessageFeedback from 'server/models/MessageFeedback';
 import ConversationFeedback from 'server/models/ConversationFeedback';
 import Conversation from 'server/models/Conversation';
 
+/**
+ * @openapi
+ * /api/v2/ai/admin/feedback/{id}/conversation:
+ *   get:
+ *     summary: Get AI feedback conversation replay
+ *     description: >
+ *       Returns the full persisted conversation for a message or conversation
+ *       feedback record so admins can replay the exchange that led to the rating.
+ *     tags:
+ *       - AI Feedback Admin
+ *     operationId: getAdminFeedbackConversation
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: >
+ *           Composite feedback identifier in the form `message-123` or
+ *           `conversation-456`.
+ *     responses:
+ *       '200':
+ *         description: Feedback conversation replay.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetAdminFeedbackConversationSuccessResponse'
+ *       '400':
+ *         description: Invalid feedback identifier.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Feedback record or conversation not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (req: NextRequest, { params }: { params: { id: string } }) => {
   const { id } = params;
 

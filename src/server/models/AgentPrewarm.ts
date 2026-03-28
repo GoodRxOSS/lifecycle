@@ -15,6 +15,7 @@
  */
 
 import Model from './_Model';
+import type { AgentSessionSelectedService, AgentSessionWorkspaceRepo } from 'server/lib/agentSession/workspace';
 
 export type AgentPrewarmStatus = 'queued' | 'running' | 'ready' | 'error';
 
@@ -29,6 +30,8 @@ export default class AgentPrewarm extends Model {
   jobName!: string;
   status!: AgentPrewarmStatus;
   services!: string[];
+  workspaceRepos!: AgentSessionWorkspaceRepo[];
+  serviceRefs!: AgentSessionSelectedService[];
   errorMessage!: string | null;
   completedAt!: string | null;
 
@@ -54,12 +57,14 @@ export default class AgentPrewarm extends Model {
       jobName: { type: 'string' },
       status: { type: 'string', enum: ['queued', 'running', 'ready', 'error'], default: 'queued' },
       services: { type: 'array', items: { type: 'string' }, default: [] },
+      workspaceRepos: { type: 'array', items: { type: 'object' }, default: [] },
+      serviceRefs: { type: 'array', items: { type: 'object' }, default: [] },
       errorMessage: { type: ['string', 'null'] },
       completedAt: { type: ['string', 'null'] },
     },
   };
 
   static get jsonAttributes() {
-    return ['services'];
+    return ['services', 'workspaceRepos', 'serviceRefs'];
   }
 }

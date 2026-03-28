@@ -20,6 +20,7 @@ mockRedisClient();
 
 const mockGetCompatibleReadyPrewarm = jest.fn();
 const mockGetReadyPrewarmByPvc = jest.fn();
+const mockExecInPod = jest.fn();
 
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/Build');
@@ -36,6 +37,14 @@ jest.mock('server/lib/agentSession/devModeManager');
 jest.mock('server/lib/agentSession/forwardedEnv');
 jest.mock('server/lib/kubernetes/networkPolicyFactory');
 jest.mock('server/services/userApiKey');
+jest.mock('server/services/agentSessionCandidates', () => {
+  const actual = jest.requireActual('server/services/agentSessionCandidates');
+  return {
+    __esModule: true,
+    ...actual,
+    loadAgentSessionServiceCandidates: jest.fn(),
+  };
+});
 jest.mock('server/services/agentPrewarm', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
@@ -57,10 +66,20 @@ jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
   return {
     ...actual,
+    Exec: jest.fn().mockImplementation(() => ({
+      exec: mockExecInPod,
+    })),
     KubeConfig: jest.fn().mockImplementation(() => ({
       loadFromDefault: jest.fn(),
       makeApiClient: jest.fn().mockReturnValue({
         createNamespacedNetworkPolicy: jest.fn().mockResolvedValue({}),
+        readNamespacedPod: jest.fn().mockResolvedValue({
+          body: {
+            spec: {
+              nodeName: 'agent-node-a',
+            },
+          },
+        }),
       }),
     })),
   };
@@ -132,6 +151,7 @@ import RedisClient from 'server/lib/redisClient';
 import { deployHelm } from 'server/lib/nativeHelm/helm';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
 import BuildServiceModule from 'server/services/build';
+import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionCandidates';
 
 const mockRedis = {
   setex: jest.fn().mockResolvedValue('OK'),
@@ -295,6 +315,25 @@ describe('AgentSessionService', () => {
     mockedBuildServiceModule.deleteBuild.mockResolvedValue(undefined);
     mockGetCompatibleReadyPrewarm.mockResolvedValue(null);
     mockGetReadyPrewarmByPvc.mockResolvedValue(null);
+    mockExecInPod.mockImplementation(
+      async (
+        _namespace: string,
+        _podName: string,
+        _containerName: string,
+        _command: string[],
+        _stdout: unknown,
+        _stderr: unknown,
+        _stdin: unknown,
+        _tty: boolean,
+        statusCallback?: (status: Record<string, unknown>) => void
+      ) => {
+        statusCallback?.({ status: 'Success' });
+        return {
+          on: jest.fn(),
+        };
+      }
+    );
+    (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([]);
     (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
       env: {},
       secretRefs: [],
@@ -768,6 +807,107 @@ describe('AgentSessionService', () => {
       );
     });
 
+    it('rewrites dev-mode workspace paths when selected services span multiple repositories', async () => {
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        repoUrl: 'https://github.com/org/ui.git',
+        branch: 'feature/ui',
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            repo: 'org/ui',
+            branch: 'feature/ui',
+            devConfig: {
+              image: 'node:20',
+              command: 'pnpm dev',
+              workDir: 'apps/web',
+              installCommand: 'pnpm install',
+            },
+          },
+          {
+            name: 'api',
+            deployId: 2,
+            resourceName: 'api-build-uuid',
+            repo: 'org/api',
+            branch: 'feature/api',
+            devConfig: {
+              image: 'node:20',
+              command: 'pnpm start',
+              workDir: 'services/api',
+              installCommand: 'pnpm install',
+            },
+          },
+        ],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(createAgentPod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repoUrl: 'https://github.com/org/ui.git',
+          branch: 'feature/ui',
+          workspaceRepos: [
+            expect.objectContaining({
+              repo: 'org/ui',
+              branch: 'feature/ui',
+              mountPath: '/workspace',
+              primary: true,
+            }),
+            expect.objectContaining({
+              repo: 'org/api',
+              branch: 'feature/api',
+              mountPath: '/workspace/repos/org/api',
+              primary: false,
+            }),
+          ],
+          installCommand: 'pnpm install\n\ncd "/workspace/repos/org/api"\npnpm install',
+        })
+      );
+      expect(mockEnableDevMode).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          devConfig: expect.objectContaining({
+            workDir: '/workspace/apps/web',
+          }),
+        })
+      );
+      expect(mockEnableDevMode).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          devConfig: expect.objectContaining({
+            workDir: '/workspace/repos/org/api/services/api',
+          }),
+        })
+      );
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceRepos: [
+            expect.objectContaining({ repo: 'org/ui', primary: true }),
+            expect.objectContaining({ repo: 'org/api', primary: false }),
+          ],
+          selectedServices: [
+            expect.objectContaining({
+              name: 'web',
+              repo: 'org/ui',
+              branch: 'feature/ui',
+              workspacePath: '/workspace',
+              workDir: '/workspace/apps/web',
+            }),
+            expect.objectContaining({
+              name: 'api',
+              repo: 'org/api',
+              branch: 'feature/api',
+              workspacePath: '/workspace/repos/org/api',
+              workDir: '/workspace/repos/org/api/services/api',
+            }),
+          ],
+        })
+      );
+      expect(mockGetCompatibleReadyPrewarm).not.toHaveBeenCalled();
+    });
+
     it('rolls back on pod creation failure', async () => {
       (createAgentPod as jest.Mock).mockRejectedValue(new Error('pod creation failed'));
 
@@ -888,6 +1028,199 @@ describe('AgentSessionService', () => {
       expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
+    });
+  });
+
+  describe('attachServices', () => {
+    it('connects a same-repo service to an active single-repo session', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+      ]);
+
+      await AgentSessionService.attachServices('sess-1', ['web']);
+
+      expect(loadAgentSessionServiceCandidates).toHaveBeenCalledWith('build-123');
+      expect(mockExecInPod).toHaveBeenCalledWith(
+        'test-ns',
+        'agent-aaaaaaaa',
+        'agent',
+        ['sh', '-lc', 'cd /workspace/apps/web && pnpm install'],
+        expect.anything(),
+        expect.anything(),
+        null,
+        false,
+        expect.any(Function)
+      );
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: 'test-ns',
+          deploymentName: 'web-build-uuid',
+          serviceName: 'web-build-uuid',
+          pvcName: 'agent-pvc-aaaaaaaa',
+          requiredNodeName: 'agent-node-a',
+          devConfig: expect.objectContaining({
+            workDir: '/workspace/apps/web',
+          }),
+        })
+      );
+      expect(mockDeployQuery.patch).toHaveBeenCalledWith({
+        devMode: true,
+        devModeSessionId: 321,
+      });
+      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedServices: [
+            expect.objectContaining({
+              name: 'web',
+              deployId: 11,
+              repo: 'example-org/example-repo',
+              branch: 'feature/current',
+              workspacePath: '/workspace',
+              workDir: '/workspace/apps/web',
+            }),
+          ],
+          devModeSnapshots: expect.objectContaining({
+            '11': expect.any(Object),
+          }),
+        })
+      );
+    });
+
+    it('rejects services outside the current repo checkout', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'api',
+          type: 'github',
+          deployId: 22,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+          },
+          repo: 'example-org/other-repo',
+          branch: 'feature/current',
+          revision: null,
+          baseDeploy: {
+            id: 22,
+            uuid: 'api-build-uuid',
+          },
+        },
+      ]);
+
+      await expect(AgentSessionService.attachServices('sess-1', ['api'])).rejects.toThrow(
+        'Only services from example-org/example-repo:feature/current can be connected after the session starts.'
+      );
+
+      expect(mockEnableDevMode).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patch).not.toHaveBeenCalled();
+    });
+
+    it('rejects services that require forwarding env vars into the already-running agent', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'worker',
+          type: 'github',
+          deployId: 33,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            forwardEnvVarsToAgent: ['PRIVATE_TOKEN'],
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: null,
+          baseDeploy: {
+            id: 33,
+            uuid: 'worker-build-uuid',
+          },
+        },
+      ]);
+
+      await expect(AgentSessionService.attachServices('sess-1', ['worker'])).rejects.toThrow(
+        'Services that forward env vars to the agent must be selected when the session starts: worker'
+      );
+
+      expect(mockEnableDevMode).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patch).not.toHaveBeenCalled();
     });
   });
 
