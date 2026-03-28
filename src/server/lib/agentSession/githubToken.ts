@@ -18,7 +18,7 @@ import type { NextRequest } from 'next/server';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 
-const logger = getLogger();
+const logger = () => getLogger();
 
 function getBearerToken(req: NextRequest): string | null {
   const authHeader = req.headers.get('authorization') || req.headers.get('Authorization');
@@ -55,9 +55,7 @@ function parseBrokerTokenResponse(body: string): string | null {
 export async function fetchGitHubBrokerToken(keycloakAccessToken: string): Promise<string | null> {
   const issuer = process.env.KEYCLOAK_ISSUER_INTERNAL?.trim() || process.env.KEYCLOAK_ISSUER?.trim();
   if (!issuer) {
-    logger.warn(
-      'GitHub broker token lookup skipped because neither KEYCLOAK_ISSUER_INTERNAL nor KEYCLOAK_ISSUER is configured'
-    );
+    logger().warn('GitHub: broker token skipped reason=issuer_missing');
     return null;
   }
 
@@ -69,11 +67,11 @@ export async function fetchGitHubBrokerToken(keycloakAccessToken: string): Promi
   });
 
   if (!response.ok) {
-    logger.warn(
+    logger().warn(
       {
         status: response.status,
       },
-      'GitHub broker token lookup failed'
+      `GitHub: broker token failed status=${response.status}`
     );
     return null;
   }
@@ -86,7 +84,7 @@ export async function resolveRequestGitHubToken(req: NextRequest): Promise<strin
     try {
       return await GlobalConfigService.getInstance().getGithubClientToken();
     } catch (error) {
-      logger.warn({ error }, 'GitHub app token lookup failed while auth is disabled');
+      logger().warn({ error }, 'GitHub: app token lookup failed auth=disabled');
       return null;
     }
   }
@@ -99,7 +97,7 @@ export async function resolveRequestGitHubToken(req: NextRequest): Promise<strin
   try {
     return await fetchGitHubBrokerToken(keycloakAccessToken);
   } catch (error) {
-    logger.warn({ error }, 'GitHub broker token lookup threw unexpectedly');
+    logger().warn({ error }, 'GitHub: broker token failed reason=unexpected_error');
     return null;
   }
 }

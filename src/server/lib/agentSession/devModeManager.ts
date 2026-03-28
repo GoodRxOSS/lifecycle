@@ -19,7 +19,7 @@ import { DevConfig } from 'server/models/yaml/YamlService';
 import { getLogger } from 'server/lib/logger';
 import { AGENT_WORKSPACE_ROOT, AGENT_WORKSPACE_SUBPATH } from './workspace';
 
-const logger = getLogger();
+const logger = () => getLogger();
 const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-deployment-snapshot';
 const DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-service-snapshot';
 const DEV_MODE_HPA_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-hpa-snapshot';
@@ -206,7 +206,7 @@ export class DevModeManager {
       throw error;
     }
 
-    logger.info(`Enabled dev mode: deployment=${resolvedDeploymentName} namespace=${opts.namespace}`);
+    logger().info(`DevMode: enabled deployment=${resolvedDeploymentName} namespace=${opts.namespace}`);
     return snapshot;
   }
 
@@ -236,10 +236,9 @@ export class DevModeManager {
           await this.cleanupServicePatch(namespace, service);
         }
       } catch (error) {
-        logger.warn(
-          `Failed to revert service ports during dev mode cleanup: service=${serviceName} namespace=${namespace} err=${
-            (error as Error).message
-          }`
+        logger().warn(
+          { error, serviceName, namespace },
+          `DevMode: service revert failed service=${serviceName} namespace=${namespace}`
         );
       }
     }
@@ -260,15 +259,14 @@ export class DevModeManager {
           );
         }
       } catch (error) {
-        logger.warn(
-          `Failed to restore HorizontalPodAutoscaler during dev mode cleanup: deployment=${resolvedDeploymentName} namespace=${namespace} err=${
-            (error as Error).message
-          }`
+        logger().warn(
+          { error, deploymentName: resolvedDeploymentName, namespace },
+          `DevMode: hpa restore failed deployment=${resolvedDeploymentName} namespace=${namespace}`
         );
       }
     }
 
-    logger.info(`Disabled dev mode patch: deployment=${resolvedDeploymentName} namespace=${namespace}`);
+    logger().info(`DevMode: disabled deployment=${resolvedDeploymentName} namespace=${namespace}`);
   }
 
   private async resolveDeployment(namespace: string, deploymentName: string): Promise<k8s.V1Deployment> {
@@ -456,7 +454,7 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
-    logger.info(`Pinned HorizontalPodAutoscaler to a single replica: hpa=${hpaName} namespace=${namespace}`);
+    logger().info(`DevMode: hpa pinned hpa=${hpaName} namespace=${namespace} replicas=1`);
   }
 
   private async patchService(opts: DevModeOptions, existing: k8s.V1Service): Promise<void> {
@@ -497,7 +495,7 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
-    logger.info(`Patched service targetPort: service=${serviceName} port=${devPort}`);
+    logger().info(`DevMode: service patched service=${serviceName} port=${devPort}`);
   }
 
   private async cleanupDeploymentPatch(
@@ -515,11 +513,11 @@ export class DevModeManager {
     if (!desiredTemplate) {
       const fallbackPatch = this.buildFallbackCleanupPatch(existing);
       if (fallbackPatch.length === 0) {
-        logger.warn(`Skipping dev mode cleanup; last-applied annotation missing deployment=${deploymentName}`);
+        logger().warn(`DevMode: cleanup skipped reason=last_applied_missing deployment=${deploymentName}`);
         return;
       }
 
-      logger.warn(`Using fallback dev mode cleanup; last-applied annotation missing deployment=${deploymentName}`);
+      logger().warn(`DevMode: cleanup fallback deployment=${deploymentName}`);
       await this.appsApi.patchNamespacedDeployment(
         deploymentName,
         namespace,
@@ -624,7 +622,7 @@ export class DevModeManager {
 
     const annotation = existing.metadata?.annotations?.['kubectl.kubernetes.io/last-applied-configuration'];
     if (!annotation) {
-      logger.warn(`Skipping service port revert; last-applied annotation missing service=${serviceName}`);
+      logger().warn(`DevMode: service revert skipped reason=last_applied_missing service=${serviceName}`);
       return;
     }
 
@@ -634,7 +632,7 @@ export class DevModeManager {
     try {
       originalSpec = JSON.parse(annotation);
     } catch {
-      logger.warn(`Failed to parse last-applied service annotation: service=${serviceName}`);
+      logger().warn(`DevMode: service annotation parse failed service=${serviceName}`);
       return;
     }
 
@@ -665,7 +663,7 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
-    logger.info(`Reverted service ports: service=${serviceName} namespace=${namespace}`);
+    logger().info(`DevMode: service reverted service=${serviceName} namespace=${namespace}`);
   }
 
   private getLastAppliedTemplate(existing: k8s.V1Deployment): AppliedDeploymentTemplate | null {
@@ -677,7 +675,7 @@ export class DevModeManager {
     try {
       return JSON.parse(annotation) as AppliedDeploymentTemplate;
     } catch (error) {
-      logger.warn({ error }, 'Failed to parse last-applied deployment annotation during dev mode cleanup');
+      logger().warn({ error }, 'DevMode: deployment annotation parse failed');
       return null;
     }
   }
@@ -726,7 +724,7 @@ export class DevModeManager {
     try {
       return JSON.parse(annotation) as T;
     } catch (error) {
-      logger.warn({ error }, 'Failed to parse dev mode snapshot annotation');
+      logger().warn({ error }, 'DevMode: snapshot annotation parse failed');
       return null;
     }
   }
@@ -872,7 +870,7 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
-    logger.info(`Restored service ports from snapshot: service=${serviceName} namespace=${namespace}`);
+    logger().info(`DevMode: service restored service=${serviceName} namespace=${namespace}`);
   }
 
   private async restoreHorizontalPodAutoscalerFromSnapshot(
@@ -899,7 +897,7 @@ export class DevModeManager {
       undefined,
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
-    logger.info(`Restored HorizontalPodAutoscaler from snapshot: hpa=${hpaName} namespace=${namespace}`);
+    logger().info(`DevMode: hpa restored hpa=${hpaName} namespace=${namespace}`);
   }
 
   private appendValuePatch(

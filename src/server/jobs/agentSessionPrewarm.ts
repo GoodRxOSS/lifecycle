@@ -18,12 +18,12 @@ import { Job } from 'bullmq';
 import { getLogger } from 'server/lib/logger';
 import AgentPrewarmService, { AgentPrewarmQueueJob } from 'server/services/agentPrewarm';
 
-const logger = getLogger();
+const logger = () => getLogger();
 
 export async function processAgentSessionPrewarm(job: Job<AgentPrewarmQueueJob>): Promise<void> {
   const { buildUuid } = job.data;
   await new AgentPrewarmService().prepareBuildPrewarm(buildUuid).catch((error) => {
-    logger.error({ error, buildUuid }, 'Agent prewarm job failed');
+    logger().error({ error, buildUuid }, `Prewarm: job failed buildUuid=${buildUuid}`);
     throw error;
   });
 }

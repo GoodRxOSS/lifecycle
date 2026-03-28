@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+jest.mock('server/models/AgentSession');
 jest.mock('server/models/Build');
 jest.mock('server/models/Deploy');
 jest.mock('server/models/yaml', () => ({
@@ -21,6 +22,7 @@ jest.mock('server/models/yaml', () => ({
   getDeployingServicesByName: jest.fn(),
 }));
 
+import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
@@ -33,6 +35,9 @@ import {
 describe('agent session system prompt', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
+      findById: jest.fn().mockResolvedValue(null),
+    });
   });
 
   it('builds a compact dynamic session context prompt', () => {
@@ -115,6 +120,8 @@ describe('agent session system prompt', () => {
         {
           name: 'next-web',
           publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
+          repo: 'example-org/example-repo',
+          branch: 'feature/sample',
           workDir: '/workspace/apps/next-web',
         },
       ],

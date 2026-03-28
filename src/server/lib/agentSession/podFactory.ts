@@ -21,7 +21,14 @@ import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
-import { AGENT_WORKSPACE_SUBPATH } from './workspace';
+import {
+  AGENT_EDITOR_WORKSPACE_FILE,
+  AGENT_WORKSPACE_SUBPATH,
+  buildAgentEditorWorkspaceContents,
+  normalizeAgentWorkspaceRepo,
+  repoNameFromRepoUrl,
+  type AgentSessionWorkspaceRepo,
+} from './workspace';
 
 export const AGENT_EDITOR_PORT = parseInt(process.env.AGENT_EDITOR_PORT || '13337', 10);
 const AGENT_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
@@ -114,10 +121,11 @@ export interface AgentPodOpts {
   apiKeySecretName: string;
   hasGitHubToken?: boolean;
   model: string;
-  repoUrl: string;
-  branch: string;
+  repoUrl?: string;
+  branch?: string;
   revision?: string;
   workspacePath: string;
+  workspaceRepos?: AgentSessionWorkspaceRepo[];
   installCommand?: string;
   claudeMdContent?: string;
   claudePermissions?: {
@@ -231,6 +239,49 @@ function buildWorkspaceVolumeMount(workspacePath: string): k8s.V1VolumeMount {
   };
 }
 
+function escapeSingleQuotedShell(value: string): string {
+  return value.replace(/'/g, `'"'"'`);
+}
+
+function resolveEditorWorkspaceRepos(opts: AgentPodOpts): AgentSessionWorkspaceRepo[] {
+  if (opts.workspaceRepos?.length) {
+    return opts.workspaceRepos;
+  }
+
+  const repo = repoNameFromRepoUrl(opts.repoUrl);
+  if (!repo || !opts.branch) {
+    return [];
+  }
+
+  return [
+    {
+      ...normalizeAgentWorkspaceRepo(
+        {
+          repo,
+          repoUrl: opts.repoUrl!,
+          branch: opts.branch,
+          revision: opts.revision || null,
+        },
+        true
+      ),
+      mountPath: opts.workspacePath,
+    },
+  ];
+}
+
+function generateEditorWorkspaceInitScript(workspaceRepos: AgentSessionWorkspaceRepo[]): string {
+  const workspaceJson = buildAgentEditorWorkspaceContents(workspaceRepos);
+
+  return [
+    '#!/bin/sh',
+    'set -e',
+    `cat > '${escapeSingleQuotedShell(AGENT_EDITOR_WORKSPACE_FILE)}' << 'WORKSPACE_EOF'`,
+    workspaceJson,
+    'WORKSPACE_EOF',
+    '',
+  ].join('\n');
+}
+
 export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   const {
     podName,
@@ -260,6 +311,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     branch,
     revision,
     workspacePath,
+    workspaceRepos: opts.workspaceRepos,
     installCommand,
     claudeMdContent,
     claudePermissions,
@@ -277,6 +329,8 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   const userEnv = buildUserIdentityEnv(userIdentity);
   const githubTokenEnv = buildGitHubTokenEnv(apiKeySecretName, hasGitHubToken);
   const workspaceVolumeMount = buildWorkspaceVolumeMount(workspacePath);
+  const editorWorkspaceRepos = resolveEditorWorkspaceRepos(opts);
+  const editorWorkspaceInitScript = generateEditorWorkspaceInitScript(editorWorkspaceRepos);
   const forwardedAgentEnv = opts.forwardedAgentEnv || {};
   const forwardedAgentSecretEnv = buildPodEnvWithSecrets(
     forwardedAgentEnv,
@@ -295,6 +349,93 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
       drop: ['ALL'],
     },
   };
+
+  const initContainers: k8s.V1Container[] = [];
+
+  if (!skipWorkspaceBootstrap) {
+    initContainers.push(
+      {
+        name: 'prepare-workspace',
+        image,
+        imagePullPolicy: 'IfNotPresent',
+        command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
+        resources,
+        securityContext: {
+          ...securityContext,
+          readOnlyRootFilesystem: false,
+        },
+        volumeMounts: [
+          {
+            name: 'workspace',
+            mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
+          },
+          {
+            name: 'tmp',
+            mountPath: '/tmp',
+          },
+        ],
+        env: [
+          { name: 'TMPDIR', value: '/tmp' },
+          { name: 'TMP', value: '/tmp' },
+          { name: 'TEMP', value: '/tmp' },
+        ],
+      },
+      {
+        name: 'init-workspace',
+        image,
+        imagePullPolicy: 'IfNotPresent',
+        command: ['sh', '-c', initScript],
+        resources,
+        securityContext: {
+          ...securityContext,
+          readOnlyRootFilesystem: false,
+        },
+        volumeMounts: [
+          workspaceVolumeMount,
+          {
+            name: 'claude-config',
+            mountPath: '/home/claude/.claude',
+          },
+          {
+            name: 'tmp',
+            mountPath: '/tmp',
+          },
+        ],
+        env: [
+          { name: 'HOME', value: '/home/claude/.claude' },
+          { name: 'TMPDIR', value: '/tmp' },
+          { name: 'TMP', value: '/tmp' },
+          { name: 'TEMP', value: '/tmp' },
+          ...forwardedAgentSecretEnv,
+          ...githubTokenEnv,
+          ...userEnv,
+        ],
+      }
+    );
+  }
+
+  initContainers.push({
+    name: 'prepare-editor-workspace',
+    image,
+    imagePullPolicy: 'IfNotPresent',
+    command: ['sh', '-c', editorWorkspaceInitScript],
+    resources,
+    securityContext: {
+      ...securityContext,
+      readOnlyRootFilesystem: false,
+    },
+    volumeMounts: [
+      {
+        name: 'tmp',
+        mountPath: '/tmp',
+      },
+    ],
+    env: [
+      { name: 'TMPDIR', value: '/tmp' },
+      { name: 'TMP', value: '/tmp' },
+      { name: 'TEMP', value: '/tmp' },
+    ],
+  });
 
   const pod: k8s.V1Pod = {
     apiVersion: 'v1',
@@ -321,69 +462,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
           type: 'RuntimeDefault',
         },
       },
-      ...(skipWorkspaceBootstrap
-        ? {}
-        : {
-            initContainers: [
-              {
-                name: 'prepare-workspace',
-                image,
-                imagePullPolicy: 'IfNotPresent',
-                command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
-                resources,
-                securityContext: {
-                  ...securityContext,
-                  readOnlyRootFilesystem: false,
-                },
-                volumeMounts: [
-                  {
-                    name: 'workspace',
-                    mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
-                  },
-                  {
-                    name: 'tmp',
-                    mountPath: '/tmp',
-                  },
-                ],
-                env: [
-                  { name: 'TMPDIR', value: '/tmp' },
-                  { name: 'TMP', value: '/tmp' },
-                  { name: 'TEMP', value: '/tmp' },
-                ],
-              },
-              {
-                name: 'init-workspace',
-                image,
-                imagePullPolicy: 'IfNotPresent',
-                command: ['sh', '-c', initScript],
-                resources,
-                securityContext: {
-                  ...securityContext,
-                  readOnlyRootFilesystem: false,
-                },
-                volumeMounts: [
-                  workspaceVolumeMount,
-                  {
-                    name: 'claude-config',
-                    mountPath: '/home/claude/.claude',
-                  },
-                  {
-                    name: 'tmp',
-                    mountPath: '/tmp',
-                  },
-                ],
-                env: [
-                  { name: 'HOME', value: '/home/claude/.claude' },
-                  { name: 'TMPDIR', value: '/tmp' },
-                  { name: 'TMP', value: '/tmp' },
-                  { name: 'TEMP', value: '/tmp' },
-                  ...forwardedAgentSecretEnv,
-                  ...githubTokenEnv,
-                  ...userEnv,
-                ],
-              },
-            ],
-          }),
+      initContainers,
       containers: [
         {
           name: 'agent',
@@ -429,7 +508,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
           image: editorImage,
           imagePullPolicy: 'IfNotPresent',
           args: [
-            workspacePath,
+            AGENT_EDITOR_WORKSPACE_FILE,
             '--auth',
             'none',
             '--bind-addr',
@@ -524,7 +603,7 @@ async function getContainerLogs(
   } catch (error) {
     getLogger().debug(
       { error, namespace, podName, containerName },
-      `podFactory: unable to fetch logs for container name=${containerName} namespace=${namespace}`
+      `Session: logs fetch failed containerName=${containerName} namespace=${namespace} podName=${podName}`
     );
     return null;
   }
@@ -590,7 +669,7 @@ async function waitForAgentPodReady(
       if (containerLogs) {
         getLogger().error(
           { namespace, podName, containerName: failingContainer, logs: containerLogs },
-          `podFactory: startup logs for failing container name=${failingContainer} namespace=${namespace}`
+          `Session: startup logs captured containerName=${failingContainer} namespace=${namespace} podName=${podName}`
         );
       }
 
@@ -610,7 +689,7 @@ async function waitForAgentPodReady(
   if (timeoutLogs) {
     getLogger().error(
       { namespace, podName, containerName: 'init-workspace', logs: timeoutLogs },
-      `podFactory: init-workspace logs after startup timeout namespace=${namespace}`
+      `Session: timeout logs captured containerName=init-workspace namespace=${namespace} podName=${podName}`
     );
   }
 
@@ -629,7 +708,7 @@ export async function createAgentPod(opts: AgentPodOpts): Promise<k8s.V1Pod> {
 
   await coreApi.createNamespacedPod(opts.namespace, pod);
   const result = await waitForAgentPodReady(coreApi, opts.namespace, opts.podName, opts.readiness);
-  logger.info(`podFactory: created pod name=${opts.podName} namespace=${opts.namespace}`);
+  logger.info(`Session: pod ready podName=${opts.podName} namespace=${opts.namespace}`);
   return result;
 }
 
@@ -639,10 +718,10 @@ export async function deleteAgentPod(namespace: string, podName: string): Promis
 
   try {
     await coreApi.deleteNamespacedPod(podName, namespace);
-    logger.info(`podFactory: deleted pod name=${podName} namespace=${namespace}`);
+    logger.info(`Session: pod cleaned podName=${podName} namespace=${namespace}`);
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(`podFactory: pod not found (already deleted) name=${podName} namespace=${namespace}`);
+      logger.info(`Session: pod cleanup skipped reason=not_found podName=${podName} namespace=${namespace}`);
       return;
     }
     throw error;

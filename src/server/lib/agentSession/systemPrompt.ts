@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
@@ -22,6 +23,9 @@ import type { LifecycleConfig } from 'server/models/yaml';
 export interface AgentSessionPromptServiceContext {
   name: string;
   publicUrl?: string;
+  repo?: string;
+  branch?: string;
+  workspacePath?: string;
   workDir?: string;
 }
 
@@ -63,7 +67,10 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
     const services = [...context.services].sort((left, right) => left.name.localeCompare(right.name));
     for (const service of services) {
       const details = [
+        service.repo ? `repo=${service.repo}` : null,
+        service.branch ? `branch=${service.branch}` : null,
         service.publicUrl ? `publicUrl=${service.publicUrl}` : null,
+        service.workspacePath ? `workspacePath=${service.workspacePath}` : null,
         service.workDir ? `workDir=${service.workDir}` : null,
       ].filter((value): value is string => Boolean(value));
 
@@ -117,44 +124,69 @@ async function resolveBuildSource(buildUuid?: string | null): Promise<{ repo?: s
 export async function resolveAgentSessionPromptContext(
   lookup: SessionPromptLookupContext
 ): Promise<AgentSessionPromptContext> {
-  const deploys = await Deploy.query()
-    .where({ devModeSessionId: lookup.sessionDbId })
-    .withGraphFetched('[deployable, repository, service]');
-  const buildSource = await resolveBuildSource(lookup.buildUuid);
+  const [session, deploys, buildSource] = await Promise.all([
+    AgentSession.query().findById(lookup.sessionDbId),
+    Deploy.query()
+      .where({ devModeSessionId: lookup.sessionDbId })
+      .withGraphFetched('[deployable, repository, service]'),
+    resolveBuildSource(lookup.buildUuid),
+  ]);
   const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
+  const deployById = new Map(deploys.filter((deploy) => deploy.id != null).map((deploy) => [deploy.id, deploy]));
 
-  const services = await Promise.all(
-    deploys.map(async (deploy): Promise<AgentSessionPromptServiceContext | null> => {
-      const serviceName =
-        normalizeOptionalString(deploy.deployable?.name) ||
-        normalizeOptionalString(deploy.service?.name) ||
-        normalizeOptionalString(deploy.uuid);
+  let services: AgentSessionPromptServiceContext[];
 
-      if (!serviceName) {
-        return null;
-      }
-
-      const repositoryName = normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo;
-      const branchName = normalizeOptionalString(deploy.branchName) || buildSource.branch;
-
-      let workDir: string | undefined;
-      if (repositoryName && branchName) {
-        const lifecycleConfig = await fetchCachedLifecycleConfig(repositoryName, branchName, lifecycleConfigCache);
-        const yamlService = lifecycleConfig ? getDeployingServicesByName(lifecycleConfig, serviceName) : undefined;
-        workDir = normalizeOptionalString(yamlService?.dev?.workDir);
-      }
+  if (session?.selectedServices?.length) {
+    services = session.selectedServices.map((service) => {
+      const deploy = deployById.get(service.deployId);
 
       return {
-        name: serviceName,
-        publicUrl: formatPublicUrl(deploy.publicUrl),
-        workDir,
+        name: service.name,
+        publicUrl: formatPublicUrl(deploy?.publicUrl),
+        repo: normalizeOptionalString(service.repo),
+        branch: normalizeOptionalString(service.branch),
+        workspacePath: normalizeOptionalString(service.workspacePath),
+        workDir: normalizeOptionalString(service.workDir) || normalizeOptionalString(service.workspacePath),
       };
-    })
-  );
+    });
+  } else {
+    services = (
+      await Promise.all(
+        deploys.map(async (deploy): Promise<AgentSessionPromptServiceContext | null> => {
+          const serviceName =
+            normalizeOptionalString(deploy.deployable?.name) ||
+            normalizeOptionalString(deploy.service?.name) ||
+            normalizeOptionalString(deploy.uuid);
+
+          if (!serviceName) {
+            return null;
+          }
+
+          const repositoryName = normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo;
+          const branchName = normalizeOptionalString(deploy.branchName) || buildSource.branch;
+
+          let workDir: string | undefined;
+          if (repositoryName && branchName) {
+            const lifecycleConfig = await fetchCachedLifecycleConfig(repositoryName, branchName, lifecycleConfigCache);
+            const yamlService = lifecycleConfig ? getDeployingServicesByName(lifecycleConfig, serviceName) : undefined;
+            workDir = normalizeOptionalString(yamlService?.dev?.workDir);
+          }
+
+          return {
+            name: serviceName,
+            publicUrl: formatPublicUrl(deploy.publicUrl),
+            repo: repositoryName,
+            branch: branchName,
+            workDir,
+          };
+        })
+      )
+    ).filter((service): service is AgentSessionPromptServiceContext => Boolean(service));
+  }
 
   return {
     namespace: lookup.namespace,
     buildUuid: lookup.buildUuid,
-    services: services.filter((service): service is AgentSessionPromptServiceContext => Boolean(service)),
+    services,
   };
 }
