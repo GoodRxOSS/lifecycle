@@ -17,6 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 
 import { getLogger } from 'server/lib/logger';
+import Build from 'server/models/Build';
 
 type ContainerState = 'Running' | 'Waiting' | 'Terminated' | 'Unknown';
 
@@ -38,6 +39,14 @@ export interface PodInfo {
   age: string;
   ready: string; // "X/Y"
   containers: ContainerInfo[];
+}
+
+async function resolveBuildNamespace(uuid: string): Promise<string> {
+  const build = await Build.query()
+    .findOne({ uuid })
+    .select('namespace')
+    .catch(() => null);
+  return build?.namespace || `env-${uuid}`;
 }
 
 function loadKubeConfig(): k8s.KubeConfig {
@@ -171,7 +180,7 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
   const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    const namespace = `env-${uuid}`;
+    const namespace = await resolveBuildNamespace(uuid);
     const fullDeploymentName = `${deploymentName}-${uuid}`;
 
     const workloadSelector = `app.kubernetes.io/instance=${fullDeploymentName}`;

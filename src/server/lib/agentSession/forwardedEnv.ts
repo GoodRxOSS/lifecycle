@@ -23,7 +23,7 @@ import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from 'server/lib/secretRe
 import { SecretProcessor } from 'server/services/secretProcessor';
 import GlobalConfigService from 'server/services/globalConfig';
 
-const logger = getLogger();
+const logger = () => getLogger();
 
 export interface ForwardedAgentEnvService {
   name: string;
@@ -191,7 +191,10 @@ export async function cleanupForwardedAgentEnvSecrets(
         continue;
       }
 
-      logger.warn({ error, namespace, secretName }, 'Agent forwarded env secret cleanup failed');
+      logger().warn(
+        { error, namespace, secretName },
+        `Secret: cleanup failed type=forwarded_agent_env name=${secretName} namespace=${namespace}`
+      );
     }
   }
 }

@@ -59,7 +59,7 @@ export async function createAgentApiKeySecret(
   };
 
   const { body: result } = await coreApi.createNamespacedSecret(namespace, secret);
-  logger.info(`apiKeySecretFactory: created Secret name=${secretName} namespace=${namespace}`);
+  logger.info(`AgentRuntime: credentials prepared kind=api_key_secret secretName=${secretName} namespace=${namespace}`);
   return result;
 }
 
@@ -69,10 +69,14 @@ export async function deleteAgentApiKeySecret(namespace: string, secretName: str
 
   try {
     await coreApi.deleteNamespacedSecret(secretName, namespace);
-    logger.info(`apiKeySecretFactory: deleted Secret name=${secretName} namespace=${namespace}`);
+    logger.info(
+      `AgentRuntime: credentials cleaned kind=api_key_secret secretName=${secretName} namespace=${namespace}`
+    );
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(`apiKeySecretFactory: Secret not found (already deleted) name=${secretName} namespace=${namespace}`);
+      logger.info(
+        `AgentRuntime: credentials cleanup skipped reason=not_found kind=api_key_secret secretName=${secretName} namespace=${namespace}`
+      );
       return;
     }
 
