@@ -66,6 +66,13 @@ import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionC
  *                             type: string
  *                           detail:
  *                             type: string
+ *                           repo:
+ *                             type: string
+ *                           branch:
+ *                             type: string
+ *                           revision:
+ *                             type: string
+ *                             nullable: true
  *                     activeSession:
  *                       type: object
  *                       nullable: true
@@ -114,8 +121,12 @@ const getHandler = async (req: NextRequest) => {
     return successResponse(
       {
         services: services
-          .map(({ name, type, detail }) => ({ name, type, detail }))
-          .sort((a, b) => a.name.localeCompare(b.name)),
+          .map(({ name, type, detail, repo, branch, revision }) => ({ name, type, detail, repo, branch, revision }))
+          .sort((a, b) =>
+            a.name === b.name
+              ? `${a.repo}:${a.branch}`.localeCompare(`${b.repo}:${b.branch}`)
+              : a.name.localeCompare(b.name)
+          ),
         activeSession,
       },
       { status: 200 },

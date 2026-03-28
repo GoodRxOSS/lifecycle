@@ -15,6 +15,7 @@
  */
 
 import * as k8s from '@kubernetes/client-node';
+import { AGENT_EDITOR_WORKSPACE_FILE } from '../workspace';
 
 const mockCreatePod = jest.fn();
 const mockReadPod = jest.fn();
@@ -130,11 +131,12 @@ describe('podFactory', () => {
   describe('buildAgentPodSpec', () => {
     it('creates a pod with init and main containers', () => {
       const pod = buildAgentPodSpec(baseOpts);
-      expect(pod.spec!.initContainers).toHaveLength(2);
+      expect(pod.spec!.initContainers).toHaveLength(3);
       expect(pod.spec!.containers).toHaveLength(2);
       expect(pod.spec!.initContainers!.map((container) => container.name)).toEqual([
         'prepare-workspace',
         'init-workspace',
+        'prepare-editor-workspace',
       ]);
       expect(pod.spec!.containers[0].name).toBe('agent');
       expect(pod.spec!.containers[1].name).toBe('editor');
@@ -530,7 +532,7 @@ describe('podFactory', () => {
           name: 'editor',
           image: 'codercom/code-server:4.98.2',
           args: [
-            '/workspace',
+            AGENT_EDITOR_WORKSPACE_FILE,
             '--auth',
             'none',
             '--bind-addr',
@@ -569,6 +571,50 @@ describe('podFactory', () => {
         mountPath: '/workspace',
         subPath: 'repo',
       });
+    });
+
+    it('writes a multi-root editor workspace file before code-server starts', () => {
+      const pod = buildAgentPodSpec({
+        ...baseOpts,
+        workspaceRepos: [
+          {
+            repo: 'org/repo',
+            repoUrl: 'https://github.com/org/repo.git',
+            branch: 'feature/test',
+            revision: null,
+            mountPath: '/workspace',
+            primary: true,
+          },
+          {
+            repo: 'org/api',
+            repoUrl: 'https://github.com/org/api.git',
+            branch: 'feature/api',
+            revision: null,
+            mountPath: '/workspace/repos/org/api',
+            primary: false,
+          },
+        ],
+      });
+
+      expect(getInitContainer(pod, 'prepare-editor-workspace')).toEqual(
+        expect.objectContaining({
+          command: ['sh', '-c', expect.stringContaining(`cat > '${AGENT_EDITOR_WORKSPACE_FILE}' << 'WORKSPACE_EOF'`)],
+          volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
+        })
+      );
+      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain('"name": "org/repo"');
+      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain(
+        '"path": "/workspace/repos/org/api"'
+      );
+    });
+
+    it('still prepares the editor workspace when workspace bootstrap is skipped', () => {
+      const pod = buildAgentPodSpec({
+        ...baseOpts,
+        skipWorkspaceBootstrap: true,
+      });
+
+      expect(pod.spec!.initContainers?.map((container) => container.name)).toEqual(['prepare-editor-workspace']);
     });
 
     it('does not set runtimeClassName when gVisor not requested', () => {

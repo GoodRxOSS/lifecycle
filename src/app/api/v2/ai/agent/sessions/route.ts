@@ -27,8 +27,9 @@ import {
 } from 'server/lib/agentSession/runtimeConfig';
 import AgentSessionService, { ActiveEnvironmentSessionError } from 'server/services/agentSession';
 import {
-  resolveAgentSessionServiceCandidates,
+  resolveAgentSessionServiceCandidatesForBuild,
   resolveRequestedAgentSessionServices,
+  type RequestedAgentSessionServiceRef,
 } from 'server/services/agentSessionCandidates';
 import Build from 'server/models/Build';
 import { fetchLifecycleConfig, type LifecycleConfig } from 'server/models/yaml';
@@ -40,6 +41,11 @@ interface ResolvedSessionService {
   deployId: number;
   devConfig: DevConfig;
   resourceName?: string;
+  repo?: string | null;
+  branch?: string | null;
+  revision?: string | null;
+  workspacePath?: string;
+  workDir?: string | null;
 }
 
 interface CreateSessionBody {
@@ -111,16 +117,28 @@ function isResolvedSessionService(value: unknown): value is ResolvedSessionServi
   );
 }
 
+function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    typeof (value as RequestedAgentSessionServiceRef).name === 'string' &&
+    ((value as RequestedAgentSessionServiceRef).repo == null ||
+      typeof (value as RequestedAgentSessionServiceRef).repo === 'string') &&
+    ((value as RequestedAgentSessionServiceRef).branch == null ||
+      typeof (value as RequestedAgentSessionServiceRef).branch === 'string')
+  );
+}
+
 async function resolveBuildContext(buildUuid: string) {
-  return Build.query().findOne({ uuid: buildUuid }).withGraphFetched('[pullRequest, deploys.[deployable]]');
+  return Build.query()
+    .findOne({ uuid: buildUuid })
+    .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
 }
 
 async function resolveRequestedServices(
   buildUuid: string | undefined,
   requestedServices: unknown[] | undefined,
-  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null,
-  lifecycleConfig: LifecycleConfig | null,
-  lifecycleConfigError?: unknown
+  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null
 ): Promise<ResolvedSessionService[]> {
   if (!Array.isArray(requestedServices) || requestedServices.length === 0) {
     return [];
@@ -138,25 +156,29 @@ async function resolveRequestedServices(
     throw new Error('Build not found');
   }
 
-  if (!lifecycleConfig) {
-    throw lifecycleConfigError instanceof Error
-      ? lifecycleConfigError
-      : new Error('Lifecycle config not found for build');
-  }
+  const requestedRefs = requestedServices.map((service) => {
+    if (typeof service === 'string') {
+      return service;
+    }
 
-  const requestedNames = requestedServices.filter((service): service is string => typeof service === 'string');
-  if (requestedNames.length !== requestedServices.length) {
-    throw new Error('services must be an array of service names');
-  }
+    if (isRequestedSessionServiceRef(service)) {
+      return service;
+    }
+
+    throw new Error('services must be an array of service names or repo-qualified service references');
+  });
 
   return resolveRequestedAgentSessionServices(
-    resolveAgentSessionServiceCandidates(buildContext.deploys || [], lifecycleConfig),
-    requestedNames
-  ).map(({ name, deployId, devConfig, baseDeploy }) => ({
+    await resolveAgentSessionServiceCandidatesForBuild(buildContext),
+    requestedRefs
+  ).map(({ name, deployId, devConfig, baseDeploy, repo, branch, revision }) => ({
     name,
     deployId,
     devConfig,
     resourceName: baseDeploy.uuid || undefined,
+    repo,
+    branch,
+    revision: revision || null,
   }));
 }
 
@@ -241,6 +263,56 @@ async function resolveRequestedServices(
  *                       branch:
  *                         type: string
  *                         nullable: true
+ *                       primaryRepo:
+ *                         type: string
+ *                         nullable: true
+ *                       primaryBranch:
+ *                         type: string
+ *                         nullable: true
+ *                       workspaceRepos:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           required: [repo, repoUrl, branch, mountPath]
+ *                           properties:
+ *                             repo:
+ *                               type: string
+ *                             repoUrl:
+ *                               type: string
+ *                             branch:
+ *                               type: string
+ *                             revision:
+ *                               type: string
+ *                               nullable: true
+ *                             mountPath:
+ *                               type: string
+ *                             primary:
+ *                               type: boolean
+ *                       selectedServices:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           required: [name, deployId, repo, branch, workspacePath]
+ *                           properties:
+ *                             name:
+ *                               type: string
+ *                             deployId:
+ *                               type: integer
+ *                             repo:
+ *                               type: string
+ *                             branch:
+ *                               type: string
+ *                             revision:
+ *                               type: string
+ *                               nullable: true
+ *                             resourceName:
+ *                               type: string
+ *                               nullable: true
+ *                             workspacePath:
+ *                               type: string
+ *                             workDir:
+ *                               type: string
+ *                               nullable: true
  *                       services:
  *                         type: array
  *                         items:
@@ -307,9 +379,19 @@ async function resolveRequestedServices(
  *                 type: string
  *               services:
  *                 type: array
- *                 description: Optional service names to enable dev mode for.
+ *                 description: Optional service names or repo-qualified service references to enable dev mode for.
  *                 items:
- *                   type: string
+ *                   oneOf:
+ *                     - type: string
+ *                     - type: object
+ *                       required: [name]
+ *                       properties:
+ *                         name:
+ *                           type: string
+ *                         repo:
+ *                           type: string
+ *                         branch:
+ *                           type: string
  *               model:
  *                 type: string
  *     responses:
@@ -377,6 +459,56 @@ async function resolveRequestedServices(
  *                     branch:
  *                       type: string
  *                       nullable: true
+ *                     primaryRepo:
+ *                       type: string
+ *                       nullable: true
+ *                     primaryBranch:
+ *                       type: string
+ *                       nullable: true
+ *                     workspaceRepos:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         required: [repo, repoUrl, branch, mountPath]
+ *                         properties:
+ *                           repo:
+ *                             type: string
+ *                           repoUrl:
+ *                             type: string
+ *                           branch:
+ *                             type: string
+ *                           revision:
+ *                             type: string
+ *                             nullable: true
+ *                           mountPath:
+ *                             type: string
+ *                           primary:
+ *                             type: boolean
+ *                     selectedServices:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         required: [name, deployId, repo, branch, workspacePath]
+ *                         properties:
+ *                           name:
+ *                             type: string
+ *                           deployId:
+ *                             type: integer
+ *                           repo:
+ *                             type: string
+ *                           branch:
+ *                             type: string
+ *                           revision:
+ *                             type: string
+ *                             nullable: true
+ *                           resourceName:
+ *                             type: string
+ *                             nullable: true
+ *                           workspacePath:
+ *                             type: string
+ *                           workDir:
+ *                             type: string
+ *                             nullable: true
  *                     services:
  *                       type: array
  *                       items:
@@ -471,7 +603,6 @@ const postHandler = async (req: NextRequest) => {
   let buildKind = BuildKind.ENVIRONMENT;
   let buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null = null;
   let lifecycleConfig: LifecycleConfig | null = null;
-  let lifecycleConfigError: unknown;
 
   if (buildUuid) {
     buildContext = await resolveBuildContext(buildUuid);
@@ -492,19 +623,13 @@ const postHandler = async (req: NextRequest) => {
       repoUrl,
       branch,
     });
-  } catch (error) {
-    lifecycleConfigError = error;
+  } catch {
+    lifecycleConfig = null;
   }
 
   let resolvedServices: ResolvedSessionService[];
   try {
-    resolvedServices = await resolveRequestedServices(
-      buildUuid,
-      services,
-      buildContext,
-      lifecycleConfig,
-      lifecycleConfigError
-    );
+    resolvedServices = await resolveRequestedServices(buildUuid, services, buildContext);
   } catch (err) {
     return errorResponse(err, { status: 400 }, req);
   }

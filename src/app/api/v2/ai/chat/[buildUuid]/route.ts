@@ -158,6 +158,9 @@ export const dynamic = 'force-dynamic';
  *                 description: >
  *                   Optional service-scoped fix target. When provided in fix mode,
  *                   mutating tool calls are constrained to this selected issue.
+ *                   The additional action hint fields are used by fix-target
+ *                   authorization to distinguish file edits from PR label
+ *                   updates and Kubernetes patch actions.
  *                 properties:
  *                   serviceName:
  *                     type: string
@@ -172,6 +175,16 @@ export const dynamic = 'force-dynamic';
  *                       properties:
  *                         path:
  *                           type: string
+ *                   autoFixAction:
+ *                     type: string
+ *                   actionType:
+ *                     type: string
+ *                   fixType:
+ *                     type: string
+ *                   tool:
+ *                     type: string
+ *                   toolName:
+ *                     type: string
  *     responses:
  *       '200':
  *         description: >

@@ -66,7 +66,7 @@ export async function createAgentPvc(
 
   const { body: result } = await coreApi.createNamespacedPersistentVolumeClaim(namespace, pvc);
   logger.info(
-    `pvcFactory: created PVC name=${pvcName} namespace=${namespace} size=${storageSize} accessMode=${accessMode}`
+    `AgentRuntime: workspace prepared pvcName=${pvcName} namespace=${namespace} size=${storageSize} accessMode=${accessMode}`
   );
   return result;
 }
@@ -77,10 +77,10 @@ export async function deleteAgentPvc(namespace: string, pvcName: string): Promis
 
   try {
     await coreApi.deleteNamespacedPersistentVolumeClaim(pvcName, namespace);
-    logger.info(`pvcFactory: deleted PVC name=${pvcName} namespace=${namespace}`);
+    logger.info(`AgentRuntime: workspace cleaned pvcName=${pvcName} namespace=${namespace}`);
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(`pvcFactory: PVC not found (already deleted) name=${pvcName} namespace=${namespace}`);
+      logger.info(`AgentRuntime: workspace cleanup skipped reason=not_found pvcName=${pvcName} namespace=${namespace}`);
       return;
     }
     throw error;

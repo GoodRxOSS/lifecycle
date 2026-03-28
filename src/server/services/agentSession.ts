@@ -16,6 +16,7 @@
 
 import 'server/lib/dependencies';
 import * as k8s from '@kubernetes/client-node';
+import { Writable } from 'stream';
 import { v4 as uuid } from 'uuid';
 import type Database from 'server/database';
 import AgentSession from 'server/models/AgentSession';
@@ -45,7 +46,17 @@ import {
   renderAgentSessionClaudeAttribution,
 } from 'server/lib/agentSession/runtimeConfig';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
-import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
+import {
+  AGENT_WORKSPACE_ROOT,
+  type AgentSessionSelectedService,
+  type AgentSessionWorkspaceRepo,
+} from 'server/lib/agentSession/workspace';
+import {
+  applyWorkspaceReposToServices,
+  buildCombinedInstallCommand,
+  resolveAgentSessionServicePlan,
+  workspaceRepoKey,
+} from 'server/lib/agentSession/servicePlan';
 import {
   buildAgentSessionDynamicSystemPrompt,
   combineAgentSessionAppendSystemPrompt,
@@ -62,8 +73,13 @@ import {
 } from 'server/lib/agentSession/startupFailureState';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import AgentPrewarmService from './agentPrewarm';
+import {
+  loadAgentSessionServiceCandidates,
+  resolveRequestedAgentSessionServices,
+  type RequestedAgentSessionServiceRef,
+} from './agentSessionCandidates';
 
-const logger = getLogger();
+const logger = () => getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
 const SESSION_REDIS_TTL = 7200;
 const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environment_build_unique';
@@ -76,6 +92,8 @@ type AgentSessionSummaryRecordBase = AgentSession & {
   baseBuildUuid: string | null;
   repo: string | null;
   branch: string | null;
+  primaryRepo: string | null;
+  primaryBranch: string | null;
   services: string[];
 };
 
@@ -145,6 +163,7 @@ async function attachStartupFailures<T extends { uuid: string; status: AgentSess
 
 type SessionSnapshotMap = Record<string, DevModeResourceSnapshot>;
 type SessionService = NonNullable<CreateSessionOptions['services']>[number];
+type RequestedSessionService = string | RequestedAgentSessionServiceRef;
 
 function getSessionSnapshot(
   snapshots: SessionSnapshotMap | null | undefined,
@@ -152,6 +171,133 @@ function getSessionSnapshot(
 ): DevModeResourceSnapshot | null {
   const snapshot = snapshots?.[String(deployId)];
   return snapshot ?? null;
+}
+
+function mergeSelectedServices(
+  existingServices: AgentSessionSelectedService[] | null | undefined,
+  nextServices: AgentSessionSelectedService[]
+): AgentSessionSelectedService[] {
+  const mergedServices = [...(existingServices || [])];
+  const seenDeployIds = new Set(mergedServices.map((service) => service.deployId));
+
+  for (const service of nextServices) {
+    if (seenDeployIds.has(service.deployId)) {
+      continue;
+    }
+
+    mergedServices.push(service);
+    seenDeployIds.add(service.deployId);
+  }
+
+  return mergedServices;
+}
+
+async function resolveAgentPodNodeName(namespace: string, podName: string): Promise<string | null> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+  const response = await coreApi.readNamespacedPod(podName, namespace);
+
+  return response.body.spec?.nodeName || null;
+}
+
+function getExecExitCode(status: any): number | null {
+  const causes = status?.details?.causes;
+  if (Array.isArray(causes)) {
+    const exitCodeCause = causes.find((cause) => cause?.reason === 'ExitCode');
+    const parsedExitCode = Number.parseInt(exitCodeCause?.message || '', 10);
+    if (Number.isFinite(parsedExitCode)) {
+      return parsedExitCode;
+    }
+  }
+
+  if (status?.status === 'Success') {
+    return 0;
+  }
+
+  return null;
+}
+
+async function runCommandInAgentPod(
+  namespace: string,
+  podName: string,
+  command: string,
+  container = 'agent'
+): Promise<void> {
+  if (!command.trim()) {
+    return;
+  }
+
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const exec = new k8s.Exec(kc);
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+
+  const stdout = new Writable({
+    write(chunk, _encoding, callback) {
+      stdoutChunks.push(chunk.toString());
+      callback();
+    },
+  });
+  const stderr = new Writable({
+    write(chunk, _encoding, callback) {
+      stderrChunks.push(chunk.toString());
+      callback();
+    },
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const settleResolve = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve();
+    };
+
+    const settleReject = (error: Error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      reject(error);
+    };
+
+    void exec
+      .exec(namespace, podName, container, ['sh', '-lc', command], stdout, stderr, null, false, (status: any) => {
+        const exitCode = getExecExitCode(status);
+        if (exitCode === 0) {
+          settleResolve();
+          return;
+        }
+
+        const stderrOutput = stderrChunks.join('').trim();
+        const stdoutOutput = stdoutChunks.join('').trim();
+        const detail =
+          stderrOutput || stdoutOutput || status?.message || `Command exited with code ${exitCode ?? 'unknown'}`;
+        settleReject(new Error(detail));
+      })
+      .then((ws) => {
+        if (ws && typeof ws.on === 'function') {
+          ws.on('error', (error: Error) => {
+            settleReject(error);
+          });
+          ws.on('close', () => {
+            if (!settled) {
+              settleResolve();
+            }
+          });
+        }
+      })
+      .catch((error) => {
+        settleReject(error as Error);
+      });
+  });
 }
 
 async function resolveTemplatedDevConfigEnvs(
@@ -257,22 +403,23 @@ function triggerDevModeDeployRestore(
   // Restore runs in the background after agent teardown so ending a session
   // does not block on workload rollout/readiness.
   void (async () => {
+    const deployIds = deploys.map(
+      (deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id
+    );
+    const deployList = deployIds.join(',');
+
     try {
       await restoreDeploys(deploys);
       await cleanupDevModePatches(namespace, snapshots, deploys);
-      logger.info(
-        `Background dev mode restore finished: namespace=${namespace} deploys=${deploys
-          .map((deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id)
-          .join(',')}`
-      );
+      logger().info(`DevMode: restore complete mode=background namespace=${namespace} deploys=${deployList}`);
     } catch (error) {
-      logger.error(
+      logger().error(
         {
           error,
           namespace,
-          deploys: deploys.map((deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id),
+          deploys: deployIds,
         },
-        'Background dev mode restore failed after session end'
+        `DevMode: restore failed mode=background namespace=${namespace} deploys=${deployList}`
       );
     }
   })();
@@ -324,11 +471,22 @@ export interface CreateSessionOptions {
   githubToken?: string | null;
   buildUuid?: string;
   buildKind?: BuildKind;
-  services?: Array<{ name: string; deployId: number; devConfig: DevConfig; resourceName?: string }>;
+  services?: Array<{
+    name: string;
+    deployId: number;
+    devConfig: DevConfig;
+    resourceName?: string;
+    repo?: string | null;
+    branch?: string | null;
+    revision?: string | null;
+    workspacePath?: string;
+    workDir?: string | null;
+  }>;
   model?: string;
-  repoUrl: string;
-  branch: string;
+  repoUrl?: string;
+  branch?: string;
   revision?: string;
+  workspaceRepos?: AgentSessionWorkspaceRepo[];
   prNumber?: number;
   namespace: string;
   agentImage: string;
@@ -428,26 +586,45 @@ export default class AgentSessionService {
 
     const enrichedSessions = sessions.map((session) => {
       const build = session.buildUuid ? buildByUuid.get(session.buildUuid) : null;
+      const primaryWorkspaceRepo =
+        session.workspaceRepos?.find((repo) => repo.primary) || session.workspaceRepos?.[0] || null;
+      const primarySelectedService = session.selectedServices?.[0] || null;
       const sessionDeploys =
         liveDeploysBySessionId.get(session.id) ||
         Object.keys(session.devModeSnapshots || {})
           .map((deployId) => snapshotDeployById.get(Number(deployId)))
           .filter((deploy): deploy is Deploy => Boolean(deploy));
-      const primaryDeploy = sessionDeploys[0];
-      const services = [
-        ...new Set(
-          sessionDeploys
-            .map((deploy) => deploy.deployable?.name || deploy.service?.name || null)
-            .filter((name): name is string => Boolean(name))
-        ),
-      ];
+      const primaryDeploy = sessionDeploys[0] || null;
+      const persistedServices = (session.selectedServices || []).map((service) => service.name).filter(Boolean);
+      const liveServices = sessionDeploys
+        .map((deploy) => deploy.deployable?.name || deploy.service?.name || null)
+        .filter((name): name is string => Boolean(name));
+      const services = [...new Set([...(persistedServices || []), ...liveServices])];
 
       return {
         ...session,
         id: session.uuid,
         uuid: session.uuid,
         baseBuildUuid: build?.baseBuild?.uuid || null,
+        primaryRepo:
+          primaryWorkspaceRepo?.repo ||
+          primarySelectedService?.repo ||
+          primaryDeploy?.repository?.fullName ||
+          build?.pullRequest?.fullName ||
+          build?.pullRequest?.repository?.fullName ||
+          build?.baseBuild?.pullRequest?.fullName ||
+          build?.baseBuild?.pullRequest?.repository?.fullName ||
+          null,
+        primaryBranch:
+          primaryWorkspaceRepo?.branch ||
+          primarySelectedService?.branch ||
+          primaryDeploy?.branchName ||
+          build?.pullRequest?.branchName ||
+          build?.baseBuild?.pullRequest?.branchName ||
+          null,
         repo:
+          primaryWorkspaceRepo?.repo ||
+          primarySelectedService?.repo ||
           primaryDeploy?.repository?.fullName ||
           build?.pullRequest?.fullName ||
           build?.pullRequest?.repository?.fullName ||
@@ -455,6 +632,8 @@ export default class AgentSessionService {
           build?.baseBuild?.pullRequest?.repository?.fullName ||
           null,
         branch:
+          primaryWorkspaceRepo?.branch ||
+          primarySelectedService?.branch ||
           primaryDeploy?.branchName ||
           build?.pullRequest?.branchName ||
           build?.baseBuild?.pullRequest?.branchName ||
@@ -516,9 +695,30 @@ export default class AgentSessionService {
       githubAppName
     );
     const claudePrAttribution = renderAgentSessionClaudeAttribution(claudeConfig.attribution.prTemplate, githubAppName);
-    const resolvedServices = await resolveTemplatedDevConfigEnvs(opts.buildUuid, opts.namespace, opts.services);
+    const templatedServices = await resolveTemplatedDevConfigEnvs(opts.buildUuid, opts.namespace, opts.services);
+    const {
+      workspaceRepos,
+      services: resolvedServices,
+      selectedServices,
+    } = resolveAgentSessionServicePlan(
+      {
+        repoUrl: opts.repoUrl,
+        branch: opts.branch,
+        revision: opts.revision,
+        workspaceRepos: opts.workspaceRepos,
+      },
+      templatedServices
+    );
+    const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
     const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
-    const compatiblePrewarm = await resolveCompatiblePrewarm(opts.buildUuid, resolvedServiceNames, opts.revision);
+    const compatiblePrewarm =
+      workspaceRepos.length === 1
+        ? await resolveCompatiblePrewarm(
+            opts.buildUuid,
+            resolvedServiceNames,
+            primaryWorkspaceRepo?.revision || opts.revision
+          )
+        : null;
     const pvcName = compatiblePrewarm?.pvcName || `agent-pvc-${sessionUuid.slice(0, 8)}`;
     const forwardedAgentEnv = await resolveForwardedAgentEnv(
       resolvedServices,
@@ -530,6 +730,12 @@ export default class AgentSessionService {
       Object.entries(forwardedAgentEnv.env).filter(
         ([envKey]) => !forwardedAgentEnv.secretRefs.some((secretRef) => secretRef.envKey === envKey)
       )
+    );
+
+    logger().info(
+      `Session: starting sessionId=${sessionUuid} buildKind=${buildKind} namespace=${opts.namespace} buildUuid=${
+        opts.buildUuid || 'none'
+      } services=${resolvedServiceNames.join(',') || 'none'} prewarm=${compatiblePrewarm ? 'reused' : 'new'}`
     );
 
     try {
@@ -546,6 +752,8 @@ export default class AgentSessionService {
         status: 'starting',
         devModeSnapshots,
         forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
+        workspaceRepos,
+        selectedServices,
       } as unknown as Partial<AgentSession>);
       sessionPersisted = true;
 
@@ -563,10 +771,7 @@ export default class AgentSessionService {
       ]);
 
       const useGvisor = await isGvisorAvailable();
-      const installCommands = (resolvedServices || [])
-        .map((service) => service.devConfig.installCommand)
-        .filter((command): command is string => Boolean(command));
-      const combinedInstallCommand = installCommands.length > 0 ? installCommands.join('\n\n') : undefined;
+      const combinedInstallCommand = buildCombinedInstallCommand(resolvedServices);
 
       failureStage = 'connect_runtime';
       const agentPod = await createAgentPod({
@@ -578,10 +783,11 @@ export default class AgentSessionService {
         apiKeySecretName,
         hasGitHubToken: Boolean(opts.githubToken),
         model,
-        repoUrl: opts.repoUrl,
-        branch: opts.branch,
-        revision: opts.revision,
+        repoUrl: primaryWorkspaceRepo?.repoUrl,
+        branch: primaryWorkspaceRepo?.branch,
+        revision: primaryWorkspaceRepo?.revision || undefined,
         workspacePath: AGENT_WORKSPACE_ROOT,
+        workspaceRepos,
         installCommand: combinedInstallCommand,
         claudePermissions: claudeConfig.permissions,
         claudeCommitAttribution,
@@ -656,6 +862,12 @@ export default class AgentSessionService {
 
       await clearAgentSessionStartupFailure(redis, sessionUuid).catch(() => {});
 
+      logger().info(
+        `Session: ready sessionId=${sessionUuid} namespace=${opts.namespace} podName=${podName} services=${
+          resolvedServiceNames.join(',') || 'none'
+        } prewarm=${compatiblePrewarm ? 'reused' : 'new'}`
+      );
+
       return session!;
     } catch (err) {
       const startupFailure = buildAgentSessionStartupFailure({
@@ -675,7 +887,10 @@ export default class AgentSessionService {
         }
       }
 
-      logger.error(`Session creation failed, rolling back: sessionId=${sessionUuid} err=${(err as Error).message}`);
+      logger().error(
+        { error: err, sessionId: sessionUuid, failureStage },
+        `Session: startup failed sessionId=${sessionUuid} stage=${failureStage}`
+      );
 
       await setAgentSessionStartupFailure(redis, startupFailure).catch(() => {});
       const endedAt = new Date().toISOString();
@@ -704,6 +919,8 @@ export default class AgentSessionService {
             endedAt,
             devModeSnapshots: {},
             forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
+            workspaceRepos,
+            selectedServices,
           } as unknown as Partial<AgentSession>)
           .catch(() => {});
       }
@@ -757,6 +974,8 @@ export default class AgentSessionService {
     const apiKeySecretName = `agent-secret-${session.uuid.slice(0, 8)}`;
     const redis = RedisClient.getInstance().getRedis();
 
+    logger().info(`Session: ending sessionId=${sessionId} status=${session.status} namespace=${session.namespace}`);
+
     const build = session.buildUuid
       ? await Build.query()
           .findOne({ uuid: session.buildUuid })
@@ -785,14 +1004,14 @@ export default class AgentSessionService {
           ...extractContextForQueue(),
         });
       } catch (error) {
-        logger.warn(
+        logger().warn(
           { error, buildUuid: build.uuid, sessionId },
-          'Sandbox delete queue enqueue failed, falling back to synchronous cleanup'
+          `Sandbox: cleanup enqueue failed action=sync_fallback sessionId=${sessionId} buildUuid=${build.uuid}`
         );
         await buildService.deleteBuild(build);
       }
 
-      logger.info(`Sandbox session ended and cleanup queued: sessionId=${sessionId} buildUuid=${build.uuid}`);
+      logger().info(`Sandbox: ending sessionId=${sessionId} buildUuid=${build.uuid} cleanup=queued`);
       return;
     }
 
@@ -824,7 +1043,189 @@ export default class AgentSessionService {
 
     await redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`);
 
-    logger.info(`Session ended: sessionId=${sessionId}`);
+    logger().info(`Session: ended sessionId=${sessionId} namespace=${session.namespace}`);
+  }
+
+  static async attachServices(sessionId: string, requestedServices: RequestedSessionService[]): Promise<void> {
+    if (!Array.isArray(requestedServices) || requestedServices.length === 0) {
+      return;
+    }
+
+    const session = await AgentSession.query().findOne({ uuid: sessionId });
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    if (session.status !== 'active') {
+      throw new Error('Only active sessions can connect services');
+    }
+
+    if (session.buildKind !== BuildKind.ENVIRONMENT) {
+      throw new Error('Connecting services after startup is only supported for environment sessions');
+    }
+
+    if (!session.buildUuid) {
+      throw new Error('Session build context is missing');
+    }
+
+    const workspaceRepos = session.workspaceRepos || [];
+    if (workspaceRepos.length !== 1) {
+      throw new Error('Connecting services after startup is only supported for single-repo sessions');
+    }
+
+    const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+    if (!primaryWorkspaceRepo?.repo || !primaryWorkspaceRepo.branch) {
+      throw new Error('Session workspace repository metadata is missing');
+    }
+
+    const candidates = await loadAgentSessionServiceCandidates(session.buildUuid);
+    const resolvedCandidates = resolveRequestedAgentSessionServices(candidates, requestedServices);
+    const attachedDeployIds = new Set<number>([
+      ...(session.selectedServices || []).map((service) => service.deployId),
+      ...Object.keys(session.devModeSnapshots || {})
+        .map((deployId) => Number(deployId))
+        .filter((deployId) => Number.isInteger(deployId)),
+    ]);
+    const attachableCandidates = resolvedCandidates.filter((candidate) => !attachedDeployIds.has(candidate.deployId));
+
+    if (attachableCandidates.length === 0) {
+      return;
+    }
+
+    const incompatibleCandidates = attachableCandidates.filter(
+      (candidate) =>
+        workspaceRepoKey(candidate.repo) !== workspaceRepoKey(primaryWorkspaceRepo.repo) ||
+        candidate.branch !== primaryWorkspaceRepo.branch
+    );
+    if (incompatibleCandidates.length > 0) {
+      const supportedTarget = `${primaryWorkspaceRepo.repo}:${primaryWorkspaceRepo.branch}`;
+      const requestedTargets = incompatibleCandidates.map(
+        (candidate) => `${candidate.name} (${candidate.repo}:${candidate.branch})`
+      );
+      throw new Error(
+        `Only services from ${supportedTarget} can be connected after the session starts. Requested: ${requestedTargets.join(
+          ', '
+        )}`
+      );
+    }
+
+    const forwardedEnvServices = attachableCandidates
+      .filter((candidate) => (candidate.devConfig.forwardEnvVarsToAgent || []).length > 0)
+      .map((candidate) => candidate.name);
+    if (forwardedEnvServices.length > 0) {
+      throw new Error(
+        `Services that forward env vars to the agent must be selected when the session starts: ${forwardedEnvServices.join(
+          ', '
+        )}`
+      );
+    }
+
+    const candidateServices = attachableCandidates.map(
+      ({ name, deployId, devConfig, baseDeploy, repo, branch, revision }) => ({
+        name,
+        deployId,
+        devConfig,
+        resourceName: baseDeploy.uuid || undefined,
+        repo,
+        branch,
+        revision: revision || null,
+      })
+    );
+    const templatedServices = await resolveTemplatedDevConfigEnvs(
+      session.buildUuid || undefined,
+      session.namespace,
+      candidateServices
+    );
+    const { services: resolvedServices, selectedServices } = applyWorkspaceReposToServices(
+      templatedServices,
+      workspaceRepos
+    );
+    const installCommand = buildCombinedInstallCommand(resolvedServices);
+
+    logger().info(
+      `Session: services attaching sessionId=${sessionId} namespace=${session.namespace} services=${
+        (resolvedServices || []).map((service) => service.name).join(',') || 'none'
+      }`
+    );
+
+    if (installCommand) {
+      await runCommandInAgentPod(session.namespace, session.podName, installCommand);
+    }
+
+    const agentNodeName = await resolveAgentPodNodeName(session.namespace, session.podName);
+
+    if (!agentNodeName) {
+      throw new Error(`Agent pod ${session.podName} did not report a scheduled node`);
+    }
+
+    const devModeManager = new DevModeManager();
+    const mutatedDeploys: number[] = [];
+    const addedSnapshots: SessionSnapshotMap = {};
+
+    try {
+      for (const service of resolvedServices || []) {
+        const resourceName = service.resourceName || service.name;
+        const snapshot = await devModeManager.enableDevMode({
+          namespace: session.namespace,
+          deploymentName: resourceName,
+          serviceName: resourceName,
+          pvcName: session.pvcName,
+          devConfig: service.devConfig,
+          requiredNodeName: agentNodeName,
+        });
+
+        mutatedDeploys.push(service.deployId);
+        addedSnapshots[String(service.deployId)] = snapshot;
+
+        await Deploy.query().findById(service.deployId).patch({
+          devMode: true,
+          devModeSessionId: session.id,
+        });
+      }
+
+      await AgentSession.query()
+        .findById(session.id)
+        .patch({
+          selectedServices: mergeSelectedServices(session.selectedServices, selectedServices),
+          devModeSnapshots: {
+            ...(session.devModeSnapshots || {}),
+            ...addedSnapshots,
+          },
+        } as unknown as Partial<AgentSession>);
+
+      const serviceNames = resolvedServices?.map((service) => service.name) || [];
+
+      logger().info(
+        {
+          sessionId,
+          namespace: session.namespace,
+          services: serviceNames,
+        },
+        `Session: services attached sessionId=${sessionId} namespace=${session.namespace} services=${
+          serviceNames.join(',') || 'none'
+        }`
+      );
+    } catch (error) {
+      if (mutatedDeploys.length > 0) {
+        const deploysToRevert = await Deploy.query()
+          .whereIn('id', mutatedDeploys)
+          .withGraphFetched(DEV_MODE_REDEPLOY_GRAPH)
+          .catch(() => [] as Deploy[]);
+
+        for (const deployId of mutatedDeploys) {
+          await Deploy.query()
+            .findById(deployId)
+            .patch({ devMode: false, devModeSessionId: null })
+            .catch(() => {});
+        }
+
+        if (deploysToRevert.length > 0) {
+          await restoreDevModeDeploys(session.namespace, addedSnapshots, deploysToRevert).catch(() => {});
+        }
+      }
+
+      throw error;
+    }
   }
 
   static async getSession(sessionId: string) {
@@ -857,7 +1258,7 @@ export default class AgentSessionService {
 
       return combineAgentSessionAppendSystemPrompt(configuredPrompt, buildAgentSessionDynamicSystemPrompt(context));
     } catch (error) {
-      logger.warn({ err: error, sessionId }, 'Failed to resolve dynamic agent session prompt context');
+      logger().warn({ error, sessionId }, `Session: prompt context resolution failed sessionId=${sessionId}`);
       return configuredPrompt;
     }
   }
