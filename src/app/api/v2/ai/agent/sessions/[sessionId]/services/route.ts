@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,10 @@
 
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { successResponse, errorResponse } from 'server/lib/response';
-import { getRequestUserSub } from 'server/lib/get-user';
+import { errorResponse, successResponse } from 'server/lib/response';
+import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentSessionService from 'server/services/agentSession';
+import type { RequestedAgentSessionServiceRef } from 'server/services/agentSessionCandidates';
 
 function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
   const sessionId = session.uuid || String(session.id);
@@ -39,23 +40,57 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
   };
 }
 
+function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    typeof (value as RequestedAgentSessionServiceRef).name === 'string' &&
+    ((value as RequestedAgentSessionServiceRef).repo == null ||
+      typeof (value as RequestedAgentSessionServiceRef).repo === 'string') &&
+    ((value as RequestedAgentSessionServiceRef).branch == null ||
+      typeof (value as RequestedAgentSessionServiceRef).branch === 'string')
+  );
+}
+
 /**
  * @openapi
- * /api/v2/ai/agent/sessions/{sessionId}:
- *   get:
- *     summary: Get an agent session by id
+ * /api/v2/ai/agent/sessions/{sessionId}/services:
+ *   post:
+ *     summary: Connect services to an active agent session
  *     tags:
  *       - Agent Sessions
- *     operationId: getAgentSession
+ *     operationId: connectAgentSessionServices
  *     parameters:
  *       - in: path
  *         name: sessionId
  *         required: true
  *         schema:
  *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [services]
+ *             properties:
+ *               services:
+ *                 type: array
+ *                 items:
+ *                   oneOf:
+ *                     - type: string
+ *                     - type: object
+ *                       required: [name]
+ *                       properties:
+ *                         name:
+ *                           type: string
+ *                         repo:
+ *                           type: string
+ *                         branch:
+ *                           type: string
  *     responses:
  *       '200':
- *         description: Agent session
+ *         description: Updated agent session
  *         content:
  *           application/json:
  *             schema:
@@ -80,13 +115,13 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                     - repo
  *                     - branch
  *                     - services
+ *                     - websocketUrl
+ *                     - editorUrl
  *                     - lastActivity
  *                     - createdAt
  *                     - updatedAt
  *                     - endedAt
  *                     - startupFailure
- *                     - websocketUrl
- *                     - editorUrl
  *                   properties:
  *                     id:
  *                       type: string
@@ -172,6 +207,10 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                       type: array
  *                       items:
  *                         type: string
+ *                     websocketUrl:
+ *                       type: string
+ *                     editorUrl:
+ *                       type: string
  *                     lastActivity:
  *                       type: string
  *                       format: date-time
@@ -204,55 +243,14 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                         recordedAt:
  *                           type: string
  *                           format: date-time
- *                     websocketUrl:
- *                       type: string
- *                     editorUrl:
- *                       type: string
  *                 error:
  *                   nullable: true
- *       '401':
- *         description: Unauthorized
+ *       '400':
+ *         description: Invalid request
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '404':
- *         description: Session not found
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
- *   delete:
- *     summary: End an agent session
- *     tags:
- *       - Agent Sessions
- *     operationId: deleteAgentSession
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       '200':
- *         description: Session ended
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [request_id, data, error]
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: object
- *                   required:
- *                     - ended
- *                   properties:
- *                     ended:
- *                       type: boolean
- *                 error:
- *                   nullable: true
  *       '401':
  *         description: Unauthorized
  *         content:
@@ -266,9 +264,28 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userId = getRequestUserSub(req);
-  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const userIdentity = getRequestUserIdentity(req);
+  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+
+  const body = (await req.json()) as {
+    services?: unknown[];
+  };
+  if (!Array.isArray(body.services) || body.services.length === 0) {
+    return errorResponse(new Error('services is required'), { status: 400 }, req);
+  }
+
+  const requestedServices = body.services.map((service) => {
+    if (typeof service === 'string') {
+      return service;
+    }
+
+    if (isRequestedSessionServiceRef(service)) {
+      return service;
+    }
+
+    throw new Error('services must be an array of service names or repo-qualified service references');
+  });
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);
@@ -276,30 +293,26 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sess
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
-  if (session.userId !== userId) {
+  if (session.userId !== userIdentity.userId) {
     return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
   }
 
-  return successResponse(serializeSessionSummary(session), { status: 200 }, req);
+  try {
+    await AgentSessionService.attachServices(sessionId, requestedServices);
+    const updatedSession = await AgentSessionService.getSession(sessionId);
+
+    if (!updatedSession) {
+      return errorResponse(new Error('Session not found'), { status: 404 }, req);
+    }
+
+    return successResponse(serializeSessionSummary(updatedSession), { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof Error && /session not found/i.test(error.message)) {
+      return errorResponse(error, { status: 404 }, req);
+    }
+
+    return errorResponse(error, { status: 400 }, req);
+  }
 };
 
-const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userId = getRequestUserSub(req);
-  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-
-  const { sessionId } = await params;
-  const session = await AgentSessionService.getSession(sessionId);
-  if (!session) {
-    return errorResponse(new Error('Session not found'), { status: 404 }, req);
-  }
-
-  if (session.userId !== userId) {
-    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
-  }
-
-  await AgentSessionService.endSession(sessionId);
-  return successResponse({ ended: true }, { status: 200 }, req);
-};
-
-export const GET = createApiHandler(getHandler);
-export const DELETE = createApiHandler(deleteHandler);
+export const POST = createApiHandler(postHandler);

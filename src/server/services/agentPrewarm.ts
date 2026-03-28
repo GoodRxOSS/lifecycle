@@ -25,7 +25,16 @@ import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFacto
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
-import { AGENT_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
+import {
+  AGENT_WORKSPACE_ROOT,
+  type AgentSessionSelectedService,
+  type AgentSessionWorkspaceRepo,
+} from 'server/lib/agentSession/workspace';
+import {
+  buildCombinedInstallCommand,
+  resolveAgentSessionServicePlan,
+  type ResolvedAgentSessionService,
+} from 'server/lib/agentSession/servicePlan';
 import { createAgentPrewarmJob, monitorAgentPrewarmJob } from 'server/lib/agentSession/prewarmJobFactory';
 import {
   resolveAgentSessionRuntimeConfig,
@@ -40,14 +49,19 @@ import { QUEUE_NAMES } from 'shared/config';
 import GlobalConfigService from './globalConfig';
 import { resolveAgentSessionServiceCandidates, resolveRequestedAgentSessionServices } from './agentSessionCandidates';
 
-const logger = getLogger();
+const logger = () => getLogger();
 const AGENT_PREWARM_ERROR_MESSAGE_MAX_LENGTH = 4000;
 
-type ResolvedPrewarmService = {
+type PrewarmServiceInput = {
   name: string;
   deployId: number;
   devConfig: DevConfig;
+  repo: string;
+  branch: string;
+  revision?: string | null;
 };
+
+type ResolvedPrewarmService = ResolvedAgentSessionService<PrewarmServiceInput>;
 
 type ResolvedBuildPrewarmPlan = {
   buildUuid: string;
@@ -58,6 +72,8 @@ type ResolvedBuildPrewarmPlan = {
   revision?: string;
   configuredServiceNames: string[];
   services: ResolvedPrewarmService[];
+  workspaceRepos: AgentSessionWorkspaceRepo[];
+  serviceRefs: AgentSessionSelectedService[];
 };
 
 export interface AgentPrewarmQueueJob {
@@ -92,14 +108,6 @@ function truncateErrorMessage(message: string): string {
   }
 
   return `${message.slice(0, AGENT_PREWARM_ERROR_MESSAGE_MAX_LENGTH - 3)}...`;
-}
-
-function buildCombinedInstallCommand(services: ResolvedPrewarmService[]): string | undefined {
-  const installCommands = services
-    .map((service) => service.devConfig.installCommand)
-    .filter((command): command is string => Boolean(command?.trim()));
-
-  return installCommands.length > 0 ? installCommands.join('\n\n') : undefined;
 }
 
 export default class AgentPrewarmService extends BaseService {
@@ -188,6 +196,12 @@ export default class AgentPrewarmService extends BaseService {
       }
     );
 
+    logger().info(
+      `Prewarm: queued buildUuid=${plan.buildUuid} services=${plan.configuredServiceNames.join(',')} revision=${
+        plan.revision || 'head'
+      }`
+    );
+
     return true;
   }
 
@@ -217,7 +231,10 @@ export default class AgentPrewarmService extends BaseService {
     const githubToken = await GlobalConfigService.getInstance()
       .getGithubClientToken()
       .catch((error) => {
-        logger.warn({ error, buildUuid }, 'Agent prewarm could not resolve lifecycle GitHub app token');
+        logger().warn(
+          { error, buildUuid },
+          `Prewarm: github token lookup failed source=lifecycle_app buildUuid=${buildUuid}`
+        );
         return null;
       });
     const forwardedAgentEnv = await resolveForwardedAgentEnv(plan.services, plan.namespace, prewarmUuid, buildUuid);
@@ -228,6 +245,12 @@ export default class AgentPrewarmService extends BaseService {
     );
     const serviceAccountName = await ensureAgentSessionServiceAccount(plan.namespace);
     const installCommand = buildCombinedInstallCommand(plan.services);
+
+    logger().info(
+      `Prewarm: starting buildUuid=${plan.buildUuid} services=${plan.configuredServiceNames.join(',')} revision=${
+        plan.revision || 'head'
+      }`
+    );
 
     let prewarm = await AgentPrewarm.query().insertAndFetch({
       uuid: prewarmUuid,
@@ -240,6 +263,8 @@ export default class AgentPrewarmService extends BaseService {
       jobName,
       status: 'running',
       services: plan.configuredServiceNames,
+      workspaceRepos: plan.workspaceRepos,
+      serviceRefs: plan.serviceRefs,
       errorMessage: null,
     } as unknown as Partial<AgentPrewarm>);
 
@@ -272,6 +297,7 @@ export default class AgentPrewarmService extends BaseService {
         branch: plan.branch,
         revision: plan.revision,
         workspacePath: AGENT_WORKSPACE_ROOT,
+        workspaceRepos: plan.workspaceRepos,
         installCommand,
         forwardedAgentEnv: forwardedAgentEnv.env,
         forwardedAgentSecretRefs: forwardedAgentEnv.secretRefs,
@@ -304,6 +330,12 @@ export default class AgentPrewarmService extends BaseService {
         errorMessage: null,
       } as AgentPrewarm;
 
+      logger().info(
+        `Prewarm: ready buildUuid=${plan.buildUuid} prewarmUuid=${
+          prewarm.uuid
+        } services=${plan.configuredServiceNames.join(',')}`
+      );
+
       await this.cleanupSupersededPrewarms(plan, prewarm);
 
       return prewarm;
@@ -319,11 +351,17 @@ export default class AgentPrewarmService extends BaseService {
       throw error;
     } finally {
       await deleteAgentApiKeySecret(plan.namespace, secretName).catch((error) => {
-        logger.warn({ error, buildUuid, secretName }, 'Agent prewarm secret cleanup failed');
+        logger().warn(
+          { error, buildUuid, secretName },
+          `Prewarm: secret cleanup failed buildUuid=${buildUuid} secretName=${secretName}`
+        );
       });
       await cleanupForwardedAgentEnvSecrets(plan.namespace, prewarmUuid, forwardedAgentEnv.secretProviders).catch(
         (error) => {
-          logger.warn({ error, buildUuid, prewarmUuid }, 'Agent prewarm forwarded env cleanup failed');
+          logger().warn(
+            { error, buildUuid, prewarmUuid },
+            `Prewarm: forwarded_env cleanup failed buildUuid=${buildUuid} prewarmUuid=${prewarmUuid}`
+          );
         }
       );
     }
@@ -373,17 +411,33 @@ export default class AgentPrewarmService extends BaseService {
       name: service.name,
       deployId: service.deployId,
       devConfig: service.devConfig,
+      repo: service.repo || repositoryFullName,
+      branch: service.branch || build.pullRequest?.branchName || null,
+      revision: service.revision || revision || null,
     }));
+
+    const {
+      workspaceRepos,
+      services: resolvedServices,
+      selectedServices,
+    } = resolveAgentSessionServicePlan({}, services);
+    if (workspaceRepos.length !== 1) {
+      return null;
+    }
+
+    const [workspaceRepo] = workspaceRepos;
 
     return {
       buildUuid,
       namespace,
-      repo: repositoryFullName,
-      repoUrl: `https://github.com/${repositoryFullName}.git`,
-      branch: build.pullRequest.branchName,
-      revision: revision || undefined,
+      repo: workspaceRepo.repo,
+      repoUrl: workspaceRepo.repoUrl,
+      branch: workspaceRepo.branch,
+      revision: workspaceRepo.revision || undefined,
       configuredServiceNames,
-      services,
+      services: resolvedServices || [],
+      workspaceRepos,
+      serviceRefs: selectedServices,
     };
   }
 
@@ -411,18 +465,18 @@ export default class AgentPrewarmService extends BaseService {
       }
 
       await deleteAgentPvc(plan.namespace, prewarm.pvcName).catch((error) => {
-        logger.warn(
+        logger().warn(
           { error, buildUuid: plan.buildUuid, pvcName: prewarm.pvcName, prewarmUuid: prewarm.uuid },
-          'Superseded agent prewarm PVC cleanup failed'
+          `Prewarm: pvc cleanup failed reason=superseded buildUuid=${plan.buildUuid} prewarmUuid=${prewarm.uuid} pvcName=${prewarm.pvcName}`
         );
       });
 
       await AgentPrewarm.query()
         .deleteById(prewarm.id)
         .catch((error) => {
-          logger.warn(
+          logger().warn(
             { error, buildUuid: plan.buildUuid, pvcName: prewarm.pvcName, prewarmUuid: prewarm.uuid },
-            'Superseded agent prewarm record cleanup failed'
+            `Prewarm: record cleanup failed reason=superseded buildUuid=${plan.buildUuid} prewarmUuid=${prewarm.uuid} pvcName=${prewarm.pvcName}`
           );
         });
     }

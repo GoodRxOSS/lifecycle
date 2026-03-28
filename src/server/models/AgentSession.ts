@@ -16,6 +16,7 @@
 
 import Model from './_Model';
 import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeManager';
+import type { AgentSessionSelectedService, AgentSessionWorkspaceRepo } from 'server/lib/agentSession/workspace';
 import { BuildKind } from 'shared/constants';
 
 export default class AgentSession extends Model {
@@ -33,6 +34,8 @@ export default class AgentSession extends Model {
   endedAt!: string | null;
   devModeSnapshots!: Record<string, DevModeResourceSnapshot>;
   forwardedAgentSecretProviders!: string[];
+  workspaceRepos!: AgentSessionWorkspaceRepo[];
+  selectedServices!: AgentSessionSelectedService[];
 
   static tableName = 'agent_sessions';
   static timestamps = true;
@@ -60,11 +63,13 @@ export default class AgentSession extends Model {
       endedAt: { type: ['string', 'null'] },
       devModeSnapshots: { type: 'object', default: {} },
       forwardedAgentSecretProviders: { type: 'array', items: { type: 'string' }, default: [] },
+      workspaceRepos: { type: 'array', items: { type: 'object' }, default: [] },
+      selectedServices: { type: 'array', items: { type: 'object' }, default: [] },
     },
   };
 
   static get jsonAttributes() {
-    return ['devModeSnapshots', 'forwardedAgentSecretProviders'];
+    return ['devModeSnapshots', 'forwardedAgentSecretProviders', 'workspaceRepos', 'selectedServices'];
   }
 
   static get relationMappings() {

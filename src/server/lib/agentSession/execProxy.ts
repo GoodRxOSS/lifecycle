@@ -19,7 +19,7 @@ import { Writable, Readable } from 'stream';
 import { getLogger } from 'server/lib/logger';
 import { resolveAgentSessionClaudeConfig } from './runtimeConfig';
 
-const logger = getLogger();
+const logger = () => getLogger();
 const CLAUDE_HOME = '/home/claude/.claude';
 
 function shellEscape(value: string): string {
@@ -84,7 +84,10 @@ async function sendSignalToClaudeProcess(
       false
     );
   } catch (err: any) {
-    logger.warn(`Failed to send ${signal} to claude process: pod=${podName} err=${err?.message}`);
+    logger().warn(
+      { error: err, namespace, podName, signal },
+      `AgentExec: signal failed process=claude signal=${signal} podName=${podName} namespace=${namespace}`
+    );
   }
 }
 
@@ -147,7 +150,10 @@ export async function attachToAgentPod(
       });
     }
   } catch (err: any) {
-    logger.error(`Failed to exec into agent pod: name=${podName} err=${err?.message}`);
+    logger().error(
+      { error: err, namespace, podName },
+      `AgentExec: attach failed podName=${podName} namespace=${namespace}`
+    );
     throw err;
   }
 

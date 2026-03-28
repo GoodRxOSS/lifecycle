@@ -26,9 +26,12 @@ import {
   SandboxLaunchStage,
   setSandboxLaunchState,
 } from 'server/lib/agentSession/sandboxLaunchState';
-import AgentSandboxSessionService, { LaunchSandboxSessionOptions } from 'server/services/agentSandboxSession';
+import AgentSandboxSessionService, {
+  formatRequestedSandboxServicesLabel,
+  LaunchSandboxSessionOptions,
+} from 'server/services/agentSandboxSession';
 
-const logger = getLogger();
+const logger = () => getLogger();
 
 export interface SandboxSessionLaunchJob extends Omit<LaunchSandboxSessionOptions, 'onProgress' | 'githubToken'> {
   launchId: string;
@@ -43,7 +46,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     userIdentity,
     encryptedGithubToken,
     baseBuildUuid,
-    service,
+    services,
     model,
     agentImage,
     editorImage,
@@ -59,6 +62,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       message,
     });
   };
+  const requestedServiceLabel = formatRequestedSandboxServicesLabel(services);
 
   try {
     const result = await new AgentSandboxSessionService().launch({
@@ -66,7 +70,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       userIdentity,
       githubToken: encryptedGithubToken ? decrypt(encryptedGithubToken) : null,
       baseBuildUuid,
-      service,
+      services,
       model,
       agentImage,
       editorImage,
@@ -101,14 +105,14 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       }),
     });
   } catch (error) {
-    logger.error(
+    logger().error(
       {
         error,
         launchId,
         baseBuildUuid,
-        service,
+        services,
       },
-      'Sandbox launch job failed'
+      `Sandbox: launch failed launchId=${launchId} baseBuildUuid=${baseBuildUuid} service=${requestedServiceLabel}`
     );
     await patchSandboxLaunchState(redis, launchId, {
       status: 'error',

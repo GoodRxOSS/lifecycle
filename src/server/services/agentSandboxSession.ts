@@ -39,12 +39,15 @@ import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/consta
 import DeployService from './deploy';
 import type { SandboxLaunchStage } from 'server/lib/agentSession/sandboxLaunchState';
 import type { RequestUserIdentity } from 'server/lib/get-user';
+import type { RequestedAgentSessionServiceRef } from './agentSessionCandidates';
 
 const randomSha = customAlphabet('1234567890abcdef', 6);
 
 export interface SandboxServiceCandidate {
   name: string;
   type: DeployTypes;
+  repo: string;
+  branch: string;
 }
 
 interface ResolvedSandboxService {
@@ -61,9 +64,65 @@ interface EnvironmentSource {
   branch: string;
 }
 
-interface SandboxServiceIdentity {
-  name: string;
-  repo: string;
+interface CreatedSandboxBuild {
+  build: Build;
+  sandboxDeploysByBaseDeployId: Map<number, Deploy>;
+}
+
+export type RequestedSandboxService = string | RequestedAgentSessionServiceRef;
+export type RequestedSandboxServices = RequestedSandboxService[];
+
+function normalizeOptionalString(value?: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeRepoKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function formatRequestedSandboxServiceLabel(service?: RequestedSandboxService | null): string {
+  if (!service) {
+    return 'unknown service';
+  }
+
+  if (typeof service === 'string') {
+    return service;
+  }
+
+  const repo = normalizeOptionalString(service.repo);
+  const branch = normalizeOptionalString(service.branch);
+
+  if (!repo && !branch) {
+    return service.name;
+  }
+
+  return `${service.name} (${repo ?? 'unknown-repo'}${branch ? `:${branch}` : ''})`;
+}
+
+export function summarizeRequestedSandboxServices(services?: RequestedSandboxServices | null): string {
+  if (!services || services.length === 0) {
+    return 'unknown service';
+  }
+
+  if (services.length === 1) {
+    return typeof services[0] === 'string' ? services[0] : services[0].name;
+  }
+
+  return `${services.length} services`;
+}
+
+export function formatRequestedSandboxServicesLabel(services?: RequestedSandboxServices | null): string {
+  if (!services || services.length === 0) {
+    return 'unknown service';
+  }
+
+  const labels = services.map((service) => formatRequestedSandboxServiceLabel(service));
+  if (labels.length <= 2) {
+    return labels.join(', ');
+  }
+
+  return `${labels.slice(0, 2).join(', ')} +${labels.length - 2} more`;
 }
 
 export interface LaunchSandboxSessionOptions {
@@ -71,7 +130,7 @@ export interface LaunchSandboxSessionOptions {
   userIdentity?: RequestUserIdentity;
   githubToken?: string | null;
   baseBuildUuid: string;
-  service?: string;
+  services?: RequestedSandboxServices;
   model?: string;
   agentImage: string;
   editorImage: string;
@@ -107,22 +166,45 @@ export default class AgentSandboxSessionService extends BaseService {
       );
     }
 
-    const selectedService = opts.service != null ? this.resolveSelectedService(opts.service, candidates) : null;
+    const selectedServices = opts.services != null ? this.resolveSelectedServices(opts.services, candidates) : [];
 
-    if (!selectedService) {
+    if (selectedServices.length === 0) {
       return {
         status: 'needs_service_selection',
         services: candidates
-          .map((candidate) => ({ name: candidate.name, type: getDeployTypeFromBaseDeploy(candidate.baseDeploy) }))
-          .sort((a, b) => a.name.localeCompare(b.name)),
+          .map((candidate) => ({
+            name: candidate.name,
+            type: getDeployTypeFromBaseDeploy(candidate.baseDeploy),
+            repo: candidate.serviceRepo,
+            branch: candidate.serviceBranch,
+          }))
+          .sort((a, b) =>
+            a.name === b.name
+              ? `${a.repo}:${a.branch}`.localeCompare(`${b.repo}:${b.branch}`)
+              : a.name.localeCompare(b.name)
+          ),
       };
     }
 
-    await opts.onProgress?.('creating_sandbox_build', `Creating sandbox build for ${selectedService.name}`);
-    const sandboxBuild = await this.createSandboxBuild({
+    const selectedServiceSummary = summarizeRequestedSandboxServices(
+      selectedServices.map((service) => ({
+        name: service.name,
+        repo: service.serviceRepo,
+        branch: service.serviceBranch,
+      }))
+    );
+
+    getLogger().info(
+      `Sandbox: starting baseBuildUuid=${opts.baseBuildUuid} services=${selectedServices
+        .map((service) => `${service.name}@${service.serviceRepo}:${service.serviceBranch}`)
+        .join(',')}`
+    );
+
+    await opts.onProgress?.('creating_sandbox_build', `Creating sandbox build for ${selectedServiceSummary}`);
+    const { build: sandboxBuild, sandboxDeploysByBaseDeployId } = await this.createSandboxBuild({
       baseBuild,
       environmentSource,
-      selectedService,
+      selectedServices,
     });
 
     try {
@@ -130,14 +212,14 @@ export default class AgentSandboxSessionService extends BaseService {
       await sandboxBuild.$query().patch({ runUUID, status: BuildStatus.QUEUED });
       await sandboxBuild.$fetchGraph('[environment, pullRequest.[repository], deploys.[deployable, repository]]');
 
-      await opts.onProgress?.('resolving_environment', `Resolving environment variables for ${selectedService.name}`);
+      await opts.onProgress?.('resolving_environment', `Resolving environment variables for ${selectedServiceSummary}`);
       await new BuildEnvironmentVariables(this.db).resolve(sandboxBuild);
 
       await this.buildService.updateStatusAndComment(sandboxBuild, BuildStatus.DEPLOYING, runUUID, false, false);
-      await opts.onProgress?.('deploying_resources', `Deploying sandbox resources for ${selectedService.name}`);
+      await opts.onProgress?.('deploying_resources', `Deploying sandbox resources for ${selectedServiceSummary}`);
       const deployed = await this.buildService.generateAndApplyManifests({
         build: sandboxBuild,
-        githubRepositoryId: '',
+        githubRepositoryId: null,
         namespace: sandboxBuild.namespace,
       });
 
@@ -153,51 +235,59 @@ export default class AgentSandboxSessionService extends BaseService {
         throw new Error(`Sandbox deployment failed for ${sandboxBuild.uuid}`);
       }
 
-      const sandboxDeploy = sandboxBuild.deploys?.find((deploy) => deploy.deployable?.name === selectedService.name);
-      if (!sandboxDeploy?.id) {
-        throw new Error(`Sandbox deploy not found for ${selectedService.name}`);
-      }
+      const selectedSandboxServices = this.resolveSelectedSandboxDeploys(
+        selectedServices,
+        sandboxDeploysByBaseDeployId
+      );
 
-      await opts.onProgress?.('creating_agent_session', `Starting agent session for ${selectedService.name}`);
+      await opts.onProgress?.('creating_agent_session', `Starting agent session for ${selectedServiceSummary}`);
       const session = await AgentSessionService.createSession({
         userId: opts.userId,
         buildUuid: sandboxBuild.uuid,
         githubToken: opts.githubToken,
-        services: [
-          {
-            name: selectedService.name,
-            deployId: sandboxDeploy.id,
-            devConfig: selectedService.devConfig,
-            resourceName: sandboxDeploy.uuid || undefined,
-          },
-        ],
+        services: selectedSandboxServices.map(({ selectedService, sandboxDeploy }) => ({
+          name: selectedService.name,
+          deployId: sandboxDeploy.id,
+          devConfig: selectedService.devConfig,
+          resourceName: sandboxDeploy.uuid || undefined,
+          repo: selectedService.serviceRepo,
+          branch: selectedService.baseDeploy.branchName || selectedService.serviceBranch,
+          revision: selectedService.baseDeploy.sha || undefined,
+        })),
         model: opts.model,
-        repoUrl: `https://github.com/${selectedService.serviceRepo}.git`,
-        branch: selectedService.baseDeploy.branchName || selectedService.serviceBranch,
-        revision: selectedService.baseDeploy.sha || undefined,
         prNumber: baseBuild.pullRequest?.pullRequestNumber,
         namespace: sandboxBuild.namespace,
         agentImage: opts.agentImage,
         editorImage: opts.editorImage,
         nodeSelector: opts.nodeSelector,
-        readiness: mergeAgentSessionReadinessForServices(opts.readiness, [
-          selectedService.devConfig.agentSession?.readiness,
-        ]),
+        readiness: mergeAgentSessionReadinessForServices(
+          opts.readiness,
+          selectedServices.map((service) => service.devConfig.agentSession?.readiness)
+        ),
         resources: mergeAgentSessionResources(opts.resources, lifecycleConfig.environment?.agentSession?.resources),
         userIdentity: opts.userIdentity,
       });
 
+      getLogger().info(
+        `Sandbox: ready baseBuildUuid=${opts.baseBuildUuid} buildUuid=${sandboxBuild.uuid} sessionId=${
+          session.uuid
+        } services=${selectedServices.map((service) => service.name).join(',')}`
+      );
+
       return {
         status: 'created',
-        service: selectedService.name,
+        service: selectedServiceSummary,
         buildUuid: sandboxBuild.uuid,
         namespace: sandboxBuild.namespace,
         session,
-        services: [selectedService.name],
+        services: selectedServices.map((service) => service.name),
       };
     } catch (error) {
       await this.buildService.deleteBuild(sandboxBuild).catch((cleanupError) => {
-        getLogger().warn({ error: cleanupError, buildUuid: sandboxBuild.uuid }, 'Sandbox cleanup failed after launch');
+        getLogger().warn(
+          { error: cleanupError, buildUuid: sandboxBuild.uuid },
+          `Sandbox: cleanup failed action=launch_rollback buildUuid=${sandboxBuild.uuid}`
+        );
       });
       throw error;
     }
@@ -216,8 +306,14 @@ export default class AgentSandboxSessionService extends BaseService {
       .map((candidate) => ({
         name: candidate.name,
         type: getDeployTypeFromBaseDeploy(candidate.baseDeploy),
+        repo: candidate.serviceRepo,
+        branch: candidate.serviceBranch,
       }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) =>
+        a.name === b.name
+          ? `${a.repo}:${a.branch}`.localeCompare(`${b.repo}:${b.branch}`)
+          : a.name.localeCompare(b.name)
+      );
   }
 
   private async loadBaseBuildAndCandidates({
@@ -297,7 +393,7 @@ export default class AgentSandboxSessionService extends BaseService {
         });
       } catch (error) {
         getLogger({ buildUuid: baseBuild.uuid, serviceName, error }).warn(
-          'Sandbox candidate resolution skipped service due to config error'
+          `Sandbox: candidate skipped service=${serviceName} buildUuid=${baseBuild.uuid} reason=config_error`
         );
       }
     }
@@ -305,14 +401,60 @@ export default class AgentSandboxSessionService extends BaseService {
     return resolvedCandidates;
   }
 
-  private resolveSelectedService(serviceName: string, candidates: ResolvedSandboxService[]): ResolvedSandboxService {
-    const matches = candidates.filter((candidate) => candidate.name === serviceName);
+  private resolveSelectedServices(
+    requestedServices: RequestedSandboxServices,
+    candidates: ResolvedSandboxService[]
+  ): ResolvedSandboxService[] {
+    const selectedServices: ResolvedSandboxService[] = [];
+    const seenServiceKeys = new Set<string>();
+
+    for (const requestedService of requestedServices) {
+      const selectedService = this.resolveSelectedService(requestedService, candidates);
+      const serviceKey = this.getResolvedSandboxServiceKey(selectedService);
+
+      if (seenServiceKeys.has(serviceKey)) {
+        continue;
+      }
+
+      seenServiceKeys.add(serviceKey);
+      selectedServices.push(selectedService);
+    }
+
+    return selectedServices;
+  }
+
+  private resolveSelectedService(
+    requestedService: RequestedSandboxService,
+    candidates: ResolvedSandboxService[]
+  ): ResolvedSandboxService {
+    const serviceName = typeof requestedService === 'string' ? requestedService : requestedService.name;
+    const requestedRepo =
+      typeof requestedService === 'string' ? undefined : normalizeOptionalString(requestedService.repo);
+    const requestedBranch =
+      typeof requestedService === 'string' ? undefined : normalizeOptionalString(requestedService.branch);
+
+    const matches = candidates.filter((candidate) => {
+      if (candidate.name !== serviceName) {
+        return false;
+      }
+
+      if (requestedRepo && normalizeRepoKey(candidate.serviceRepo) !== normalizeRepoKey(requestedRepo)) {
+        return false;
+      }
+
+      if (requestedBranch && candidate.serviceBranch !== requestedBranch) {
+        return false;
+      }
+
+      return true;
+    });
+
     if (matches.length === 0) {
-      throw new Error(`Unknown sandbox service: ${serviceName}`);
+      throw new Error(`Unknown sandbox service: ${formatRequestedSandboxServiceLabel(requestedService)}`);
     }
 
     if (matches.length > 1) {
-      throw new Error(`Multiple sandbox services matched ${serviceName}`);
+      throw new Error(`Multiple sandbox services matched ${formatRequestedSandboxServiceLabel(requestedService)}`);
     }
 
     return matches[0];
@@ -321,22 +463,23 @@ export default class AgentSandboxSessionService extends BaseService {
   private async createSandboxBuild({
     baseBuild,
     environmentSource,
-    selectedService,
+    selectedServices,
   }: {
     baseBuild: Build;
     environmentSource: EnvironmentSource;
-    selectedService: ResolvedSandboxService;
-  }): Promise<Build> {
-    const includedKeys = await this.resolveDependencyClosure(baseBuild, selectedService, environmentSource);
+    selectedServices: ResolvedSandboxService[];
+  }): Promise<CreatedSandboxBuild> {
+    const includedDeployIds = await this.resolveDependencyClosure(baseBuild, selectedServices, environmentSource);
     const baseDeploys = (baseBuild.deploys || []).filter(
-      (deploy) =>
-        deploy.active && this.getDeployServiceKey(deploy) && includedKeys.has(this.getDeployServiceKey(deploy)!)
+      (deploy) => deploy.active && Boolean(deploy.id) && includedDeployIds.has(deploy.id)
     );
 
-    if (baseDeploys.length !== includedKeys.size) {
-      const foundKeys = new Set(baseDeploys.map((deploy) => this.getDeployServiceKey(deploy)).filter(Boolean));
-      const missing = [...includedKeys].filter((key) => !foundKeys.has(key));
-      throw new Error(`Base build is missing active deploys for sandbox dependencies: ${missing.join(', ')}`);
+    if (baseDeploys.length !== includedDeployIds.size) {
+      const foundDeployIds = new Set(
+        baseDeploys.map((deploy) => deploy.id).filter((deployId): deployId is number => Boolean(deployId))
+      );
+      const missingDeployIds = [...includedDeployIds].filter((deployId) => !foundDeployIds.has(deployId));
+      throw new Error(`Base build is missing active deploys for sandbox dependencies: ${missingDeployIds.join(', ')}`);
     }
 
     const haikunator = new Haikunator({
@@ -348,6 +491,7 @@ export default class AgentSandboxSessionService extends BaseService {
     const sandboxNamespace = `sbx-${sandboxUuid}`;
 
     return Build.transaction(async (trx) => {
+      const sandboxDeploysByBaseDeployId = new Map<number, Deploy>();
       const baseBuildJson = baseBuild.$toJson() as Record<string, unknown>;
       const {
         id: _baseBuildId,
@@ -457,6 +601,7 @@ export default class AgentSandboxSessionService extends BaseService {
           devMode: false,
           devModeSessionId: null,
         } as unknown as Partial<Deploy>);
+        sandboxDeploysByBaseDeployId.set(baseDeploy.id, sandboxDeploy);
 
         const sandboxDeployable = await Deployable.query(trx).findById(sandboxDeployableId);
         if (!sandboxDeployable) {
@@ -486,37 +631,60 @@ export default class AgentSandboxSessionService extends BaseService {
       }
 
       await sandboxBuild.$fetchGraph('[pullRequest.[repository], environment, deploys.[deployable, repository]]');
-      return sandboxBuild;
+      return {
+        build: sandboxBuild,
+        sandboxDeploysByBaseDeployId,
+      };
+    });
+  }
+
+  private resolveSelectedSandboxDeploys(
+    selectedServices: ResolvedSandboxService[],
+    sandboxDeploysByBaseDeployId: Map<number, Deploy>
+  ): Array<{
+    selectedService: ResolvedSandboxService;
+    sandboxDeploy: Deploy;
+  }> {
+    return selectedServices.map((selectedService) => {
+      const baseDeployId = selectedService.baseDeploy.id;
+      const sandboxDeploy = baseDeployId ? sandboxDeploysByBaseDeployId.get(baseDeployId) : undefined;
+
+      if (!sandboxDeploy?.id) {
+        throw new Error(`Sandbox deploy not found for ${selectedService.name} in ${selectedService.serviceRepo}`);
+      }
+
+      return {
+        selectedService,
+        sandboxDeploy,
+      };
     });
   }
 
   private async resolveDependencyClosure(
     baseBuild: Build,
-    selectedService: ResolvedSandboxService,
+    selectedServices: ResolvedSandboxService[],
     environmentSource: EnvironmentSource
-  ): Promise<Set<string>> {
+  ): Promise<Set<number>> {
     const activeDeploys = this.getActiveDeploys(baseBuild);
     const configCache = new Map<string, Promise<LifecycleConfig>>();
-    const included = new Set<string>();
+    const includedDeployIds = new Set<number>();
     const queue: Array<{
       serviceRef: DependencyService;
       baseDeploy: Deploy;
       resolvedSource?: ResolvedLifecycleServiceSource;
-    }> = [
-      {
-        serviceRef: {
-          name: selectedService.name,
-          repository: selectedService.serviceRepo,
-          branch: selectedService.serviceBranch,
-        },
-        baseDeploy: selectedService.baseDeploy,
-        resolvedSource: {
-          repo: selectedService.serviceRepo,
-          branch: selectedService.serviceBranch,
-          yamlService: selectedService.yamlService,
-        },
+    }> = selectedServices.map((selectedService) => ({
+      serviceRef: {
+        name: selectedService.name,
+        repository: selectedService.serviceRepo,
+        branch: selectedService.serviceBranch,
       },
-    ];
+      baseDeploy: selectedService.baseDeploy,
+      resolvedSource: {
+        repo: selectedService.serviceRepo,
+        branch: selectedService.serviceBranch,
+        yamlService: selectedService.yamlService,
+      },
+    }));
 
     while (queue.length > 0) {
       const current = queue.shift();
@@ -526,7 +694,7 @@ export default class AgentSandboxSessionService extends BaseService {
       }
 
       const baseDeploy = current.baseDeploy;
-      if (!baseDeploy?.deployable) {
+      if (!baseDeploy?.id || !baseDeploy.deployable) {
         throw new Error(`Active deploy not found for dependency ${serviceName} in base build ${baseBuild.uuid}`);
       }
 
@@ -538,15 +706,11 @@ export default class AgentSandboxSessionService extends BaseService {
           fallbackSource: environmentSource,
           configCache,
         }));
-      const serviceKey = this.getServiceKey({
-        name: serviceName,
-        repo: serviceSource.repo,
-      });
-      if (included.has(serviceKey)) {
+      if (includedDeployIds.has(baseDeploy.id)) {
         continue;
       }
 
-      included.add(serviceKey);
+      includedDeployIds.add(baseDeploy.id);
 
       const yamlService = serviceSource.yamlService;
       for (const requiredService of yamlService?.requires || []) {
@@ -566,7 +730,7 @@ export default class AgentSandboxSessionService extends BaseService {
       }
     }
 
-    return included;
+    return includedDeployIds;
   }
 
   private getEnvironmentSource(baseBuild: Build): EnvironmentSource {
@@ -604,18 +768,10 @@ export default class AgentSandboxSessionService extends BaseService {
     return (baseBuild.deploys || []).filter((deploy) => deploy.active && deploy.deployable?.name);
   }
 
-  private getServiceKey(service: SandboxServiceIdentity): string {
-    return `${service.repo}::${service.name}`;
-  }
-
-  private getDeployServiceKey(deploy: Deploy): string | null {
-    const name = deploy.deployable?.name;
-    const repo = deploy.repository?.fullName;
-    if (!name || !repo) {
-      return null;
-    }
-
-    return this.getServiceKey({ name, repo });
+  private getResolvedSandboxServiceKey(
+    service: Pick<ResolvedSandboxService, 'name' | 'serviceRepo' | 'serviceBranch'>
+  ): string {
+    return `${normalizeRepoKey(service.serviceRepo)}::${service.serviceBranch}::${service.name}`;
   }
 
   private findActiveDeployForReference(activeDeploys: Deploy[], serviceRef: DependencyService): Deploy | null {
@@ -624,9 +780,13 @@ export default class AgentSandboxSessionService extends BaseService {
     }
 
     const matchesByName = activeDeploys.filter((deploy) => deploy.deployable?.name === serviceRef.name);
-    const matches = serviceRef.repository
+    const repoMatches = serviceRef.repository
       ? matchesByName.filter((deploy) => deploy.repository?.fullName === serviceRef.repository)
       : matchesByName;
+    const requestedBranch = normalizeOptionalString(serviceRef.branch);
+    const matches = requestedBranch
+      ? repoMatches.filter((deploy) => normalizeOptionalString(deploy.branchName) === requestedBranch)
+      : repoMatches;
 
     if (matches.length === 0) {
       return null;
@@ -636,7 +796,7 @@ export default class AgentSandboxSessionService extends BaseService {
       throw new Error(
         `Multiple active deploys matched sandbox service ${serviceRef.name}${
           serviceRef.repository ? ` in ${serviceRef.repository}` : ''
-        }`
+        }${requestedBranch ? ` on ${requestedBranch}` : ''}`
       );
     }
 
