@@ -17,6 +17,7 @@
 var mockListNamespacedDeployment: jest.Mock;
 var mockListNamespacedStatefulSet: jest.Mock;
 var mockListNamespacedPod: jest.Mock;
+var mockBuildFindOne: jest.Mock;
 
 jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
@@ -58,6 +59,15 @@ jest.mock('server/lib/logger', () => ({
     warn: jest.fn(),
     error: jest.fn(),
   }),
+}));
+
+jest.mock('server/models/Build', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(() => ({
+      findOne: (...args: unknown[]) => mockBuildFindOne(...args),
+    })),
+  },
 }));
 
 import { getDeploymentPods } from '../getDeploymentPods';
@@ -106,6 +116,11 @@ function buildPod({
 describe('getDeploymentPods', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockBuildFindOne = jest.fn().mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        namespace: 'env-sample-env',
+      }),
+    });
     mockListNamespacedDeployment.mockResolvedValue({
       body: {
         items: [
@@ -178,6 +193,43 @@ describe('getDeploymentPods', () => {
     expect(pods[0]?.ready).toBe('1/1');
     expect(mockListNamespacedPod).toHaveBeenCalledWith(
       'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'app=sample-service'
+    );
+  });
+
+  it('uses the build namespace for sandbox builds', async () => {
+    mockBuildFindOne.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        namespace: 'sbx-sample-env',
+      }),
+    });
+    mockListNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          buildPod({
+            name: 'sandbox-active',
+            createdAt: '2026-03-27T19:00:00.000Z',
+          }),
+        ],
+      },
+    });
+
+    await getDeploymentPods('sample-service', 'sample-env');
+
+    expect(mockListNamespacedDeployment).toHaveBeenCalledWith(
+      'sbx-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'app.kubernetes.io/instance=sample-service-sample-env'
+    );
+    expect(mockListNamespacedPod).toHaveBeenCalledWith(
+      'sbx-sample-env',
       undefined,
       undefined,
       undefined,

@@ -74,6 +74,91 @@ interface ConversationMessageCostRow {
   metadata: unknown;
 }
 
+/**
+ * @openapi
+ * /api/v2/ai/admin/feedback:
+ *   get:
+ *     summary: List AI feedback records
+ *     description: >
+ *       Returns paginated message-level and conversation-level AI feedback for
+ *       admin review. Results can be filtered by repository, rating, type, and
+ *       date range, and are ordered by creation time.
+ *     tags:
+ *       - AI Feedback Admin
+ *     operationId: getAdminFeedbackList
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *           minimum: 1
+ *         description: Page number for pagination.
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 25
+ *           minimum: 1
+ *         description: Number of feedback records per page.
+ *       - in: query
+ *         name: repo
+ *         schema:
+ *           type: string
+ *         description: Case-insensitive repository or build UUID search term.
+ *       - in: query
+ *         name: rating
+ *         schema:
+ *           type: string
+ *           enum: [up, down]
+ *         description: Filter by user rating.
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [message, conversation]
+ *         description: Filter by feedback record type.
+ *       - in: query
+ *         name: from
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Include feedback created on or after this timestamp.
+ *       - in: query
+ *         name: to
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Include feedback created on or before this timestamp.
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum: [createdAt]
+ *           default: createdAt
+ *         description: Sort field. Only `createdAt` is currently supported.
+ *       - in: query
+ *         name: sortDirection
+ *         schema:
+ *           type: string
+ *           enum: [asc, desc]
+ *           default: desc
+ *         description: Sort direction.
+ *     responses:
+ *       '200':
+ *         description: Paginated feedback records.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetAdminFeedbackListSuccessResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
+
 function toSingleLine(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }

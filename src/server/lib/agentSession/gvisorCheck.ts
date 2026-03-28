@@ -48,7 +48,7 @@ export async function isGvisorAvailable(): Promise<boolean> {
       return false;
     }
     const logger = getLogger();
-    logger.warn(`gvisorCheck: failed to check RuntimeClass error=${error?.message || error}`);
+    logger.warn({ error }, 'Session: runtime check failed name=gvisor');
     cachedResult = false;
     cacheTimestamp = now;
     return false;

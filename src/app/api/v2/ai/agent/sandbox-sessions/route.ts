@@ -29,13 +29,72 @@ import { redisClient } from 'server/lib/dependencies';
 import QueueManager from 'server/lib/queueManager';
 import { QUEUE_NAMES } from 'shared/config';
 import { setSandboxLaunchState, toPublicSandboxLaunchState } from 'server/lib/agentSession/sandboxLaunchState';
-import AgentSandboxSessionService from 'server/services/agentSandboxSession';
+import AgentSandboxSessionService, {
+  formatRequestedSandboxServicesLabel,
+  summarizeRequestedSandboxServices,
+  type RequestedSandboxService,
+  type RequestedSandboxServices,
+} from 'server/services/agentSandboxSession';
 import type { SandboxSessionLaunchJob } from 'server/jobs/agentSandboxSessionLaunch';
+import type { RequestedAgentSessionServiceRef } from 'server/services/agentSessionCandidates';
 
 interface CreateSandboxSessionBody {
   baseBuildUuid?: string;
-  service?: string;
+  service?: unknown;
+  services?: unknown;
   model?: string;
+}
+
+function isRequestedSandboxServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    typeof (value as RequestedAgentSessionServiceRef).name === 'string' &&
+    ((value as RequestedAgentSessionServiceRef).repo == null ||
+      typeof (value as RequestedAgentSessionServiceRef).repo === 'string') &&
+    ((value as RequestedAgentSessionServiceRef).branch == null ||
+      typeof (value as RequestedAgentSessionServiceRef).branch === 'string')
+  );
+}
+
+function parseRequestedSandboxService(value: unknown): RequestedSandboxService {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (isRequestedSandboxServiceRef(value)) {
+    return value;
+  }
+
+  throw new Error('service must be a service name or repo-qualified service reference');
+}
+
+function parseRequestedSandboxServices(value: unknown): RequestedSandboxServices {
+  if (!Array.isArray(value)) {
+    throw new Error('services must be an array of service names or repo-qualified service references');
+  }
+
+  if (value.length === 0) {
+    throw new Error('services must contain at least one service');
+  }
+
+  return value.map(parseRequestedSandboxService);
+}
+
+function parseRequestedSandboxServicesFromBody(body: CreateSandboxSessionBody): RequestedSandboxServices {
+  if (body.services != null) {
+    if (body.service != null) {
+      throw new Error('Provide either service or services, not both');
+    }
+
+    return parseRequestedSandboxServices(body.services);
+  }
+
+  if (body.service != null) {
+    return [parseRequestedSandboxService(body.service)];
+  }
+
+  throw new Error('service or services is required');
 }
 
 const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.AGENT_SANDBOX_SESSION_LAUNCH, {
@@ -93,6 +152,10 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                             type: string
  *                           type:
  *                             type: string
+ *                           repo:
+ *                             type: string
+ *                           branch:
+ *                             type: string
  *                 error:
  *                   nullable: true
  *       '400':
@@ -111,16 +174,54 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required:
- *               - baseBuildUuid
- *             properties:
- *               baseBuildUuid:
- *                 type: string
- *               service:
- *                 type: string
- *               model:
- *                 type: string
+ *             oneOf:
+ *               - type: object
+ *                 required:
+ *                   - baseBuildUuid
+ *                   - service
+ *                 properties:
+ *                   baseBuildUuid:
+ *                     type: string
+ *                   service:
+ *                     oneOf:
+ *                       - type: string
+ *                       - type: object
+ *                         required:
+ *                           - name
+ *                         properties:
+ *                           name:
+ *                             type: string
+ *                           repo:
+ *                             type: string
+ *                           branch:
+ *                             type: string
+ *                   model:
+ *                     type: string
+ *               - type: object
+ *                 required:
+ *                   - baseBuildUuid
+ *                   - services
+ *                 properties:
+ *                   baseBuildUuid:
+ *                     type: string
+ *                   services:
+ *                     type: array
+ *                     minItems: 1
+ *                     items:
+ *                       oneOf:
+ *                         - type: string
+ *                         - type: object
+ *                           required:
+ *                             - name
+ *                           properties:
+ *                             name:
+ *                               type: string
+ *                             repo:
+ *                               type: string
+ *                             branch:
+ *                               type: string
+ *                   model:
+ *                     type: string
  *     responses:
  *       '200':
  *         description: Service selection required or sandbox session launch queued
@@ -245,10 +346,9 @@ const postHandler = async (req: NextRequest) => {
   }
 
   try {
-    if (!body.service) {
-      return errorResponse(new Error('service is required'), { status: 400 }, req);
-    }
-
+    const requestedServices = parseRequestedSandboxServicesFromBody(body);
+    const requestedServiceSummary = summarizeRequestedSandboxServices(requestedServices);
+    const requestedServiceLabel = formatRequestedSandboxServicesLabel(requestedServices);
     const runtimeConfig = await resolveAgentSessionRuntimeConfig();
     const githubToken = await resolveRequestGitHubToken(req);
     const launchId = uuid();
@@ -258,11 +358,11 @@ const postHandler = async (req: NextRequest) => {
       userId: userIdentity.userId,
       status: 'queued',
       stage: 'queued',
-      message: `Queued sandbox launch for ${body.service}`,
+      message: `Queued sandbox launch for ${requestedServiceLabel}`,
       createdAt: now,
       updatedAt: now,
       baseBuildUuid: body.baseBuildUuid,
-      service: body.service,
+      service: requestedServiceSummary,
     });
 
     await sandboxLaunchQueue.add(
@@ -273,7 +373,7 @@ const postHandler = async (req: NextRequest) => {
         userIdentity,
         encryptedGithubToken: githubToken ? encrypt(githubToken) : null,
         baseBuildUuid: body.baseBuildUuid,
-        service: body.service,
+        services: requestedServices,
         model: body.model,
         agentImage: runtimeConfig.image,
         editorImage: runtimeConfig.editorImage,
@@ -292,11 +392,11 @@ const postHandler = async (req: NextRequest) => {
         userId: userIdentity.userId,
         status: 'queued',
         stage: 'queued',
-        message: `Queued sandbox launch for ${body.service}`,
+        message: `Queued sandbox launch for ${requestedServiceLabel}`,
         createdAt: now,
         updatedAt: now,
         baseBuildUuid: body.baseBuildUuid,
-        service: body.service,
+        service: requestedServiceSummary,
       }),
       { status: 200 },
       req

@@ -108,7 +108,35 @@ describe('configSeeder', () => {
       expect(script).toContain('Pushing to $branch_name is not allowed');
       expect(script).toContain('main');
       expect(script).toContain('master');
-      expect(script).toContain('chmod +x .git/hooks/pre-push');
+      expect(script).toContain('chmod +x "/workspace/.git/hooks/pre-push"');
+    });
+
+    it('clones additional repositories into repo-specific workspace paths', () => {
+      const script = generateInitScript({
+        workspaceRepos: [
+          {
+            repo: 'org/ui',
+            repoUrl: 'https://github.com/org/ui.git',
+            branch: 'feature/ui',
+            revision: 'abc123',
+            mountPath: '/workspace',
+            primary: true,
+          },
+          {
+            repo: 'org/api',
+            repoUrl: 'https://github.com/org/api.git',
+            branch: 'feature/api',
+            revision: null,
+            mountPath: '/workspace/repos/org/api',
+            primary: false,
+          },
+        ],
+      });
+
+      expect(script).toContain('git clone --progress --depth 50 --branch "feature/ui" --single-branch');
+      expect(script).toContain('git clone --progress --depth 50 --branch "feature/api" --single-branch');
+      expect(script).toContain('"/workspace/repos/org"');
+      expect(script).toContain('"/workspace/repos/org/api"');
     });
 
     it('starts with shebang', () => {

@@ -349,7 +349,12 @@ function closeSocket(ws: WebSocket, code: number, reason: string) {
   }
 
   const safeReason = Buffer.byteLength(reason, 'utf8') > 123 ? 'Connection error' : reason;
-  ws.close(code, safeReason);
+  if (isSendableCloseCode(code)) {
+    ws.close(code, safeReason);
+    return;
+  }
+
+  ws.close(1000, safeReason);
 }
 
 function buildClaudeUserMessage(content: string): string {
@@ -437,7 +442,7 @@ function scheduleAgentRuntimeCleanup(
       return;
     }
 
-    logger.debug(agentLogCtx, 'Closing idle agent runtime after client disconnect');
+    logger.debug(agentLogCtx, `AgentRuntime: closing reason=idle_disconnect sessionId=${sessionId}`);
     disposeAgentRuntime(sessionId, runtime, true);
   }, AGENT_RUNTIME_IDLE_TIMEOUT_MS);
 }
@@ -511,7 +516,7 @@ async function getOrCreateAgentRuntime(
           return;
         }
 
-        logger.debug(agentLogCtx, 'Agent exec connection closed');
+        logger.debug(agentLogCtx, `AgentExec: connection closed sessionId=${sessionId}`);
         closeAgentClients(runtime!, 1012, 'Agent runtime restarted');
         disposeAgentRuntime(sessionId, runtime!, false);
       });
@@ -521,10 +526,13 @@ async function getOrCreateAgentRuntime(
           return;
         }
 
-        logger.error({ ...agentLogCtx, err }, 'Agent exec error');
+        logger.error({ ...agentLogCtx, error: err }, `AgentExec: connection failed sessionId=${sessionId}`);
         const failure = buildLocalAgentSessionFailure(sessionId, err);
         void persistAgentRuntimeFailure(sessionId, err).catch((persistError) => {
-          logger.warn({ ...agentLogCtx, err: persistError }, 'Failed to persist agent runtime failure');
+          logger.warn(
+            { ...agentLogCtx, error: persistError },
+            `Session: runtime failure persist failed sessionId=${sessionId}`
+          );
         });
         broadcastAgentMessage(runtime!, {
           type: 'status',
@@ -540,7 +548,10 @@ async function getOrCreateAgentRuntime(
     })()
       .catch(async (error) => {
         await persistAgentRuntimeFailure(sessionId, error).catch((persistError) => {
-          logger.warn({ ...agentLogCtx, err: persistError }, 'Failed to persist agent runtime failure');
+          logger.warn(
+            { ...agentLogCtx, error: persistError },
+            `Session: runtime failure persist failed sessionId=${sessionId}`
+          );
         });
         disposeAgentRuntime(sessionId, runtime!, true);
         throw error;
@@ -587,9 +598,9 @@ async function attachToAgentPodWithRetry(
           ...agentLogCtx,
           attempt,
           maxAttempts: AGENT_EXEC_ATTACH_MAX_ATTEMPTS,
-          err: error,
+          error,
         },
-        'Agent exec attach failed; retrying while pod becomes ready'
+        `AgentExec: attach retry podName=${podName} namespace=${namespace} attempt=${attempt} maxAttempts=${AGENT_EXEC_ATTACH_MAX_ATTEMPTS}`
       );
 
       await new Promise((resolve) => setTimeout(resolve, AGENT_EXEC_ATTACH_RETRY_DELAY_MS));
@@ -683,7 +694,10 @@ async function handleAgentEditorHttp(
 
     return true;
   } catch (error: any) {
-    logger.error({ err: error, path: pathname, sessionId: match.sessionId }, 'Agent editor proxy request failed');
+    logger.error(
+      { error, path: pathname, sessionId: match.sessionId },
+      `AgentEditor: proxy failed sessionId=${match.sessionId} path=${pathname}`
+    );
     res.statusCode =
       error?.message?.includes('Forbidden') || error?.message?.includes('Authentication')
         ? 401
@@ -730,12 +744,12 @@ app.prepare().then(() => {
         wss.emit('connection', ws, request);
       });
     } else if (parseAgentEditorPath(pathname, false)) {
-      logger.debug(connectionLogCtx, 'Handling upgrade request for agent editor');
+      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=agent_editor');
       wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
         wss.emit('agent-editor', ws, request);
       });
     } else if (pathname?.startsWith(AGENT_SESSION_PATH)) {
-      logger.debug(connectionLogCtx, 'Handling upgrade request for agent session');
+      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=agent_session');
       wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
         wss.emit('agent-session', ws, request);
       });
@@ -897,7 +911,10 @@ app.prepare().then(() => {
       });
 
       ws.on('error', (error) => {
-        logger.warn({ ...editorLogCtx, err: error }, 'Agent editor client WebSocket error');
+        logger.warn(
+          { ...editorLogCtx, error },
+          `AgentEditor: websocket error source=client sessionId=${match.sessionId}`
+        );
         closeUpstream(1011, Buffer.from('Client WebSocket error'));
       });
 
@@ -912,19 +929,25 @@ app.prepare().then(() => {
       });
 
       upstream.on('error', (error) => {
-        logger.warn({ ...editorLogCtx, err: error }, 'Agent editor upstream WebSocket error');
+        logger.warn(
+          { ...editorLogCtx, error },
+          `AgentEditor: websocket error source=upstream sessionId=${match.sessionId}`
+        );
         closeSocket(ws, 1011, 'Editor upstream error');
       });
 
       upstream.on('unexpected-response', (_req, response) => {
         logger.warn(
           { ...editorLogCtx, statusCode: response.statusCode },
-          'Agent editor upstream WebSocket rejected the upgrade'
+          `AgentEditor: upgrade rejected sessionId=${match.sessionId} statusCode=${response.statusCode}`
         );
         closeSocket(ws, 1011, 'Editor upgrade rejected');
       });
     } catch (error: any) {
-      logger.error({ ...editorLogCtx, err: error, sessionId: match.sessionId }, 'Agent editor WebSocket setup error');
+      logger.error(
+        { ...editorLogCtx, error, sessionId: match.sessionId },
+        `AgentEditor: websocket setup failed sessionId=${match.sessionId}`
+      );
       closeSocket(ws, 1008, `Connection error: ${error.message}`);
       if (upstream && upstream.readyState === WebSocket.CONNECTING) {
         upstream.terminate();
@@ -967,7 +990,7 @@ app.prepare().then(() => {
 
       agentLogCtx.podName = session.podName;
       agentLogCtx.namespace = session.namespace;
-      logger.debug(agentLogCtx, 'Agent session WebSocket connected');
+      logger.debug(agentLogCtx, `AgentSession: websocket connected sessionId=${activeSessionId}`);
 
       runtime = await getOrCreateAgentRuntime(
         activeSessionId,
@@ -1016,16 +1039,22 @@ app.prepare().then(() => {
               }
               break;
             default:
-              logger.debug({ ...agentLogCtx, msgType: msg.type }, 'Unknown client message type');
+              logger.debug(
+                { ...agentLogCtx, msgType: msg.type },
+                `AgentSession: message ignored reason=unknown_type sessionId=${activeSessionId} msgType=${msg.type}`
+              );
           }
         } catch (err) {
-          logger.warn({ ...agentLogCtx, err }, 'Failed to process client message');
+          logger.warn({ ...agentLogCtx, error: err }, `AgentSession: message failed sessionId=${activeSessionId}`);
         }
       });
 
       ws.on('close', (code, reason) => {
         const reasonString = reason instanceof Buffer ? reason.toString() : String(reason);
-        logger.debug({ ...agentLogCtx, code, reason: reasonString }, 'Agent WebSocket closed by client');
+        logger.debug(
+          { ...agentLogCtx, code, reason: reasonString },
+          `AgentSession: websocket closed sessionId=${activeSessionId} code=${code} reason=${reasonString}`
+        );
         cleanupLocal();
         if (runtime && sessionId) {
           runtime.clients.delete(ws);
@@ -1034,7 +1063,7 @@ app.prepare().then(() => {
       });
 
       ws.on('error', (error) => {
-        logger.warn({ ...agentLogCtx, err: error }, 'Agent WebSocket error');
+        logger.warn({ ...agentLogCtx, error }, `AgentSession: websocket error sessionId=${activeSessionId}`);
         cleanupLocal();
         if (runtime && sessionId) {
           runtime.clients.delete(ws);
@@ -1042,7 +1071,10 @@ app.prepare().then(() => {
         }
       });
     } catch (error: any) {
-      logger.error({ ...agentLogCtx, err: error }, 'Agent session WebSocket setup error');
+      logger.error(
+        { ...agentLogCtx, error },
+        `AgentSession: websocket setup failed sessionId=${sessionId ?? 'unknown'}`
+      );
       cleanupLocal();
       if (runtime && sessionId) {
         runtime.clients.delete(ws);
