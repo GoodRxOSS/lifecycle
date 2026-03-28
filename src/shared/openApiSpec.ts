@@ -1002,6 +1002,156 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        FeedbackEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            feedbackType: {
+              type: 'string',
+              enum: ['message', 'conversation'],
+            },
+            buildUuid: { type: 'string' },
+            rating: {
+              type: 'string',
+              enum: ['up', 'down'],
+            },
+            text: { type: 'string', nullable: true },
+            userIdentifier: { type: 'string', nullable: true },
+            repo: { type: 'string' },
+            prNumber: { type: 'integer', nullable: true },
+            messageId: { type: 'integer', nullable: true },
+            messagePreview: { type: 'string', nullable: true },
+            costUsd: { type: 'number', nullable: true },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: [
+            'id',
+            'feedbackType',
+            'buildUuid',
+            'rating',
+            'text',
+            'userIdentifier',
+            'repo',
+            'prNumber',
+            'messageId',
+            'messagePreview',
+            'costUsd',
+            'createdAt',
+          ],
+        },
+
+        FeedbackListPaginationMetadata: {
+          type: 'object',
+          properties: {
+            page: { type: 'integer' },
+            limit: { type: 'integer' },
+            totalCount: { type: 'integer' },
+            totalPages: { type: 'integer' },
+          },
+          required: ['page', 'limit', 'totalCount', 'totalPages'],
+        },
+
+        FeedbackListResponseMetadata: {
+          type: 'object',
+          properties: {
+            pagination: { $ref: '#/components/schemas/FeedbackListPaginationMetadata' },
+          },
+          required: ['pagination'],
+        },
+
+        GetAdminFeedbackListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/FeedbackEntry' },
+                },
+                metadata: { $ref: '#/components/schemas/FeedbackListResponseMetadata' },
+              },
+              required: ['data', 'metadata'],
+            },
+          ],
+        },
+
+        ConversationReplayMessage: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            role: {
+              type: 'string',
+              enum: ['user', 'assistant', 'system'],
+            },
+            content: { type: 'string' },
+            timestamp: { type: 'integer' },
+            metadata: {
+              type: 'object',
+              additionalProperties: true,
+            },
+          },
+          required: ['id', 'role', 'content', 'timestamp', 'metadata'],
+        },
+
+        FeedbackConversationReplayData: {
+          type: 'object',
+          properties: {
+            feedbackType: {
+              type: 'string',
+              enum: ['message', 'conversation'],
+            },
+            feedbackId: { type: 'integer' },
+            buildUuid: { type: 'string' },
+            repo: { type: 'string' },
+            ratedMessageId: { type: 'integer', nullable: true },
+            feedbackRating: {
+              type: 'string',
+              enum: ['up', 'down'],
+            },
+            feedbackText: { type: 'string', nullable: true },
+            feedbackUserIdentifier: { type: 'string', nullable: true },
+            feedbackCreatedAt: { type: 'string', format: 'date-time' },
+            conversation: {
+              type: 'object',
+              properties: {
+                messageCount: { type: 'integer' },
+                model: { type: 'string', nullable: true },
+                messages: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/ConversationReplayMessage' },
+                },
+              },
+              required: ['messageCount', 'model', 'messages'],
+            },
+          },
+          required: [
+            'feedbackType',
+            'feedbackId',
+            'buildUuid',
+            'repo',
+            'ratedMessageId',
+            'feedbackRating',
+            'feedbackText',
+            'feedbackUserIdentifier',
+            'feedbackCreatedAt',
+            'conversation',
+          ],
+        },
+
+        GetAdminFeedbackConversationSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/FeedbackConversationReplayData' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
         // ===================================================================
         // AI Chat Schemas
         // ===================================================================

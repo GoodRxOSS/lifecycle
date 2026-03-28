@@ -16,7 +16,7 @@
 
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import type { Deploy } from 'server/models';
-import { resolveAgentSessionServiceCandidates } from '../agentSessionCandidates';
+import { resolveAgentSessionServiceCandidates, resolveRequestedAgentSessionServices } from '../agentSessionCandidates';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 
 describe('agentSessionCandidates', () => {
@@ -119,5 +119,38 @@ services:
 
     const names = resolveAgentSessionServiceCandidates(deploys, lifecycleConfig).map((candidate) => candidate.name);
     expect(names).toEqual(['github-app', 'helm-app']);
+  });
+
+  test('requires repo-qualified service references when names collide across repositories', () => {
+    const candidates = [
+      {
+        name: 'web',
+        type: DeployTypes.GITHUB,
+        deployId: 11,
+        devConfig: { image: 'node:20', command: 'pnpm dev' },
+        repo: 'example-org/ui',
+        branch: 'feature/ui',
+        revision: 'abc123',
+        baseDeploy: { id: 11 } as unknown as Deploy,
+      },
+      {
+        name: 'web',
+        type: DeployTypes.GITHUB,
+        deployId: 12,
+        devConfig: { image: 'node:20', command: 'pnpm dev' },
+        repo: 'example-org/marketing-site',
+        branch: 'feature/web-refresh',
+        revision: 'def456',
+        baseDeploy: { id: 12 } as unknown as Deploy,
+      },
+    ];
+
+    expect(() => resolveRequestedAgentSessionServices(candidates, ['web'])).toThrow(
+      'Multiple services matched the request; specify repo to disambiguate'
+    );
+
+    expect(resolveRequestedAgentSessionServices(candidates, [{ name: 'web', repo: 'example-org/ui' }])).toEqual([
+      candidates[0],
+    ]);
   });
 });

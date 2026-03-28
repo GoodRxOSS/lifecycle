@@ -59,9 +59,7 @@ export async function createAgentEditorService(
   };
 
   const { body: result } = await coreApi.createNamespacedService(namespace, service);
-  logger.info(
-    `editorServiceFactory: created Service name=${serviceName} namespace=${namespace} port=${AGENT_EDITOR_PORT}`
-  );
+  logger.info(`AgentEditor: ready serviceName=${serviceName} namespace=${namespace} port=${AGENT_EDITOR_PORT}`);
   return result;
 }
 
@@ -71,12 +69,10 @@ export async function deleteAgentEditorService(namespace: string, serviceName: s
 
   try {
     await coreApi.deleteNamespacedService(serviceName, namespace);
-    logger.info(`editorServiceFactory: deleted Service name=${serviceName} namespace=${namespace}`);
+    logger.info(`AgentEditor: cleaned serviceName=${serviceName} namespace=${namespace}`);
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(
-        `editorServiceFactory: Service not found (already deleted) name=${serviceName} namespace=${namespace}`
-      );
+      logger.info(`AgentEditor: cleanup skipped reason=not_found serviceName=${serviceName} namespace=${namespace}`);
       return;
     }
 
