@@ -19,7 +19,9 @@ import { Redis } from 'ioredis';
 import { getLogger } from 'server/lib/logger';
 
 interface RegisteredQueue {
-  queue: Queue;
+  name: string;
+  queue: Queue | null;
+  queueProxy?: Queue;
   worker?: Worker;
 }
 
@@ -43,20 +45,59 @@ export default class QueueManager {
       defaultJobOptions?: QueueOptions['defaultJobOptions'];
     }
   ): Queue {
-    const existing = this.registeredQueues.find((r) => r.queue?.name === queueName);
-    if (existing && existing.queue) {
-      return existing.queue;
+    const existing = this.registeredQueues.find((r) => r.name === queueName);
+    if (existing?.queueProxy) {
+      return existing.queueProxy;
     }
 
-    getLogger().debug(`Registering queue: queueName=${queueName}`);
+    const registered: RegisteredQueue = {
+      name: queueName,
+      queue: null,
+    };
 
-    const queue = new Queue(queueName, {
-      connection: options.connection.duplicate ? options.connection.duplicate() : options.connection,
-      defaultJobOptions: options.defaultJobOptions,
+    const getOrCreateQueue = (): Queue => {
+      if (registered.queue) {
+        return registered.queue;
+      }
+
+      getLogger().debug(`Registering queue: queueName=${queueName}`);
+      registered.queue = new Queue(queueName, {
+        connection: options.connection.duplicate ? options.connection.duplicate() : options.connection,
+        defaultJobOptions: options.defaultJobOptions,
+      });
+
+      return registered.queue;
+    };
+
+    const queueProxy = new Proxy({} as Queue, {
+      get(_target, prop) {
+        if (prop === 'name') {
+          return queueName;
+        }
+
+        const queue = getOrCreateQueue();
+        const value = Reflect.get(queue, prop, queue);
+        return typeof value === 'function' ? value.bind(queue) : value;
+      },
+      set(_target, prop, value) {
+        const queue = getOrCreateQueue();
+        return Reflect.set(queue, prop, value, queue);
+      },
+      has(_target, prop) {
+        const queue = getOrCreateQueue();
+        return prop in queue;
+      },
+      ownKeys() {
+        return Reflect.ownKeys(getOrCreateQueue());
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        return Object.getOwnPropertyDescriptor(getOrCreateQueue(), prop);
+      },
     });
 
-    this.registeredQueues.push({ queue });
-    return queue;
+    registered.queueProxy = queueProxy;
+    this.registeredQueues.push(registered);
+    return queueProxy;
   }
 
   public registerWorker(
@@ -88,18 +129,18 @@ export default class QueueManager {
     });
 
     // find queue to associate with worker
-    const registered = this.registeredQueues.find((r) => r.queue?.name === queueName);
+    const registered = this.registeredQueues.find((r) => r.name === queueName);
     if (registered) {
       registered.worker = worker;
     } else {
-      this.registeredQueues.push({ queue: null, worker });
+      this.registeredQueues.push({ name: queueName, queue: null, worker });
     }
 
     return worker;
   }
 
   public getQueues(): Queue[] {
-    return this.registeredQueues.map((r) => r.queue).filter(Boolean);
+    return this.registeredQueues.map((r) => r.queue).filter((queue): queue is Queue => queue != null);
   }
 
   public async emptyAndCloseAllQueues(): Promise<void> {

@@ -110,14 +110,14 @@ describe('ToolSafetyManager', () => {
       expect(callbacks.onToolConfirmation).toHaveBeenCalledWith(confirmDetails);
     });
 
-    it('user cancellation returns USER_CANCELLED error', async () => {
+    it('unconfirmed request returns AWAITING_APPROVAL error', async () => {
       const callbacks = makeCallbacks({ onToolConfirmation: jest.fn().mockResolvedValue(false) });
       const tool = makeTool({
         safetyLevel: ToolSafetyLevel.DANGEROUS,
         shouldConfirmExecution: jest.fn().mockResolvedValue(confirmDetails),
       });
       const result = await manager.safeExecute(tool, {}, callbacks);
-      expect(result.error?.code).toBe('USER_CANCELLED');
+      expect(result.error?.code).toBe('AWAITING_APPROVAL');
     });
 
     it('missing onToolConfirmation returns NO_CONFIRMATION_HANDLER', async () => {

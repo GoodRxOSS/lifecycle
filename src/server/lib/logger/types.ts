@@ -17,6 +17,7 @@
 export interface LogContext {
   correlationId: string;
   buildUuid?: string;
+  newUuid?: string;
   deployUuid?: string;
   serviceName?: string;
   sender?: string;
@@ -25,11 +26,15 @@ export interface LogContext {
   pr?: number;
   branch?: string;
   sha?: string;
+  pipelineId?: string;
+  webhookName?: string;
+  webhookType?: string;
 }
 
 export interface JobDataWithContext {
   correlationId?: string;
   buildUuid?: string;
+  newUuid?: string;
   deployUuid?: string;
   serviceName?: string;
   sender?: string;
@@ -37,5 +42,8 @@ export interface JobDataWithContext {
   pr?: number;
   branch?: string;
   sha?: string;
+  pipelineId?: string;
+  webhookName?: string;
+  webhookType?: string;
   _ddTraceContext?: Record<string, string>;
 }

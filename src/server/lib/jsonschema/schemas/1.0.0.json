@@ -157,6 +157,66 @@
               "env"
             ]
           }
+        },
+        "agentSession": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "editor": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "prewarm": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "services": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1345,6 +1405,63 @@
             "required": [
               "defaultTag",
               "branchName"
+            ]
+          },
+          "dev": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "image": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "installCommand": {
+                "type": "string"
+              },
+              "workDir": {
+                "type": "string"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "env": {
+                "type": "object"
+              },
+              "forwardEnvVarsToAgent": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "agentSession": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pollMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "image",
+              "command"
             ]
           }
         },

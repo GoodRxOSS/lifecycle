@@ -1,5 +1,5 @@
 import { OAS3Options } from 'swagger-jsdoc';
-import { BuildStatus, DeployStatus, DeployTypes } from './constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from './constants';
 
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
@@ -529,6 +529,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           enum: Object.values(BuildStatus),
         },
 
+        BuildKind: {
+          type: 'string',
+          enum: Object.values(BuildKind),
+        },
+
         /**
          * @description The main Build object.
          */
@@ -540,10 +545,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             manifest: { type: 'string', example: 'version: 1.0.0\nservices:\n  web:\n    image: myapp:web\n' },
             uuid: { type: 'string', example: 'white-poetry-596195' },
             status: { $ref: '#/components/schemas/BuildStatus' },
+            kind: { $ref: '#/components/schemas/BuildKind' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
+            baseBuildId: { type: 'integer', nullable: true },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
+            baseBuild: {
+              type: 'object',
+              nullable: true,
+              properties: {
+                id: { type: 'integer' },
+                uuid: { type: 'string' },
+              },
+            },
             pullRequest: { $ref: '#/components/schemas/PullRequest' },
             deploys: {
               type: 'array',
@@ -555,6 +570,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'id',
             'uuid',
             'status',
+            'kind',
             'namespace',
             'manifest',
             'isStatic',
@@ -621,6 +637,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             dockerImage: { type: 'string', example: 'myapp:web' },
             buildLogs: { type: 'string', example: 'https://g.codefresh.io/build/123...' },
             active: { type: 'boolean', example: true },
+            devMode: { type: 'boolean', example: false },
             branchName: { type: 'string', example: 'main' },
             publicUrl: { type: 'string', example: 'http://myapp.example.com' },
             deployableId: { type: 'integer' },
@@ -642,6 +659,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'dockerImage',
             'buildLogs',
             'active',
+            'devMode',
             'branchName',
             'publicUrl',
             'deployableId',
@@ -896,6 +914,156 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                   items: { $ref: '#/components/schemas/AIAgentRepoConfigEntry' },
                 },
               },
+            },
+          ],
+        },
+
+        FeedbackEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            feedbackType: {
+              type: 'string',
+              enum: ['message', 'conversation'],
+            },
+            buildUuid: { type: 'string' },
+            rating: {
+              type: 'string',
+              enum: ['up', 'down'],
+            },
+            text: { type: 'string', nullable: true },
+            userIdentifier: { type: 'string', nullable: true },
+            repo: { type: 'string' },
+            prNumber: { type: 'integer', nullable: true },
+            messageId: { type: 'integer', nullable: true },
+            messagePreview: { type: 'string', nullable: true },
+            costUsd: { type: 'number', nullable: true },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: [
+            'id',
+            'feedbackType',
+            'buildUuid',
+            'rating',
+            'text',
+            'userIdentifier',
+            'repo',
+            'prNumber',
+            'messageId',
+            'messagePreview',
+            'costUsd',
+            'createdAt',
+          ],
+        },
+
+        FeedbackListPaginationMetadata: {
+          type: 'object',
+          properties: {
+            page: { type: 'integer' },
+            limit: { type: 'integer' },
+            totalCount: { type: 'integer' },
+            totalPages: { type: 'integer' },
+          },
+          required: ['page', 'limit', 'totalCount', 'totalPages'],
+        },
+
+        FeedbackListResponseMetadata: {
+          type: 'object',
+          properties: {
+            pagination: { $ref: '#/components/schemas/FeedbackListPaginationMetadata' },
+          },
+          required: ['pagination'],
+        },
+
+        GetAdminFeedbackListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/FeedbackEntry' },
+                },
+                metadata: { $ref: '#/components/schemas/FeedbackListResponseMetadata' },
+              },
+              required: ['data', 'metadata'],
+            },
+          ],
+        },
+
+        ConversationReplayMessage: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            role: {
+              type: 'string',
+              enum: ['user', 'assistant', 'system'],
+            },
+            content: { type: 'string' },
+            timestamp: { type: 'integer' },
+            metadata: {
+              type: 'object',
+              additionalProperties: true,
+            },
+          },
+          required: ['id', 'role', 'content', 'timestamp', 'metadata'],
+        },
+
+        FeedbackConversationReplayData: {
+          type: 'object',
+          properties: {
+            feedbackType: {
+              type: 'string',
+              enum: ['message', 'conversation'],
+            },
+            feedbackId: { type: 'integer' },
+            buildUuid: { type: 'string' },
+            repo: { type: 'string' },
+            ratedMessageId: { type: 'integer', nullable: true },
+            feedbackRating: {
+              type: 'string',
+              enum: ['up', 'down'],
+            },
+            feedbackText: { type: 'string', nullable: true },
+            feedbackUserIdentifier: { type: 'string', nullable: true },
+            feedbackCreatedAt: { type: 'string', format: 'date-time' },
+            conversation: {
+              type: 'object',
+              properties: {
+                messageCount: { type: 'integer' },
+                model: { type: 'string', nullable: true },
+                messages: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/ConversationReplayMessage' },
+                },
+              },
+              required: ['messageCount', 'model', 'messages'],
+            },
+          },
+          required: [
+            'feedbackType',
+            'feedbackId',
+            'buildUuid',
+            'repo',
+            'ratedMessageId',
+            'feedbackRating',
+            'feedbackText',
+            'feedbackUserIdentifier',
+            'feedbackCreatedAt',
+            'conversation',
+          ],
+        },
+
+        GetAdminFeedbackConversationSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/FeedbackConversationReplayData' },
+              },
+              required: ['data'],
             },
           ],
         },

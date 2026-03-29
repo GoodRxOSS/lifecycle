@@ -28,6 +28,22 @@ export interface Service001 {
   };
 }
 
+export interface DevConfig {
+  image: string;
+  command: string;
+  installCommand?: string;
+  workDir?: string;
+  ports?: number[];
+  env?: Record<string, string>;
+  forwardEnvVarsToAgent?: string[];
+  agentSession?: {
+    readiness?: {
+      timeoutMs?: number;
+      pollMs?: number;
+    };
+  };
+}
+
 export interface Service {
   readonly name: string;
   appShort?: string;
@@ -35,6 +51,7 @@ export interface Service {
   readonly requires?: DependencyService[];
   readonly deploymentDependsOn?: string[];
   readonly kedaScaleToZero?: KedaScaleToZero;
+  readonly dev?: DevConfig;
 }
 
 export interface KedaScaleToZero {
@@ -388,6 +405,22 @@ export function getDeployType(service: Service): DeployTypes {
   }
 
   return result;
+}
+
+/**
+ * Returns true when Lifecycle owns the service image build inputs.
+ * This is narrower than "participates in build flow" because some services
+ * only reference externally managed images and are not safe dev-mode targets.
+ */
+export function hasLifecycleManagedDockerBuild(service: Service): boolean {
+  switch (getDeployType(service)) {
+    case DeployTypes.GITHUB:
+      return !!(service as GithubService)?.github?.docker?.app?.dockerfilePath;
+    case DeployTypes.HELM:
+      return !!(service as HelmService)?.helm?.docker?.app?.dockerfilePath;
+    default:
+      return false;
+  }
 }
 
 /**

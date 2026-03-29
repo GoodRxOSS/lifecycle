@@ -1,0 +1,320 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import GlobalConfigService from 'server/services/globalConfig';
+import type {
+  AgentSessionClaudeAttribution,
+  AgentSessionClaudeConfig,
+  AgentSessionClaudePermissions,
+  AgentSessionReadinessConfig,
+  AgentSessionResourcesConfig,
+  AgentSessionSchedulingConfig,
+  ResourceRequirements,
+} from 'server/services/types/globalConfig';
+
+export interface AgentSessionRuntimeConfig {
+  image: string;
+  editorImage: string;
+  nodeSelector?: Record<string, string>;
+  readiness: ResolvedAgentSessionReadinessConfig;
+  resources: ResolvedAgentSessionResources;
+  claude: ResolvedAgentSessionClaudeConfig;
+}
+
+export interface ResolvedAgentSessionReadinessConfig {
+  timeoutMs: number;
+  pollMs: number;
+}
+
+export interface ResolvedAgentSessionResourceRequirements {
+  requests: Record<string, string>;
+  limits: Record<string, string>;
+}
+
+export interface ResolvedAgentSessionResources {
+  agent: ResolvedAgentSessionResourceRequirements;
+  editor: ResolvedAgentSessionResourceRequirements;
+}
+
+export interface ResolvedAgentSessionClaudePermissions {
+  allow: string[];
+  deny: string[];
+}
+
+export interface ResolvedAgentSessionClaudeAttribution {
+  commitTemplate: string;
+  prTemplate: string;
+}
+
+export interface ResolvedAgentSessionClaudeConfig {
+  permissions: ResolvedAgentSessionClaudePermissions;
+  attribution: ResolvedAgentSessionClaudeAttribution;
+  appendSystemPrompt?: string;
+}
+
+const DEFAULT_CLAUDE_PERMISSION_ALLOW = ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'];
+const DEFAULT_CLAUDE_PERMISSION_DENY: string[] = [];
+const DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
+const DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
+const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
+const DEFAULT_AGENT_READY_POLL_MS = 2000;
+const DEFAULT_AGENT_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+  requests: {
+    cpu: '500m',
+    memory: '1Gi',
+  },
+  limits: {
+    cpu: '2',
+    memory: '4Gi',
+  },
+};
+const DEFAULT_EDITOR_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+  requests: {
+    cpu: '250m',
+    memory: '512Mi',
+  },
+  limits: {
+    cpu: '1',
+    memory: '1Gi',
+  },
+};
+
+function normalizeStringArray(values: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(values)) {
+    return [...fallback];
+  }
+
+  const normalized = values
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return normalized.length > 0 ? normalized : [...fallback];
+}
+
+function normalizeAttributionTemplate(template: unknown, fallback: string): string {
+  return typeof template === 'string' && template.trim() ? template.trim() : fallback;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(values)
+      .filter(([key, value]) => typeof key === 'string' && key.trim() && typeof value === 'string' && value.trim())
+      .map(([key, value]) => [key.trim(), value.trim()])
+  );
+}
+
+function mergeResourceRequirements(
+  fallback: ResolvedAgentSessionResourceRequirements,
+  overrides?: ResourceRequirements | null
+): ResolvedAgentSessionResourceRequirements {
+  return {
+    requests: {
+      ...fallback.requests,
+      ...normalizeResourceQuantityMap(overrides?.requests),
+    },
+    limits: {
+      ...fallback.limits,
+      ...normalizeResourceQuantityMap(overrides?.limits),
+    },
+  };
+}
+
+function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null): Record<string, string> | undefined {
+  const nodeSelector = scheduling?.nodeSelector;
+
+  if (!nodeSelector || typeof nodeSelector !== 'object' || Array.isArray(nodeSelector)) {
+    return undefined;
+  }
+
+  const normalized = Object.fromEntries(
+    Object.entries(nodeSelector)
+      .filter(([key, value]) => typeof key === 'string' && key.trim() && typeof value === 'string' && value.trim())
+      .map(([key, value]) => [key.trim(), value.trim()])
+  );
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function getDefaultReadinessConfig(): ResolvedAgentSessionReadinessConfig {
+  return {
+    timeoutMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_TIMEOUT_MS) ?? DEFAULT_AGENT_READY_TIMEOUT_MS,
+    pollMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_POLL_MS) ?? DEFAULT_AGENT_READY_POLL_MS,
+  };
+}
+
+export function resolveAgentSessionReadinessFromDefaults(
+  readinessDefaults?: AgentSessionReadinessConfig | null
+): ResolvedAgentSessionReadinessConfig {
+  const defaults = getDefaultReadinessConfig();
+
+  return {
+    timeoutMs: normalizeNonNegativeInteger(readinessDefaults?.timeoutMs) ?? defaults.timeoutMs,
+    pollMs: normalizeNonNegativeInteger(readinessDefaults?.pollMs) ?? defaults.pollMs,
+  };
+}
+
+export function mergeAgentSessionReadiness(
+  baseReadiness: ResolvedAgentSessionReadinessConfig,
+  overrides?: AgentSessionReadinessConfig | null
+): ResolvedAgentSessionReadinessConfig {
+  return {
+    timeoutMs: normalizeNonNegativeInteger(overrides?.timeoutMs) ?? baseReadiness.timeoutMs,
+    pollMs: normalizeNonNegativeInteger(overrides?.pollMs) ?? baseReadiness.pollMs,
+  };
+}
+
+export function mergeAgentSessionReadinessForServices(
+  baseReadiness: ResolvedAgentSessionReadinessConfig,
+  overrides: Array<AgentSessionReadinessConfig | null | undefined>
+): ResolvedAgentSessionReadinessConfig {
+  const timeoutOverrides = overrides
+    .map((override) => normalizeNonNegativeInteger(override?.timeoutMs))
+    .filter((value): value is number => value !== undefined);
+  const pollOverrides = overrides
+    .map((override) => normalizeNonNegativeInteger(override?.pollMs))
+    .filter((value): value is number => value !== undefined);
+
+  return {
+    timeoutMs: timeoutOverrides.length > 0 ? Math.max(...timeoutOverrides) : baseReadiness.timeoutMs,
+    pollMs: pollOverrides.length > 0 ? Math.min(...pollOverrides) : baseReadiness.pollMs,
+  };
+}
+
+export function resolveAgentSessionResourcesFromDefaults(
+  resourceDefaults?: AgentSessionResourcesConfig | null
+): ResolvedAgentSessionResources {
+  return {
+    agent: mergeResourceRequirements(DEFAULT_AGENT_RESOURCES, resourceDefaults?.agent),
+    editor: mergeResourceRequirements(DEFAULT_EDITOR_RESOURCES, resourceDefaults?.editor),
+  };
+}
+
+export function mergeAgentSessionResources(
+  baseResources: ResolvedAgentSessionResources,
+  overrides?: AgentSessionResourcesConfig | null
+): ResolvedAgentSessionResources {
+  return {
+    agent: mergeResourceRequirements(baseResources.agent, overrides?.agent),
+    editor: mergeResourceRequirements(baseResources.editor, overrides?.editor),
+  };
+}
+
+export function resolveAgentSessionClaudeConfigFromDefaults(
+  claudeDefaults?: AgentSessionClaudeConfig | null
+): ResolvedAgentSessionClaudeConfig {
+  const permissions: AgentSessionClaudePermissions | undefined = claudeDefaults?.permissions;
+  const attribution: AgentSessionClaudeAttribution | undefined = claudeDefaults?.attribution;
+
+  return {
+    permissions: {
+      allow: normalizeStringArray(permissions?.allow, DEFAULT_CLAUDE_PERMISSION_ALLOW),
+      deny: normalizeStringArray(permissions?.deny, DEFAULT_CLAUDE_PERMISSION_DENY),
+    },
+    attribution: {
+      commitTemplate: normalizeAttributionTemplate(
+        attribution?.commitTemplate,
+        DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE
+      ),
+      prTemplate: normalizeAttributionTemplate(attribution?.prTemplate, DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE),
+    },
+    appendSystemPrompt: normalizeOptionalString(claudeDefaults?.appendSystemPrompt),
+  };
+}
+
+export async function resolveAgentSessionClaudeConfig(): Promise<ResolvedAgentSessionClaudeConfig> {
+  const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  return resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude);
+}
+
+export function renderAgentSessionClaudeAttribution(template: string, appName: string | null): string {
+  const trimmedTemplate = template.trim();
+  if (!trimmedTemplate) {
+    return '';
+  }
+
+  if (trimmedTemplate.includes('{appName}')) {
+    const trimmedAppName = appName?.trim();
+    if (!trimmedAppName) {
+      return '';
+    }
+
+    return trimmedTemplate.replace(/\{appName\}/g, trimmedAppName).trim();
+  }
+
+  return trimmedTemplate;
+}
+
+export class AgentSessionRuntimeConfigError extends Error {
+  readonly missingFields: Array<'image' | 'editorImage'>;
+
+  constructor(missingFields: Array<'image' | 'editorImage'>) {
+    super(`Agent session runtime is not configured. Missing ${missingFields.join(' and ')}.`);
+    this.name = 'AgentSessionRuntimeConfigError';
+    this.missingFields = missingFields;
+  }
+}
+
+export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRuntimeConfig> {
+  const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  const image = agentSessionDefaults?.image?.trim() || '';
+  const editorImage = agentSessionDefaults?.editorImage?.trim() || '';
+  const missingFields: Array<'image' | 'editorImage'> = [];
+
+  if (!image) {
+    missingFields.push('image');
+  }
+
+  if (!editorImage) {
+    missingFields.push('editorImage');
+  }
+
+  if (missingFields.length > 0) {
+    throw new AgentSessionRuntimeConfigError(missingFields);
+  }
+
+  return {
+    image,
+    editorImage,
+    nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
+    readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),
+    resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
+    claude: resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude),
+  };
+}

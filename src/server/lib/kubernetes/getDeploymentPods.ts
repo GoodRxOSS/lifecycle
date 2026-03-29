@@ -17,6 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 
 import { getLogger } from 'server/lib/logger';
+import Build from 'server/models/Build';
 
 type ContainerState = 'Running' | 'Waiting' | 'Terminated' | 'Unknown';
 
@@ -38,6 +39,14 @@ export interface PodInfo {
   age: string;
   ready: string; // "X/Y"
   containers: ContainerInfo[];
+}
+
+async function resolveBuildNamespace(uuid: string): Promise<string> {
+  const build = await Build.query()
+    .findOne({ uuid })
+    .select('namespace')
+    .catch(() => null);
+  return build?.namespace || `env-${uuid}`;
 }
 
 function loadKubeConfig(): k8s.KubeConfig {
@@ -93,6 +102,20 @@ function podAgeSeconds(pod: k8s.V1Pod): number {
   const created = pod.metadata?.creationTimestamp;
   if (!created) return 0;
   return Math.max(0, Math.floor((Date.now() - new Date(created).getTime()) / 1000));
+}
+
+function isTerminalPod(pod: k8s.V1Pod): boolean {
+  if (pod.metadata?.deletionTimestamp) {
+    return true;
+  }
+
+  const phase = pod.status?.phase;
+  if (phase === 'Succeeded' || phase === 'Failed') {
+    return true;
+  }
+
+  const appContainerStatuses = pod.status?.containerStatuses ?? [];
+  return appContainerStatuses.length > 0 && appContainerStatuses.every((status) => Boolean(status.state?.terminated));
 }
 
 function containerState(cs?: k8s.V1ContainerStatus): { state: ContainerState; reason?: string } {
@@ -157,7 +180,7 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
   const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
-    const namespace = `env-${uuid}`;
+    const namespace = await resolveBuildNamespace(uuid);
     const fullDeploymentName = `${deploymentName}-${uuid}`;
 
     const workloadSelector = `app.kubernetes.io/instance=${fullDeploymentName}`;
@@ -207,26 +230,28 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
       labelSelector
     );
 
-    const pods = podResp.body.items ?? [];
+    const pods = (podResp.body.items ?? []).filter((pod) => !isTerminalPod(pod));
 
     if (pods.length === 0) {
       return [];
     }
 
-    return pods.map((pod) => {
-      const ageSeconds = podAgeSeconds(pod);
-      const containers = extractContainers(pod);
+    return pods
+      .map((pod) => {
+        const ageSeconds = podAgeSeconds(pod);
+        const containers = extractContainers(pod);
 
-      return {
-        podName: pod.metadata?.name ?? '',
-        status: podStatus(pod),
-        restarts: podRestarts(pod),
-        ageSeconds,
-        age: formatAge(ageSeconds),
-        ready: podReady(pod),
-        containers,
-      };
-    });
+        return {
+          podName: pod.metadata?.name ?? '',
+          status: podStatus(pod),
+          restarts: podRestarts(pod),
+          ageSeconds,
+          age: formatAge(ageSeconds),
+          ready: podReady(pod),
+          containers,
+        };
+      })
+      .sort((left, right) => left.ageSeconds - right.ageSeconds);
   } catch (error) {
     getLogger().error({ error }, `K8s: failed to list workload pods service=${deploymentName}`);
     throw error;

@@ -20,6 +20,7 @@ export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
   helmDefaults: HelmDefaults;
   buildDefaults?: BuildDefaults;
+  agentSessionDefaults?: AgentSessionDefaults;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -48,7 +49,52 @@ export type AppSetup = {
   restarted: boolean;
   url: string;
   state: string;
+  name?: string;
   org?: string;
+};
+
+export type AgentSessionClaudePermissions = {
+  allow?: string[];
+  deny?: string[];
+};
+
+export type AgentSessionClaudeAttribution = {
+  commitTemplate?: string;
+  prTemplate?: string;
+};
+
+export type AgentSessionClaudeConfig = {
+  permissions?: AgentSessionClaudePermissions;
+  attribution?: AgentSessionClaudeAttribution;
+  appendSystemPrompt?: string;
+};
+
+export type AgentSessionSchedulingConfig = {
+  nodeSelector?: Record<string, string> | null;
+};
+
+export type AgentSessionReadinessConfig = {
+  timeoutMs?: number | string | null;
+  pollMs?: number | string | null;
+};
+
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+};
+
+export type AgentSessionResourcesConfig = {
+  agent?: ResourceRequirements | null;
+  editor?: ResourceRequirements | null;
+};
+
+export type AgentSessionDefaults = {
+  image?: string | null;
+  editorImage?: string | null;
+  scheduling?: AgentSessionSchedulingConfig;
+  readiness?: AgentSessionReadinessConfig;
+  resources?: AgentSessionResourcesConfig;
+  claude?: AgentSessionClaudeConfig;
 };
 
 export type RoleSettings = {
@@ -138,11 +184,6 @@ export type BuildDefaults = {
     healthCheckTimeout?: number;
     insecure?: boolean;
   };
-};
-
-export type ResourceRequirements = {
-  requests?: Record<string, string>;
-  limits?: Record<string, string>;
 };
 
 export type CommentToggleConfig = {

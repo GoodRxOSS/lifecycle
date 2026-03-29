@@ -22,7 +22,7 @@ export interface RBACConfig {
   namespace: string;
   serviceAccountName: string;
   awsRoleArn?: string;
-  permissions: 'build' | 'deploy' | 'full';
+  permissions: 'build' | 'deploy' | 'full' | 'read';
 }
 
 const PERMISSION_RULES = {
@@ -35,6 +35,58 @@ const PERMISSION_RULES = {
     {
       apiGroups: [''],
       resources: ['pods', 'pods/log'],
+      verbs: ['get', 'list', 'watch'],
+    },
+  ],
+  read: [
+    {
+      apiGroups: [''],
+      resources: [
+        'configmaps',
+        'endpoints',
+        'events',
+        'persistentvolumeclaims',
+        'pods',
+        'pods/log',
+        'replicationcontrollers',
+        'resourcequotas',
+        'services',
+      ],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['apps'],
+      resources: ['controllerrevisions', 'daemonsets', 'deployments', 'replicasets', 'statefulsets'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['batch'],
+      resources: ['cronjobs', 'jobs'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['networking.k8s.io'],
+      resources: ['ingresses', 'networkpolicies'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['autoscaling'],
+      resources: ['horizontalpodautoscalers'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['discovery.k8s.io'],
+      resources: ['endpointslices'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['events.k8s.io'],
+      resources: ['events'],
+      verbs: ['get', 'list', 'watch'],
+    },
+    {
+      apiGroups: ['policy'],
+      resources: ['poddisruptionbudgets'],
       verbs: ['get', 'list', 'watch'],
     },
   ],
@@ -181,6 +233,17 @@ export async function setupBuildServiceAccountInNamespace(
     serviceAccountName,
     awsRoleArn,
     permissions: 'build',
+  });
+}
+
+export async function setupReadOnlyServiceAccountInNamespace(
+  namespace: string,
+  serviceAccountName: string = 'agent-sa'
+): Promise<void> {
+  await setupServiceAccountWithRBAC({
+    namespace,
+    serviceAccountName,
+    permissions: 'read',
   });
 }
 
