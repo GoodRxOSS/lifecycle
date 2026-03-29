@@ -55,6 +55,7 @@ const LEGACY_AGENT_EDITOR_PATH_PREFIX = '/api/v2/ai/agent/sessions/';
 const LEGACY_AGENT_EDITOR_PATH_SUFFIX = '/editor';
 const AGENT_EDITOR_COOKIE_NAME = 'lfc_agent_editor_auth';
 const AGENT_EDITOR_PORT = parseInt(process.env.AGENT_EDITOR_PORT || '13337', 10);
+const AGENT_EDITOR_HEARTBEAT_INTERVAL_MS = parseInt(process.env.AGENT_EDITOR_HEARTBEAT_INTERVAL_MS || '15000', 10);
 const AGENT_RUNTIME_IDLE_TIMEOUT_MS = parseInt(process.env.AGENT_RUNTIME_IDLE_TIMEOUT_MS || '60000', 10);
 const AGENT_EXEC_ATTACH_RETRY_DELAY_MS = parseInt(process.env.AGENT_EXEC_ATTACH_RETRY_DELAY_MS || '500', 10);
 const AGENT_EXEC_ATTACH_MAX_ATTEMPTS = parseInt(process.env.AGENT_EXEC_ATTACH_MAX_ATTEMPTS || '20', 10);
@@ -355,6 +356,16 @@ function closeSocket(ws: WebSocket, code: number, reason: string) {
   }
 
   ws.close(1000, safeReason);
+}
+
+function normalizeWebSocketCloseReason(reason?: Buffer | string): string | undefined {
+  if (!reason) {
+    return undefined;
+  }
+
+  const value = typeof reason === 'string' ? reason : reason.toString();
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function buildClaudeUserMessage(content: string): string {
@@ -864,6 +875,7 @@ app.prepare().then(() => {
     }
 
     let upstream: WebSocket | null = null;
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
     try {
       const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
@@ -892,13 +904,44 @@ app.prepare().then(() => {
           return;
         }
 
-        const closeReason = reason?.toString();
+        const closeReason = normalizeWebSocketCloseReason(reason);
         if (isSendableCloseCode(code)) {
           upstream.close(code, closeReason);
         } else {
           upstream.close();
         }
       };
+
+      const clearHeartbeat = () => {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+      };
+
+      const logEditorClose = (source: 'client' | 'upstream', code: number, reason?: Buffer | string) => {
+        logger.info(
+          {
+            ...editorLogCtx,
+            source,
+            sessionId: match.sessionId,
+            code,
+            reason: normalizeWebSocketCloseReason(reason),
+          },
+          `AgentEditor: websocket closed source=${source} sessionId=${match.sessionId} code=${code}`
+        );
+      };
+
+      if (AGENT_EDITOR_HEARTBEAT_INTERVAL_MS > 0) {
+        heartbeatInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+          }
+          if (upstream?.readyState === WebSocket.OPEN) {
+            upstream.ping();
+          }
+        }, AGENT_EDITOR_HEARTBEAT_INTERVAL_MS);
+      }
 
       ws.on('message', (data, isBinary) => {
         if (upstream?.readyState === WebSocket.OPEN) {
@@ -907,10 +950,13 @@ app.prepare().then(() => {
       });
 
       ws.on('close', (code, reason) => {
+        clearHeartbeat();
+        logEditorClose('client', code, reason);
         closeUpstream(code, reason);
       });
 
       ws.on('error', (error) => {
+        clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, error },
           `AgentEditor: websocket error source=client sessionId=${match.sessionId}`
@@ -925,10 +971,17 @@ app.prepare().then(() => {
       });
 
       upstream.on('close', (code, reason) => {
-        closeSocket(ws, code === 1005 ? 1000 : code, reason.toString() || 'Editor connection closed');
+        clearHeartbeat();
+        logEditorClose('upstream', code, reason);
+        closeSocket(
+          ws,
+          code === 1005 ? 1000 : code,
+          normalizeWebSocketCloseReason(reason) || 'Editor connection closed'
+        );
       });
 
       upstream.on('error', (error) => {
+        clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, error },
           `AgentEditor: websocket error source=upstream sessionId=${match.sessionId}`
@@ -937,6 +990,7 @@ app.prepare().then(() => {
       });
 
       upstream.on('unexpected-response', (_req, response) => {
+        clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, statusCode: response.statusCode },
           `AgentEditor: upgrade rejected sessionId=${match.sessionId} statusCode=${response.statusCode}`
@@ -948,6 +1002,9 @@ app.prepare().then(() => {
         { ...editorLogCtx, error, sessionId: match.sessionId },
         `AgentEditor: websocket setup failed sessionId=${match.sessionId}`
       );
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+      }
       closeSocket(ws, 1008, `Connection error: ${error.message}`);
       if (upstream && upstream.readyState === WebSocket.CONNECTING) {
         upstream.terminate();
