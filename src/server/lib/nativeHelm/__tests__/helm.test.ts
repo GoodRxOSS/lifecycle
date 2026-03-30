@@ -206,7 +206,7 @@ describe('Native Helm', () => {
 
       expect(result).toContain('helm upgrade --install my-release my-chart');
       expect(result).toContain('--namespace my-namespace');
-      expect(result).toContain('--set "key=value"');
+      expect(result).toContain(`--set 'key=value'`);
       expect(result).toContain('-f values.yaml');
       // Should not have any default args when none provided
       expect(result).not.toContain('--wait');
@@ -281,8 +281,8 @@ describe('Native Helm', () => {
         // no defaultArgs
       );
 
-      expect(result).toContain('--set "key1=value1"');
-      expect(result).toContain('--set "key2=value2"');
+      expect(result).toContain(`--set 'key1=value1'`);
+      expect(result).toContain(`--set 'key2=value2'`);
       expect(result).toContain('-f values1.yaml');
       expect(result).toContain('-f values2.yaml');
     });
@@ -303,7 +303,7 @@ describe('Native Helm', () => {
 
       expect(result).toContain('helm upgrade --install my-release my-chart');
       expect(result).toContain('--namespace my-namespace');
-      expect(result).toContain('--set "key=value"');
+      expect(result).toContain(`--set 'key=value'`);
       expect(result).toContain('-f values.yaml');
       expect(result).toContain('--force --timeout 60m0s --wait');
       expect(result).not.toContain('--wait --timeout 30m');
@@ -415,7 +415,7 @@ describe('Native Helm', () => {
         'helm upgrade --install my-release oci://ghcr.io/prometheus-community/helm-charts/prometheus'
       );
       expect(result).toContain('--namespace my-namespace');
-      expect(result).toContain('--set "key=value"');
+      expect(result).toContain(`--set 'key=value'`);
       expect(result).toContain('-f values.yaml');
     });
 
@@ -437,8 +437,8 @@ describe('Native Helm', () => {
       expect(result).toContain('helm upgrade --install my-release oci://ghcr.io/myorg/charts/postgresql');
       expect(result).toContain('--namespace my-namespace');
       expect(result).toContain('--version 12.9.0');
-      expect(result).toContain('--set "auth.username=admin"');
-      expect(result).toContain('--set "auth.password=secret"');
+      expect(result).toContain(`--set 'auth.username=admin'`);
+      expect(result).toContain(`--set 'auth.password=secret'`);
       expect(result).toContain('--wait');
     });
 
@@ -460,7 +460,7 @@ describe('Native Helm', () => {
       expect(result).toContain('helm upgrade --install my-release prometheus-community/prometheus');
       expect(result).toContain('--namespace my-namespace');
       expect(result).toContain('--version 25.11.0');
-      expect(result).toContain('--set "server.replicaCount=2"');
+      expect(result).toContain(`--set 'server.replicaCount=2'`);
     });
 
     it('should not add chart version for LOCAL charts even when version is specified', () => {
@@ -481,6 +481,22 @@ describe('Native Helm', () => {
       expect(result).toContain('helm upgrade --install my-release ./my-local-chart');
       expect(result).toContain('--namespace my-namespace');
       expect(result).not.toContain('--version');
+    });
+
+    it('should preserve inner double quotes in --set keys for annotation paths', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['ingress.extraAnnotations."app\\.kubernetes\\.io/name"=my-app'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://example.com/charts'
+      );
+
+      expect(result).toContain(`--set 'ingress.extraAnnotations."app\\.kubernetes\\.io/name"=my-app'`);
     });
 
     it('should not add chart version for PUBLIC charts when version is not specified', () => {
@@ -519,7 +535,7 @@ describe('Native Helm', () => {
       expect(result).toContain('helm upgrade --install my-release helm-app');
       expect(result).toContain('--namespace my-namespace');
       expect(result).toContain('--version 2.0.9');
-      expect(result).toContain('--set "deployment.appImage=myapp:latest"');
+      expect(result).toContain(`--set 'deployment.appImage=myapp:latest'`);
     });
 
     it('should not add chart version for ORG_CHART when version is not specified', () => {

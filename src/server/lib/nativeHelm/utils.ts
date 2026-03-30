@@ -96,9 +96,9 @@ export function constructHelmCommand(
       const key = value.substring(0, equalIndex);
       const val = value.substring(equalIndex + 1);
       const escapedVal = escapeHelmValue(val);
-      command += ` --set "${key}=${escapedVal}"`;
+      command += ` --set '${key}=${escapedVal}'`;
     } else {
-      command += ` --set "${value}"`;
+      command += ` --set '${value}'`;
     }
   });
 
