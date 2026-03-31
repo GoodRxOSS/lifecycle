@@ -44,7 +44,7 @@ importers:
         specifier: ^2.1004.0
         version: 2.1004.0
       axios:
-        specifier: ^0.30.0
+        specifier: 0.30.0
         version: 0.30.0
       bcryptjs:
         specifier: ^3.0.2

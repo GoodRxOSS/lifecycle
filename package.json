@@ -38,7 +38,7 @@
     "@octokit/webhooks": "^12.0.1",
     "@types/react-syntax-highlighter": "^15.5.13",
     "aws-sdk": "^2.1004.0",
-    "axios": "^0.30.0",
+    "axios": "0.30.0",
     "bcryptjs": "^3.0.2",
     "bullmq": "5.56.8",
     "cockatiel": "^3.2.1",
