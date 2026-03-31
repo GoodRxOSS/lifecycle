@@ -18,7 +18,7 @@ import BaseService from './_service';
 import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
 import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
-import { APP_HOST, QUEUE_NAMES, LIFECYCLE_UI_URL } from 'shared/config';
+import { QUEUE_NAMES, LIFECYCLE_UI_URL } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
 import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
@@ -48,7 +48,6 @@ import { nanoid } from 'nanoid';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
-import { shouldUseNativeHelm } from 'server/lib/nativeHelm';
 
 const createDeployMessage = async () => {
   const deployLabel = await getDeployLabel();
@@ -745,33 +744,6 @@ export default class ActivityStream extends BaseService {
     }
   }
 
-  private async hasAnyServiceWithDeployLogs(deploys: Deploy[]): Promise<boolean> {
-    for (const deploy of deploys) {
-      if ((await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private async isNativeHelmDeployment(deploy: Deploy): Promise<boolean> {
-    return deploy.deployable?.type === DeployTypes.HELM && (await shouldUseNativeHelm(deploy));
-  }
-
-  private isNativeBuildDeployment(deploy: Deploy): boolean {
-    if (!deploy.deployable) return false;
-    return (
-      [DeployTypes.GITHUB, DeployTypes.HELM].includes(deploy.deployable.type) &&
-      ['buildkit', 'kaniko'].includes(deploy.deployable.builder?.engine)
-    );
-  }
-
-  private isGitHubKubernetesDeployment(deploy: Deploy): boolean {
-    if (!deploy.deployable) return false;
-    const deployType = deploy.deployable.type;
-    return deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType);
-  }
-
   /**
    * Generating comment message for status comment for the PR. This comment block should be dynamic change based on build status.
    * @param build
@@ -906,22 +878,8 @@ export default class ActivityStream extends BaseService {
   ): Promise<string> {
     let message = '';
 
-    // Check if any service should show deploy logs column
-    const hasDeployLogsColumn = await this.hasAnyServiceWithDeployLogs(deploys);
-
-    // Add table headers
-    message += '| Service | Branch | Status | Build Pipeline |';
-    if (hasDeployLogsColumn) {
-      message += ' Deploy Logs |';
-    }
-    message += '\n';
-
-    // Add separator row
-    message += '|---|---|---|---|';
-    if (hasDeployLogsColumn) {
-      message += '---|';
-    }
-    message += '\n';
+    message += '| Service | Branch | Status |\n';
+    message += '|---|---|---|\n';
 
     await build?.$fetchGraph('[deploys.[service, deployable.repository]]');
     deploys = build.deploys;
@@ -941,68 +899,12 @@ export default class ActivityStream extends BaseService {
 
       if (isSelectedDeployType == null || isSelectedDeployType(deploy, build.enableFullYaml, orgChartName)) {
         if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
-          // Show Build Logs link if:
-          // 1. It's a Codefresh build and buildLogs URL exists, OR
-          // 2. It's a Native Build V2 deployment
-          let buildLogsColumn = '';
-          if (deploy.buildLogs) {
-            // Keep existing Codefresh build logs URL
-            buildLogsColumn = deploy.buildLogs;
-          } else if (this.isNativeBuildDeployment(deploy)) {
-            // Always show Native Build logs link - we query Kubernetes directly
-            const actualServiceName = deploy.deployable?.name || serviceName;
-            buildLogsColumn = `[Build Logs](${APP_HOST}/builds/${build.uuid}/services/${actualServiceName}/buildLogs)`;
-          }
-
-          let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
-            deploy
-          )}_ | ${buildLogsColumn} |`;
-
-          if (hasDeployLogsColumn) {
-            const deployLogsColumn =
-              (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
-                ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                    deploy.deployable?.name || serviceName
-                  }/deployLogs)`
-                : '';
-            row += ` ${deployLogsColumn} |`;
-          }
-
-          message += row + '\n';
+          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(deploy)}_ |\n`;
         } else if (CLIDeployTypes.has(serviceType) && deploy.active) {
           if (serviceType === DeployTypes.CODEFRESH) {
-            // For Codefresh, just keep the existing buildLogs URL if available
-            const buildLogsColumn = deploy.buildLogs || '';
-
-            let row = `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(
-              deploy
-            )}_ | ${buildLogsColumn} |`;
-
-            if (hasDeployLogsColumn) {
-              const deployLogsColumn =
-                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
-                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                      deploy.deployable?.name || serviceName
-                    }/deployLogs)`
-                  : '';
-              row += ` ${deployLogsColumn} |`;
-            }
-
-            message += row + '\n';
+            message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(deploy)}_ |\n`;
           } else {
-            let row = `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ ||`;
-
-            if (hasDeployLogsColumn) {
-              const deployLogsColumn =
-                (await this.isNativeHelmDeployment(deploy)) || this.isGitHubKubernetesDeployment(deploy)
-                  ? `[Deploy Logs](${APP_HOST}/builds/${build.uuid}/services/${
-                      deploy.deployable?.name || serviceName
-                    }/deployLogs)`
-                  : '';
-              row += ` ${deployLogsColumn} |`;
-            }
-
-            message += row + '\n';
+            message += `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ |\n`;
           }
         }
       }

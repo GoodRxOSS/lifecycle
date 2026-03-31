@@ -42,7 +42,6 @@ jest.mock('server/services/globalConfig', () => {
   };
 });
 
-jest.mock('axios');
 jest.mock('server/lib/github/client');
 jest.mock('server/lib/github/utils');
 jest.mock('server/lib/logger', () => ({

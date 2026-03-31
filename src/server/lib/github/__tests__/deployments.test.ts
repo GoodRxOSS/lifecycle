@@ -45,8 +45,6 @@ jest.mock('server/lib/github/client');
 jest.mock('server/lib/github/index', () => ({
   getPullRequest: jest.fn(),
 }));
-jest.mock('axios');
-
 describe('GitHub Deployment Functions', () => {
   const mockPatch = jest.fn();
 
