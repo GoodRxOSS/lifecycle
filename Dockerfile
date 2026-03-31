@@ -55,7 +55,7 @@ FROM base AS packages
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install
+RUN pnpm install --frozen-lockfile
 
 FROM packages
 
