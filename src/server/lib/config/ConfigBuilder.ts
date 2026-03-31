@@ -31,6 +31,8 @@ export interface HelmConfig {
   nativeHelm?: {
     enabled?: boolean;
     defaultArgs?: string;
+    image?: string;
+    postRendererPath?: string;
   };
 }
 
@@ -57,6 +59,8 @@ export interface GlobalConfig {
   nativeHelm?: {
     enabled?: boolean;
     defaultArgs?: string;
+    image?: string;
+    postRendererPath?: string;
   };
 }
 

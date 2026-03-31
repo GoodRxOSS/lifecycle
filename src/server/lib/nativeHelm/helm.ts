@@ -85,7 +85,9 @@ export async function createHelmContainer(
   chartRepoUrl?: string,
   defaultArgs?: string,
   chartVersion?: string,
-  registryAuth?: RegistryAuthConfig
+  registryAuth?: RegistryAuthConfig,
+  helmImage?: string,
+  postRendererPath?: string
 ): Promise<any> {
   const script = generateHelmInstallScript(
     repoName,
@@ -99,12 +101,13 @@ export async function createHelmContainer(
     chartRepoUrl,
     defaultArgs,
     chartVersion,
-    registryAuth
+    registryAuth,
+    postRendererPath
   );
 
   return {
     name: 'helm-deploy',
-    image: `${HELM_IMAGE_PREFIX}:${helmVersion}`,
+    image: helmImage || `${HELM_IMAGE_PREFIX}:${helmVersion}`,
     env: [
       { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
       { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
@@ -155,6 +158,8 @@ export async function generateHelmManifest(
   const helmArgs = mergedHelmConfig.args;
   const defaultArgs = mergedHelmConfig.nativeHelm?.defaultArgs;
   const registryAuth = detectRegistryAuth(chartRepoUrl);
+  const helmImage = mergedHelmConfig.nativeHelm?.image;
+  const postRendererPath = mergedHelmConfig.nativeHelm?.postRendererPath;
 
   const helmContainer = await createHelmContainer(
     repository?.fullName || 'no-repo',
@@ -171,7 +176,9 @@ export async function generateHelmManifest(
     chartRepoUrl,
     defaultArgs,
     chartVersion,
-    registryAuth
+    registryAuth,
+    helmImage,
+    postRendererPath
   );
 
   const volumeConfig = {

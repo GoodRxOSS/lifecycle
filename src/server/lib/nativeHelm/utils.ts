@@ -56,7 +56,8 @@ export function constructHelmCommand(
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
-  chartVersion?: string
+  chartVersion?: string,
+  postRendererPath?: string
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -89,6 +90,10 @@ export function constructHelmCommand(
 
   if (chartVersion && (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART)) {
     command += ` --version ${chartVersion}`;
+  }
+
+  if (postRendererPath) {
+    command += ` --post-renderer ${postRendererPath}`;
   }
 
   customValues.forEach((value) => {
@@ -131,7 +136,8 @@ export function generateHelmInstallScript(
   chartRepoUrl?: string,
   defaultArgs?: string,
   chartVersion?: string,
-  registryAuth?: RegistryAuthConfig
+  registryAuth?: RegistryAuthConfig,
+  postRendererPath?: string
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -144,7 +150,8 @@ export function generateHelmInstallScript(
     args,
     chartRepoUrl,
     defaultArgs,
-    chartVersion
+    chartVersion,
+    postRendererPath
   );
 
   let script = [
@@ -866,7 +873,7 @@ export async function validateHelmConfiguration(deploy: Deploy): Promise<string[
 
   // Check for helm version in multiple locations
   const helmVersion = helm.version || helm.nativeHelm?.defaultHelmVersion;
-  if (!helmVersion) {
+  if (!helmVersion && !helm.nativeHelm?.image) {
     errors.push('Helm version is required');
   }
 

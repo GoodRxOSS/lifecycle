@@ -398,6 +398,26 @@ describe('Native Helm', () => {
       expect(result).not.toContain('--timeout 30m');
     });
 
+    it('should include a post-renderer when configured', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--force --timeout 60m0s --wait',
+        undefined,
+        '--wait --timeout 30m',
+        '1.2.3',
+        '/opt/bin/post-renderer'
+      );
+
+      expect(result).toContain('--post-renderer /opt/bin/post-renderer');
+      expect(result).toContain('--version 1.2.3');
+    });
+
     it('should handle OCI chart URLs correctly', () => {
       const result = constructHelmCommand(
         'upgrade --install',
@@ -573,6 +593,32 @@ describe('Native Helm', () => {
       expect(result.args).toHaveLength(1);
       expect(result.args[0]).toContain('helm upgrade --install');
       expect(result.args[0]).toContain('--force --timeout 60m0s --wait');
+    });
+
+    it('should use a configured custom helm image and post-renderer path', async () => {
+      const customImage = 'registry.example.com/custom/helm-with-renderer:1.2.3';
+      const result = await createHelmContainer(
+        'org/repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        '--force --timeout 60m0s --wait',
+        'https://charts.example.com',
+        '--wait --timeout 30m',
+        '1.2.3',
+        undefined,
+        customImage,
+        '/opt/bin/post-renderer'
+      );
+
+      expect(result.image).toBe(customImage);
+      expect(result.args[0]).toContain('--post-renderer /opt/bin/post-renderer');
     });
   });
 

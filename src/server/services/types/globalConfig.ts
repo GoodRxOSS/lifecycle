@@ -168,6 +168,8 @@ export type NativeHelmConfig = {
   jobTimeout?: number;
   serviceAccount?: string;
   defaultArgs?: string;
+  image?: string;
+  postRendererPath?: string;
 };
 
 export type BuildDefaults = {
