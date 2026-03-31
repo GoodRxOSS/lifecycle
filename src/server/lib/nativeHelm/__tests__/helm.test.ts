@@ -483,6 +483,38 @@ describe('Native Helm', () => {
       expect(result).not.toContain('--version');
     });
 
+    it('should preserve inner double quotes in --set keys for annotation paths', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['ingress.extraAnnotations."app\\.kubernetes\\.io/name"=my-app'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://example.com/charts'
+      );
+
+      expect(result).toContain('--set "ingress.extraAnnotations.\\"app\\.kubernetes\\.io/name\\"=my-app"');
+    });
+
+    it('should escape inner double quotes in --set values', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['deployment.env.MSG="hello world"'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://example.com/charts'
+      );
+
+      expect(result).toContain('--set "deployment.env.MSG=\\"hello world\\""');
+    });
+
     it('should not add chart version for PUBLIC charts when version is not specified', () => {
       const result = constructHelmCommand(
         'upgrade --install',

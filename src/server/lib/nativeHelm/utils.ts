@@ -93,12 +93,12 @@ export function constructHelmCommand(
   customValues.forEach((value) => {
     const equalIndex = value.indexOf('=');
     if (equalIndex > -1) {
-      const key = value.substring(0, equalIndex);
+      const key = value.substring(0, equalIndex).replace(/"/g, '\\"');
       const val = value.substring(equalIndex + 1);
-      const escapedVal = escapeHelmValue(val);
+      const escapedVal = escapeHelmValue(val).replace(/"/g, '\\"');
       command += ` --set "${key}=${escapedVal}"`;
     } else {
-      command += ` --set "${value}"`;
+      command += ` --set "${value.replace(/"/g, '\\"')}"`;
     }
   });
 
