@@ -22,6 +22,40 @@ import BuildService from 'server/services/build';
 /**
  * @openapi
  * /api/v2/builds/{uuid}/webhooks:
+ *   get:
+ *     summary: Retrieve webhook invocations for a build
+ *     description: |
+ *       Retrieves all webhook invocations for a specific build,
+ *       ordered by creation date in descending order.
+ *     tags:
+ *       - Builds
+ *     operationId: getWebhooksForBuild
+ *     parameters:
+ *       - in: path
+ *         name: uuid
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The UUID of the build
+ *     responses:
+ *       '200':
+ *         description: List of webhook invocations
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetWebhooksSuccessResponse'
+ *       '404':
+ *         description: Build not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
  *     summary: Invoke webhooks for a build
  *     description: |
@@ -62,7 +96,21 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+  const { uuid: buildUuid } = params;
+
+  const buildService = new BuildService();
+
+  const response = await buildService.getWebhooksForBuild(buildUuid);
+
+  if (response.status === 'not_found') {
+    return errorResponse(response.message, { status: 404 }, req);
+  }
+
+  return successResponse(response.data, { status: 200 }, req);
+};
+
+const putHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
   const { uuid: buildUuid } = params;
 
   const buildService = new BuildService();
@@ -80,4 +128,5 @@ const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string
   }
 };
 
-export const PUT = createApiHandler(PutHandler);
+export const GET = createApiHandler(getHandler);
+export const PUT = createApiHandler(putHandler);

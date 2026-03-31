@@ -451,6 +451,48 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description A single webhook invocation record.
+         */
+        WebhookInvocation: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            buildId: { type: 'integer' },
+            runUUID: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            state: { type: 'string' },
+            yamlConfig: { type: 'string' },
+            owner: { type: 'string' },
+            metadata: { type: 'string', nullable: true },
+            status: { type: 'string' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'buildId', 'runUUID', 'name', 'type', 'state', 'owner', 'status'],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/webhooks
+         */
+        GetWebhooksSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/WebhookInvocation' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description The specific success response for
          * POST /api/v2/builds/{uuid}/webhooks
          */
