@@ -149,6 +149,7 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
             runAsGroup: 1000,
             runAsNonRoot: true,
             fsGroup: 1000,
+            fsGroupChangePolicy: 'OnRootMismatch',
             seccompProfile: {
               type: 'RuntimeDefault',
             },
