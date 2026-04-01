@@ -37,6 +37,7 @@ import { getLogs } from 'server/lib/codefresh';
 import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
 
 export interface DeployOptions {
@@ -1051,46 +1052,83 @@ export default class DeployService extends BaseService {
           const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
           const secretProviders = globalConfigs.secretProviders;
 
-          if (secretProviders && deploy.env) {
-            const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
-            await ensureNamespaceExists(deploy.build.namespace);
+          if (secretProviders) {
+            const buildEnvToProcess = (deploy.env || {}) as Record<string, string>;
+            const initEnvToProcess = (deploy.initEnv || {}) as Record<string, string>;
+            const buildSecretRefs = parseSecretRefsFromEnv(buildEnvToProcess);
+            const initSecretRefs = parseSecretRefsFromEnv(initEnvToProcess);
+            const buildSecretRefKeys = new Set(buildSecretRefs.map((ref) => ref.envKey));
+            const combinedSecretEnvEntries = new Map<string, string>();
+            const conflictingSecretEnvKeys = new Set<string>();
 
-            const secretProcessor = new SecretProcessor(secretProviders);
-            const envToProcess = deploy.env as Record<string, string>;
+            const addSecretRef = (envKey: string, value: string) => {
+              const existingValue = combinedSecretEnvEntries.get(envKey);
 
-            const secretResult = await secretProcessor.processEnvSecrets({
-              env: envToProcess,
-              serviceName: deployable.name,
-              namespace: deploy.build.namespace,
-              buildUuid: deploy.uuid,
-            });
+              if (existingValue && existingValue !== value) {
+                conflictingSecretEnvKeys.add(envKey);
+                return;
+              }
 
-            secretEnvKeys = new Set(secretResult.secretRefs.map((ref) => ref.envKey));
+              combinedSecretEnvEntries.set(envKey, value);
+            };
 
-            if (secretResult.warnings.length > 0) {
-              getLogger().warn(
-                `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
-                  ', '
-                )}`
+            buildSecretRefs.forEach((ref) => addSecretRef(ref.envKey, buildEnvToProcess[ref.envKey]));
+            initSecretRefs.forEach((ref) => addSecretRef(ref.envKey, initEnvToProcess[ref.envKey]));
+
+            if (conflictingSecretEnvKeys.size > 0) {
+              getLogger().error(
+                `Build: secret env conflict service=${deployable.name} keys=[${Array.from(
+                  conflictingSecretEnvKeys
+                ).join(', ')}]`
               );
+              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+              return false;
             }
 
-            if (secretResult.secretNames.length > 0) {
-              getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+            const envToProcess = Object.fromEntries(combinedSecretEnvEntries);
 
-              const providerTimeouts = Object.values(secretProviders)
-                .map((p) => p.secretSyncTimeout)
-                .filter((t): t is number => t !== undefined);
-              const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+            if (Object.keys(envToProcess).length > 0) {
+              const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
+              await ensureNamespaceExists(deploy.build.namespace);
 
-              try {
-                await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
-                buildSecretNames = secretResult.secretNames;
-                getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
-              } catch (error) {
-                getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
-                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-                return false;
+              const secretProcessor = new SecretProcessor(secretProviders);
+
+              const secretResult = await secretProcessor.processEnvSecrets({
+                env: envToProcess,
+                serviceName: deployable.name,
+                namespace: deploy.build.namespace,
+                buildUuid: deploy.uuid,
+              });
+
+              secretEnvKeys = new Set(
+                secretResult.secretRefs.filter((ref) => buildSecretRefKeys.has(ref.envKey)).map((ref) => ref.envKey)
+              );
+
+              if (secretResult.warnings.length > 0) {
+                getLogger().warn(
+                  `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
+                    ', '
+                  )}`
+                );
+              }
+
+              if (secretResult.secretNames.length > 0) {
+                getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+
+                const providerTimeouts = Object.values(secretProviders)
+                  .map((p) => p.secretSyncTimeout)
+                  .filter((t): t is number => t !== undefined);
+                const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+
+                try {
+                  await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
+                  buildSecretNames = secretResult.secretNames;
+                  getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
+                } catch (error) {
+                  getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
+                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+                  return false;
+                }
               }
             }
           }
