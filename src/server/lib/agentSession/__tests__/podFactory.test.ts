@@ -192,6 +192,11 @@ describe('podFactory', () => {
       expect(pod.spec!.securityContext!.seccompProfile).toEqual({ type: 'RuntimeDefault' });
     });
 
+    it('uses OnRootMismatch for fsGroup changes on the workspace PVC', () => {
+      const pod = buildAgentPodSpec(baseOpts);
+      expect(pod.spec!.securityContext!.fsGroupChangePolicy).toBe('OnRootMismatch');
+    });
+
     it('does not set a nodeSelector by default', () => {
       const pod = buildAgentPodSpec(baseOpts);
 
