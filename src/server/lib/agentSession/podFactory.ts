@@ -458,6 +458,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
         runAsGroup: 1000,
         runAsNonRoot: true,
         fsGroup: 1000,
+        fsGroupChangePolicy: 'OnRootMismatch',
         seccompProfile: {
           type: 'RuntimeDefault',
         },
