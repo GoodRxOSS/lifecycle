@@ -228,5 +228,135 @@ describe('Helm tests', () => {
       expect(customValues).toContain('deployment.initImage=repo/init:tag');
       expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
     });
+
+    test('converts secret shorthand env entries for native-build org charts', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        lifecycleDefaults: {
+          deployCluster: 'test-cluster',
+          cfStepType: 'helm',
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+        },
+      });
+      const mockGetOrgChartName = jest.fn().mockResolvedValue('lifecycle-app');
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+        getOrgChartName: mockGetOrgChartName,
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        initEnv: {
+          INIT_TOKEN: '{{aws:myapp/rds-credentials:init_token}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'buildkit',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          namespace: 'env-test',
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn(),
+      } as unknown as Deploy;
+
+      const result = await helmOrgAppDeployStep(deploy);
+      const customValues = result.arguments.custom_values as string[];
+
+      expect(customValues).toContain(
+        'deployment.env.DB__URL.valueFrom.secretKeyRef.name="mail-delivery-backend-aws-secrets"'
+      );
+      expect(customValues).toContain('deployment.env.DB__URL.valueFrom.secretKeyRef.key="DB_URL"');
+      expect(customValues).toContain(
+        'deployment.initEnv.INIT__TOKEN.valueFrom.secretKeyRef.name=mail-delivery-backend-aws-secrets'
+      );
+      expect(customValues).toContain('deployment.initEnv.INIT__TOKEN.valueFrom.secretKeyRef.key=INIT_TOKEN');
+    });
+
+    test('keeps secret shorthand as a plain env value for non-native builders', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        lifecycleDefaults: {
+          deployCluster: 'test-cluster',
+          cfStepType: 'helm',
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+        },
+      });
+      const mockGetOrgChartName = jest.fn().mockResolvedValue('lifecycle-app');
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+        getOrgChartName: mockGetOrgChartName,
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'docker',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          namespace: 'env-test',
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn(),
+      } as unknown as Deploy;
+
+      const result = await helmOrgAppDeployStep(deploy);
+      const customValues = result.arguments.custom_values as string[];
+
+      expect(customValues).toContain('deployment.env.DB__URL="{{aws:myapp/rds-credentials:url}}"');
+    });
   });
 });

@@ -895,6 +895,82 @@ describe('Native Helm', () => {
       expect(customValues).not.toContain('deployment.initEnv.INIT__DB__HOST=init-postgres.internal');
       expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
     });
+
+    it('converts secret shorthand env entries for native-build org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        initEnv: {
+          INIT_TOKEN: '{{aws:myapp/rds-credentials:init_token}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'buildkit',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain(
+        'deployment.env.DB_URL.valueFrom.secretKeyRef.name="mail-delivery-backend-aws-secrets"'
+      );
+      expect(customValues).toContain('deployment.env.DB_URL.valueFrom.secretKeyRef.key="DB_URL"');
+      expect(customValues).toContain(
+        'deployment.initEnv.INIT_TOKEN.valueFrom.secretKeyRef.name=mail-delivery-backend-aws-secrets'
+      );
+      expect(customValues).toContain('deployment.initEnv.INIT_TOKEN.valueFrom.secretKeyRef.key=INIT_TOKEN');
+    });
+
+    it('keeps secret shorthand as a plain env value for non-native builders', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'docker',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('deployment.env.DB_URL="{{aws:myapp/rds-credentials:url}}"');
+    });
   });
 
   describe('envMapping for LOCAL charts', () => {
