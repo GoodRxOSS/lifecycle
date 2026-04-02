@@ -113,8 +113,8 @@ export const triggerPipeline = async (
 };
 
 export async function kubeContextStep({ context, cluster }: { context: string; cluster: string }) {
-  let awsAccessKeyId = '${{DEPLOYMENT_AWS_ACCESS_KEY_ID}}';
-  let awsSecretAccessKey = '${{DEPLOYMENT_AWS_SECRET_ACCESS_KEY}}';
+  let awsAccessKeyId = '${{AWS_ACCESS_KEY_ID_LFC_PRD}}';
+  let awsSecretAccessKey = '${{AWS_SECRET_ACCESS_KEY_LFC_PRD}}';
 
   if (ENVIRONMENT === 'staging') {
     awsAccessKeyId = '${{STG_AWS_ACCESS_KEY_ID}}';
