@@ -384,6 +384,22 @@ export default class BuildService extends BaseService {
     });
   }
 
+  async getWebhooksForBuild(
+    uuid: string
+  ): Promise<{ status: 'not_found'; message: string } | { status: 'success'; data: any[] }> {
+    const build = await this.db.models.Build.query().select('id').findOne({ uuid });
+
+    if (!build) {
+      return { status: 'not_found', message: `Build not found for ${uuid}.` };
+    }
+
+    const data = await this.db.models.WebhookInvocations.query()
+      .where('buildId', build.id)
+      .orderBy('createdAt', 'desc');
+
+    return { status: 'success', data };
+  }
+
   async validateLifecycleSchema(repo: string, branch: string): Promise<{ valid: boolean }> {
     try {
       const content = (await getYamlFileContentFromBranch(repo, branch)) as string;

@@ -334,6 +334,48 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description Information about a pod within a build environment, including its service name.
+         */
+        EnvironmentPodInfo: {
+          allOf: [
+            { $ref: '#/components/schemas/DeploymentPodInfo' },
+            {
+              type: 'object',
+              properties: {
+                serviceName: { type: 'string', description: 'The service this pod belongs to.' },
+              },
+              required: ['serviceName'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/pods
+         */
+        GetEnvironmentPodsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    pods: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/EnvironmentPodInfo' },
+                    },
+                  },
+                  required: ['pods'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description The specific success response for
          * PUT /api/v2/builds/{uuid}/services/{name}/redeploy
          */
@@ -404,6 +446,48 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 },
                 required: ['data'],
               },
+            },
+          ],
+        },
+
+        /**
+         * @description A single webhook invocation record.
+         */
+        WebhookInvocation: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            buildId: { type: 'integer' },
+            runUUID: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            state: { type: 'string' },
+            yamlConfig: { type: 'string' },
+            owner: { type: 'string' },
+            metadata: { type: 'string', nullable: true },
+            status: { type: 'string' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'buildId', 'runUUID', 'name', 'type', 'state', 'owner', 'status'],
+        },
+
+        /**
+         * @description The specific success response for
+         * GET /api/v2/builds/{uuid}/webhooks
+         */
+        GetWebhooksSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/WebhookInvocation' },
+                },
+              },
+              required: ['data'],
             },
           ],
         },

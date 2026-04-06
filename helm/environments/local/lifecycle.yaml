@@ -44,8 +44,6 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
-    - name: ALLOWED_ORIGINS
-      value: 'http://localhost:3000'
   envFrom:
     - secretRef:
         name: app-secrets
