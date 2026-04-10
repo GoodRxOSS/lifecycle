@@ -46,7 +46,15 @@ describe('apiKeySecretFactory', () => {
   });
 
   it('stores the GitHub token once in the session secret when provided', async () => {
-    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', 'sk-ant-test-key', 'gho_test_token');
+    await createAgentApiKeySecret(
+      'test-ns',
+      'agent-secret-abc123',
+      {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+        OPENAI_API_KEY: 'sample-openai-provider-key',
+      },
+      'sample-github-token'
+    );
 
     expect(mockCreateSecret).toHaveBeenCalledWith(
       'test-ns',
@@ -56,38 +64,61 @@ describe('apiKeySecretFactory', () => {
           namespace: 'test-ns',
         }),
         stringData: {
-          ANTHROPIC_API_KEY: 'sk-ant-test-key',
-          GITHUB_TOKEN: 'gho_test_token',
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+          OPENAI_API_KEY: 'sample-openai-provider-key',
+          GITHUB_TOKEN: 'sample-github-token',
         },
       })
     );
   });
 
   it('stores forwarded plain env values in the session secret', async () => {
-    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', 'sk-ant-test-key', null, undefined, {
-      PRIVATE_REGISTRY_TOKEN: 'plain-token',
-    });
+    await createAgentApiKeySecret(
+      'test-ns',
+      'agent-secret-abc123',
+      {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+      },
+      null,
+      undefined,
+      {
+        PRIVATE_REGISTRY_TOKEN: 'plain-token',
+      }
+    );
 
     expect(mockCreateSecret).toHaveBeenCalledWith(
       'test-ns',
       expect.objectContaining({
         stringData: {
-          ANTHROPIC_API_KEY: 'sk-ant-test-key',
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
           PRIVATE_REGISTRY_TOKEN: 'plain-token',
         },
       })
     );
   });
 
-  it('omits the GitHub token keys when no token is provided', async () => {
-    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', 'sk-ant-test-key');
+  it('stores additional session-pod MCP config data in the session secret', async () => {
+    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123', undefined, undefined, undefined, undefined, {
+      LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[{"slug":"figma"}]',
+    });
 
     expect(mockCreateSecret).toHaveBeenCalledWith(
       'test-ns',
       expect.objectContaining({
         stringData: {
-          ANTHROPIC_API_KEY: 'sk-ant-test-key',
+          LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[{"slug":"figma"}]',
         },
+      })
+    );
+  });
+
+  it('omits provider keys and GitHub token keys when no values are provided', async () => {
+    await createAgentApiKeySecret('test-ns', 'agent-secret-abc123');
+
+    expect(mockCreateSecret).toHaveBeenCalledWith(
+      'test-ns',
+      expect.objectContaining({
+        stringData: {},
       })
     );
   });

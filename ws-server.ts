@@ -33,12 +33,6 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
-import {
-  AgentSessionStartupFailureStage,
-  PublicAgentSessionStartupFailure,
-  buildAgentSessionStartupFailure,
-  toPublicAgentSessionStartupFailure,
-} from './src/server/lib/agentSession/startupFailureState';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -49,16 +43,13 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 const LOG_STREAM_PATH = '/api/logs/stream'; // Path for WebSocket connections
-const AGENT_SESSION_PATH = '/api/agent/session';
-const AGENT_EDITOR_PATH_PREFIX = '/api/agent/editor/';
-const LEGACY_AGENT_EDITOR_PATH_PREFIX = '/api/v2/ai/agent/sessions/';
-const LEGACY_AGENT_EDITOR_PATH_SUFFIX = '/editor';
-const AGENT_EDITOR_COOKIE_NAME = 'lfc_agent_editor_auth';
-const AGENT_EDITOR_PORT = parseInt(process.env.AGENT_EDITOR_PORT || '13337', 10);
-const AGENT_EDITOR_HEARTBEAT_INTERVAL_MS = parseInt(process.env.AGENT_EDITOR_HEARTBEAT_INTERVAL_MS || '15000', 10);
-const AGENT_RUNTIME_IDLE_TIMEOUT_MS = parseInt(process.env.AGENT_RUNTIME_IDLE_TIMEOUT_MS || '60000', 10);
-const AGENT_EXEC_ATTACH_RETRY_DELAY_MS = parseInt(process.env.AGENT_EXEC_ATTACH_RETRY_DELAY_MS || '500', 10);
-const AGENT_EXEC_ATTACH_MAX_ATTEMPTS = parseInt(process.env.AGENT_EXEC_ATTACH_MAX_ATTEMPTS || '20', 10);
+const SESSION_WORKSPACE_EDITOR_PATH_PREFIX = '/api/agent-session/workspace-editor/';
+const SESSION_WORKSPACE_EDITOR_COOKIE_NAME = 'lfc_session_workspace_editor_auth';
+const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
+const SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.AGENT_SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS || '15000',
+  10
+);
 const logger = rootLogger.child({ filename: __filename });
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -70,69 +61,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-
-type AgentExecConnection = {
-  write(data: string): void;
-  cancel(): void;
-  close(): void;
-  onStdout(handler: (data: string) => void): void;
-  onStderr(handler: (data: string) => void): void;
-  onClose(handler: () => void): void;
-  onError(handler: (err: Error) => void): void;
-};
-
-type AgentSessionRuntime = {
-  sessionId: string;
-  namespace: string;
-  podName: string;
-  model: string;
-  clients: Set<WebSocket>;
-  execConn: AgentExecConnection | null;
-  parser: { feed(data: string): void } | null;
-  startPromise: Promise<void> | null;
-  idleTimer: ReturnType<typeof setTimeout> | null;
-  isReady: boolean;
-};
-
-const agentSessionRuntimes = new Map<string, AgentSessionRuntime>();
-
-function buildLocalAgentSessionFailure(
-  sessionId: string,
-  error: unknown,
-  stage: AgentSessionStartupFailureStage = 'connect_runtime'
-): PublicAgentSessionStartupFailure {
-  return toPublicAgentSessionStartupFailure(
-    buildAgentSessionStartupFailure({
-      sessionId,
-      error,
-      stage,
-    })
-  );
-}
-
-async function persistAgentRuntimeFailure(
-  sessionId: string,
-  error: unknown,
-  stage: AgentSessionStartupFailureStage = 'connect_runtime'
-): Promise<PublicAgentSessionStartupFailure> {
-  const AgentSessionService = (await import('./src/server/services/agentSession')).default;
-  return AgentSessionService.markSessionRuntimeFailure(sessionId, error, stage);
-}
-
-async function resolveAgentSessionFailureForClient(
-  sessionId: string | null,
-  error: unknown,
-  stage: AgentSessionStartupFailureStage = 'connect_runtime'
-): Promise<PublicAgentSessionStartupFailure> {
-  if (!sessionId) {
-    return buildLocalAgentSessionFailure('unknown-session', error, stage);
-  }
-
-  const AgentSessionService = (await import('./src/server/services/agentSession')).default;
-  const persistedFailure = await AgentSessionService.getSessionStartupFailure(sessionId);
-
-  return persistedFailure || buildLocalAgentSessionFailure(sessionId, error, stage);
-}
 
 function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<string, string> {
   if (!cookieHeader) {
@@ -157,12 +85,12 @@ function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<
   }, {});
 }
 
-type AgentEditorPathMatch = { sessionId: string; forwardPath: string; isLegacy: boolean };
+type SessionWorkspaceEditorPathMatch = { sessionId: string; forwardPath: string };
 
-function parseAgentEditorPath(pathname: string | null | undefined, includeLegacy = true): AgentEditorPathMatch | null {
+function parseSessionWorkspaceEditorPath(pathname: string | null | undefined): SessionWorkspaceEditorPathMatch | null {
   const safePathname = pathname || '';
-  if (safePathname.startsWith(AGENT_EDITOR_PATH_PREFIX)) {
-    const remainder = safePathname.slice(AGENT_EDITOR_PATH_PREFIX.length);
+  if (safePathname.startsWith(SESSION_WORKSPACE_EDITOR_PATH_PREFIX)) {
+    const remainder = safePathname.slice(SESSION_WORKSPACE_EDITOR_PATH_PREFIX.length);
     const slashIndex = remainder.indexOf('/');
     const sessionId = slashIndex >= 0 ? remainder.slice(0, slashIndex) : remainder;
     if (!sessionId) {
@@ -173,41 +101,13 @@ function parseAgentEditorPath(pathname: string | null | undefined, includeLegacy
     return {
       sessionId: decodeURIComponent(sessionId),
       forwardPath: forwardPath || '/',
-      isLegacy: false,
     };
   }
-
-  if (!includeLegacy || !safePathname.startsWith(LEGACY_AGENT_EDITOR_PATH_PREFIX)) {
-    return null;
-  }
-
-  const editorIndex = safePathname.indexOf(LEGACY_AGENT_EDITOR_PATH_SUFFIX, LEGACY_AGENT_EDITOR_PATH_PREFIX.length);
-  if (editorIndex < 0) {
-    return null;
-  }
-
-  const sessionId = safePathname.slice(LEGACY_AGENT_EDITOR_PATH_PREFIX.length, editorIndex);
-  if (!sessionId) {
-    return null;
-  }
-
-  const remainder = safePathname.slice(editorIndex + LEGACY_AGENT_EDITOR_PATH_SUFFIX.length);
-  return {
-    sessionId: decodeURIComponent(sessionId),
-    forwardPath: remainder ? (remainder.startsWith('/') ? remainder : `/${remainder}`) : '/',
-    isLegacy: true,
-  };
+  return null;
 }
 
-function getAgentEditorCookiePath(sessionId: string): string {
-  return `${AGENT_EDITOR_PATH_PREFIX}${encodeURIComponent(sessionId)}`;
-}
-
-function getAgentEditorRequestPath(sessionId: string, forwardPath = '/'): string {
-  const normalizedForwardPath =
-    !forwardPath || forwardPath === '/' ? '/' : forwardPath.startsWith('/') ? forwardPath : `/${forwardPath}`;
-
-  return `${getAgentEditorCookiePath(sessionId)}${normalizedForwardPath}`;
+function getSessionWorkspaceEditorCookiePath(sessionId: string): string {
+  return `${SESSION_WORKSPACE_EDITOR_PATH_PREFIX}${encodeURIComponent(sessionId)}`;
 }
 
 function isSendableCloseCode(code?: number): code is number {
@@ -222,12 +122,12 @@ function isSendableCloseCode(code?: number): code is number {
   return ![1004, 1005, 1006, 1015].includes(code);
 }
 
-function buildAgentEditorCookie(request: IncomingMessage, sessionId: string, token: string): string {
+function buildSessionWorkspaceEditorCookie(request: IncomingMessage, sessionId: string, token: string): string {
   const isSecure =
     request.headers['x-forwarded-proto'] === 'https' || (request.socket as { encrypted?: boolean }).encrypted === true;
   const cookieParts = [
-    `${AGENT_EDITOR_COOKIE_NAME}=${encodeURIComponent(token)}`,
-    `Path=${getAgentEditorCookiePath(sessionId)}`,
+    `${SESSION_WORKSPACE_EDITOR_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    `Path=${getSessionWorkspaceEditorCookiePath(sessionId)}`,
     'HttpOnly',
     'SameSite=Lax',
   ];
@@ -254,7 +154,7 @@ function appendSetCookie(res: ServerResponse, value: string) {
   res.setHeader('Set-Cookie', [existing.toString(), value]);
 }
 
-function buildAgentEditorServiceUrl(
+function buildSessionWorkspaceEditorServiceUrl(
   session: { id: string; podName: string; namespace: string },
   forwardPath: string,
   query: Record<string, string | string[] | undefined>,
@@ -262,7 +162,7 @@ function buildAgentEditorServiceUrl(
 ) {
   const protocol = isWebSocket ? 'ws' : 'http';
   const target = new URL(
-    `${protocol}://${session.podName}.${session.namespace}.svc.cluster.local:${AGENT_EDITOR_PORT}${forwardPath}`
+    `${protocol}://${session.podName}.${session.namespace}.svc.cluster.local:${SESSION_WORKSPACE_EDITOR_PORT}${forwardPath}`
   );
 
   for (const [key, value] of Object.entries(query)) {
@@ -327,7 +227,7 @@ async function resolveOwnedAgentSession(
 
   if (process.env.ENABLE_AUTH === 'true') {
     const headerToken = request.headers.authorization?.split(' ')[1];
-    const cookieToken = parseCookieHeader(request.headers.cookie)[AGENT_EDITOR_COOKIE_NAME];
+    const cookieToken = parseCookieHeader(request.headers.cookie)[SESSION_WORKSPACE_EDITOR_COOKIE_NAME];
     const rawToken = headerToken || cookieToken || queryToken;
 
     if (!rawToken) {
@@ -368,295 +268,22 @@ function normalizeWebSocketCloseReason(reason?: Buffer | string): string | undef
   return trimmed || undefined;
 }
 
-function buildClaudeUserMessage(content: string): string {
-  return `${JSON.stringify({
-    type: 'user',
-    message: {
-      role: 'user',
-      content: [{ type: 'text', text: content }],
-    },
-  })}\n`;
-}
-
-function broadcastAgentMessage(runtime: AgentSessionRuntime, payload: Record<string, unknown>) {
-  const message = JSON.stringify(payload);
-  for (const client of runtime.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  }
-}
-
-function notifyAgentClientReady(runtime: AgentSessionRuntime, client: WebSocket, attempt = 0) {
-  if (!runtime.clients.has(client)) {
-    return;
-  }
-
-  if (client.readyState === WebSocket.OPEN) {
-    client.send(JSON.stringify({ type: 'status', status: 'ready' }));
-    return;
-  }
-
-  if (attempt >= 5) {
-    return;
-  }
-
-  setTimeout(() => {
-    notifyAgentClientReady(runtime, client, attempt + 1);
-  }, 100);
-}
-
-function clearAgentRuntimeIdleTimer(runtime: AgentSessionRuntime) {
-  if (runtime.idleTimer) {
-    clearTimeout(runtime.idleTimer);
-    runtime.idleTimer = null;
-  }
-}
-
-function closeAgentClients(runtime: AgentSessionRuntime, code: number, reason: string) {
-  for (const client of Array.from(runtime.clients)) {
-    runtime.clients.delete(client);
-    closeSocket(client, code, reason);
-  }
-}
-
-function disposeAgentRuntime(sessionId: string, runtime: AgentSessionRuntime, closeExec: boolean) {
-  clearAgentRuntimeIdleTimer(runtime);
-  runtime.isReady = false;
-  runtime.parser = null;
-  runtime.startPromise = null;
-  agentSessionRuntimes.delete(sessionId);
-
-  if (closeExec && runtime.execConn) {
-    const execConn = runtime.execConn;
-    runtime.execConn = null;
-    execConn.close();
-    return;
-  }
-
-  runtime.execConn = null;
-}
-
-function scheduleAgentRuntimeCleanup(
-  sessionId: string,
-  runtime: AgentSessionRuntime,
-  agentLogCtx: Record<string, unknown>
-) {
-  if (agentSessionRuntimes.get(sessionId) !== runtime || runtime.clients.size > 0) {
-    return;
-  }
-
-  clearAgentRuntimeIdleTimer(runtime);
-  runtime.idleTimer = setTimeout(() => {
-    const currentRuntime = agentSessionRuntimes.get(sessionId);
-    if (currentRuntime !== runtime || runtime.clients.size > 0) {
-      return;
-    }
-
-    logger.debug(agentLogCtx, `AgentRuntime: closing reason=idle_disconnect sessionId=${sessionId}`);
-    disposeAgentRuntime(sessionId, runtime, true);
-  }, AGENT_RUNTIME_IDLE_TIMEOUT_MS);
-}
-
-async function getOrCreateAgentRuntime(
-  sessionId: string,
-  namespace: string,
-  podName: string,
-  model: string,
-  appendSystemPrompt: string | undefined,
-  agentLogCtx: Record<string, unknown>
-): Promise<AgentSessionRuntime> {
-  let runtime = agentSessionRuntimes.get(sessionId);
-
-  if (runtime && (runtime.namespace !== namespace || runtime.podName !== podName)) {
-    disposeAgentRuntime(sessionId, runtime, true);
-    runtime = undefined;
-  }
-
-  if (!runtime) {
-    runtime = {
-      sessionId,
-      namespace,
-      podName,
-      model,
-      clients: new Set<WebSocket>(),
-      execConn: null,
-      parser: null,
-      startPromise: null,
-      idleTimer: null,
-      isReady: false,
-    };
-    agentSessionRuntimes.set(sessionId, runtime);
-  }
-
-  clearAgentRuntimeIdleTimer(runtime);
-
-  if (runtime.execConn) {
-    return runtime;
-  }
-
-  if (!runtime.startPromise) {
-    runtime.startPromise = (async () => {
-      const { attachToAgentPod } = await import('./src/server/lib/agentSession/execProxy');
-      const { JsonlParser } = await import('./src/server/lib/agentSession/jsonlParser');
-
-      const execConn = (await attachToAgentPodWithRetry(
-        attachToAgentPod,
-        namespace,
-        podName,
-        model,
-        appendSystemPrompt,
-        agentLogCtx
-      )) as AgentExecConnection;
-      runtime!.execConn = execConn;
-      runtime!.parser = new JsonlParser((msg) => {
-        broadcastAgentMessage(runtime!, msg as Record<string, unknown>);
-      });
-      runtime!.isReady = true;
-
-      execConn.onStdout((data: string) => {
-        runtime?.parser?.feed(data);
-      });
-
-      execConn.onStderr((data: string) => {
-        broadcastAgentMessage(runtime!, { type: 'chunk', content: data });
-      });
-
-      execConn.onClose(() => {
-        if (agentSessionRuntimes.get(sessionId) !== runtime) {
-          return;
-        }
-
-        logger.debug(agentLogCtx, `AgentExec: connection closed sessionId=${sessionId}`);
-        closeAgentClients(runtime!, 1012, 'Agent runtime restarted');
-        disposeAgentRuntime(sessionId, runtime!, false);
-      });
-
-      execConn.onError((err: Error) => {
-        if (agentSessionRuntimes.get(sessionId) !== runtime) {
-          return;
-        }
-
-        logger.error({ ...agentLogCtx, error: err }, `AgentExec: connection failed sessionId=${sessionId}`);
-        const failure = buildLocalAgentSessionFailure(sessionId, err);
-        void persistAgentRuntimeFailure(sessionId, err).catch((persistError) => {
-          logger.warn(
-            { ...agentLogCtx, error: persistError },
-            `Session: runtime failure persist failed sessionId=${sessionId}`
-          );
-        });
-        broadcastAgentMessage(runtime!, {
-          type: 'status',
-          status: 'error',
-          title: failure.title,
-          message: failure.message,
-        });
-        closeAgentClients(runtime!, 1011, 'Agent exec error');
-        disposeAgentRuntime(sessionId, runtime!, false);
-      });
-
-      broadcastAgentMessage(runtime!, { type: 'status', status: 'ready' });
-    })()
-      .catch(async (error) => {
-        await persistAgentRuntimeFailure(sessionId, error).catch((persistError) => {
-          logger.warn(
-            { ...agentLogCtx, error: persistError },
-            `Session: runtime failure persist failed sessionId=${sessionId}`
-          );
-        });
-        disposeAgentRuntime(sessionId, runtime!, true);
-        throw error;
-      })
-      .finally(() => {
-        if (runtime) {
-          runtime.startPromise = null;
-        }
-      });
-  }
-
-  await runtime.startPromise;
-  return runtime;
-}
-
-async function attachToAgentPodWithRetry(
-  attachToAgentPod: (
-    namespace: string,
-    podName: string,
-    model: string,
-    container?: string,
-    appendSystemPrompt?: string
-  ) => Promise<AgentExecConnection>,
-  namespace: string,
-  podName: string,
-  model: string,
-  appendSystemPrompt: string | undefined,
-  agentLogCtx: Record<string, unknown>
-): Promise<AgentExecConnection> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= AGENT_EXEC_ATTACH_MAX_ATTEMPTS; attempt++) {
-    try {
-      return await attachToAgentPod(namespace, podName, model, undefined, appendSystemPrompt);
-    } catch (error: any) {
-      lastError = error;
-
-      if (attempt === AGENT_EXEC_ATTACH_MAX_ATTEMPTS) {
-        break;
-      }
-
-      logger.warn(
-        {
-          ...agentLogCtx,
-          attempt,
-          maxAttempts: AGENT_EXEC_ATTACH_MAX_ATTEMPTS,
-          error,
-        },
-        `AgentExec: attach retry podName=${podName} namespace=${namespace} attempt=${attempt} maxAttempts=${AGENT_EXEC_ATTACH_MAX_ATTEMPTS}`
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, AGENT_EXEC_ATTACH_RETRY_DELAY_MS));
-    }
-  }
-
-  throw lastError ?? new Error('Failed to attach to agent pod');
-}
-
-async function handleAgentEditorHttp(
+async function handleSessionWorkspaceEditorHttp(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
   query: Record<string, string | string[] | undefined>
 ) {
-  const match = parseAgentEditorPath(pathname);
+  const match = parseSessionWorkspaceEditorPath(pathname);
   if (!match) {
     return false;
-  }
-
-  if (match.isLegacy) {
-    const target = new URL(pathname, 'http://placeholder');
-    target.pathname = getAgentEditorRequestPath(match.sessionId, match.forwardPath);
-    for (const [key, value] of Object.entries(query)) {
-      if (value == null) {
-        continue;
-      }
-      if (Array.isArray(value)) {
-        value.forEach((item) => target.searchParams.append(key, item));
-      } else {
-        target.searchParams.set(key, value);
-      }
-    }
-
-    res.statusCode = 307;
-    res.setHeader('Location', `${target.pathname}${target.search}`);
-    res.end();
-    return true;
   }
 
   try {
     const queryToken = typeof query.token === 'string' ? query.token : null;
     const session = await resolveOwnedAgentSession(req, match.sessionId, queryToken);
-    const forwardedPrefix = getAgentEditorCookiePath(match.sessionId);
-    const targetUrl = buildAgentEditorServiceUrl(session, match.forwardPath, query);
+    const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
+    const targetUrl = buildSessionWorkspaceEditorServiceUrl(session, match.forwardPath, query);
     const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix);
     await new Promise<void>((resolve, reject) => {
       const proxyReq = httpRequest(
@@ -685,7 +312,7 @@ async function handleAgentEditorHttp(
           });
 
           if (process.env.ENABLE_AUTH === 'true' && queryToken) {
-            appendSetCookie(res, buildAgentEditorCookie(req, match.sessionId, queryToken));
+            appendSetCookie(res, buildSessionWorkspaceEditorCookie(req, match.sessionId, queryToken));
           }
 
           proxyRes.on('error', reject);
@@ -707,7 +334,7 @@ async function handleAgentEditorHttp(
   } catch (error: any) {
     logger.error(
       { error, path: pathname, sessionId: match.sessionId },
-      `AgentEditor: proxy failed sessionId=${match.sessionId} path=${pathname}`
+      `SessionEditor: proxy failed sessionId=${match.sessionId} path=${pathname}`
     );
     res.statusCode =
       error?.message?.includes('Forbidden') || error?.message?.includes('Authentication')
@@ -726,7 +353,7 @@ app.prepare().then(() => {
       const parsedUrl = parse(req.url!, true);
       if (
         parsedUrl.pathname &&
-        (await handleAgentEditorHttp(
+        (await handleSessionWorkspaceEditorHttp(
           req,
           res,
           parsedUrl.pathname,
@@ -754,15 +381,10 @@ app.prepare().then(() => {
       wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
         wss.emit('connection', ws, request);
       });
-    } else if (parseAgentEditorPath(pathname, false)) {
-      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=agent_editor');
+    } else if (parseSessionWorkspaceEditorPath(pathname)) {
+      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=session_workspace_editor');
       wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
         wss.emit('agent-editor', ws, request);
-      });
-    } else if (pathname?.startsWith(AGENT_SESSION_PATH)) {
-      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=agent_session');
-      wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-        wss.emit('agent-session', ws, request);
       });
     } else {
       socket.destroy();
@@ -863,7 +485,7 @@ app.prepare().then(() => {
 
   wss.on('agent-editor', async (ws: WebSocket, request: IncomingMessage) => {
     const parsedUrl = parse(request.url || '', true);
-    const match = parseAgentEditorPath(parsedUrl.pathname, false);
+    const match = parseSessionWorkspaceEditorPath(parsedUrl.pathname);
     const editorLogCtx: Record<string, unknown> = {
       remoteAddress: request.socket.remoteAddress,
       path: parsedUrl.pathname,
@@ -880,8 +502,8 @@ app.prepare().then(() => {
     try {
       const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
       const session = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
-      const forwardedPrefix = getAgentEditorCookiePath(match.sessionId);
-      const targetUrl = buildAgentEditorServiceUrl(
+      const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
+      const targetUrl = buildSessionWorkspaceEditorServiceUrl(
         session,
         match.forwardPath,
         parsedUrl.query as Record<string, string | string[] | undefined>,
@@ -928,11 +550,11 @@ app.prepare().then(() => {
             code,
             reason: normalizeWebSocketCloseReason(reason),
           },
-          `AgentEditor: websocket closed source=${source} sessionId=${match.sessionId} code=${code}`
+          `SessionEditor: websocket closed source=${source} sessionId=${match.sessionId} code=${code}`
         );
       };
 
-      if (AGENT_EDITOR_HEARTBEAT_INTERVAL_MS > 0) {
+      if (SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS > 0) {
         heartbeatInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.ping();
@@ -940,7 +562,7 @@ app.prepare().then(() => {
           if (upstream?.readyState === WebSocket.OPEN) {
             upstream.ping();
           }
-        }, AGENT_EDITOR_HEARTBEAT_INTERVAL_MS);
+        }, SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS);
       }
 
       ws.on('message', (data, isBinary) => {
@@ -959,7 +581,7 @@ app.prepare().then(() => {
         clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, error },
-          `AgentEditor: websocket error source=client sessionId=${match.sessionId}`
+          `SessionEditor: websocket error source=client sessionId=${match.sessionId}`
         );
         closeUpstream(1011, Buffer.from('Client WebSocket error'));
       });
@@ -984,7 +606,7 @@ app.prepare().then(() => {
         clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, error },
-          `AgentEditor: websocket error source=upstream sessionId=${match.sessionId}`
+          `SessionEditor: websocket error source=upstream sessionId=${match.sessionId}`
         );
         closeSocket(ws, 1011, 'Editor upstream error');
       });
@@ -993,14 +615,14 @@ app.prepare().then(() => {
         clearHeartbeat();
         logger.warn(
           { ...editorLogCtx, statusCode: response.statusCode },
-          `AgentEditor: upgrade rejected sessionId=${match.sessionId} statusCode=${response.statusCode}`
+          `SessionEditor: upgrade rejected sessionId=${match.sessionId} statusCode=${response.statusCode}`
         );
         closeSocket(ws, 1011, 'Editor upgrade rejected');
       });
     } catch (error: any) {
       logger.error(
         { ...editorLogCtx, error, sessionId: match.sessionId },
-        `AgentEditor: websocket setup failed sessionId=${match.sessionId}`
+        `SessionEditor: websocket setup failed sessionId=${match.sessionId}`
       );
       if (heartbeatInterval) {
         clearInterval(heartbeatInterval);
@@ -1008,146 +630,6 @@ app.prepare().then(() => {
       closeSocket(ws, 1008, `Connection error: ${error.message}`);
       if (upstream && upstream.readyState === WebSocket.CONNECTING) {
         upstream.terminate();
-      }
-    }
-  });
-
-  wss.on('agent-session', async (ws: WebSocket, request: IncomingMessage) => {
-    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-    let runtime: AgentSessionRuntime | null = null;
-    let sessionId: string | null = null;
-    const agentLogCtx: Record<string, any> = { remoteAddress: request.socket.remoteAddress };
-
-    const cleanupLocal = () => {
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-        heartbeatInterval = null;
-      }
-    };
-
-    try {
-      const { query } = parse(request.url || '', true);
-      const { sessionId: sessionIdFromQuery, token: tokenFromQuery } = query;
-
-      if (!sessionIdFromQuery || typeof sessionIdFromQuery !== 'string') {
-        throw new Error('Missing required parameter: sessionId');
-      }
-
-      sessionId = sessionIdFromQuery;
-      const activeSessionId = sessionIdFromQuery;
-      agentLogCtx.sessionId = activeSessionId;
-      const AgentSessionService = (await import('./src/server/services/agentSession')).default;
-
-      const session = await resolveOwnedAgentSession(
-        request,
-        activeSessionId,
-        typeof tokenFromQuery === 'string' ? tokenFromQuery : null
-      );
-      const appendSystemPrompt = await AgentSessionService.getSessionAppendSystemPrompt(activeSessionId);
-
-      agentLogCtx.podName = session.podName;
-      agentLogCtx.namespace = session.namespace;
-      logger.debug(agentLogCtx, `AgentSession: websocket connected sessionId=${activeSessionId}`);
-
-      runtime = await getOrCreateAgentRuntime(
-        activeSessionId,
-        session.namespace,
-        session.podName,
-        session.model,
-        appendSystemPrompt,
-        agentLogCtx
-      );
-
-      if (runtime.clients.size > 0) {
-        closeAgentClients(runtime, 1000, 'Superseded by a new connection');
-      }
-
-      runtime.clients.add(ws);
-
-      if (runtime.isReady) {
-        notifyAgentClientReady(runtime, ws);
-      }
-
-      heartbeatInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'heartbeat', ts: Date.now() }));
-        }
-      }, 15_000);
-
-      ws.on('message', async (raw) => {
-        try {
-          const msg = JSON.parse(raw.toString());
-          await AgentSessionService.touchActivity(activeSessionId);
-
-          switch (msg.type) {
-            case 'message':
-              if (runtime?.execConn && msg.content) {
-                runtime.execConn.write(buildClaudeUserMessage(msg.content));
-              }
-              break;
-            case 'cancel':
-              if (runtime?.execConn) {
-                runtime.execConn.cancel();
-              }
-              break;
-            case 'set_model':
-              if (runtime?.execConn && msg.model) {
-                runtime.execConn.write(buildClaudeUserMessage(`/model ${msg.model}`));
-              }
-              break;
-            default:
-              logger.debug(
-                { ...agentLogCtx, msgType: msg.type },
-                `AgentSession: message ignored reason=unknown_type sessionId=${activeSessionId} msgType=${msg.type}`
-              );
-          }
-        } catch (err) {
-          logger.warn({ ...agentLogCtx, error: err }, `AgentSession: message failed sessionId=${activeSessionId}`);
-        }
-      });
-
-      ws.on('close', (code, reason) => {
-        const reasonString = reason instanceof Buffer ? reason.toString() : String(reason);
-        logger.debug(
-          { ...agentLogCtx, code, reason: reasonString },
-          `AgentSession: websocket closed sessionId=${activeSessionId} code=${code} reason=${reasonString}`
-        );
-        cleanupLocal();
-        if (runtime && sessionId) {
-          runtime.clients.delete(ws);
-          scheduleAgentRuntimeCleanup(sessionId, runtime, agentLogCtx);
-        }
-      });
-
-      ws.on('error', (error) => {
-        logger.warn({ ...agentLogCtx, error }, `AgentSession: websocket error sessionId=${activeSessionId}`);
-        cleanupLocal();
-        if (runtime && sessionId) {
-          runtime.clients.delete(ws);
-          scheduleAgentRuntimeCleanup(sessionId, runtime, agentLogCtx);
-        }
-      });
-    } catch (error: any) {
-      logger.error(
-        { ...agentLogCtx, error },
-        `AgentSession: websocket setup failed sessionId=${sessionId ?? 'unknown'}`
-      );
-      cleanupLocal();
-      if (runtime && sessionId) {
-        runtime.clients.delete(ws);
-        scheduleAgentRuntimeCleanup(sessionId, runtime, agentLogCtx);
-      }
-      const failure = await resolveAgentSessionFailureForClient(sessionId, error);
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.send(
-          JSON.stringify({
-            type: 'status',
-            status: 'error',
-            title: failure.title,
-            message: failure.message,
-          })
-        );
-        closeSocket(ws, 1008, `${failure.title}: ${failure.message}`);
       }
     }
   });
@@ -1295,15 +777,16 @@ app.prepare().then(() => {
 
 /**
  * @openapi
- * /api/v2/ai/agent/sessions/{sessionId}/editor:
+ * /api/agent-session/workspace-editor/{sessionId}:
  *   get:
- *     summary: Open the browser editor attached to an active agent session
+ *     summary: Open the workspace editor attached to an active agent session
  *     description: |
  *       Proxies a browser-based VS Code session (code-server) running inside the
- *       agent session pod. The editor uses the same workspace PVC as the agent.
+ *       session workspace pod. The editor uses the same workspace PVC as the
+ *       session workspace.
  *
- *       Authentication follows the same session ownership rules as the agent
- *       WebSocket. The first request may include a bearer token via the
+ *       Authentication follows the agent session ownership rules. The first
+ *       request may include a bearer token via the
  *       `Authorization` header or `token` query parameter; the proxy then sets a
  *       session-scoped HTTP-only cookie for follow-up asset and WebSocket
  *       requests under the same path prefix.

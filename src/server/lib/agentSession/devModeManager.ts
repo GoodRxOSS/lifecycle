@@ -17,7 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 import { DevConfig } from 'server/models/yaml/YamlService';
 import { getLogger } from 'server/lib/logger';
-import { AGENT_WORKSPACE_ROOT, AGENT_WORKSPACE_SUBPATH } from './workspace';
+import { SESSION_WORKSPACE_ROOT, SESSION_WORKSPACE_SUBPATH } from './workspace';
 
 const logger = () => getLogger();
 const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-deployment-snapshot';
@@ -407,7 +407,7 @@ export class DevModeManager {
                 env: Object.entries(devConfig.env || {}).map(([name, value]) => ({ name, value })),
                 // Mount the shared repo root once and let workingDir target the service subdirectory.
                 volumeMounts: [
-                  { name: 'workspace', mountPath: AGENT_WORKSPACE_ROOT, subPath: AGENT_WORKSPACE_SUBPATH },
+                  { name: 'workspace', mountPath: SESSION_WORKSPACE_ROOT, subPath: SESSION_WORKSPACE_SUBPATH },
                 ],
               },
             ],
@@ -559,7 +559,7 @@ export class DevModeManager {
     const desiredVolumeMounts = desiredContainer?.volumeMounts || [];
     for (let index = liveVolumeMounts.length - 1; index >= 0; index--) {
       const mount = liveVolumeMounts[index];
-      const isWorkspaceMount = mount.name === 'workspace' && mount.mountPath === AGENT_WORKSPACE_ROOT;
+      const isWorkspaceMount = mount.name === 'workspace' && mount.mountPath === SESSION_WORKSPACE_ROOT;
       const desiredHasMount = desiredVolumeMounts.some(
         (desiredMount) => desiredMount.name === mount.name && desiredMount.mountPath === mount.mountPath
       );
@@ -945,9 +945,9 @@ export class DevModeManager {
     const liveContainer = liveContainers[liveContainerIndex];
     const liveVolumeMounts = liveContainer.volumeMounts || [];
     const hasWorkspaceMount = liveVolumeMounts.some(
-      (mount) => mount.name === 'workspace' && mount.mountPath === AGENT_WORKSPACE_ROOT
+      (mount) => mount.name === 'workspace' && mount.mountPath === SESSION_WORKSPACE_ROOT
     );
-    const hasWorkspaceWorkingDir = liveContainer.workingDir?.startsWith(AGENT_WORKSPACE_ROOT) ?? false;
+    const hasWorkspaceWorkingDir = liveContainer.workingDir?.startsWith(SESSION_WORKSPACE_ROOT) ?? false;
     const isLikelyDevPatched = hasWorkspaceMount || hasWorkspaceWorkingDir;
 
     const patch: Array<Record<string, string>> = [];
@@ -962,7 +962,7 @@ export class DevModeManager {
 
     for (let index = liveVolumeMounts.length - 1; index >= 0; index--) {
       const mount = liveVolumeMounts[index];
-      const isWorkspaceMount = mount.name === 'workspace' && mount.mountPath === AGENT_WORKSPACE_ROOT;
+      const isWorkspaceMount = mount.name === 'workspace' && mount.mountPath === SESSION_WORKSPACE_ROOT;
 
       if (isWorkspaceMount) {
         patch.push({

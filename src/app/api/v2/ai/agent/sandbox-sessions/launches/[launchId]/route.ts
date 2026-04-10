@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 
 import { redisClient } from 'server/lib/dependencies';
-import { getRequestUserSub } from 'server/lib/get-user';
+import { getRequestUserIdentity } from 'server/lib/get-user';
 import { getSandboxLaunchState, toPublicSandboxLaunchState } from 'server/lib/agentSession/sandboxLaunchState';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
@@ -78,7 +78,7 @@ import { errorResponse, successResponse } from 'server/lib/response';
  *                         - creating_sandbox_build
  *                         - resolving_environment
  *                         - deploying_resources
- *                         - creating_agent_session
+ *                         - opening_session
  *                         - ready
  *                         - error
  *                     message:
@@ -116,14 +116,14 @@ import { errorResponse, successResponse } from 'server/lib/response';
  *         description: Launch not found
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ launchId: string }> }) => {
-  const userId = getRequestUserSub(req);
-  if (!userId) {
+  const userIdentity = getRequestUserIdentity(req);
+  if (!userIdentity) {
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
   const { launchId } = await params;
   const state = await getSandboxLaunchState(redisClient.getRedis(), launchId);
-  if (!state || state.userId !== userId) {
+  if (!state || state.userId !== userIdentity.userId) {
     return errorResponse(new Error('Sandbox launch not found'), { status: 404 }, req);
   }
 

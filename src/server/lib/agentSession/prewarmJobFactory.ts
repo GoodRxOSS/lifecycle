@@ -16,14 +16,22 @@
 
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from 'server/lib/logger';
-import { generateInitScript, InitScriptOpts } from './configSeeder';
+import {
+  SESSION_WORKSPACE_HOME_VOLUME_NAME,
+  SESSION_WORKSPACE_SHARED_HOME_DIR,
+  generateInitScript,
+  generateRuntimeSeedScript,
+  InitScriptOpts,
+} from './configSeeder';
+import { generateSkillBootstrapCommand } from './skillBootstrap';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
-import { AGENT_WORKSPACE_SUBPATH, type AgentSessionWorkspaceRepo } from './workspace';
+import { SESSION_WORKSPACE_SUBPATH, type AgentSessionWorkspaceRepo } from './workspace';
 import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
+import type { AgentSessionSkillPlan } from './skillPlan';
 
-const AGENT_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
+const SESSION_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
 const DEFAULT_PREWARM_TIMEOUT_SECONDS = 30 * 60;
 
 export interface AgentPrewarmJobOpts {
@@ -31,6 +39,7 @@ export interface AgentPrewarmJobOpts {
   namespace: string;
   pvcName: string;
   image: string;
+  workspaceGatewayImage?: string;
   apiKeySecretName: string;
   hasGitHubToken?: boolean;
   repoUrl?: string;
@@ -38,6 +47,7 @@ export interface AgentPrewarmJobOpts {
   revision?: string;
   workspacePath: string;
   workspaceRepos?: AgentSessionWorkspaceRepo[];
+  skillPlan?: AgentSessionSkillPlan;
   installCommand?: string;
   forwardedAgentEnv?: Record<string, string>;
   forwardedAgentSecretRefs?: SecretRefWithEnvKey[];
@@ -53,7 +63,7 @@ function buildWorkspaceVolumeMount(workspacePath: string): k8s.V1VolumeMount {
   return {
     name: 'workspace',
     mountPath: workspacePath,
-    subPath: AGENT_WORKSPACE_SUBPATH,
+    subPath: SESSION_WORKSPACE_SUBPATH,
   };
 }
 
@@ -73,6 +83,10 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
     installCommand: opts.installCommand,
     useGitHubToken: opts.hasGitHubToken,
   };
+  const skillBootstrapCommand = generateSkillBootstrapCommand(opts.skillPlan, {
+    useGitHubToken: opts.hasGitHubToken,
+  });
+  const runtimeSeedScript = generateRuntimeSeedScript(initScriptOpts);
 
   const workspaceVolumeMount = buildWorkspaceVolumeMount(opts.workspacePath);
   const forwardedAgentEnv = opts.forwardedAgentEnv || {};
@@ -159,7 +173,7 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
               name: 'prepare-workspace',
               image: opts.image,
               imagePullPolicy: 'IfNotPresent',
-              command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
+              command: ['sh', '-c', `mkdir -p "${SESSION_WORKSPACE_VOLUME_ROOT}/${SESSION_WORKSPACE_SUBPATH}"`],
               resources: opts.resources,
               securityContext: {
                 ...securityContext,
@@ -168,7 +182,7 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
               volumeMounts: [
                 {
                   name: 'workspace',
-                  mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
+                  mountPath: SESSION_WORKSPACE_VOLUME_ROOT,
                 },
                 {
                   name: 'tmp',
@@ -194,8 +208,8 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
               volumeMounts: [
                 workspaceVolumeMount,
                 {
-                  name: 'claude-config',
-                  mountPath: '/home/claude/.claude',
+                  name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+                  mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR,
                 },
                 {
                   name: 'tmp',
@@ -203,7 +217,71 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
                 },
               ],
               env: [
-                { name: 'HOME', value: '/home/claude/.claude' },
+                { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+                { name: 'TMPDIR', value: '/tmp' },
+                { name: 'TMP', value: '/tmp' },
+                { name: 'TEMP', value: '/tmp' },
+                ...forwardedAgentSecretEnv,
+                ...githubTokenEnv,
+              ],
+            },
+            ...((opts.skillPlan?.skills || []).length > 0
+              ? [
+                  {
+                    name: 'init-skills',
+                    image: opts.workspaceGatewayImage || opts.image,
+                    imagePullPolicy: 'IfNotPresent',
+                    command: ['sh', '-c', skillBootstrapCommand],
+                    resources: opts.resources,
+                    securityContext: {
+                      ...securityContext,
+                      readOnlyRootFilesystem: false,
+                    },
+                    volumeMounts: [
+                      workspaceVolumeMount,
+                      {
+                        name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+                        mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR,
+                      },
+                      {
+                        name: 'tmp',
+                        mountPath: '/tmp',
+                      },
+                    ],
+                    env: [
+                      { name: 'LIFECYCLE_SESSION_HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+                      { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+                      { name: 'TMPDIR', value: '/tmp' },
+                      { name: 'TMP', value: '/tmp' },
+                      { name: 'TEMP', value: '/tmp' },
+                      ...githubTokenEnv,
+                    ],
+                  } satisfies k8s.V1Container,
+                ]
+              : []),
+            {
+              name: 'seed-runtime-config',
+              image: opts.image,
+              imagePullPolicy: 'IfNotPresent',
+              command: ['sh', '-c', runtimeSeedScript],
+              resources: opts.resources,
+              securityContext: {
+                ...securityContext,
+                readOnlyRootFilesystem: false,
+              },
+              volumeMounts: [
+                workspaceVolumeMount,
+                {
+                  name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+                  mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR,
+                },
+                {
+                  name: 'tmp',
+                  mountPath: '/tmp',
+                },
+              ],
+              env: [
+                { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
                 { name: 'TMPDIR', value: '/tmp' },
                 { name: 'TMP', value: '/tmp' },
                 { name: 'TEMP', value: '/tmp' },
@@ -242,7 +320,7 @@ export function buildAgentPrewarmJobSpec(opts: AgentPrewarmJobOpts): k8s.V1Job {
               },
             },
             {
-              name: 'claude-config',
+              name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
               emptyDir: {},
             },
             {

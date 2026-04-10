@@ -16,10 +16,10 @@
 
 import { posix as pathPosix } from 'path';
 
-export const AGENT_WORKSPACE_ROOT = '/workspace';
-export const AGENT_WORKSPACE_SUBPATH = 'repo';
-export const AGENT_EDITOR_WORKSPACE_FILE = '/tmp/agent-session.code-workspace';
-const AGENT_ADDITIONAL_REPOS_ROOT = `${AGENT_WORKSPACE_ROOT}/repos`;
+export const SESSION_WORKSPACE_ROOT = '/workspace';
+export const SESSION_WORKSPACE_SUBPATH = 'repo';
+export const SESSION_WORKSPACE_EDITOR_PROJECT_FILE = '/tmp/agent-session.code-workspace';
+const SESSION_WORKSPACE_ADDITIONAL_REPOS_ROOT = `${SESSION_WORKSPACE_ROOT}/repos`;
 
 export interface AgentSessionWorkspaceRepo {
   repo: string;
@@ -59,16 +59,16 @@ export function repoNameFromRepoUrl(repoUrl?: string | null): string | null {
   return normalized || null;
 }
 
-export function buildAgentWorkspaceRepoMountPath(repo: string, primary = false): string {
+export function buildSessionWorkspaceRepoMountPath(repo: string, primary = false): string {
   if (primary) {
-    return AGENT_WORKSPACE_ROOT;
+    return SESSION_WORKSPACE_ROOT;
   }
 
   const { owner, name } = splitRepoFullName(repo);
-  return pathPosix.join(AGENT_ADDITIONAL_REPOS_ROOT, owner, name);
+  return pathPosix.join(SESSION_WORKSPACE_ADDITIONAL_REPOS_ROOT, owner, name);
 }
 
-export function normalizeAgentWorkspaceRepo(
+export function normalizeSessionWorkspaceRepo(
   repo: Pick<AgentSessionWorkspaceRepo, 'repo' | 'repoUrl' | 'branch' | 'revision'>,
   primary = false
 ): AgentSessionWorkspaceRepo {
@@ -77,7 +77,7 @@ export function normalizeAgentWorkspaceRepo(
     repoUrl: repo.repoUrl,
     branch: repo.branch,
     revision: repo.revision || null,
-    mountPath: buildAgentWorkspaceRepoMountPath(repo.repo, primary),
+    mountPath: buildSessionWorkspaceRepoMountPath(repo.repo, primary),
     primary,
   };
 }
@@ -87,12 +87,12 @@ export function rewriteWorkspacePathForRepo(value: string, repoRoot: string): st
     return value;
   }
 
-  if (value === AGENT_WORKSPACE_ROOT) {
+  if (value === SESSION_WORKSPACE_ROOT) {
     return repoRoot;
   }
 
-  if (value.startsWith(`${AGENT_WORKSPACE_ROOT}/`)) {
-    return `${repoRoot}${value.slice(AGENT_WORKSPACE_ROOT.length)}`;
+  if (value.startsWith(`${SESSION_WORKSPACE_ROOT}/`)) {
+    return `${repoRoot}${value.slice(SESSION_WORKSPACE_ROOT.length)}`;
   }
 
   if (value.startsWith('/')) {
@@ -103,14 +103,14 @@ export function rewriteWorkspacePathForRepo(value: string, repoRoot: string): st
 }
 
 export function rewriteWorkspaceScriptForRepo(value: string, repoRoot: string): string {
-  if (!value.trim() || repoRoot === AGENT_WORKSPACE_ROOT) {
+  if (!value.trim() || repoRoot === SESSION_WORKSPACE_ROOT) {
     return value;
   }
 
-  return value.split(AGENT_WORKSPACE_ROOT).join(repoRoot);
+  return value.split(SESSION_WORKSPACE_ROOT).join(repoRoot);
 }
 
-export function buildAgentEditorWorkspaceContents(workspaceRepos: AgentSessionWorkspaceRepo[]): string {
+export function buildSessionWorkspaceEditorContents(workspaceRepos: AgentSessionWorkspaceRepo[]): string {
   return JSON.stringify(
     {
       folders: workspaceRepos.map((repo) => ({

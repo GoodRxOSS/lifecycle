@@ -16,22 +16,35 @@
 
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from 'server/lib/logger';
-import { generateInitScript, InitScriptOpts } from './configSeeder';
+import {
+  SESSION_WORKSPACE_HOME_VOLUME_NAME,
+  SESSION_WORKSPACE_SHARED_HOME_DIR,
+  generateInitScript,
+  generateRuntimeSeedScript,
+  InitScriptOpts,
+} from './configSeeder';
+import { generateSkillBootstrapCommand } from './skillBootstrap';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
+import { SESSION_POD_MCP_CONFIG_ENV, SESSION_POD_MCP_CONFIG_SECRET_KEY } from 'server/services/ai/mcp/sessionPod';
 import {
-  AGENT_EDITOR_WORKSPACE_FILE,
-  AGENT_WORKSPACE_SUBPATH,
-  buildAgentEditorWorkspaceContents,
-  normalizeAgentWorkspaceRepo,
+  SESSION_WORKSPACE_EDITOR_PROJECT_FILE,
+  SESSION_WORKSPACE_SUBPATH,
+  buildSessionWorkspaceEditorContents,
+  normalizeSessionWorkspaceRepo,
   repoNameFromRepoUrl,
   type AgentSessionWorkspaceRepo,
 } from './workspace';
+import type { AgentSessionSkillPlan } from './skillPlan';
 
-export const AGENT_EDITOR_PORT = parseInt(process.env.AGENT_EDITOR_PORT || '13337', 10);
-const AGENT_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
+export const SESSION_WORKSPACE_EDITOR_CONTAINER_NAME = 'editor';
+export const SESSION_WORKSPACE_GATEWAY_CONTAINER_NAME = 'workspace-gateway';
+export const SESSION_WORKSPACE_GATEWAY_PORT_NAME = 'ws-gateway';
+export const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
+export const SESSION_WORKSPACE_GATEWAY_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT || '13338', 10);
+const SESSION_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -112,28 +125,63 @@ function summarizePodState(pod: k8s.V1Pod): string {
   return `phase=${pod.status?.phase || 'Unknown'} init=[${initStates}] containers=[${mainStates}]`;
 }
 
-export interface AgentPodOpts {
+function describePodCreateError(error: unknown): string | null {
+  if (!(error instanceof k8s.HttpError)) {
+    return null;
+  }
+
+  if (typeof error.body === 'string' && error.body.trim()) {
+    return error.body.trim();
+  }
+
+  const body =
+    error.body && typeof error.body === 'object'
+      ? (error.body as {
+          message?: unknown;
+          details?: {
+            causes?: Array<{
+              field?: unknown;
+              message?: unknown;
+            }>;
+          };
+        })
+      : null;
+
+  const summary = typeof body?.message === 'string' ? body.message.trim() : '';
+  const causeList = body?.details?.causes;
+  const causes = Array.isArray(causeList)
+    ? causeList
+        .map((cause) => {
+          const field = typeof cause.field === 'string' ? cause.field.trim() : '';
+          const message = typeof cause.message === 'string' ? cause.message.trim() : '';
+          if (field && message) {
+            return `${field}: ${message}`;
+          }
+          return message || field;
+        })
+        .filter(Boolean)
+    : [];
+
+  const details = [summary, ...causes].filter(Boolean);
+  return details.length > 0 ? details.join('; ') : error.message;
+}
+
+export interface SessionWorkspacePodOptions {
   podName: string;
   namespace: string;
   pvcName: string;
-  image: string;
-  editorImage: string;
+  workspaceImage?: string;
+  workspaceEditorImage?: string;
+  workspaceGatewayImage?: string;
   apiKeySecretName: string;
   hasGitHubToken?: boolean;
-  model: string;
   repoUrl?: string;
   branch?: string;
   revision?: string;
   workspacePath: string;
   workspaceRepos?: AgentSessionWorkspaceRepo[];
+  skillPlan?: AgentSessionSkillPlan;
   installCommand?: string;
-  claudeMdContent?: string;
-  claudePermissions?: {
-    allow: string[];
-    deny: string[];
-  };
-  claudeCommitAttribution?: string;
-  claudePrAttribution?: string;
   forwardedAgentEnv?: Record<string, string>;
   forwardedAgentSecretRefs?: SecretRefWithEnvKey[];
   forwardedAgentSecretServiceName?: string;
@@ -148,20 +196,21 @@ export interface AgentPodOpts {
   };
   skipWorkspaceBootstrap?: boolean;
   resources?: {
-    agent?: k8s.V1ResourceRequirements;
+    workspace?: k8s.V1ResourceRequirements;
     editor?: k8s.V1ResourceRequirements;
+    workspaceGateway?: k8s.V1ResourceRequirements;
   };
 }
 
-function buildAgentResources(): k8s.V1ResourceRequirements {
+function buildWorkspaceBootstrapResources(): k8s.V1ResourceRequirements {
   return {
     requests: {
-      cpu: process.env.AGENT_POD_CPU_REQUEST || '500m',
-      memory: process.env.AGENT_POD_MEMORY_REQUEST || '1Gi',
+      cpu: process.env.AGENT_SESSION_WORKSPACE_CPU_REQUEST || '500m',
+      memory: process.env.AGENT_SESSION_WORKSPACE_MEMORY_REQUEST || '1Gi',
     },
     limits: {
-      cpu: process.env.AGENT_POD_CPU_LIMIT || '2',
-      memory: process.env.AGENT_POD_MEMORY_LIMIT || '4Gi',
+      cpu: process.env.AGENT_SESSION_WORKSPACE_CPU_LIMIT || '2',
+      memory: process.env.AGENT_SESSION_WORKSPACE_MEMORY_LIMIT || '4Gi',
     },
   };
 }
@@ -169,12 +218,25 @@ function buildAgentResources(): k8s.V1ResourceRequirements {
 function buildEditorResources(): k8s.V1ResourceRequirements {
   return {
     requests: {
-      cpu: process.env.AGENT_EDITOR_CPU_REQUEST || '250m',
-      memory: process.env.AGENT_EDITOR_MEMORY_REQUEST || '512Mi',
+      cpu: process.env.AGENT_SESSION_WORKSPACE_EDITOR_CPU_REQUEST || '250m',
+      memory: process.env.AGENT_SESSION_WORKSPACE_EDITOR_MEMORY_REQUEST || '512Mi',
     },
     limits: {
-      cpu: process.env.AGENT_EDITOR_CPU_LIMIT || '1',
-      memory: process.env.AGENT_EDITOR_MEMORY_LIMIT || '1Gi',
+      cpu: process.env.AGENT_SESSION_WORKSPACE_EDITOR_CPU_LIMIT || '1',
+      memory: process.env.AGENT_SESSION_WORKSPACE_EDITOR_MEMORY_LIMIT || '1Gi',
+    },
+  };
+}
+
+function buildWorkspaceGatewayResources(): k8s.V1ResourceRequirements {
+  return {
+    requests: {
+      cpu: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_CPU_REQUEST || '100m',
+      memory: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_MEMORY_REQUEST || '256Mi',
+    },
+    limits: {
+      cpu: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_CPU_LIMIT || '500m',
+      memory: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_MEMORY_LIMIT || '512Mi',
     },
   };
 }
@@ -235,7 +297,7 @@ function buildWorkspaceVolumeMount(workspacePath: string): k8s.V1VolumeMount {
   return {
     name: 'workspace',
     mountPath: workspacePath,
-    subPath: AGENT_WORKSPACE_SUBPATH,
+    subPath: SESSION_WORKSPACE_SUBPATH,
   };
 }
 
@@ -243,7 +305,7 @@ function escapeSingleQuotedShell(value: string): string {
   return value.replace(/'/g, `'"'"'`);
 }
 
-function resolveEditorWorkspaceRepos(opts: AgentPodOpts): AgentSessionWorkspaceRepo[] {
+function resolveEditorWorkspaceRepos(opts: SessionWorkspacePodOptions): AgentSessionWorkspaceRepo[] {
   if (opts.workspaceRepos?.length) {
     return opts.workspaceRepos;
   }
@@ -255,7 +317,7 @@ function resolveEditorWorkspaceRepos(opts: AgentPodOpts): AgentSessionWorkspaceR
 
   return [
     {
-      ...normalizeAgentWorkspaceRepo(
+      ...normalizeSessionWorkspaceRepo(
         {
           repo,
           repoUrl: opts.repoUrl!,
@@ -270,41 +332,38 @@ function resolveEditorWorkspaceRepos(opts: AgentPodOpts): AgentSessionWorkspaceR
 }
 
 function generateEditorWorkspaceInitScript(workspaceRepos: AgentSessionWorkspaceRepo[]): string {
-  const workspaceJson = buildAgentEditorWorkspaceContents(workspaceRepos);
+  const workspaceJson = buildSessionWorkspaceEditorContents(workspaceRepos);
 
   return [
     '#!/bin/sh',
     'set -e',
-    `cat > '${escapeSingleQuotedShell(AGENT_EDITOR_WORKSPACE_FILE)}' << 'WORKSPACE_EOF'`,
+    `cat > '${escapeSingleQuotedShell(SESSION_WORKSPACE_EDITOR_PROJECT_FILE)}' << 'WORKSPACE_EOF'`,
     workspaceJson,
     'WORKSPACE_EOF',
     '',
   ].join('\n');
 }
 
-export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
+export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): k8s.V1Pod {
   const {
     podName,
     namespace,
     pvcName,
-    image,
-    editorImage,
+    workspaceImage,
+    workspaceEditorImage,
+    workspaceGatewayImage,
     apiKeySecretName,
     hasGitHubToken,
-    model,
     repoUrl,
     branch,
     revision,
     workspacePath,
     installCommand,
-    claudeMdContent,
-    claudePermissions,
-    claudeCommitAttribution,
-    claudePrAttribution,
     useGvisor,
     userIdentity,
     skipWorkspaceBootstrap,
   } = opts;
+  const resolvedWorkspaceGatewayImage = workspaceGatewayImage ?? workspaceImage;
 
   const initScriptOpts: InitScriptOpts = {
     repoUrl,
@@ -313,10 +372,6 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     workspacePath,
     workspaceRepos: opts.workspaceRepos,
     installCommand,
-    claudeMdContent,
-    claudePermissions,
-    claudeCommitAttribution,
-    claudePrAttribution,
     gitUserName: userIdentity?.gitUserName,
     gitUserEmail: userIdentity?.gitUserEmail,
     githubUsername: userIdentity?.githubUsername || undefined,
@@ -324,11 +379,24 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
   };
 
   const initScript = generateInitScript(initScriptOpts);
-  const resources = opts.resources?.agent || buildAgentResources();
+  const skillBootstrapCommand = generateSkillBootstrapCommand(opts.skillPlan, {
+    useGitHubToken: hasGitHubToken,
+  });
+  const runtimeSeedScript = generateRuntimeSeedScript(initScriptOpts);
+  if (!workspaceImage || !workspaceEditorImage) {
+    throw new Error('Session workspace pod requires workspaceImage and workspaceEditorImage');
+  }
+
+  const resources = opts.resources?.workspace || buildWorkspaceBootstrapResources();
   const editorResources = opts.resources?.editor || buildEditorResources();
+  const workspaceGatewayResources = opts.resources?.workspaceGateway || buildWorkspaceGatewayResources();
   const userEnv = buildUserIdentityEnv(userIdentity);
   const githubTokenEnv = buildGitHubTokenEnv(apiKeySecretName, hasGitHubToken);
   const workspaceVolumeMount = buildWorkspaceVolumeMount(workspacePath);
+  const sessionHomeVolumeMount: k8s.V1VolumeMount = {
+    name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+    mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR,
+  };
   const editorWorkspaceRepos = resolveEditorWorkspaceRepos(opts);
   const editorWorkspaceInitScript = generateEditorWorkspaceInitScript(editorWorkspaceRepos);
   const forwardedAgentEnv = opts.forwardedAgentEnv || {};
@@ -338,6 +406,16 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     opts.forwardedAgentSecretServiceName || podName,
     apiKeySecretName
   );
+  const sessionPodMcpConfigEnv: k8s.V1EnvVar = {
+    name: SESSION_POD_MCP_CONFIG_ENV,
+    valueFrom: {
+      secretKeyRef: {
+        name: apiKeySecretName,
+        key: SESSION_POD_MCP_CONFIG_SECRET_KEY,
+        optional: true,
+      },
+    },
+  };
 
   const securityContext: k8s.V1SecurityContext = {
     runAsUser: 1000,
@@ -356,9 +434,9 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     initContainers.push(
       {
         name: 'prepare-workspace',
-        image,
+        image: workspaceImage,
         imagePullPolicy: 'IfNotPresent',
-        command: ['sh', '-c', `mkdir -p "${AGENT_WORKSPACE_VOLUME_ROOT}/${AGENT_WORKSPACE_SUBPATH}"`],
+        command: ['sh', '-c', `mkdir -p "${SESSION_WORKSPACE_VOLUME_ROOT}/${SESSION_WORKSPACE_SUBPATH}"`],
         resources,
         securityContext: {
           ...securityContext,
@@ -367,7 +445,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
         volumeMounts: [
           {
             name: 'workspace',
-            mountPath: AGENT_WORKSPACE_VOLUME_ROOT,
+            mountPath: SESSION_WORKSPACE_VOLUME_ROOT,
           },
           {
             name: 'tmp',
@@ -382,7 +460,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
       },
       {
         name: 'init-workspace',
-        image,
+        image: workspaceImage,
         imagePullPolicy: 'IfNotPresent',
         command: ['sh', '-c', initScript],
         resources,
@@ -392,17 +470,14 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
         },
         volumeMounts: [
           workspaceVolumeMount,
-          {
-            name: 'claude-config',
-            mountPath: '/home/claude/.claude',
-          },
+          sessionHomeVolumeMount,
           {
             name: 'tmp',
             mountPath: '/tmp',
           },
         ],
         env: [
-          { name: 'HOME', value: '/home/claude/.claude' },
+          { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
           { name: 'TMPDIR', value: '/tmp' },
           { name: 'TMP', value: '/tmp' },
           { name: 'TEMP', value: '/tmp' },
@@ -414,9 +489,68 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
     );
   }
 
+  if ((opts.skillPlan?.skills || []).length > 0) {
+    initContainers.push({
+      name: 'init-skills',
+      image: resolvedWorkspaceGatewayImage,
+      imagePullPolicy: 'IfNotPresent',
+      command: ['sh', '-c', skillBootstrapCommand],
+      resources: workspaceGatewayResources,
+      securityContext: {
+        ...securityContext,
+        readOnlyRootFilesystem: false,
+      },
+      volumeMounts: [
+        workspaceVolumeMount,
+        sessionHomeVolumeMount,
+        {
+          name: 'tmp',
+          mountPath: '/tmp',
+        },
+      ],
+      env: [
+        { name: 'LIFECYCLE_SESSION_HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+        { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+        { name: 'TMPDIR', value: '/tmp' },
+        { name: 'TMP', value: '/tmp' },
+        { name: 'TEMP', value: '/tmp' },
+        ...githubTokenEnv,
+      ],
+    });
+  }
+
+  initContainers.push({
+    name: 'seed-runtime-config',
+    image: workspaceImage,
+    imagePullPolicy: 'IfNotPresent',
+    command: ['sh', '-c', runtimeSeedScript],
+    resources,
+    securityContext: {
+      ...securityContext,
+      readOnlyRootFilesystem: false,
+    },
+    volumeMounts: [
+      workspaceVolumeMount,
+      sessionHomeVolumeMount,
+      {
+        name: 'tmp',
+        mountPath: '/tmp',
+      },
+    ],
+    env: [
+      { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+      { name: 'TMPDIR', value: '/tmp' },
+      { name: 'TMP', value: '/tmp' },
+      { name: 'TEMP', value: '/tmp' },
+      ...forwardedAgentSecretEnv,
+      ...githubTokenEnv,
+      ...userEnv,
+    ],
+  });
+
   initContainers.push({
     name: 'prepare-editor-workspace',
-    image,
+    image: workspaceImage,
     imagePullPolicy: 'IfNotPresent',
     command: ['sh', '-c', editorWorkspaceInitScript],
     resources,
@@ -466,58 +600,19 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
       initContainers,
       containers: [
         {
-          name: 'agent',
-          image,
-          imagePullPolicy: 'IfNotPresent',
-          command: ['sleep', 'infinity'],
-          resources,
-          securityContext,
-          env: [
-            {
-              name: 'ANTHROPIC_API_KEY',
-              valueFrom: {
-                secretKeyRef: {
-                  name: apiKeySecretName,
-                  key: 'ANTHROPIC_API_KEY',
-                },
-              },
-            },
-            { name: 'CLAUDE_MODEL', value: model },
-            { name: 'HOME', value: '/home/claude/.claude' },
-            { name: 'TMPDIR', value: '/tmp' },
-            { name: 'TMP', value: '/tmp' },
-            { name: 'TEMP', value: '/tmp' },
-            { name: 'NODE_OPTIONS', value: process.env.AGENT_NODE_OPTIONS || '--max-old-space-size=2048' },
-            ...forwardedAgentSecretEnv,
-            ...githubTokenEnv,
-            ...userEnv,
-          ],
-          volumeMounts: [
-            workspaceVolumeMount,
-            {
-              name: 'claude-config',
-              mountPath: '/home/claude/.claude',
-            },
-            {
-              name: 'tmp',
-              mountPath: '/tmp',
-            },
-          ],
-        },
-        {
-          name: 'editor',
-          image: editorImage,
+          name: SESSION_WORKSPACE_EDITOR_CONTAINER_NAME,
+          image: workspaceEditorImage,
           imagePullPolicy: 'IfNotPresent',
           args: [
-            AGENT_EDITOR_WORKSPACE_FILE,
+            SESSION_WORKSPACE_EDITOR_PROJECT_FILE,
             '--auth',
             'none',
             '--bind-addr',
-            `0.0.0.0:${AGENT_EDITOR_PORT}`,
+            `0.0.0.0:${SESSION_WORKSPACE_EDITOR_PORT}`,
             '--disable-telemetry',
             '--disable-update-check',
           ],
-          ports: [{ containerPort: AGENT_EDITOR_PORT, name: 'editor' }],
+          ports: [{ containerPort: SESSION_WORKSPACE_EDITOR_PORT, name: SESSION_WORKSPACE_EDITOR_CONTAINER_NAME }],
           resources: editorResources,
           securityContext,
           env: [
@@ -529,7 +624,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
           readinessProbe: {
             httpGet: {
               path: '/healthz',
-              port: AGENT_EDITOR_PORT,
+              port: SESSION_WORKSPACE_EDITOR_PORT,
             },
             initialDelaySeconds: 2,
             periodSeconds: 5,
@@ -546,6 +641,48 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
             },
           ],
         },
+        {
+          name: SESSION_WORKSPACE_GATEWAY_CONTAINER_NAME,
+          image: resolvedWorkspaceGatewayImage,
+          imagePullPolicy: 'IfNotPresent',
+          command: ['node', '/opt/lifecycle-workspace-gateway/index.mjs'],
+          ports: [{ containerPort: SESSION_WORKSPACE_GATEWAY_PORT, name: SESSION_WORKSPACE_GATEWAY_PORT_NAME }],
+          resources: workspaceGatewayResources,
+          securityContext,
+          env: [
+            { name: 'LIFECYCLE_SESSION_WORKSPACE', value: workspacePath },
+            { name: 'LIFECYCLE_SESSION_HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+            { name: 'MCP_PORT', value: String(SESSION_WORKSPACE_GATEWAY_PORT) },
+            { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+            { name: 'TMPDIR', value: '/tmp' },
+            { name: 'TMP', value: '/tmp' },
+            { name: 'TEMP', value: '/tmp' },
+            {
+              name: 'NODE_OPTIONS',
+              value: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_NODE_OPTIONS || '--max-old-space-size=2048',
+            },
+            sessionPodMcpConfigEnv,
+            ...forwardedAgentSecretEnv,
+            ...githubTokenEnv,
+            ...userEnv,
+          ],
+          readinessProbe: {
+            httpGet: {
+              path: '/health',
+              port: SESSION_WORKSPACE_GATEWAY_PORT,
+            },
+            initialDelaySeconds: 2,
+            periodSeconds: 5,
+          },
+          volumeMounts: [
+            workspaceVolumeMount,
+            sessionHomeVolumeMount,
+            {
+              name: 'tmp',
+              mountPath: '/tmp',
+            },
+          ],
+        },
       ],
       volumes: [
         {
@@ -555,7 +692,7 @@ export function buildAgentPodSpec(opts: AgentPodOpts): k8s.V1Pod {
           },
         },
         {
-          name: 'claude-config',
+          name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
           emptyDir: {},
         },
         {
@@ -623,25 +760,27 @@ function summarizeLogLine(logs: string | null): string | null {
   return firstLine || null;
 }
 
-async function waitForAgentPodReady(
+async function waitForSessionWorkspacePodReady(
   coreApi: k8s.CoreV1Api,
   namespace: string,
   podName: string,
-  readiness?: AgentPodOpts['readiness']
+  readiness?: SessionWorkspacePodOptions['readiness']
 ): Promise<k8s.V1Pod> {
   const readyTimeoutMs =
     normalizeNonNegativeInteger(readiness?.timeoutMs) ??
-    normalizeNonNegativeInteger(process.env.AGENT_POD_READY_TIMEOUT_MS) ??
+    normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_TIMEOUT_MS) ??
     60000;
   const readyPollMs =
     normalizeNonNegativeInteger(readiness?.pollMs) ??
-    normalizeNonNegativeInteger(process.env.AGENT_POD_READY_POLL_MS) ??
+    normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS) ??
     2000;
   const deadline = Date.now() + readyTimeoutMs;
   let lastObservedState = 'pending';
+  let lastPod: k8s.V1Pod | null = null;
 
   while (Date.now() < deadline) {
     const { body: pod } = await coreApi.readNamespacedPod(podName, namespace);
+    lastPod = pod;
     const failure = getPodStartupFailure(pod);
     if (failure) {
       const failingContainer =
@@ -675,7 +814,7 @@ async function waitForAgentPodReady(
       }
 
       const logSummary = summarizeLogLine(containerLogs);
-      throw new Error(`Agent pod failed to start: ${failure}${logSummary ? ` - ${logSummary}` : ''}`);
+      throw new Error(`Session workspace pod failed to start: ${failure}${logSummary ? ` - ${logSummary}` : ''}`);
     }
 
     if (isPodReady(pod)) {
@@ -686,43 +825,63 @@ async function waitForAgentPodReady(
     await sleep(readyPollMs);
   }
 
-  const timeoutLogs = await getContainerLogs(coreApi, namespace, podName, 'init-workspace');
+  const timeoutContainer =
+    (lastPod?.status?.initContainerStatuses || []).find((status) => !status.state?.terminated)?.name ||
+    'init-workspace';
+  const timeoutLogs = await getContainerLogs(coreApi, namespace, podName, timeoutContainer);
   if (timeoutLogs) {
     getLogger().error(
-      { namespace, podName, containerName: 'init-workspace', logs: timeoutLogs },
-      `Session: timeout logs captured containerName=init-workspace namespace=${namespace} podName=${podName}`
+      { namespace, podName, containerName: timeoutContainer, logs: timeoutLogs },
+      `Session: timeout logs captured containerName=${timeoutContainer} namespace=${namespace} podName=${podName}`
     );
   }
 
   const timeoutSummary = summarizeLogLine(timeoutLogs);
   throw new Error(
-    `Agent pod did not become ready within ${readyTimeoutMs}ms: ${lastObservedState}${
+    `Session workspace pod did not become ready within ${readyTimeoutMs}ms: ${lastObservedState}${
       timeoutSummary ? ` - ${timeoutSummary}` : ''
     }`
   );
 }
 
-export async function createAgentPod(opts: AgentPodOpts): Promise<k8s.V1Pod> {
+export async function createSessionWorkspacePod(opts: SessionWorkspacePodOptions): Promise<k8s.V1Pod> {
   const logger = getLogger();
   const coreApi = getCoreApi();
-  const pod = buildAgentPodSpec(opts);
+  const pod = buildSessionWorkspacePodSpec(opts);
 
-  await coreApi.createNamespacedPod(opts.namespace, pod);
-  const result = await waitForAgentPodReady(coreApi, opts.namespace, opts.podName, opts.readiness);
-  logger.info(`Session: pod ready podName=${opts.podName} namespace=${opts.namespace}`);
+  try {
+    await coreApi.createNamespacedPod(opts.namespace, pod);
+  } catch (error) {
+    const detail = describePodCreateError(error);
+    logger.error(
+      { error, namespace: opts.namespace, podName: opts.podName, pod },
+      `Session: workspace pod create failed podName=${opts.podName} namespace=${opts.namespace}${
+        detail ? ` detail=${detail}` : ''
+      }`
+    );
+
+    if (detail) {
+      throw new Error(`Session workspace pod creation rejected by Kubernetes: ${detail}`);
+    }
+
+    throw error;
+  }
+
+  const result = await waitForSessionWorkspacePodReady(coreApi, opts.namespace, opts.podName, opts.readiness);
+  logger.info(`Session: workspace pod ready podName=${opts.podName} namespace=${opts.namespace}`);
   return result;
 }
 
-export async function deleteAgentPod(namespace: string, podName: string): Promise<void> {
+export async function deleteSessionWorkspacePod(namespace: string, podName: string): Promise<void> {
   const logger = getLogger();
   const coreApi = getCoreApi();
 
   try {
     await coreApi.deleteNamespacedPod(podName, namespace);
-    logger.info(`Session: pod cleaned podName=${podName} namespace=${namespace}`);
+    logger.info(`Session: workspace pod cleaned podName=${podName} namespace=${namespace}`);
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(`Session: pod cleanup skipped reason=not_found podName=${podName} namespace=${namespace}`);
+      logger.info(`Session: workspace pod cleanup skipped reason=not_found podName=${podName} namespace=${namespace}`);
       return;
     }
     throw error;

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { generateInitScript } from '../configSeeder';
+import { generateInitScript, generateRuntimeSeedScript } from '../configSeeder';
 
 describe('configSeeder', () => {
   describe('generateInitScript', () => {
@@ -42,10 +42,9 @@ describe('configSeeder', () => {
       expect(script).toContain('git checkout "abc123def456"');
     });
 
-    it('marks the workspace as a safe git directory before checkout steps', () => {
+    it('creates the workspace directory before cloning', () => {
       const script = generateInitScript(baseOpts);
       expect(script).toContain('mkdir -p "/workspace"');
-      expect(script).toContain('git config --global --add safe.directory "/workspace"');
     });
 
     it('contains install command when provided', () => {
@@ -58,52 +57,50 @@ describe('configSeeder', () => {
       expect(script).not.toContain('pnpm install');
     });
 
-    it('writes CLAUDE.md when content is provided', () => {
-      const script = generateInitScript({ ...baseOpts, claudeMdContent: 'Project rules here' });
-      expect(script).toContain('CLAUDE.md');
-      expect(script).toContain('Project rules here');
-    });
-
-    it('writes settings.json with permissions', () => {
+    it('does not write deprecated assistant bootstrap files', () => {
       const script = generateInitScript(baseOpts);
-      expect(script).toContain('settings.json');
-      expect(script).toContain('Bash(*)');
-      expect(script).toContain('Read(*)');
-      expect(script).toContain('Write(*)');
-      expect(script).toContain('Edit(*)');
-      expect(script).toContain('Glob(*)');
-      expect(script).toContain('Grep(*)');
+      expect(script).not.toContain('CLAUDE.md');
+      expect(script).not.toContain('settings.json');
     });
 
-    it('writes Claude attribution settings when provided', () => {
-      const script = generateInitScript({
-        ...baseOpts,
-        claudeCommitAttribution: 'Generated with (sample-lifecycle-app)',
-        claudePrAttribution: 'Generated with (sample-lifecycle-app)',
-      });
-
-      expect(script).toContain('"attribution"');
-      expect(script).toContain('"commit": "Generated with (sample-lifecycle-app)"');
-      expect(script).toContain('"pr": "Generated with (sample-lifecycle-app)"');
+    it('does not include runtime seed steps', () => {
+      const script = generateInitScript(baseOpts);
+      expect(script).not.toContain('git config --global --add safe.directory "/workspace"');
+      expect(script).not.toContain('pre-push');
+      expect(script).not.toContain('git config --global user.name');
     });
 
-    it('writes custom Claude permissions when provided', () => {
+    it('configures a GitHub credential helper before the first clone when token auth is enabled', () => {
       const script = generateInitScript({
         ...baseOpts,
-        claudePermissions: {
-          allow: ['Read(*)'],
-          deny: ['Bash(*)'],
-        },
+        useGitHubToken: true,
       });
 
-      expect(script).toContain('"allow": [');
-      expect(script).toContain('"Read(*)"');
-      expect(script).toContain('"deny": [');
-      expect(script).toContain('"Bash(*)"');
+      const credentialHelperIndex = script.indexOf(
+        'git config --global credential.helper \'!f() { test "$1" = get || exit 0; echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f\''
+      );
+      const cloneIndex = script.indexOf('git clone --progress --depth 50 --branch "feature/test"');
+
+      expect(credentialHelperIndex).toBeGreaterThan(-1);
+      expect(cloneIndex).toBeGreaterThan(-1);
+      expect(credentialHelperIndex).toBeLessThan(cloneIndex);
+    });
+  });
+
+  describe('generateRuntimeSeedScript', () => {
+    const baseOpts = {
+      repoUrl: 'https://github.com/org/repo.git',
+      branch: 'feature/test',
+      workspacePath: '/workspace',
+    };
+
+    it('marks the workspace as a safe git directory', () => {
+      const script = generateRuntimeSeedScript(baseOpts);
+      expect(script).toContain('git config --global --add safe.directory "/workspace"');
     });
 
     it('sets up pre-push branch protection hook', () => {
-      const script = generateInitScript(baseOpts);
+      const script = generateRuntimeSeedScript(baseOpts);
       expect(script).toContain('pre-push');
       expect(script).toContain('Pushing to $branch_name is not allowed');
       expect(script).toContain('main');
@@ -145,7 +142,7 @@ describe('configSeeder', () => {
     });
 
     it('configures git identity when user context is provided', () => {
-      const script = generateInitScript({
+      const script = generateRuntimeSeedScript({
         ...baseOpts,
         gitUserName: 'Sample User',
         gitUserEmail: 'sample-user@example.com',
@@ -158,7 +155,7 @@ describe('configSeeder', () => {
     });
 
     it('configures a GitHub credential helper when token auth is enabled', () => {
-      const script = generateInitScript({
+      const script = generateRuntimeSeedScript({
         ...baseOpts,
         useGitHubToken: true,
       });

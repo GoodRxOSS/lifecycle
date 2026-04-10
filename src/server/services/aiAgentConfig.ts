@@ -17,8 +17,13 @@
 import BaseService from './_service';
 import GlobalConfigService from './globalConfig';
 import { getLogger } from 'server/lib/logger';
-import type { AIAgentConfig, AIAgentRepoOverride, AIAgentRepoConfigRow } from './types/aiAgentConfig';
-import { validateFileExclusionPatterns } from 'server/lib/validation/filePatternValidator';
+import type {
+  AIAgentConfig,
+  AIAgentRepoOverride,
+  AIAgentRepoConfigRow,
+  ApprovalPolicyConfig,
+} from './types/aiAgentConfig';
+import { validateAIAgentConfig, validateAIAgentRepoOverride } from 'server/lib/validation/aiAgentConfigValidator';
 
 const REDIS_KEY_PREFIX = 'ai_agent_repo_config:';
 
@@ -94,6 +99,23 @@ export default class AIAgentConfigService extends BaseService {
     return config;
   }
 
+  private mergeApprovalPolicy(
+    globalPolicy?: ApprovalPolicyConfig,
+    repoPolicy?: ApprovalPolicyConfig
+  ): ApprovalPolicyConfig | undefined {
+    if (!globalPolicy && !repoPolicy) {
+      return undefined;
+    }
+
+    return {
+      defaultMode: repoPolicy?.defaultMode ?? globalPolicy?.defaultMode,
+      rules: {
+        ...(globalPolicy?.rules || {}),
+        ...(repoPolicy?.rules || {}),
+      },
+    };
+  }
+
   private mergeConfigs(global: AIAgentConfig, repoOverride: Partial<AIAgentRepoOverride>): AIAgentConfig {
     const result = { ...global };
 
@@ -106,6 +128,7 @@ export default class AIAgentConfigService extends BaseService {
     if (repoOverride.sessionTTL !== undefined) {
       result.sessionTTL = repoOverride.sessionTTL;
     }
+    result.approvalPolicy = this.mergeApprovalPolicy(global.approvalPolicy, repoOverride.approvalPolicy);
     if (repoOverride.systemPromptOverride !== undefined) {
       result.systemPromptOverride = repoOverride.systemPromptOverride;
     }
@@ -143,10 +166,52 @@ export default class AIAgentConfigService extends BaseService {
   }
 
   async setGlobalConfig(config: AIAgentConfig): Promise<void> {
+    validateAIAgentConfig(config);
     await GlobalConfigService.getInstance().setConfig('aiAgent', config);
-    this.globalCache = { data: null, expiry: 0 };
-    this.memoryCache.clear();
+    this.invalidateCaches();
     getLogger().info('AIAgentConfig: global config updated via=api');
+  }
+
+  async updateGlobalAdditiveRules(additiveRules: string[]): Promise<AIAgentConfig> {
+    validateAIAgentRepoOverride({ additiveRules });
+
+    const currentConfig = await this.getGlobalConfig();
+    const nextConfig: AIAgentConfig = {
+      ...currentConfig,
+      additiveRules,
+    };
+
+    await GlobalConfigService.getInstance().setConfig('aiAgent', nextConfig);
+    this.invalidateCaches();
+    getLogger().info(`AIAgentConfig: global additive rules updated count=${additiveRules.length} via=api`);
+
+    return nextConfig;
+  }
+
+  async updateGlobalApprovalPolicy(approvalPolicy: ApprovalPolicyConfig): Promise<AIAgentConfig> {
+    validateAIAgentRepoOverride({ approvalPolicy });
+
+    const currentConfig = await this.getGlobalConfig();
+    const nextApprovalPolicy = this.normalizeApprovalPolicy({
+      ...currentConfig.approvalPolicy,
+      ...approvalPolicy,
+      rules: approvalPolicy.rules ?? currentConfig.approvalPolicy?.rules,
+    });
+    const nextConfig: AIAgentConfig = {
+      ...currentConfig,
+    };
+
+    if (nextApprovalPolicy) {
+      nextConfig.approvalPolicy = nextApprovalPolicy;
+    } else {
+      delete nextConfig.approvalPolicy;
+    }
+
+    await GlobalConfigService.getInstance().setConfig('aiAgent', nextConfig);
+    this.invalidateCaches();
+    getLogger().info('AIAgentConfig: global approval policy updated via=api');
+
+    return nextConfig;
   }
 
   async listRepoConfigs(): Promise<AIAgentRepoConfigRow[]> {
@@ -178,24 +243,33 @@ export default class AIAgentConfigService extends BaseService {
 
   async setRepoConfig(repoFullName: string, config: Partial<AIAgentRepoOverride>): Promise<void> {
     const normalized = repoFullName.toLowerCase();
-    if (config.systemPromptOverride !== undefined && config.systemPromptOverride.length > 50000) {
-      throw new Error('systemPromptOverride exceeds maximum length of 50000 characters');
-    }
-    if (config.excludedTools && config.excludedTools.length > 0) {
-      const CORE_TOOLS = ['query_database'];
-      for (const tool of config.excludedTools) {
-        if (CORE_TOOLS.includes(tool)) {
-          throw new Error(`Cannot exclude core tool: "${tool}". Core tools are required for agent operation.`);
-        }
-      }
-    }
-    if (config.excludedFilePatterns && config.excludedFilePatterns.length > 0) {
-      validateFileExclusionPatterns(config.excludedFilePatterns);
-    }
+    validateAIAgentRepoOverride(config);
+    await this.upsertRepoConfig(normalized, config);
+  }
+
+  async updateRepoAdditiveRules(repoFullName: string, additiveRules: string[]): Promise<Partial<AIAgentRepoOverride>> {
+    const normalized = repoFullName.toLowerCase();
+    validateAIAgentRepoOverride({ additiveRules });
+
+    const currentConfig = (await this.getRepoConfig(normalized)) ?? {};
+    const nextConfig: Partial<AIAgentRepoOverride> = {
+      ...currentConfig,
+      additiveRules,
+    };
+
+    await this.upsertRepoConfig(normalized, nextConfig);
+    getLogger().info(
+      `AIAgentConfig: repo additive rules updated repo=${normalized} count=${additiveRules.length} via=api`
+    );
+
+    return nextConfig;
+  }
+
+  private async upsertRepoConfig(normalizedRepoFullName: string, config: Partial<AIAgentRepoOverride>): Promise<void> {
     await this.db
       .knex('ai_agent_repo_config')
       .insert({
-        repositoryFullName: normalized,
+        repositoryFullName: normalizedRepoFullName,
         config: JSON.stringify(config),
         createdAt: this.db.knex.fn.now(),
         updatedAt: this.db.knex.fn.now(),
@@ -207,9 +281,9 @@ export default class AIAgentConfigService extends BaseService {
         deletedAt: null,
       });
 
-    const redisKey = `${REDIS_KEY_PREFIX}${normalized}`;
+    const redisKey = `${REDIS_KEY_PREFIX}${normalizedRepoFullName}`;
     await this.redis.del(redisKey);
-    this.memoryCache.delete(normalized);
+    this.memoryCache.delete(normalizedRepoFullName);
   }
 
   async deleteRepoConfig(repoFullName: string): Promise<void> {
@@ -231,8 +305,30 @@ export default class AIAgentConfigService extends BaseService {
       const redisKey = `${REDIS_KEY_PREFIX}${normalized}`;
       this.redis.del(redisKey);
     } else {
-      this.memoryCache.clear();
-      this.globalCache = { data: null, expiry: 0 };
+      this.invalidateCaches();
     }
+  }
+
+  private normalizeApprovalPolicy(approvalPolicy?: ApprovalPolicyConfig): ApprovalPolicyConfig | undefined {
+    if (!approvalPolicy) {
+      return undefined;
+    }
+
+    const normalizedRules =
+      approvalPolicy.rules && Object.keys(approvalPolicy.rules).length > 0 ? approvalPolicy.rules : undefined;
+
+    if (!approvalPolicy.defaultMode && !normalizedRules) {
+      return undefined;
+    }
+
+    return {
+      ...(approvalPolicy.defaultMode ? { defaultMode: approvalPolicy.defaultMode } : {}),
+      ...(normalizedRules ? { rules: normalizedRules } : {}),
+    };
+  }
+
+  private invalidateCaches(): void {
+    this.globalCache = { data: null, expiry: 0 };
+    this.memoryCache.clear();
   }
 }

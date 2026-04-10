@@ -324,11 +324,30 @@ export interface ProviderConfig {
   models: ModelConfig[];
 }
 
+export type ApprovalModeConfig = 'allow' | 'require_approval' | 'deny';
+
+export interface ApprovalPolicyConfig {
+  defaultMode?: ApprovalModeConfig;
+  rules?: Partial<
+    Record<
+      | 'read'
+      | 'workspace_write'
+      | 'shell_exec'
+      | 'git_write'
+      | 'network_access'
+      | 'deploy_k8s_mutation'
+      | 'external_mcp_write',
+      ApprovalModeConfig
+    >
+  >;
+}
+
 export interface AIAgentConfig {
   enabled: boolean;
   providers: ProviderConfig[];
   maxMessagesPerSession: number;
   sessionTTL: number;
+  approvalPolicy?: ApprovalPolicyConfig;
   additiveRules?: string[];
   systemPromptOverride?: string;
   excludedTools?: string[];

@@ -16,8 +16,8 @@
 
 import type { DevConfig } from 'server/models/yaml/YamlService';
 import {
-  AGENT_WORKSPACE_ROOT,
-  normalizeAgentWorkspaceRepo,
+  SESSION_WORKSPACE_ROOT,
+  normalizeSessionWorkspaceRepo,
   repoNameFromRepoUrl,
   rewriteWorkspacePathForRepo,
   rewriteWorkspaceScriptForRepo,
@@ -181,7 +181,7 @@ export function resolveAgentSessionWorkspaceRepos(
 
   return orderedKeys.map((key) => {
     const repo = reposByKey.get(key)!;
-    return normalizeAgentWorkspaceRepo(repo, key === resolvedPrimaryKey);
+    return normalizeSessionWorkspaceRepo(repo, key === resolvedPrimaryKey);
   });
 }
 
@@ -266,8 +266,8 @@ export function buildCombinedInstallCommand<T extends Pick<AgentSessionServiceIn
       }
 
       if (
-        workspacePath === AGENT_WORKSPACE_ROOT ||
-        installCommand.includes(AGENT_WORKSPACE_ROOT) ||
+        workspacePath === SESSION_WORKSPACE_ROOT ||
+        installCommand.includes(SESSION_WORKSPACE_ROOT) ||
         /(^|\n)\s*cd\s+/.test(installCommand)
       ) {
         return installCommand;

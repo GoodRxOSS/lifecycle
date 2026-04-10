@@ -865,12 +865,12 @@ describe('DevModeManager', () => {
         items: [
           {
             metadata: {
-              name: 'lc-test-gh-type-wispy-frog-035797',
-              labels: { 'tags.datadoghq.com/service': 'lc-test-gh-type' },
+              name: 'sample-git-service-misty-river-123456',
+              labels: { 'tags.datadoghq.com/service': 'sample-git-service' },
             },
             spec: {
-              selector: { matchLabels: { name: 'lc-test-gh-type-wispy-frog-035797' } },
-              template: { spec: { containers: [{ name: 'lc-test-gh-type' }] } },
+              selector: { matchLabels: { name: 'sample-git-service-misty-river-123456' } },
+              template: { spec: { containers: [{ name: 'sample-git-service' }] } },
             },
           },
         ],
@@ -880,15 +880,15 @@ describe('DevModeManager', () => {
       .mockRejectedValueOnce(new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404))
       .mockResolvedValueOnce({
         body: {
-          metadata: { name: 'lc-test-gh-type-wispy-frog-035797' },
+          metadata: { name: 'sample-git-service-misty-river-123456' },
           spec: { ports: [{ name: 'provided-8080', port: 8080, protocol: 'TCP' }] },
         },
       });
 
     const opts: DevModeOptions = {
-      namespace: 'env-wispy-frog-035797',
-      deploymentName: 'lc-test-gh-type',
-      serviceName: 'lc-test-gh-type',
+      namespace: 'env-misty-river-123456',
+      deploymentName: 'sample-git-service',
+      serviceName: 'sample-git-service',
       pvcName: 'agent-pvc-abc',
       devConfig: { image: 'node:20-slim', command: 'node --watch app.js', ports: [8080] },
     };
@@ -896,8 +896,8 @@ describe('DevModeManager', () => {
     await manager.enableDevMode(opts);
 
     expect(mockPatchDeployment).toHaveBeenCalledWith(
-      'lc-test-gh-type-wispy-frog-035797',
-      'env-wispy-frog-035797',
+      'sample-git-service-misty-river-123456',
+      'env-misty-river-123456',
       expect.any(Object),
       undefined,
       undefined,
@@ -907,8 +907,8 @@ describe('DevModeManager', () => {
       { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } }
     );
     expect(mockPatchService).toHaveBeenCalledWith(
-      'lc-test-gh-type-wispy-frog-035797',
-      'env-wispy-frog-035797',
+      'sample-git-service-misty-river-123456',
+      'env-misty-river-123456',
       expect.objectContaining({
         spec: {
           ports: [{ name: 'provided-8080', port: 8080, protocol: 'TCP', targetPort: 8080 }],

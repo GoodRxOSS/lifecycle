@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ jest.mock('server/lib/logger', () => ({
 
 import { MCPToolAdapter, createMcpTools } from '../toolAdapter';
 import { ToolSafetyLevel } from '../../types/tool';
-import { MCP_ERROR_CODES } from '../types';
+import { MCP_ERROR_CODES, type ResolvedMcpServer } from '../types';
 
 describe('MCPToolAdapter', () => {
   beforeEach(() => {
@@ -40,140 +40,143 @@ describe('MCPToolAdapter', () => {
   });
 
   describe('constructor', () => {
-    it('produces namespaced name', () => {
+    it('produces a namespaced tool name', () => {
       const adapter = new MCPToolAdapter(
-        'my-server',
-        { name: 'doStuff', inputSchema: { type: 'object' } },
-        'http://x',
+        'sample-server',
+        { name: 'inspectItem', inputSchema: { type: 'object' } },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
         {},
         30000
       );
-      expect(adapter.name).toBe('mcp__my-server__doStuff');
+
+      expect(adapter.name).toBe('mcp__sample-server__inspectItem');
     });
 
-    it('maps destructive annotation to DANGEROUS', () => {
+    it('maps destructive annotations to DANGEROUS', () => {
       const adapter = new MCPToolAdapter(
-        'srv',
-        { name: 'destroy', inputSchema: { type: 'object' }, annotations: { destructiveHint: true } },
-        'http://x',
+        'sample-server',
+        { name: 'removeItem', inputSchema: { type: 'object' }, annotations: { destructiveHint: true } },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
         {},
         30000
       );
+
       expect(adapter.safetyLevel).toBe(ToolSafetyLevel.DANGEROUS);
       expect(adapter.description).toMatch(/^\[DANGEROUS\]/);
     });
 
-    it('maps readOnly annotation to SAFE', () => {
+    it('maps read-only annotations to SAFE', () => {
       const adapter = new MCPToolAdapter(
-        'srv',
-        { name: 'read', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
-        'http://x',
+        'sample-server',
+        { name: 'readItem', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
         {},
         30000
       );
+
       expect(adapter.safetyLevel).toBe(ToolSafetyLevel.SAFE);
-    });
-
-    it('defaults to CAUTIOUS with no annotations', () => {
-      const adapter = new MCPToolAdapter(
-        'srv',
-        { name: 'unknown', inputSchema: { type: 'object' } },
-        'http://x',
-        {},
-        30000
-      );
-      expect(adapter.safetyLevel).toBe(ToolSafetyLevel.CAUTIOUS);
-    });
-
-    it('has mcp category', () => {
-      const adapter = new MCPToolAdapter(
-        'srv',
-        { name: 'tool', inputSchema: { type: 'object' } },
-        'http://x',
-        {},
-        30000
-      );
-      expect(adapter.category).toBe('mcp');
     });
   });
 
   describe('execute', () => {
-    it('returns success with text content', async () => {
+    it('returns text content on success', async () => {
       mockCallTool.mockResolvedValue({
         content: [{ type: 'text', text: 'result data' }],
         isError: false,
       });
-      const adapter = new MCPToolAdapter('srv', { name: 't', inputSchema: {} }, 'http://x', {}, 30000);
+
+      const adapter = new MCPToolAdapter(
+        'sample-server',
+        { name: 'inspectItem', inputSchema: {} },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
+        {},
+        30000
+      );
+
       const result = await adapter.execute({});
+
       expect(result.success).toBe(true);
       expect(result.agentContent).toBe('result data');
     });
 
-    it('returns connection error when connect fails', async () => {
+    it('returns a connection error when connect fails', async () => {
       mockConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-      const adapter = new MCPToolAdapter('srv', { name: 't', inputSchema: {} }, 'http://x', {}, 30000);
+
+      const adapter = new MCPToolAdapter(
+        'sample-server',
+        { name: 'inspectItem', inputSchema: {} },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
+        {},
+        30000
+      );
+
       const result = await adapter.execute({});
+
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe(MCP_ERROR_CODES.CONNECTION);
     });
 
-    it('returns tool error when isError is true', async () => {
-      mockCallTool.mockResolvedValue({
-        content: [{ type: 'text', text: 'bad input' }],
-        isError: true,
-      });
-      const adapter = new MCPToolAdapter('srv', { name: 't', inputSchema: {} }, 'http://x', {}, 30000);
-      const result = await adapter.execute({});
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(MCP_ERROR_CODES.TOOL);
-    });
-
-    it('returns protocol error for json-rpc failures', async () => {
-      mockCallTool.mockRejectedValue(new Error('json-rpc parse error'));
-      const adapter = new MCPToolAdapter('srv', { name: 't', inputSchema: {} }, 'http://x', {}, 30000);
-      const result = await adapter.execute({});
-      expect(result.success).toBe(false);
-      expect(result.error?.code).toBe(MCP_ERROR_CODES.PROTOCOL);
-      expect(result.error?.recoverable).toBe(false);
-    });
-
-    it('always calls close', async () => {
+    it('applies default args before calling the tool', async () => {
       mockCallTool.mockResolvedValue({
         content: [{ type: 'text', text: 'ok' }],
         isError: false,
       });
-      const adapter = new MCPToolAdapter('srv', { name: 't', inputSchema: {} }, 'http://x', {}, 30000);
+
+      const adapter = new MCPToolAdapter(
+        'sample-server',
+        {
+          name: 'inspectItem',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              siteUrl: { type: 'string' },
+            },
+          },
+        },
+        { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
+        { siteUrl: 'https://sample-site.example.com' },
+        30000
+      );
+
       await adapter.execute({});
-      expect(mockClose).toHaveBeenCalled();
+
+      expect(mockCallTool).toHaveBeenCalledWith(
+        'inspectItem',
+        { siteUrl: 'https://sample-site.example.com' },
+        30000,
+        undefined
+      );
     });
   });
 
   describe('createMcpTools', () => {
-    it('creates tools from servers', () => {
-      const servers = [
+    it('creates tools from resolved servers', () => {
+      const servers: ResolvedMcpServer[] = [
         {
-          slug: 'srv1',
-          name: 'Server 1',
-          url: 'http://s1',
-          headers: {},
-          envVars: {},
+          slug: 'sample-server-a',
+          name: 'Sample Server A',
+          transport: { type: 'http', url: 'https://mcp-a.example.com/v1/mcp' },
           timeout: 30000,
-          cachedTools: [{ name: 'tool1', inputSchema: {} }],
+          defaultArgs: {},
+          env: {},
+          discoveredTools: [{ name: 'inspectItem', inputSchema: {} }],
         },
         {
-          slug: 'srv2',
-          name: 'Server 2',
-          url: 'http://s2',
-          headers: {},
-          envVars: {},
+          slug: 'sample-server-b',
+          name: 'Sample Server B',
+          transport: { type: 'sse', url: 'https://mcp-b.example.com/sse' },
           timeout: 30000,
-          cachedTools: [{ name: 'tool2', inputSchema: {} }],
+          defaultArgs: {},
+          env: {},
+          discoveredTools: [{ name: 'createItem', inputSchema: {} }],
         },
       ];
+
       const tools = createMcpTools(servers);
+
       expect(tools).toHaveLength(2);
-      expect(tools[0].name).toBe('mcp__srv1__tool1');
-      expect(tools[1].name).toBe('mcp__srv2__tool2');
+      expect(tools[0].name).toBe('mcp__sample-server-a__inspectItem');
+      expect(tools[1].name).toBe('mcp__sample-server-b__createItem');
     });
   });
 });

@@ -21,6 +21,7 @@ mockRedisClient();
 const mockGetCompatibleReadyPrewarm = jest.fn();
 const mockGetReadyPrewarmByPvc = jest.fn();
 const mockExecInPod = jest.fn();
+const mockResolveSessionPodServersForRepo = jest.fn().mockResolvedValue([]);
 
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/Build');
@@ -36,6 +37,39 @@ jest.mock('server/lib/agentSession/configSeeder');
 jest.mock('server/lib/agentSession/devModeManager');
 jest.mock('server/lib/agentSession/forwardedEnv');
 jest.mock('server/lib/kubernetes/networkPolicyFactory');
+jest.mock('server/services/ai/mcp/config', () => ({
+  __esModule: true,
+  McpConfigService: jest.fn().mockImplementation(() => ({
+    resolveSessionPodServersForRepo: mockResolveSessionPodServersForRepo,
+  })),
+}));
+jest.mock('server/lib/agentSession/runtimeConfig', () => {
+  const actual = jest.requireActual('server/lib/agentSession/runtimeConfig');
+  return {
+    __esModule: true,
+    ...actual,
+    resolveAgentSessionControlPlaneConfig: jest.fn(actual.resolveAgentSessionControlPlaneConfig),
+  };
+});
+jest.mock('server/lib/agentSession/systemPrompt', () => {
+  const actual = jest.requireActual('server/lib/agentSession/systemPrompt');
+  return {
+    __esModule: true,
+    ...actual,
+    buildAgentSessionDynamicSystemPrompt: jest.fn(actual.buildAgentSessionDynamicSystemPrompt),
+    combineAgentSessionAppendSystemPrompt: jest.fn(actual.combineAgentSessionAppendSystemPrompt),
+    resolveAgentSessionPromptContext: jest.fn(actual.resolveAgentSessionPromptContext),
+  };
+});
+const mockGetEffectiveAgentSessionConfig = jest.fn();
+jest.mock('server/services/agentSessionConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getEffectiveConfig: mockGetEffectiveAgentSessionConfig,
+    })),
+  },
+}));
 jest.mock('server/services/userApiKey');
 jest.mock('server/services/agentSessionCandidates', () => {
   const actual = jest.requireActual('server/services/agentSessionCandidates');
@@ -122,6 +156,33 @@ jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
+      getConfig: jest.fn().mockImplementation(async (key: string) => {
+        if (key === 'aiAgent') {
+          return {
+            enabled: true,
+            providers: [
+              {
+                name: 'anthropic',
+                enabled: true,
+                apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+                models: [
+                  {
+                    id: 'claude-sonnet-4-6',
+                    displayName: 'Claude Sonnet',
+                    enabled: true,
+                    default: true,
+                    maxTokens: 8192,
+                  },
+                ],
+              },
+            ],
+            maxMessagesPerSession: 50,
+            sessionTTL: 3600,
+          };
+        }
+
+        return null;
+      }),
       getAllConfigs: jest.fn().mockResolvedValue({
         lifecycleDefaults: {
           defaultUUID: 'sample-env-0',
@@ -134,18 +195,23 @@ jest.mock('server/services/globalConfig', () => ({
   },
 }));
 
-import AgentSessionService, { CreateSessionOptions } from 'server/services/agentSession';
+import AgentSessionService, { CreateSessionOptions, buildAgentSessionPodName } from 'server/services/agentSession';
 import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
-import { createAgentPod, deleteAgentPod } from 'server/lib/agentSession/podFactory';
-import { createAgentEditorService, deleteAgentEditorService } from 'server/lib/agentSession/editorServiceFactory';
+import { createSessionWorkspacePod, deleteSessionWorkspacePod } from 'server/lib/agentSession/podFactory';
+import {
+  createSessionWorkspaceService,
+  deleteSessionWorkspaceService,
+} from 'server/lib/agentSession/editorServiceFactory';
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
+import * as runtimeConfig from 'server/lib/agentSession/runtimeConfig';
+import * as systemPrompt from 'server/lib/agentSession/systemPrompt';
 import UserApiKeyService from 'server/services/userApiKey';
 import RedisClient from 'server/lib/redisClient';
 import { deployHelm } from 'server/lib/nativeHelm/helm';
@@ -195,13 +261,13 @@ const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
 (isGvisorAvailable as jest.Mock).mockResolvedValue(false);
 (createAgentPvc as jest.Mock).mockResolvedValue({});
 (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
-(createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
-(createAgentEditorService as jest.Mock).mockResolvedValue({});
+(createSessionWorkspacePod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+(createSessionWorkspaceService as jest.Mock).mockResolvedValue({});
 (ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
-(deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
+(deleteSessionWorkspacePod as jest.Mock).mockResolvedValue(undefined);
 (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
 (deleteAgentApiKeySecret as jest.Mock).mockResolvedValue(undefined);
-(deleteAgentEditorService as jest.Mock).mockResolvedValue(undefined);
+(deleteSessionWorkspaceService as jest.Mock).mockResolvedValue(undefined);
 (deployHelm as jest.Mock).mockResolvedValue(undefined);
 
 const mockSessionQuery = {
@@ -230,13 +296,35 @@ const mockDeployQuery = {
 const baseOpts: CreateSessionOptions = {
   userId: 'user-123',
   namespace: 'test-ns',
-  repoUrl: 'https://github.com/org/repo.git',
-  branch: 'feature/test',
-  agentImage: 'lifecycle-agent:latest',
-  editorImage: 'codercom/code-server:4.98.2',
+  repoUrl: 'https://github.com/example-org/example-repo.git',
+  branch: 'feature/example-session',
+  workspaceImage: 'lifecycle-agent:latest',
+  workspaceEditorImage: 'codercom/code-server:4.98.2',
 };
 
 describe('AgentSessionService', () => {
+  describe('buildAgentSessionPodName', () => {
+    it('keeps the legacy short form when no build UUID is provided', () => {
+      expect(buildAgentSessionPodName('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('agent-aaaaaaaa');
+    });
+
+    it('includes the build UUID when available', () => {
+      expect(buildAgentSessionPodName('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'sandbox-build-uuid')).toBe(
+        'agent-sandbox-build-uuid'
+      );
+    });
+
+    it('sanitizes and truncates long build UUIDs to a Kubernetes-safe name', () => {
+      const podName = buildAgentSessionPodName(
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        'Build_UUID_With.Invalid.Characters.And-A-Very-Long-Descriptive-Suffix-1234567890'
+      );
+
+      expect(podName).toBe('agent-build-uuid-with-invalid-characters-and-a-very-long-descri');
+      expect(podName.length).toBeLessThanOrEqual(63);
+    });
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(mockSessionQuery);
@@ -269,7 +357,7 @@ describe('AgentSessionService', () => {
     mockDeployQuery.findById.mockReturnThis();
     mockDeployQuery.patch.mockResolvedValue(1);
     mockDeployQuery.withGraphFetched.mockResolvedValue([]);
-    (UserApiKeyService.getDecryptedKey as jest.Mock) = jest.fn().mockResolvedValue('sk-ant-test-key');
+    (UserApiKeyService.getDecryptedKey as jest.Mock) = jest.fn().mockResolvedValue('sample-anthropic-provider-key');
 
     jest.spyOn(RedisClient, 'getInstance').mockReturnValue({
       getRedis: () => mockRedis as any,
@@ -300,13 +388,13 @@ describe('AgentSessionService', () => {
     (isGvisorAvailable as jest.Mock).mockResolvedValue(false);
     (createAgentPvc as jest.Mock).mockResolvedValue({});
     (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
-    (createAgentPod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
-    (createAgentEditorService as jest.Mock).mockResolvedValue({});
+    (createSessionWorkspacePod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+    (createSessionWorkspaceService as jest.Mock).mockResolvedValue({});
     (ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
-    (deleteAgentPod as jest.Mock).mockResolvedValue(undefined);
+    (deleteSessionWorkspacePod as jest.Mock).mockResolvedValue(undefined);
     (deleteAgentPvc as jest.Mock).mockResolvedValue(undefined);
     (deleteAgentApiKeySecret as jest.Mock).mockResolvedValue(undefined);
-    (deleteAgentEditorService as jest.Mock).mockResolvedValue(undefined);
+    (deleteSessionWorkspaceService as jest.Mock).mockResolvedValue(undefined);
     (deployHelm as jest.Mock).mockResolvedValue(undefined);
     (DeploymentManager as jest.Mock).mockImplementation(() => ({
       deploy: jest.fn().mockResolvedValue(undefined),
@@ -341,6 +429,19 @@ describe('AgentSessionService', () => {
       secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
     });
     (cleanupForwardedAgentEnvSecrets as jest.Mock).mockResolvedValue(undefined);
+    mockResolveSessionPodServersForRepo.mockResolvedValue([]);
+    (runtimeConfig.resolveAgentSessionControlPlaneConfig as jest.Mock).mockResolvedValue({
+      appendSystemPrompt: undefined,
+    });
+    (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mockImplementation(
+      jest.requireActual('server/lib/agentSession/systemPrompt').buildAgentSessionDynamicSystemPrompt
+    );
+    (systemPrompt.combineAgentSessionAppendSystemPrompt as jest.Mock).mockImplementation(
+      jest.requireActual('server/lib/agentSession/systemPrompt').combineAgentSessionAppendSystemPrompt
+    );
+    (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockImplementation(
+      jest.requireActual('server/lib/agentSession/systemPrompt').resolveAgentSessionPromptContext
+    );
   });
 
   describe('createSession', () => {
@@ -379,10 +480,14 @@ describe('AgentSessionService', () => {
       );
     });
 
-    it('throws API_KEY_REQUIRED when no API key found', async () => {
+    it('requires a stored provider API key to launch the session workspace', async () => {
       (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValue(null);
 
-      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('API_KEY_REQUIRED');
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow(
+        'No stored API key is configured for provider "anthropic"'
+      );
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePod).not.toHaveBeenCalled();
     });
 
     it('creates PVC, pod, network policy, and session record', async () => {
@@ -393,30 +498,29 @@ describe('AgentSessionService', () => {
       expect(createAgentApiKeySecret).toHaveBeenCalledWith(
         'test-ns',
         'agent-secret-aaaaaaaa',
-        'sk-ant-test-key',
+        {
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+        },
         undefined,
         undefined,
-        {}
+        {},
+        {
+          LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+        }
       );
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           podName: 'agent-aaaaaaaa',
           namespace: 'test-ns',
           pvcName: 'agent-pvc-aaaaaaaa',
-          image: 'lifecycle-agent:latest',
+          workspaceImage: 'lifecycle-agent:latest',
+          workspaceEditorImage: 'codercom/code-server:4.98.2',
           apiKeySecretName: 'agent-secret-aaaaaaaa',
           serviceAccountName: 'agent-sa',
           hasGitHubToken: false,
-          model: 'claude-sonnet-4-6',
-          claudePermissions: {
-            allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-            deny: [],
-          },
-          claudeCommitAttribution: 'Generated with (sample-lifecycle-app)',
-          claudePrAttribution: 'Generated with (sample-lifecycle-app)',
         })
       );
-      expect(createAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa', undefined);
+      expect(createSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa', undefined);
       expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
         expect.objectContaining({
           uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -462,7 +566,7 @@ describe('AgentSessionService', () => {
         revision: undefined,
       });
       expect(createAgentPvc).not.toHaveBeenCalled();
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           pvcName: 'agent-prewarm-pvc-1234',
           skipWorkspaceBootstrap: true,
@@ -490,8 +594,9 @@ describe('AgentSessionService', () => {
         revision: undefined,
       });
       expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', 'build-123');
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
+          podName: 'agent-build-123',
           pvcName: 'agent-pvc-aaaaaaaa',
           skipWorkspaceBootstrap: false,
         })
@@ -527,7 +632,7 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithResources);
 
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           resources: optsWithResources.resources,
         })
@@ -545,7 +650,7 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithReadiness);
 
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           readiness: optsWithReadiness.readiness,
         })
@@ -580,14 +685,19 @@ describe('AgentSessionService', () => {
       expect(createAgentApiKeySecret).toHaveBeenCalledWith(
         'test-ns',
         'agent-secret-aaaaaaaa',
-        'sk-ant-test-key',
+        {
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+        },
         undefined,
         undefined,
         {
           PRIVATE_REGISTRY_TOKEN: 'plain-token',
+        },
+        {
+          LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
         }
       );
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           forwardedAgentEnv: { PRIVATE_REGISTRY_TOKEN: 'plain-token' },
           forwardedAgentSecretRefs: [],
@@ -619,7 +729,7 @@ describe('AgentSessionService', () => {
           ownerGithubUsername: 'sample-user',
         })
       );
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           userIdentity: expect.objectContaining({
             githubUsername: 'sample-user',
@@ -633,7 +743,7 @@ describe('AgentSessionService', () => {
     it('writes the GitHub token into the per-session secret when provided', async () => {
       const optsWithGitHubToken: CreateSessionOptions = {
         ...baseOpts,
-        githubToken: 'gho_test_token',
+        githubToken: 'sample-github-token',
       };
 
       await AgentSessionService.createSession(optsWithGitHubToken);
@@ -641,12 +751,17 @@ describe('AgentSessionService', () => {
       expect(createAgentApiKeySecret).toHaveBeenCalledWith(
         'test-ns',
         'agent-secret-aaaaaaaa',
-        'sk-ant-test-key',
-        'gho_test_token',
+        {
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+        },
+        'sample-github-token',
         undefined,
-        {}
+        {},
+        {
+          LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+        }
       );
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           hasGitHubToken: true,
         })
@@ -800,7 +915,7 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           installCommand: 'cd /workspace/web && pnpm install\n\ncd /workspace/api && pnpm install',
         })
@@ -810,15 +925,15 @@ describe('AgentSessionService', () => {
     it('rewrites dev-mode workspace paths when selected services span multiple repositories', async () => {
       const optsWithServices: CreateSessionOptions = {
         ...baseOpts,
-        repoUrl: 'https://github.com/org/ui.git',
-        branch: 'feature/ui',
+        repoUrl: 'https://github.com/example-org/ui-service.git',
+        branch: 'feature/ui-service',
         services: [
           {
             name: 'web',
             deployId: 1,
             resourceName: 'web-build-uuid',
-            repo: 'org/ui',
-            branch: 'feature/ui',
+            repo: 'example-org/ui-service',
+            branch: 'feature/ui-service',
             devConfig: {
               image: 'node:20',
               command: 'pnpm dev',
@@ -830,8 +945,8 @@ describe('AgentSessionService', () => {
             name: 'api',
             deployId: 2,
             resourceName: 'api-build-uuid',
-            repo: 'org/api',
-            branch: 'feature/api',
+            repo: 'example-org/api-service',
+            branch: 'feature/api-service',
             devConfig: {
               image: 'node:20',
               command: 'pnpm start',
@@ -844,25 +959,25 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
-      expect(createAgentPod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
-          repoUrl: 'https://github.com/org/ui.git',
-          branch: 'feature/ui',
+          repoUrl: 'https://github.com/example-org/ui-service.git',
+          branch: 'feature/ui-service',
           workspaceRepos: [
             expect.objectContaining({
-              repo: 'org/ui',
-              branch: 'feature/ui',
+              repo: 'example-org/ui-service',
+              branch: 'feature/ui-service',
               mountPath: '/workspace',
               primary: true,
             }),
             expect.objectContaining({
-              repo: 'org/api',
-              branch: 'feature/api',
-              mountPath: '/workspace/repos/org/api',
+              repo: 'example-org/api-service',
+              branch: 'feature/api-service',
+              mountPath: '/workspace/repos/example-org/api-service',
               primary: false,
             }),
           ],
-          installCommand: 'pnpm install\n\ncd "/workspace/repos/org/api"\npnpm install',
+          installCommand: 'pnpm install\n\ncd "/workspace/repos/example-org/api-service"\npnpm install',
         })
       );
       expect(mockEnableDevMode).toHaveBeenNthCalledWith(
@@ -877,30 +992,30 @@ describe('AgentSessionService', () => {
         2,
         expect.objectContaining({
           devConfig: expect.objectContaining({
-            workDir: '/workspace/repos/org/api/services/api',
+            workDir: '/workspace/repos/example-org/api-service/services/api',
           }),
         })
       );
       expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
         expect.objectContaining({
           workspaceRepos: [
-            expect.objectContaining({ repo: 'org/ui', primary: true }),
-            expect.objectContaining({ repo: 'org/api', primary: false }),
+            expect.objectContaining({ repo: 'example-org/ui-service', primary: true }),
+            expect.objectContaining({ repo: 'example-org/api-service', primary: false }),
           ],
           selectedServices: [
             expect.objectContaining({
               name: 'web',
-              repo: 'org/ui',
-              branch: 'feature/ui',
+              repo: 'example-org/ui-service',
+              branch: 'feature/ui-service',
               workspacePath: '/workspace',
               workDir: '/workspace/apps/web',
             }),
             expect.objectContaining({
               name: 'api',
-              repo: 'org/api',
-              branch: 'feature/api',
-              workspacePath: '/workspace/repos/org/api',
-              workDir: '/workspace/repos/org/api/services/api',
+              repo: 'example-org/api-service',
+              branch: 'feature/api-service',
+              workspacePath: '/workspace/repos/example-org/api-service',
+              workDir: '/workspace/repos/example-org/api-service/services/api',
             }),
           ],
         })
@@ -909,7 +1024,7 @@ describe('AgentSessionService', () => {
     });
 
     it('rolls back on pod creation failure', async () => {
-      (createAgentPod as jest.Mock).mockRejectedValue(new Error('pod creation failed'));
+      (createSessionWorkspacePod as jest.Mock).mockRejectedValue(new Error('pod creation failed'));
 
       await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('pod creation failed');
 
@@ -918,8 +1033,8 @@ describe('AgentSessionService', () => {
         3600,
         expect.any(String)
       );
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith(
@@ -1017,15 +1132,15 @@ describe('AgentSessionService', () => {
       const rollbackPromise = AgentSessionService.createSession(optsWithServices);
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(deleteAgentPod).not.toHaveBeenCalled();
-      expect(deleteAgentEditorService).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
       expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
       expect(deleteAgentPvc).not.toHaveBeenCalled();
 
       releaseDeploy();
       await expect(rollbackPromise).rejects.toThrow('snapshot persist failed');
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
+      expect(deleteSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa');
     });
@@ -1081,7 +1196,7 @@ describe('AgentSessionService', () => {
       expect(mockExecInPod).toHaveBeenCalledWith(
         'test-ns',
         'agent-aaaaaaaa',
-        'agent',
+        'workspace-gateway',
         ['sh', '-lc', 'cd /workspace/apps/web && pnpm install'],
         expect.anything(),
         expect.anything(),
@@ -1321,8 +1436,8 @@ describe('AgentSessionService', () => {
       expect(mockDisableDevMode.mock.invocationCallOrder[0]).toBeLessThan(
         deployManagerDeploy.mock.invocationCallOrder[0]
       );
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith('test-ns', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', [
@@ -1381,7 +1496,7 @@ describe('AgentSessionService', () => {
         pvcName: 'agent-prewarm-pvc-1234',
       });
       expect(deleteAgentPvc).not.toHaveBeenCalled();
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended', devModeSnapshots: {} }));
     });
@@ -1411,8 +1526,8 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.endSession('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith('test-ns', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', [
         'aws',
@@ -1499,8 +1614,8 @@ describe('AgentSessionService', () => {
       const endPromise = AgentSessionService.endSession('sess-1');
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(deleteAgentPod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
-      expect(deleteAgentEditorService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
       await expect(endPromise).resolves.toBeUndefined();
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
@@ -1595,7 +1710,7 @@ describe('AgentSessionService', () => {
         JSON.stringify({
           sessionId: 'sess-1',
           stage: 'connect_runtime',
-          title: 'Agent pod failed to start',
+          title: 'Session workspace pod failed to start',
           message: 'init-workspace: ImagePullBackOff',
           recordedAt: '2026-03-25T10:00:00.000Z',
         })
@@ -1609,7 +1724,7 @@ describe('AgentSessionService', () => {
           status: 'error',
           startupFailure: {
             stage: 'connect_runtime',
-            title: 'Agent pod failed to start',
+            title: 'Session workspace pod failed to start',
             message: 'init-workspace: ImagePullBackOff',
             recordedAt: '2026-03-25T10:00:00.000Z',
           },
@@ -1624,7 +1739,7 @@ describe('AgentSessionService', () => {
         JSON.stringify({
           sessionId: 'sess-1',
           stage: 'connect_runtime',
-          title: 'Agent pod failed to start',
+          title: 'Session workspace pod failed to start',
           message: 'init-workspace: ImagePullBackOff',
           recordedAt: '2026-03-25T10:00:00.000Z',
         })
@@ -1635,7 +1750,7 @@ describe('AgentSessionService', () => {
       expect(mockRedis.get).toHaveBeenCalledWith('lifecycle:agent:session:startup-failure:sess-1');
       expect(result).toEqual({
         stage: 'connect_runtime',
-        title: 'Agent pod failed to start',
+        title: 'Session workspace pod failed to start',
         message: 'init-workspace: ImagePullBackOff',
         recordedAt: '2026-03-25T10:00:00.000Z',
       });
@@ -1650,7 +1765,7 @@ describe('AgentSessionService', () => {
 
       const result = await AgentSessionService.markSessionRuntimeFailure(
         'sess-1',
-        new Error('Agent pod failed to start: init-workspace: ImagePullBackOff')
+        new Error('Session workspace pod failed to start: init-workspace: ImagePullBackOff')
       );
 
       expect(mockRedis.setex).toHaveBeenCalledWith(
@@ -1668,7 +1783,7 @@ describe('AgentSessionService', () => {
       expect(result).toEqual(
         expect.objectContaining({
           stage: 'connect_runtime',
-          title: 'Agent pod failed to start',
+          title: 'Session workspace pod failed to start',
           message: 'init-workspace: ImagePullBackOff',
         })
       );
@@ -1783,7 +1898,7 @@ describe('AgentSessionService', () => {
                 id: 22,
                 branchName: 'feature/sandbox',
                 repository: { fullName: 'example-org/example-repo' },
-                deployable: { name: 'lc-test-gh-type' },
+                deployable: { name: 'sample-git-service' },
               },
             ]),
           }),
@@ -1805,7 +1920,7 @@ describe('AgentSessionService', () => {
           id: 'sess-ended',
           repo: 'example-org/example-repo',
           branch: 'feature/sandbox',
-          services: ['lc-test-gh-type'],
+          services: ['sample-git-service'],
           startupFailure: null,
         }),
       ]);
@@ -1836,7 +1951,7 @@ describe('AgentSessionService', () => {
         JSON.stringify({
           sessionId: 'sess-error',
           stage: 'connect_runtime',
-          title: 'Agent pod failed to start',
+          title: 'Session workspace pod failed to start',
           message: 'init-workspace: ImagePullBackOff',
           recordedAt: '2026-03-25T10:00:00.000Z',
         })
@@ -1850,7 +1965,7 @@ describe('AgentSessionService', () => {
           status: 'error',
           startupFailure: {
             stage: 'connect_runtime',
-            title: 'Agent pod failed to start',
+            title: 'Session workspace pod failed to start',
             message: 'init-workspace: ImagePullBackOff',
             recordedAt: '2026-03-25T10:00:00.000Z',
           },
@@ -1879,6 +1994,60 @@ describe('AgentSessionService', () => {
       expect(mockSessionQuery.patch).toHaveBeenCalledWith(
         expect.objectContaining({ lastActivity: expect.any(String) })
       );
+    });
+  });
+
+  describe('getSessionAppendSystemPrompt', () => {
+    it('uses the control-plane prompt config and appends dynamic session context', async () => {
+      mockGetEffectiveAgentSessionConfig.mockResolvedValue({
+        appendSystemPrompt: 'Use concise responses.',
+      });
+      (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockResolvedValue({
+        namespace: 'test-ns',
+        buildUuid: 'build-123',
+        services: [],
+      });
+      (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mockReturnValue(
+        'Session context:\n- namespace: test-ns'
+      );
+      (systemPrompt.combineAgentSessionAppendSystemPrompt as jest.Mock).mockReturnValue('combined prompt');
+
+      (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          select: jest.fn().mockResolvedValue({
+            id: 123,
+            namespace: 'test-ns',
+            buildUuid: 'build-123',
+          }),
+        }),
+      });
+
+      await expect(AgentSessionService.getSessionAppendSystemPrompt('sess-1')).resolves.toBe('combined prompt');
+      expect(mockGetEffectiveAgentSessionConfig).toHaveBeenCalled();
+      expect(systemPrompt.resolveAgentSessionPromptContext).toHaveBeenCalledWith({
+        sessionDbId: 123,
+        namespace: 'test-ns',
+        buildUuid: 'build-123',
+      });
+      expect(systemPrompt.buildAgentSessionDynamicSystemPrompt).toHaveBeenCalled();
+      expect(systemPrompt.combineAgentSessionAppendSystemPrompt).toHaveBeenCalledWith(
+        'Use concise responses.',
+        'Session context:\n- namespace: test-ns'
+      );
+    });
+
+    it('returns the configured control-plane prompt when the session cannot be found', async () => {
+      mockGetEffectiveAgentSessionConfig.mockResolvedValue({
+        appendSystemPrompt: 'Use concise responses.',
+      });
+
+      (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          select: jest.fn().mockResolvedValue(null),
+        }),
+      });
+
+      await expect(AgentSessionService.getSessionAppendSystemPrompt('missing')).resolves.toBe('Use concise responses.');
     });
   });
 });

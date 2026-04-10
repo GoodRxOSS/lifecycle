@@ -177,6 +177,33 @@ services:
       expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
     });
 
+    test('accepts environment-level agent session skills', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+environment:
+  agentSession:
+    skills:
+      - repo: 'GoodRx/gdrx-agent-devtools'
+        branch: 'main'
+        path: 'skills/engineering/code-review'
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+
     test('accepts service-level agent session readiness overrides in dev config', () => {
       const parser = new YamlConfigParser();
       const config = parser.parseYamlConfigFromString(`---
@@ -190,6 +217,32 @@ services:
         readiness:
           timeoutMs: 120000
           pollMs: 500
+    github:
+      repository: 'org/example'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'apps/agent-app/Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+
+    test('accepts service-level agent session skills in dev config', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'agent-app'
+    dev:
+      image: 'node:20-slim'
+      command: 'pnpm dev'
+      agentSession:
+        skills:
+          - repo: 'GoodRx/gdrx-agent-devtools'
+            branch: 'main'
+            path: 'skills/engineering/debug'
     github:
       repository: 'org/example'
       branchName: 'main'

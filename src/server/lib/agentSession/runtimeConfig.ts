@@ -16,9 +16,8 @@
 
 import GlobalConfigService from 'server/services/globalConfig';
 import type {
-  AgentSessionClaudeAttribution,
-  AgentSessionClaudeConfig,
-  AgentSessionClaudePermissions,
+  AgentSessionControlPlaneConfig,
+  AgentSessionDefaults,
   AgentSessionReadinessConfig,
   AgentSessionResourcesConfig,
   AgentSessionSchedulingConfig,
@@ -26,12 +25,12 @@ import type {
 } from 'server/services/types/globalConfig';
 
 export interface AgentSessionRuntimeConfig {
-  image: string;
-  editorImage: string;
+  workspaceImage: string;
+  workspaceEditorImage: string;
+  workspaceGatewayImage: string;
   nodeSelector?: Record<string, string>;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
-  claude: ResolvedAgentSessionClaudeConfig;
 }
 
 export interface ResolvedAgentSessionReadinessConfig {
@@ -45,33 +44,30 @@ export interface ResolvedAgentSessionResourceRequirements {
 }
 
 export interface ResolvedAgentSessionResources {
-  agent: ResolvedAgentSessionResourceRequirements;
+  workspace: ResolvedAgentSessionResourceRequirements;
   editor: ResolvedAgentSessionResourceRequirements;
+  workspaceGateway: ResolvedAgentSessionResourceRequirements;
 }
 
-export interface ResolvedAgentSessionClaudePermissions {
-  allow: string[];
-  deny: string[];
-}
-
-export interface ResolvedAgentSessionClaudeAttribution {
-  commitTemplate: string;
-  prTemplate: string;
-}
-
-export interface ResolvedAgentSessionClaudeConfig {
-  permissions: ResolvedAgentSessionClaudePermissions;
-  attribution: ResolvedAgentSessionClaudeAttribution;
+export interface ResolvedAgentSessionControlPlaneConfig {
+  systemPrompt?: string;
   appendSystemPrompt?: string;
 }
 
-const DEFAULT_CLAUDE_PERMISSION_ALLOW = ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'];
-const DEFAULT_CLAUDE_PERMISSION_DENY: string[] = [];
-const DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
-const DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE = 'Generated with ({appName})';
+export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
+  'You are Lifecycle Agent Session, a coding agent operating on a real workspace through tool calls.',
+  'Use the available tools directly when you need to inspect files, search the workspace, run commands, or modify code.',
+  'Do not emit pseudo-tool markup or pretend execution happened. Never write things like <read_file>, <write_file>, <attempt_completion>, <result>, or shell commands as if they were already executed.',
+  'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.',
+  'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
+].join('\n');
+
+export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT =
+  'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.';
+
 const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
 const DEFAULT_AGENT_READY_POLL_MS = 2000;
-const DEFAULT_AGENT_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+const DEFAULT_WORKSPACE_RESOURCES: ResolvedAgentSessionResourceRequirements = {
   requests: {
     cpu: '500m',
     memory: '1Gi',
@@ -91,23 +87,16 @@ const DEFAULT_EDITOR_RESOURCES: ResolvedAgentSessionResourceRequirements = {
     memory: '1Gi',
   },
 };
-
-function normalizeStringArray(values: unknown, fallback: string[]): string[] {
-  if (!Array.isArray(values)) {
-    return [...fallback];
-  }
-
-  const normalized = values
-    .filter((value): value is string => typeof value === 'string')
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return normalized.length > 0 ? normalized : [...fallback];
-}
-
-function normalizeAttributionTemplate(template: unknown, fallback: string): string {
-  return typeof template === 'string' && template.trim() ? template.trim() : fallback;
-}
+const DEFAULT_WORKSPACE_GATEWAY_RESOURCES: ResolvedAgentSessionResourceRequirements = {
+  requests: {
+    cpu: '100m',
+    memory: '256Mi',
+  },
+  limits: {
+    cpu: '500m',
+    memory: '512Mi',
+  },
+};
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -174,8 +163,11 @@ function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null)
 
 function getDefaultReadinessConfig(): ResolvedAgentSessionReadinessConfig {
   return {
-    timeoutMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_TIMEOUT_MS) ?? DEFAULT_AGENT_READY_TIMEOUT_MS,
-    pollMs: normalizeNonNegativeInteger(process.env.AGENT_POD_READY_POLL_MS) ?? DEFAULT_AGENT_READY_POLL_MS,
+    timeoutMs:
+      normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_TIMEOUT_MS) ??
+      DEFAULT_AGENT_READY_TIMEOUT_MS,
+    pollMs:
+      normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS) ?? DEFAULT_AGENT_READY_POLL_MS,
   };
 }
 
@@ -221,8 +213,12 @@ export function resolveAgentSessionResourcesFromDefaults(
   resourceDefaults?: AgentSessionResourcesConfig | null
 ): ResolvedAgentSessionResources {
   return {
-    agent: mergeResourceRequirements(DEFAULT_AGENT_RESOURCES, resourceDefaults?.agent),
+    workspace: mergeResourceRequirements(DEFAULT_WORKSPACE_RESOURCES, resourceDefaults?.workspace),
     editor: mergeResourceRequirements(DEFAULT_EDITOR_RESOURCES, resourceDefaults?.editor),
+    workspaceGateway: mergeResourceRequirements(
+      DEFAULT_WORKSPACE_GATEWAY_RESOURCES,
+      resourceDefaults?.workspaceGateway
+    ),
   };
 }
 
@@ -231,61 +227,38 @@ export function mergeAgentSessionResources(
   overrides?: AgentSessionResourcesConfig | null
 ): ResolvedAgentSessionResources {
   return {
-    agent: mergeResourceRequirements(baseResources.agent, overrides?.agent),
+    workspace: mergeResourceRequirements(baseResources.workspace, overrides?.workspace),
     editor: mergeResourceRequirements(baseResources.editor, overrides?.editor),
+    workspaceGateway: mergeResourceRequirements(baseResources.workspaceGateway, overrides?.workspaceGateway),
   };
 }
 
-export function resolveAgentSessionClaudeConfigFromDefaults(
-  claudeDefaults?: AgentSessionClaudeConfig | null
-): ResolvedAgentSessionClaudeConfig {
-  const permissions: AgentSessionClaudePermissions | undefined = claudeDefaults?.permissions;
-  const attribution: AgentSessionClaudeAttribution | undefined = claudeDefaults?.attribution;
+export function resolveAgentSessionControlPlaneConfigFromDefaults(
+  agentSessionDefaults?: AgentSessionDefaults | null
+): ResolvedAgentSessionControlPlaneConfig {
+  const controlPlaneDefaults: AgentSessionControlPlaneConfig | undefined = agentSessionDefaults?.controlPlane;
+  const systemPrompt =
+    normalizeOptionalString(controlPlaneDefaults?.systemPrompt) || DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT;
+  const appendSystemPrompt =
+    normalizeOptionalString(controlPlaneDefaults?.appendSystemPrompt) ||
+    DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT;
 
   return {
-    permissions: {
-      allow: normalizeStringArray(permissions?.allow, DEFAULT_CLAUDE_PERMISSION_ALLOW),
-      deny: normalizeStringArray(permissions?.deny, DEFAULT_CLAUDE_PERMISSION_DENY),
-    },
-    attribution: {
-      commitTemplate: normalizeAttributionTemplate(
-        attribution?.commitTemplate,
-        DEFAULT_CLAUDE_COMMIT_ATTRIBUTION_TEMPLATE
-      ),
-      prTemplate: normalizeAttributionTemplate(attribution?.prTemplate, DEFAULT_CLAUDE_PR_ATTRIBUTION_TEMPLATE),
-    },
-    appendSystemPrompt: normalizeOptionalString(claudeDefaults?.appendSystemPrompt),
+    systemPrompt,
+    appendSystemPrompt,
   };
 }
 
-export async function resolveAgentSessionClaudeConfig(): Promise<ResolvedAgentSessionClaudeConfig> {
+export async function resolveAgentSessionControlPlaneConfig(): Promise<ResolvedAgentSessionControlPlaneConfig> {
   const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  return resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude);
-}
-
-export function renderAgentSessionClaudeAttribution(template: string, appName: string | null): string {
-  const trimmedTemplate = template.trim();
-  if (!trimmedTemplate) {
-    return '';
-  }
-
-  if (trimmedTemplate.includes('{appName}')) {
-    const trimmedAppName = appName?.trim();
-    if (!trimmedAppName) {
-      return '';
-    }
-
-    return trimmedTemplate.replace(/\{appName\}/g, trimmedAppName).trim();
-  }
-
-  return trimmedTemplate;
+  return resolveAgentSessionControlPlaneConfigFromDefaults(agentSessionDefaults);
 }
 
 export class AgentSessionRuntimeConfigError extends Error {
-  readonly missingFields: Array<'image' | 'editorImage'>;
+  readonly missingFields: Array<'workspaceImage' | 'workspaceEditorImage'>;
 
-  constructor(missingFields: Array<'image' | 'editorImage'>) {
-    super(`Agent session runtime is not configured. Missing ${missingFields.join(' and ')}.`);
+  constructor(missingFields: Array<'workspaceImage' | 'workspaceEditorImage'>) {
+    super(`Agent session workspace is not configured. Missing ${missingFields.join(' and ')}.`);
     this.name = 'AgentSessionRuntimeConfigError';
     this.missingFields = missingFields;
   }
@@ -293,16 +266,17 @@ export class AgentSessionRuntimeConfigError extends Error {
 
 export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRuntimeConfig> {
   const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  const image = agentSessionDefaults?.image?.trim() || '';
-  const editorImage = agentSessionDefaults?.editorImage?.trim() || '';
-  const missingFields: Array<'image' | 'editorImage'> = [];
+  const workspaceImage = agentSessionDefaults?.workspaceImage?.trim() || '';
+  const workspaceEditorImage = agentSessionDefaults?.workspaceEditorImage?.trim() || '';
+  const workspaceGatewayImage = agentSessionDefaults?.workspaceGatewayImage?.trim() || workspaceImage;
+  const missingFields: Array<'workspaceImage' | 'workspaceEditorImage'> = [];
 
-  if (!image) {
-    missingFields.push('image');
+  if (!workspaceImage) {
+    missingFields.push('workspaceImage');
   }
 
-  if (!editorImage) {
-    missingFields.push('editorImage');
+  if (!workspaceEditorImage) {
+    missingFields.push('workspaceEditorImage');
   }
 
   if (missingFields.length > 0) {
@@ -310,11 +284,11 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
   }
 
   return {
-    image,
-    editorImage,
+    workspaceImage,
+    workspaceEditorImage,
+    workspaceGatewayImage,
     nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
     readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),
     resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
-    claude: resolveAgentSessionClaudeConfigFromDefaults(agentSessionDefaults?.claude),
   };
 }

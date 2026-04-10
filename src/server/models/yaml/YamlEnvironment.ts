@@ -29,6 +29,7 @@ export interface AgentSessionEnvironmentConfig {
   readonly prewarm?: {
     readonly services?: string[];
   };
+  readonly skills?: YamlService.AgentSessionSkillRef[];
 }
 
 export interface Environment {

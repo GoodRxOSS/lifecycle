@@ -36,6 +36,15 @@ if aws_role:
 ##################################
 lifecycle_app = 'lifecycle-app'
 app_namespace = 'lifecycle-app'
+kind_cluster_name = 'lfc'
+agent_session_workspace_image = 'lifecycle-workspace'
+agent_session_workspace_image_ref = '{}:latest'.format(agent_session_workspace_image)
+legacy_agent_session_workspace_image_ref = 'lifecycle-agent:latest'
+agent_session_workspace_image_deps = [
+    '.dockerignore',
+    'sysops/dockerfiles/agent.Dockerfile',
+    'sysops/workspace-gateway',
+]
 
 # NGROK Configuration
 ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
@@ -74,6 +83,7 @@ secret_create_generic(
 # Bitnami Redis (Helm)
 ##################################
 helm_repo('bitnami', 'https://charts.bitnami.com/bitnami')
+helm_repo('ingress-nginx-chart', 'https://kubernetes.github.io/ingress-nginx')
 
 helm_resource(
     name='redis',
@@ -109,6 +119,36 @@ k8s_yaml('sysops/tilt/local-postgres.yaml')
 k8s_resource(
     'local-postgres',
     port_forwards=['5434:5432'],
+    labels=["infra"]
+)
+
+##################################
+# Agent Session Workspace Runtime
+##################################
+local_resource(
+    'agent-session-workspace-image',
+    cmd='docker build -t {workspace_ref} -t {legacy_ref} -f sysops/dockerfiles/agent.Dockerfile . && kind load docker-image {workspace_ref} {legacy_ref} --name {cluster}'.format(
+        workspace_ref=agent_session_workspace_image_ref,
+        legacy_ref=legacy_agent_session_workspace_image_ref,
+        cluster=kind_cluster_name,
+    ),
+    deps=agent_session_workspace_image_deps,
+    labels=['infra'],
+)
+
+##################################
+# Ingress NGINX (Helm)
+##################################
+helm_resource(
+    name='ingress-nginx',
+    chart='ingress-nginx-chart/ingress-nginx',
+    namespace='ingress-nginx',
+    resource_deps=['ingress-nginx-chart'],
+    flags=[
+        '--create-namespace',
+        '--version', '4.15.1',
+        '-f', 'sysops/tilt/ingress-nginx-values.yaml',
+    ],
     labels=["infra"]
 )
 
@@ -231,7 +271,7 @@ for r in patched_deploy:
 
         # Don't add postgres/redis deps for keycloak resources
         if "keycloak" not in name:
-            resource_deps = ['local-postgres', 'redis']
+            resource_deps = ['local-postgres', 'redis', 'agent-session-workspace-image']
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']

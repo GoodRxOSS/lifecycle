@@ -29,6 +29,7 @@ import { redisClient } from 'server/lib/dependencies';
 import QueueManager from 'server/lib/queueManager';
 import { QUEUE_NAMES } from 'shared/config';
 import { setSandboxLaunchState, toPublicSandboxLaunchState } from 'server/lib/agentSession/sandboxLaunchState';
+import { AGENT_API_KEY_HEADER, AGENT_API_KEY_PROVIDER_HEADER } from 'server/services/agent/providerConfig';
 import AgentSandboxSessionService, {
   formatRequestedSandboxServicesLabel,
   summarizeRequestedSandboxServices,
@@ -224,7 +225,7 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                     type: string
  *     responses:
  *       '200':
- *         description: Service selection required or sandbox session launch queued
+ *         description: Sandbox session launch queued
  *         content:
  *           application/json:
  *             schema:
@@ -264,7 +265,7 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                         - creating_sandbox_build
  *                         - resolving_environment
  *                         - deploying_resources
- *                         - creating_agent_session
+ *                         - opening_session
  *                         - ready
  *                         - error
  *                     message:
@@ -351,6 +352,8 @@ const postHandler = async (req: NextRequest) => {
     const requestedServiceLabel = formatRequestedSandboxServicesLabel(requestedServices);
     const runtimeConfig = await resolveAgentSessionRuntimeConfig();
     const githubToken = await resolveRequestGitHubToken(req);
+    const requestApiKey = req.headers.get(AGENT_API_KEY_HEADER);
+    const requestApiKeyProvider = req.headers.get(AGENT_API_KEY_PROVIDER_HEADER);
     const launchId = uuid();
     const now = new Date().toISOString();
     await setSandboxLaunchState(redisClient.getRedis(), {
@@ -363,6 +366,11 @@ const postHandler = async (req: NextRequest) => {
       updatedAt: now,
       baseBuildUuid: body.baseBuildUuid,
       service: requestedServiceSummary,
+      buildUuid: null,
+      namespace: null,
+      sessionId: null,
+      focusUrl: null,
+      error: null,
     });
 
     await sandboxLaunchQueue.add(
@@ -372,11 +380,14 @@ const postHandler = async (req: NextRequest) => {
         userId: userIdentity.userId,
         userIdentity,
         encryptedGithubToken: githubToken ? encrypt(githubToken) : null,
+        encryptedRequestApiKey: requestApiKey ? encrypt(requestApiKey) : null,
+        requestApiKeyProvider,
         baseBuildUuid: body.baseBuildUuid,
         services: requestedServices,
         model: body.model,
-        agentImage: runtimeConfig.image,
-        editorImage: runtimeConfig.editorImage,
+        workspaceImage: runtimeConfig.workspaceImage,
+        workspaceEditorImage: runtimeConfig.workspaceEditorImage,
+        workspaceGatewayImage: runtimeConfig.workspaceGatewayImage,
         nodeSelector: runtimeConfig.nodeSelector,
         readiness: runtimeConfig.readiness,
         resources: runtimeConfig.resources,
@@ -397,19 +408,16 @@ const postHandler = async (req: NextRequest) => {
         updatedAt: now,
         baseBuildUuid: body.baseBuildUuid,
         service: requestedServiceSummary,
+        buildUuid: null,
+        namespace: null,
+        sessionId: null,
+        focusUrl: null,
+        error: null,
       }),
       { status: 200 },
       req
     );
   } catch (err) {
-    if (err instanceof Error && err.message === 'API_KEY_REQUIRED') {
-      return errorResponse(
-        new Error('An Anthropic API key is required. Please add one in settings.'),
-        { status: 400 },
-        req
-      );
-    }
-
     if (err instanceof Error && /not found/i.test(err.message)) {
       return errorResponse(err, { status: 404 }, req);
     }

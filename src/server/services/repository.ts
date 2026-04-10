@@ -18,6 +18,12 @@ import { getLogger } from 'server/lib/logger';
 import { Repository } from 'server/models';
 import BaseService from './_service';
 
+export interface RepositorySearchResult {
+  githubRepositoryId: number;
+  fullName: string;
+  htmlUrl: string | null;
+}
+
 export default class RepositoryService extends BaseService {
   /**
    * Retrieve a Lifecycle Github Repository model. If it doesn't exist, create a new record.
@@ -87,5 +93,29 @@ export default class RepositoryService extends BaseService {
     }
 
     return repository;
+  }
+
+  async searchRepositories(query: string, limit = 10): Promise<RepositorySearchResult[]> {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    const normalizedLimit = Math.min(Math.max(limit, 1), 25);
+
+    try {
+      return await this.db.models.Repository.query()
+        .select('githubRepositoryId', 'fullName', 'htmlUrl')
+        .whereRaw('lower("fullName") like ?', [`%${normalizedQuery}%`])
+        .orderByRaw('case when lower("fullName") = ? then 0 when lower("fullName") like ? then 1 else 2 end', [
+          normalizedQuery,
+          `${normalizedQuery}%`,
+        ])
+        .orderBy('updatedAt', 'desc')
+        .limit(normalizedLimit);
+    } catch (error) {
+      getLogger({ query: normalizedQuery, limit: normalizedLimit, error }).error('Repository: search failed');
+      throw error;
+    }
   }
 }

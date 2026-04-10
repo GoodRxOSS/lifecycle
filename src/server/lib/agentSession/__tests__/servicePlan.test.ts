@@ -15,7 +15,7 @@
  */
 
 import { buildCombinedInstallCommand, resolveAgentSessionServicePlan } from '../servicePlan';
-import { AGENT_WORKSPACE_ROOT } from '../workspace';
+import { SESSION_WORKSPACE_ROOT } from '../workspace';
 
 describe('servicePlan', () => {
   it('rewrites secondary repo service config against the mounted workspace path', () => {
@@ -51,7 +51,7 @@ describe('servicePlan', () => {
     expect(plan.workspaceRepos).toEqual([
       expect.objectContaining({
         repo: 'example-org/api',
-        mountPath: AGENT_WORKSPACE_ROOT,
+        mountPath: SESSION_WORKSPACE_ROOT,
         primary: true,
       }),
       expect.objectContaining({

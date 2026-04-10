@@ -28,6 +28,12 @@ export interface Service001 {
   };
 }
 
+export interface AgentSessionSkillRef {
+  readonly repo: string;
+  readonly branch: string;
+  readonly path: string;
+}
+
 export interface DevConfig {
   image: string;
   command: string;
@@ -41,6 +47,7 @@ export interface DevConfig {
       timeoutMs?: number;
       pollMs?: number;
     };
+    skills?: AgentSessionSkillRef[];
   };
 }
 

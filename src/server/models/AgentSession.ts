@@ -16,6 +16,8 @@
 
 import Model from './_Model';
 import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeManager';
+import type { AgentSessionSkillPlan } from 'server/lib/agentSession/skillPlan';
+import { EMPTY_AGENT_SESSION_SKILL_PLAN } from 'server/lib/agentSession/skillPlan';
 import type { AgentSessionSelectedService, AgentSessionWorkspaceRepo } from 'server/lib/agentSession/workspace';
 import { BuildKind } from 'shared/constants';
 
@@ -36,6 +38,7 @@ export default class AgentSession extends Model {
   forwardedAgentSecretProviders!: string[];
   workspaceRepos!: AgentSessionWorkspaceRepo[];
   selectedServices!: AgentSessionSelectedService[];
+  skillPlan!: AgentSessionSkillPlan;
 
   static tableName = 'agent_sessions';
   static timestamps = true;
@@ -43,7 +46,7 @@ export default class AgentSession extends Model {
 
   static jsonSchema = {
     type: 'object',
-    required: ['uuid', 'userId', 'podName', 'namespace', 'pvcName', 'model', 'buildKind'],
+    required: ['userId', 'podName', 'namespace', 'pvcName', 'model'],
     properties: {
       id: { type: 'integer' },
       uuid: {
@@ -65,11 +68,19 @@ export default class AgentSession extends Model {
       forwardedAgentSecretProviders: { type: 'array', items: { type: 'string' }, default: [] },
       workspaceRepos: { type: 'array', items: { type: 'object' }, default: [] },
       selectedServices: { type: 'array', items: { type: 'object' }, default: [] },
+      skillPlan: {
+        type: 'object',
+        properties: {
+          version: { type: 'integer', enum: [1], default: 1 },
+          skills: { type: 'array', items: { type: 'object' }, default: [] },
+        },
+        default: EMPTY_AGENT_SESSION_SKILL_PLAN,
+      },
     },
   };
 
   static get jsonAttributes() {
-    return ['devModeSnapshots', 'forwardedAgentSecretProviders', 'workspaceRepos', 'selectedServices'];
+    return ['devModeSnapshots', 'forwardedAgentSecretProviders', 'workspaceRepos', 'selectedServices', 'skillPlan'];
   }
 
   static get relationMappings() {
