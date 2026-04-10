@@ -41,8 +41,12 @@ jest.mock('server/lib/logger', () => ({
   }),
 }));
 
-import { createAgentEditorService, deleteAgentEditorService } from '../editorServiceFactory';
-import { AGENT_EDITOR_PORT } from '../podFactory';
+import { createSessionWorkspaceService, deleteSessionWorkspaceService } from '../editorServiceFactory';
+import {
+  SESSION_WORKSPACE_EDITOR_PORT,
+  SESSION_WORKSPACE_GATEWAY_PORT,
+  SESSION_WORKSPACE_GATEWAY_PORT_NAME,
+} from '../podFactory';
 
 describe('editorServiceFactory', () => {
   beforeEach(() => {
@@ -52,7 +56,7 @@ describe('editorServiceFactory', () => {
   it('creates a ClusterIP editor service for the session pod', async () => {
     mockCreateService.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
 
-    await createAgentEditorService('test-ns', 'agent-abc123');
+    await createSessionWorkspaceService('test-ns', 'agent-abc123');
 
     expect(mockCreateService).toHaveBeenCalledWith(
       'test-ns',
@@ -60,7 +64,14 @@ describe('editorServiceFactory', () => {
         metadata: expect.objectContaining({ name: 'agent-abc123' }),
         spec: expect.objectContaining({
           selector: { 'app.kubernetes.io/name': 'agent-abc123' },
-          ports: [{ name: 'editor', port: AGENT_EDITOR_PORT, targetPort: AGENT_EDITOR_PORT }],
+          ports: [
+            { name: 'editor', port: SESSION_WORKSPACE_EDITOR_PORT, targetPort: SESSION_WORKSPACE_EDITOR_PORT },
+            {
+              name: SESSION_WORKSPACE_GATEWAY_PORT_NAME,
+              port: SESSION_WORKSPACE_GATEWAY_PORT,
+              targetPort: SESSION_WORKSPACE_GATEWAY_PORT,
+            },
+          ],
         }),
       })
     );
@@ -69,7 +80,7 @@ describe('editorServiceFactory', () => {
   it('deletes the editor service', async () => {
     mockDeleteService.mockResolvedValue({});
 
-    await deleteAgentEditorService('test-ns', 'agent-abc123');
+    await deleteSessionWorkspaceService('test-ns', 'agent-abc123');
 
     expect(mockDeleteService).toHaveBeenCalledWith('agent-abc123', 'test-ns');
   });
@@ -78,6 +89,6 @@ describe('editorServiceFactory', () => {
     const error = new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404);
     mockDeleteService.mockRejectedValue(error);
 
-    await expect(deleteAgentEditorService('test-ns', 'agent-abc123')).resolves.toBeUndefined();
+    await expect(deleteSessionWorkspaceService('test-ns', 'agent-abc123')).resolves.toBeUndefined();
   });
 });

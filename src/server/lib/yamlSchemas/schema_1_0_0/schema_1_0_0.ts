@@ -57,6 +57,22 @@ const agentSessionReadiness = {
   },
 };
 
+const agentSessionSkillRef = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    repo: { type: 'string', minLength: 1 },
+    branch: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+  },
+  required: ['repo', 'branch', 'path'],
+};
+
+const agentSessionSkills = {
+  type: 'array',
+  items: agentSessionSkillRef,
+};
+
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
   type: 'object',
@@ -77,6 +93,7 @@ const schema_1_0_0 = {
           properties: {
             resources: agentSessionResources,
             prewarm: agentSessionPrewarm,
+            skills: agentSessionSkills,
           },
         },
         defaultServices: {
@@ -269,6 +286,7 @@ const schema_1_0_0 = {
                 additionalProperties: false,
                 properties: {
                   readiness: agentSessionReadiness,
+                  skills: agentSessionSkills,
                 },
               },
             },

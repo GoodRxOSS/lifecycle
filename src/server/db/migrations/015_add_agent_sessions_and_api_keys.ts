@@ -19,31 +19,43 @@ import { Knex } from 'knex';
 export async function up(knex: Knex): Promise<void> {
   const existingAgentSessionDefaults = await knex('global_config').where('key', 'agentSessionDefaults').first();
   const defaultAgentSessionDefaults = {
-    image: process.env.AGENT_IMAGE || null,
-    editorImage: process.env.AGENT_EDITOR_IMAGE || null,
+    workspaceImage: process.env.AGENT_SESSION_WORKSPACE_IMAGE || null,
+    workspaceEditorImage: process.env.AGENT_SESSION_WORKSPACE_EDITOR_IMAGE || null,
+    workspaceGatewayImage:
+      process.env.AGENT_SESSION_WORKSPACE_GATEWAY_IMAGE || process.env.AGENT_SESSION_WORKSPACE_IMAGE || null,
     readiness: {
-      timeoutMs: parseInt(process.env.AGENT_POD_READY_TIMEOUT_MS || '60000', 10),
-      pollMs: parseInt(process.env.AGENT_POD_READY_POLL_MS || '2000', 10),
+      timeoutMs: parseInt(process.env.AGENT_SESSION_WORKSPACE_READY_TIMEOUT_MS || '60000', 10),
+      pollMs: parseInt(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS || '2000', 10),
     },
     resources: {
-      agent: {
+      workspace: {
         requests: {
-          cpu: process.env.AGENT_POD_CPU_REQUEST || '500m',
-          memory: process.env.AGENT_POD_MEMORY_REQUEST || '1Gi',
+          cpu: process.env.AGENT_SESSION_WORKSPACE_CPU_REQUEST || '500m',
+          memory: process.env.AGENT_SESSION_WORKSPACE_MEMORY_REQUEST || '1Gi',
         },
         limits: {
-          cpu: process.env.AGENT_POD_CPU_LIMIT || '2',
-          memory: process.env.AGENT_POD_MEMORY_LIMIT || '4Gi',
+          cpu: process.env.AGENT_SESSION_WORKSPACE_CPU_LIMIT || '2',
+          memory: process.env.AGENT_SESSION_WORKSPACE_MEMORY_LIMIT || '4Gi',
         },
       },
       editor: {
         requests: {
-          cpu: process.env.AGENT_EDITOR_CPU_REQUEST || '250m',
-          memory: process.env.AGENT_EDITOR_MEMORY_REQUEST || '512Mi',
+          cpu: process.env.AGENT_SESSION_WORKSPACE_EDITOR_CPU_REQUEST || '250m',
+          memory: process.env.AGENT_SESSION_WORKSPACE_EDITOR_MEMORY_REQUEST || '512Mi',
         },
         limits: {
-          cpu: process.env.AGENT_EDITOR_CPU_LIMIT || '1',
-          memory: process.env.AGENT_EDITOR_MEMORY_LIMIT || '1Gi',
+          cpu: process.env.AGENT_SESSION_WORKSPACE_EDITOR_CPU_LIMIT || '1',
+          memory: process.env.AGENT_SESSION_WORKSPACE_EDITOR_MEMORY_LIMIT || '1Gi',
+        },
+      },
+      workspaceGateway: {
+        requests: {
+          cpu: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_CPU_REQUEST || '100m',
+          memory: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_MEMORY_REQUEST || '256Mi',
+        },
+        limits: {
+          cpu: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_CPU_LIMIT || '500m',
+          memory: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_MEMORY_LIMIT || '512Mi',
         },
       },
     },
@@ -116,7 +128,7 @@ export async function up(knex: Knex): Promise<void> {
       createdAt: knex.fn.now(),
       updatedAt: knex.fn.now(),
       deletedAt: null,
-      description: 'Default configuration for agent session runtime images and Claude Code bootstrap behavior.',
+      description: 'Default configuration for agent session workspace runtime images and bootstrap behavior.',
     });
   }
 }

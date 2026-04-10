@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-export type { AIAgentConfig, ProviderConfig, ModelConfig } from './aiAgent';
+export type { AIAgentConfig, ApprovalPolicyConfig, ProviderConfig, ModelConfig } from './aiAgent';
 
 export interface AIAgentRepoConfigRow {
   id: number;
@@ -29,6 +29,7 @@ export interface AIAgentRepoOverride {
   enabled?: boolean;
   maxMessagesPerSession?: number;
   sessionTTL?: number;
+  approvalPolicy?: import('./aiAgent').ApprovalPolicyConfig;
   additiveRules?: string[];
   systemPromptOverride?: string;
   excludedTools?: string[];

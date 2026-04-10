@@ -26,7 +26,7 @@ import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/age
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
 import {
-  AGENT_WORKSPACE_ROOT,
+  SESSION_WORKSPACE_ROOT,
   type AgentSessionSelectedService,
   type AgentSessionWorkspaceRepo,
 } from 'server/lib/agentSession/workspace';
@@ -35,6 +35,7 @@ import {
   resolveAgentSessionServicePlan,
   type ResolvedAgentSessionService,
 } from 'server/lib/agentSession/servicePlan';
+import { resolveAgentSessionSkillPlan, type AgentSessionSkillPlan } from 'server/lib/agentSession/skillPlan';
 import { createAgentPrewarmJob, monitorAgentPrewarmJob } from 'server/lib/agentSession/prewarmJobFactory';
 import {
   resolveAgentSessionRuntimeConfig,
@@ -74,6 +75,7 @@ type ResolvedBuildPrewarmPlan = {
   services: ResolvedPrewarmService[];
   workspaceRepos: AgentSessionWorkspaceRepo[];
   serviceRefs: AgentSessionSelectedService[];
+  skillPlan: AgentSessionSkillPlan;
 };
 
 export interface AgentPrewarmQueueJob {
@@ -280,7 +282,7 @@ export default class AgentPrewarmService extends BaseService {
       await createAgentApiKeySecret(
         plan.namespace,
         secretName,
-        '',
+        undefined,
         githubToken,
         plan.buildUuid,
         forwardedPlainAgentEnv
@@ -290,14 +292,16 @@ export default class AgentPrewarmService extends BaseService {
         jobName,
         namespace: plan.namespace,
         pvcName,
-        image: runtimeConfig.image,
+        image: runtimeConfig.workspaceImage,
         apiKeySecretName: secretName,
         hasGitHubToken: Boolean(githubToken),
         repoUrl: plan.repoUrl,
         branch: plan.branch,
         revision: plan.revision,
-        workspacePath: AGENT_WORKSPACE_ROOT,
+        workspacePath: SESSION_WORKSPACE_ROOT,
         workspaceRepos: plan.workspaceRepos,
+        workspaceGatewayImage: runtimeConfig.workspaceGatewayImage,
+        skillPlan: plan.skillPlan,
         installCommand,
         forwardedAgentEnv: forwardedAgentEnv.env,
         forwardedAgentSecretRefs: forwardedAgentEnv.secretRefs,
@@ -305,7 +309,7 @@ export default class AgentPrewarmService extends BaseService {
         buildUuid: plan.buildUuid,
         nodeSelector: runtimeConfig.nodeSelector,
         serviceAccountName,
-        resources: runtimeConfig.resources.agent as unknown as AgentSessionRuntimeConfig['resources']['agent'] &
+        resources: runtimeConfig.resources.workspace as unknown as AgentSessionRuntimeConfig['resources']['workspace'] &
           k8s.V1ResourceRequirements,
       });
 
@@ -438,6 +442,10 @@ export default class AgentPrewarmService extends BaseService {
       services: resolvedServices || [],
       workspaceRepos,
       serviceRefs: selectedServices,
+      skillPlan: resolveAgentSessionSkillPlan({
+        environmentSkillRefs: lifecycleConfig?.environment?.agentSession?.skills,
+        services: resolvedServices || [],
+      }),
     };
   }
 

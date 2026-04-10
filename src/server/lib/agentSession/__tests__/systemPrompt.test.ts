@@ -45,6 +45,11 @@ describe('agent session system prompt', () => {
       buildAgentSessionDynamicSystemPrompt({
         namespace: 'env-sample-123456',
         buildUuid: 'sample-123456',
+        skillsAvailable: true,
+        toolLines: [
+          '- inspect files, services, and git state: workspace.read_file, workspace.exec',
+          '- run mutating or networked shell commands: workspace.exec_mutation',
+        ],
         services: [
           {
             name: 'next-web',
@@ -60,6 +65,10 @@ describe('agent session system prompt', () => {
         '- buildUuid: sample-123456',
         '- selected services:',
         '  - next-web: publicUrl=https://next-web-sample.lifecycle.dev.example.com, workDir=/workspace/apps/next-web',
+        '- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it',
+        '- equipped tools:',
+        '  - inspect files, services, and git state: workspace.read_file, workspace.exec',
+        '  - run mutating or networked shell commands: workspace.exec_mutation',
       ].join('\n')
     );
   });
@@ -125,6 +134,7 @@ describe('agent session system prompt', () => {
           workDir: '/workspace/apps/next-web',
         },
       ],
+      skillsAvailable: false,
     });
 
     expect(fetchLifecycleConfig).toHaveBeenCalledWith('example-org/example-repo', 'feature/sample');

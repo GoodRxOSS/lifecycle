@@ -41,7 +41,7 @@ export default class AgentPrewarm extends Model {
 
   static jsonSchema = {
     type: 'object',
-    required: ['uuid', 'buildUuid', 'namespace', 'pvcName', 'jobName', 'status'],
+    required: ['buildUuid', 'namespace', 'pvcName', 'jobName'],
     properties: {
       id: { type: 'integer' },
       uuid: {

@@ -58,7 +58,7 @@ describe('GitHub Deployment Functions', () => {
     build: {
       pullRequest: {
         repository: {
-          fullName: 'user/repo',
+          fullName: 'example-org/example-repo',
         },
         branchName: 'feature-branch',
       },
@@ -162,7 +162,7 @@ describe('GitHub Deployment Functions', () => {
         status: 'deployed',
         pullRequest: {
           repository: {
-            fullName: 'user/repo',
+            fullName: 'example-org/example-repo',
           },
           pullRequestNumber: 123,
           branchName: 'feature-branch',

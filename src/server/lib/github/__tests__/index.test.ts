@@ -62,7 +62,7 @@ test('createOrUpdatePullRequestComment success', async () => {
   const result = await createOrUpdatePullRequestComment({
     installationId: 1,
     pullRequestNumber: 123,
-    fullName: 'foo/bar',
+    fullName: 'example-org/example-repo',
     message: 'hello',
     commentId: 123,
     isTesting: true,
@@ -82,7 +82,7 @@ test('getPullRequestByRepositoryFullName success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
     request: jest.fn().mockResolvedValue({ data: 'foo' }),
   });
-  const result = await getPullRequestByRepositoryFullName('foo/foo', 123, 1);
+  const result = await getPullRequestByRepositoryFullName('example-org/example-repo', 123, 1);
   expect(result.data).toEqual('foo');
 });
 
@@ -90,7 +90,7 @@ test('getPullRequestByRepositoryFullName failure', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
     request: jest.fn().mockRejectedValue(new Error('error')),
   });
-  await expect(getPullRequestByRepositoryFullName('foo/foo', 123, 1)).rejects.toThrow();
+  await expect(getPullRequestByRepositoryFullName('example-org/example-repo', 123, 1)).rejects.toThrow();
 });
 
 test('getPullRequestByRepositoryFullName invalid repository name', async () => {
@@ -135,7 +135,7 @@ test('getSHAForBranch success', async () => {
   const mockSHA = 'abc123def456';
   (utils.getRefForBranchName as jest.Mock).mockResolvedValue({ data: { object: { sha: mockSHA } } });
 
-  const sha = await getSHAForBranch('main', 'foo', 'bar');
+  const sha = await getSHAForBranch('main', 'example-org', 'example-repo');
 
   expect(sha).toBe(mockSHA);
 });
@@ -143,8 +143,8 @@ test('getSHAForBranch success', async () => {
 test('getSHAForBranch failure', async () => {
   const mockError = new Error('error');
   (utils.getRefForBranchName as jest.Mock).mockRejectedValue(mockError);
-  await expect(getSHAForBranch('main', 'foo', 'bar')).rejects.toThrow('error');
-  expect(getLogger).toHaveBeenCalledWith({ error: mockError, repo: 'foo/bar', branch: 'main' });
+  await expect(getSHAForBranch('main', 'example-org', 'example-repo')).rejects.toThrow('error');
+  expect(getLogger).toHaveBeenCalledWith({ error: mockError, repo: 'example-org/example-repo', branch: 'main' });
 });
 
 test('checkIfCommentExists to return true', async () => {
@@ -154,7 +154,7 @@ test('checkIfCommentExists to return true', async () => {
     request: jest.fn().mockResolvedValue({ data: mockComments }),
   });
   const result = await checkIfCommentExists({
-    fullName: 'foo/bar',
+    fullName: 'example-org/example-repo',
     pullRequestNumber: 123,
     commentIdentifier: 'uniqueIdentifier',
   });
@@ -169,7 +169,7 @@ test('checkIfCommentExists to return false', async () => {
     request: jest.fn().mockResolvedValue({ data: mockComments }),
   });
   const result = await checkIfCommentExists({
-    fullName: 'foo/bar',
+    fullName: 'example-org/example-repo',
     pullRequestNumber: 123,
     commentIdentifier: 'uniqueIdentifier',
   });

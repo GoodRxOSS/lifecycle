@@ -17,6 +17,9 @@
 import { posix as pathPosix } from 'path';
 import type { AgentSessionWorkspaceRepo } from './workspace';
 
+export const SESSION_WORKSPACE_SHARED_HOME_DIR = '/home/agent/.lifecycle-session';
+export const SESSION_WORKSPACE_HOME_VOLUME_NAME = 'session-home';
+
 export interface InitScriptOpts {
   repoUrl?: string;
   branch?: string;
@@ -24,13 +27,6 @@ export interface InitScriptOpts {
   workspacePath?: string;
   workspaceRepos?: AgentSessionWorkspaceRepo[];
   installCommand?: string;
-  claudeMdContent?: string;
-  claudePermissions?: {
-    allow: string[];
-    deny: string[];
-  };
-  claudeCommitAttribution?: string;
-  claudePrAttribution?: string;
   gitUserName?: string;
   gitUserEmail?: string;
   githubUsername?: string;
@@ -64,11 +60,11 @@ function resolveInitWorkspaceRepos(opts: InitScriptOpts): AgentSessionWorkspaceR
 
 function appendPrePushHook(lines: string[], repoPath: string) {
   lines.push(
-    `mkdir -p "${escapeDoubleQuotedShell(repoPath)}/.git/hooks"`,
-    `cat > "${escapeDoubleQuotedShell(repoPath)}/.git/hooks/pre-push" << 'HOOK_EOF'`,
+    `if [ -d "${escapeDoubleQuotedShell(repoPath)}/.git" ]; then`,
+    `  mkdir -p "${escapeDoubleQuotedShell(repoPath)}/.git/hooks"`,
+    `  cat > "${escapeDoubleQuotedShell(repoPath)}/.git/hooks/pre-push" << 'HOOK_EOF'`,
     '#!/bin/sh',
-    'remote="$1"',
-    'while read local_ref local_sha remote_ref remote_sha; do',
+    'while read _ _ remote_ref _; do',
     `  branch_name="\${remote_ref##refs/heads/}"`,
     `  if [ "$branch_name" = "main" ] || [ "$branch_name" = "master" ]; then`,
     '    echo "ERROR: Pushing to $branch_name is not allowed"',
@@ -77,43 +73,13 @@ function appendPrePushHook(lines: string[], repoPath: string) {
     'done',
     'exit 0',
     'HOOK_EOF',
-    `chmod +x "${escapeDoubleQuotedShell(repoPath)}/.git/hooks/pre-push"`
+    `  chmod +x "${escapeDoubleQuotedShell(repoPath)}/.git/hooks/pre-push"`,
+    'fi'
   );
 }
 
-export function generateInitScript(opts: InitScriptOpts): string {
-  const {
-    installCommand,
-    claudeMdContent,
-    claudePermissions,
-    claudeCommitAttribution,
-    claudePrAttribution,
-    gitUserName,
-    gitUserEmail,
-    githubUsername,
-    useGitHubToken,
-  } = opts;
-  const workspaceRepos = resolveInitWorkspaceRepos(opts);
-  const primaryRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
-
-  const settings = {
-    permissions: {
-      allow: claudePermissions?.allow || ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-      deny: claudePermissions?.deny || [],
-    },
-    ...(claudeCommitAttribution !== undefined || claudePrAttribution !== undefined
-      ? {
-          attribution: {
-            commit: claudeCommitAttribution || '',
-            pr: claudePrAttribution || '',
-          },
-        }
-      : {}),
-  };
-
-  const settingsJson = JSON.stringify(settings, null, 2);
-
-  const lines = ['#!/bin/sh', 'set -e'];
+function appendRuntimeSeedLines(lines: string[], workspaceRepos: AgentSessionWorkspaceRepo[], opts: InitScriptOpts) {
+  const { gitUserName, gitUserEmail, githubUsername, useGitHubToken } = opts;
 
   if (gitUserName) {
     lines.push(`git config --global user.name "${escapeDoubleQuotedShell(gitUserName)}"`);
@@ -136,12 +102,43 @@ export function generateInitScript(opts: InitScriptOpts): string {
   }
 
   for (const repo of workspaceRepos) {
+    lines.push(
+      `if ! git config --global --get-all safe.directory | grep -Fx "${escapeDoubleQuotedShell(
+        repo.mountPath
+      )}" >/dev/null 2>&1; then`,
+      `  git config --global --add safe.directory "${escapeDoubleQuotedShell(repo.mountPath)}"`,
+      'fi'
+    );
+  }
+
+  for (const repo of workspaceRepos) {
+    lines.push('');
+    appendPrePushHook(lines, repo.mountPath);
+  }
+}
+
+export function generateRuntimeSeedScript(opts: InitScriptOpts): string {
+  const workspaceRepos = resolveInitWorkspaceRepos(opts);
+  const lines = ['#!/bin/sh', 'set -e'];
+
+  appendRuntimeSeedLines(lines, workspaceRepos, opts);
+
+  return lines.join('\n') + '\n';
+}
+
+export function generateInitScript(opts: InitScriptOpts): string {
+  const { installCommand } = opts;
+  const workspaceRepos = resolveInitWorkspaceRepos(opts);
+  const primaryRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+
+  const lines = ['#!/bin/sh', 'set -e'];
+
+  for (const repo of workspaceRepos) {
     const parentDir = pathPosix.dirname(repo.mountPath);
     const cloneRoot = parentDir === '/' ? repo.mountPath : parentDir;
     lines.push(
       '',
       `mkdir -p "${escapeDoubleQuotedShell(cloneRoot)}"`,
-      `git config --global --add safe.directory "${escapeDoubleQuotedShell(repo.mountPath)}"`,
       `git clone --progress --depth 50 --branch "${escapeDoubleQuotedShell(
         repo.branch
       )}" --single-branch "${escapeDoubleQuotedShell(repo.repoUrl)}" "${escapeDoubleQuotedShell(repo.mountPath)}"`,
@@ -164,24 +161,6 @@ export function generateInitScript(opts: InitScriptOpts): string {
 
   if (installCommand) {
     lines.push('', `cd "${escapeDoubleQuotedShell(primaryRepo.mountPath)}"`, installCommand);
-  }
-
-  lines.push('', 'mkdir -p ~/.claude', '');
-
-  if (claudeMdContent) {
-    lines.push(`cat > ~/.claude/CLAUDE.md << 'CLAUDE_MD_EOF'`);
-    lines.push(claudeMdContent);
-    lines.push('CLAUDE_MD_EOF');
-    lines.push('');
-  }
-
-  lines.push(`cat > ~/.claude/settings.json << 'SETTINGS_EOF'`);
-  lines.push(settingsJson);
-  lines.push('SETTINGS_EOF');
-
-  for (const repo of workspaceRepos) {
-    lines.push('');
-    appendPrePushHook(lines, repo.mountPath);
   }
 
   return lines.join('\n') + '\n';

@@ -14,102 +14,115 @@
  * limitations under the License.
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';
 import { getLogger } from 'server/lib/logger';
+import type { McpDiscoveredTool, McpResolvedTransportConfig, McpToolAnnotations } from './types';
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000;
 const DEFAULT_CALL_TIMEOUT_MS = 30000;
 
-export interface McpTool {
-  name: string;
-  description?: string;
-  inputSchema: Record<string, unknown>;
-  annotations?: {
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    openWorldHint?: boolean;
+type ListToolsDefinitions = Awaited<ReturnType<MCPClient['listTools']>>;
+type ExperimentalStdioMCPModule = typeof import('@ai-sdk/mcp/dist/mcp-stdio');
+
+function getExperimentalStdioMCPTransport(): ExperimentalStdioMCPModule['Experimental_StdioMCPTransport'] {
+  return require('@ai-sdk/mcp/mcp-stdio')
+    .Experimental_StdioMCPTransport as ExperimentalStdioMCPModule['Experimental_StdioMCPTransport'];
+}
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+
+    operation.then(
+      (result) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        resolve(result);
+      },
+      (error) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        reject(error);
+      }
+    );
+  });
+}
+
+function mapToolAnnotations(annotations: Record<string, unknown> | undefined): McpToolAnnotations | undefined {
+  if (!annotations || typeof annotations !== 'object') {
+    return undefined;
+  }
+
+  return {
+    readOnlyHint: annotations.readOnlyHint === true,
+    destructiveHint: annotations.destructiveHint === true,
+    openWorldHint: annotations.openWorldHint === true,
   };
 }
 
-export class McpClientManager {
-  private client: Client | null = null;
+function toMcpDiscoveredTools(definitions: ListToolsDefinitions): McpDiscoveredTool[] {
+  return definitions.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema as Record<string, unknown>,
+    annotations: mapToolAnnotations(tool.annotations as Record<string, unknown> | undefined),
+  }));
+}
 
-  async connect(
-    url: string,
-    headers?: Record<string, string>,
-    handshakeTimeoutMs: number = DEFAULT_HANDSHAKE_TIMEOUT_MS
-  ): Promise<void> {
-    const parsedUrl = new URL(url);
-    const requestInit: RequestInit = headers ? { headers } : {};
+function createTransport(transport: McpResolvedTransportConfig) {
+  if (transport.type === 'stdio') {
+    const ExperimentalStdioMCPTransport = getExperimentalStdioMCPTransport();
 
-    const client = new Client({ name: 'lifecycle', version: '1.0.0' });
-
-    try {
-      const transport = new StreamableHTTPClientTransport(parsedUrl, { requestInit });
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), handshakeTimeoutMs);
-      try {
-        await client.connect(transport, { signal: controller.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-      this.client = client;
-      return;
-    } catch {
-      // StreamableHTTP failed, try SSE
-    }
-
-    try {
-      const fallbackClient = new Client({ name: 'lifecycle', version: '1.0.0' });
-      const transport = new SSEClientTransport(parsedUrl, { requestInit });
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), handshakeTimeoutMs);
-      try {
-        await fallbackClient.connect(transport, { signal: controller.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-      this.client = fallbackClient;
-      return;
-    } catch (sseError) {
-      throw new Error(
-        `MCP connection failed for ${url}: both StreamableHTTP and SSE transports failed. Last error: ${
-          sseError instanceof Error ? sseError.message : String(sseError)
-        }`
-      );
-    }
+    return new ExperimentalStdioMCPTransport({
+      command: transport.command,
+      args: transport.args || [],
+      env: transport.env,
+    });
   }
 
-  async listTools(): Promise<McpTool[]> {
+  return transport;
+}
+
+export class McpClientManager {
+  private client: MCPClient | null = null;
+  private toolDefinitions: ListToolsDefinitions | null = null;
+
+  async connect(
+    transport: McpResolvedTransportConfig,
+    handshakeTimeoutMs: number = DEFAULT_HANDSHAKE_TIMEOUT_MS
+  ): Promise<void> {
+    this.client = await withTimeout(
+      createMCPClient({
+        transport: createTransport(transport),
+        name: 'lifecycle',
+        version: '1.0.0',
+        onUncaughtError: (error) => {
+          getLogger().warn(`MCP client uncaught error: ${error instanceof Error ? error.message : String(error)}`);
+        },
+      }),
+      handshakeTimeoutMs,
+      'MCP client connect'
+    );
+    this.toolDefinitions = null;
+  }
+
+  async listTools(timeoutMs: number = DEFAULT_CALL_TIMEOUT_MS): Promise<McpDiscoveredTool[]> {
     if (!this.client) {
       throw new Error('MCP client not connected. Call connect() first.');
     }
 
-    const tools: McpTool[] = [];
-    let cursor: string | undefined;
+    const definitions = await this.client.listTools({
+      options: {
+        timeout: timeoutMs,
+      },
+    });
+    this.toolDefinitions = definitions;
 
-    do {
-      const result = await this.client.listTools(cursor ? { cursor } : undefined);
-      for (const tool of result.tools) {
-        tools.push({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema as Record<string, unknown>,
-          annotations: tool.annotations
-            ? {
-                readOnlyHint: tool.annotations.readOnlyHint,
-                destructiveHint: tool.annotations.destructiveHint,
-                openWorldHint: tool.annotations.openWorldHint,
-              }
-            : undefined,
-        });
-      }
-      cursor = result.nextCursor;
-    } while (cursor);
-
-    return tools;
+    return toMcpDiscoveredTools(definitions);
   }
 
   async callTool(
@@ -122,19 +135,36 @@ export class McpClientManager {
       throw new Error('MCP client not connected. Call connect() first.');
     }
 
+    const definitions =
+      this.toolDefinitions ||
+      (await this.client.listTools({
+        options: {
+          timeout: timeoutMs,
+        },
+      }));
+    this.toolDefinitions = definitions;
+
+    const tools = this.client.toolsFromDefinitions(definitions);
+    const tool = tools[toolName] as unknown as {
+      execute?: (input: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
+    };
+    if (!tool?.execute) {
+      throw new Error(`MCP tool '${toolName}' not found`);
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
     signal?.addEventListener('abort', onAbort);
+
     try {
-      const result = await this.client.callTool({ name: toolName, arguments: args }, undefined, {
-        signal: controller.signal,
-      });
-      return { content: result.content, isError: result.isError ?? false };
+      const result = await tool.execute(args, { abortSignal: controller.signal });
+      return result as { content: unknown; isError: boolean };
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (error instanceof Error && error.message.includes('Request was aborted')) {
         throw new Error(`MCP tool call '${toolName}' timed out after ${timeoutMs}ms`);
       }
+
       throw error;
     } finally {
       clearTimeout(timer);
@@ -146,12 +176,14 @@ export class McpClientManager {
     if (!this.client) {
       return;
     }
+
     try {
       await this.client.close();
     } catch (error) {
       getLogger().warn(`MCP client close warning: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       this.client = null;
+      this.toolDefinitions = null;
     }
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,23 +14,20 @@
  * limitations under the License.
  */
 
-const mockClientInstance = {
-  connect: jest.fn(),
-  listTools: jest.fn(),
-  callTool: jest.fn(),
-  close: jest.fn(),
-};
+const mockListTools = jest.fn();
+const mockClose = jest.fn();
+const mockExecute = jest.fn();
+const mockCreateMCPClient = jest.fn();
+const mockExperimentalStdioTransport = jest.fn();
 
-jest.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
-  Client: jest.fn().mockImplementation(() => mockClientInstance),
+jest.mock('@ai-sdk/mcp', () => ({
+  createMCPClient: (...args: unknown[]) => mockCreateMCPClient(...args),
 }));
 
-jest.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: jest.fn(),
-}));
-
-jest.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
-  SSEClientTransport: jest.fn(),
+jest.mock('@ai-sdk/mcp/mcp-stdio', () => ({
+  Experimental_StdioMCPTransport: function (...args: unknown[]) {
+    return mockExperimentalStdioTransport(...args);
+  },
 }));
 
 jest.mock('server/lib/logger', () => ({
@@ -38,134 +35,107 @@ jest.mock('server/lib/logger', () => ({
 }));
 
 import { McpClientManager } from '../client';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
 describe('McpClientManager', () => {
   let manager: McpClientManager;
 
   beforeEach(() => {
     jest.clearAllMocks();
+
+    mockCreateMCPClient.mockResolvedValue({
+      listTools: mockListTools,
+      close: mockClose,
+      toolsFromDefinitions: jest.fn(() => ({
+        inspectItem: { execute: mockExecute },
+      })),
+    });
+
+    mockExperimentalStdioTransport.mockReturnValue({ transport: 'stdio' });
+    mockClose.mockResolvedValue(undefined);
     manager = new McpClientManager();
-    mockClientInstance.connect.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     jest.useRealTimers();
   });
 
-  describe('connect', () => {
-    it('succeeds with StreamableHTTP', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      expect(StreamableHTTPClientTransport).toHaveBeenCalledTimes(1);
-      expect(SSEClientTransport).not.toHaveBeenCalled();
+  it('connects using HTTP transport through the AI SDK MCP client', async () => {
+    await manager.connect({
+      type: 'http',
+      url: 'https://mcp.example.com/v1/mcp',
+      headers: { Authorization: 'Bearer sample-token' },
     });
 
-    it('falls back to SSE when StreamableHTTP fails', async () => {
-      mockClientInstance.connect.mockRejectedValueOnce(new Error('streamable failed')).mockResolvedValueOnce(undefined);
-      await manager.connect('http://localhost:3000/mcp');
-      expect(SSEClientTransport).toHaveBeenCalledTimes(1);
-      expect(Client).toHaveBeenCalledTimes(2);
-    });
-
-    it('throws when both transports fail', async () => {
-      mockClientInstance.connect.mockRejectedValue(new Error('fail'));
-      await expect(manager.connect('http://localhost:3000/mcp')).rejects.toThrow(
-        'both StreamableHTTP and SSE transports failed'
-      );
-    });
-
-    it('passes headers to transport', async () => {
-      await manager.connect('http://localhost:3000/mcp', { Authorization: 'Bearer tok' });
-      expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
-        expect.any(URL),
-        expect.objectContaining({ requestInit: { headers: { Authorization: 'Bearer tok' } } })
-      );
-    });
+    expect(mockCreateMCPClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.com/v1/mcp',
+          headers: { Authorization: 'Bearer sample-token' },
+        },
+        name: 'lifecycle',
+        version: '1.0.0',
+      })
+    );
   });
 
-  describe('listTools', () => {
-    it('returns tools from single page', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      mockClientInstance.listTools.mockResolvedValue({
-        tools: [{ name: 'tool1', description: 'desc', inputSchema: {} }],
-        nextCursor: undefined,
-      });
-      const result = await manager.listTools();
-      expect(result).toHaveLength(1);
+  it('wraps stdio transport with the AI SDK stdio helper', async () => {
+    await manager.connect({
+      type: 'stdio',
+      command: 'sample-command',
+      args: ['--serve'],
+      env: { SAMPLE_ENV: '1' },
     });
 
-    it('paginates via nextCursor', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      mockClientInstance.listTools
-        .mockResolvedValueOnce({ tools: [{ name: 't1', inputSchema: {} }], nextCursor: 'page2' })
-        .mockResolvedValueOnce({ tools: [{ name: 't2', inputSchema: {} }], nextCursor: undefined });
-      const result = await manager.listTools();
-      expect(result).toHaveLength(2);
-      expect(mockClientInstance.listTools).toHaveBeenCalledTimes(2);
-      expect(mockClientInstance.listTools).toHaveBeenLastCalledWith({ cursor: 'page2' });
+    expect(mockExperimentalStdioTransport).toHaveBeenCalledWith({
+      command: 'sample-command',
+      args: ['--serve'],
+      env: { SAMPLE_ENV: '1' },
     });
-
-    it('throws when not connected', async () => {
-      await expect(manager.listTools()).rejects.toThrow('not connected');
-    });
+    expect(mockCreateMCPClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: { transport: 'stdio' },
+      })
+    );
   });
 
-  describe('callTool', () => {
-    it('returns result on success', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      mockClientInstance.callTool.mockResolvedValue({
-        content: [{ type: 'text', text: 'ok' }],
-        isError: false,
-      });
-      const result = await manager.callTool('test', {});
-      expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }], isError: false });
+  it('returns discovered tools from AI SDK definitions', async () => {
+    mockListTools.mockResolvedValue({
+      tools: [{ name: 'inspectItem', description: 'Inspect item', inputSchema: {} }],
     });
 
-    it('throws timeout error', async () => {
-      jest.useFakeTimers();
-      await manager.connect('http://localhost:3000/mcp');
+    await manager.connect({ type: 'http', url: 'https://mcp.example.com/v1/mcp' });
+    const result = await manager.listTools();
 
-      mockClientInstance.callTool.mockImplementation((_args: any, _schema: any, options: any) => {
-        return new Promise((_resolve, reject) => {
-          if (options?.signal) {
-            options.signal.addEventListener('abort', () => {
-              const err = new Error('aborted');
-              err.name = 'AbortError';
-              reject(err);
-            });
-          }
-        });
-      });
-
-      const promise = manager.callTool('test', {}, 10);
-      jest.advanceTimersByTime(15);
-      await expect(promise).rejects.toThrow('timed out');
-    });
-
-    it('throws when not connected', async () => {
-      await expect(manager.callTool('test', {})).rejects.toThrow('not connected');
-    });
+    expect(result).toEqual([
+      {
+        name: 'inspectItem',
+        description: 'Inspect item',
+        inputSchema: {},
+        annotations: undefined,
+      },
+    ]);
   });
 
-  describe('close', () => {
-    it('closes connected client', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      mockClientInstance.close.mockResolvedValue(undefined);
-      await manager.close();
-      expect(mockClientInstance.close).toHaveBeenCalled();
-      await expect(manager.listTools()).rejects.toThrow('not connected');
+  it('executes tool calls via toolsFromDefinitions', async () => {
+    mockListTools.mockResolvedValue({
+      tools: [{ name: 'inspectItem', description: 'Inspect item', inputSchema: {} }],
+    });
+    mockExecute.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
     });
 
-    it('is safe when not connected', async () => {
-      await expect(manager.close()).resolves.toBeUndefined();
-    });
+    await manager.connect({ type: 'http', url: 'https://mcp.example.com/v1/mcp' });
+    const result = await manager.callTool('inspectItem', { id: 'item-123' });
 
-    it('suppresses close errors', async () => {
-      await manager.connect('http://localhost:3000/mcp');
-      mockClientInstance.close.mockRejectedValue(new Error('close failed'));
-      await expect(manager.close()).resolves.toBeUndefined();
+    expect(mockExecute).toHaveBeenCalledWith(
+      { id: 'item-123' },
+      expect.objectContaining({ abortSignal: expect.any(Object) })
+    );
+    expect(result).toEqual({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
     });
   });
 });

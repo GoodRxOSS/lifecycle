@@ -18,6 +18,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
 import AIAgentConfigService from 'server/services/aiAgentConfig';
+import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from 'server/services/agent/providerConfig';
 
 /**
  * @openapi
@@ -54,9 +55,11 @@ const getHandler = async (req: NextRequest) => {
     return successResponse({ enabled: false }, { status: 200 }, req);
   }
 
-  const enabledProvider = aiAgentConfig.providers?.find((p: any) => p.enabled);
-  const provider = enabledProvider?.name || 'anthropic';
-  const apiKeySet = provider === 'anthropic' ? !!process.env.ANTHROPIC_API_KEY : !!process.env.OPENAI_API_KEY;
+  const enabledProvider = aiAgentConfig.providers?.find((p: any) => p.enabled !== false);
+  const provider = normalizeStoredAgentProviderName(enabledProvider?.name) || 'anthropic';
+  const apiKeySet = getProviderEnvVarCandidates(provider, enabledProvider?.apiKeyEnvVar).some((envVar) =>
+    Boolean(process.env[envVar])
+  );
 
   return successResponse({ enabled: true, provider, configured: apiKeySet }, { status: 200 }, req);
 };

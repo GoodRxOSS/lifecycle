@@ -25,15 +25,20 @@ import Configuration from 'server/models/Configuration';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
-import { createAgentPod, deleteAgentPod } from 'server/lib/agentSession/podFactory';
-import { createAgentEditorService, deleteAgentEditorService } from 'server/lib/agentSession/editorServiceFactory';
+import {
+  SESSION_WORKSPACE_GATEWAY_CONTAINER_NAME,
+  createSessionWorkspacePod,
+  deleteSessionWorkspacePod,
+} from 'server/lib/agentSession/podFactory';
+import {
+  createSessionWorkspaceService,
+  deleteSessionWorkspaceService,
+} from 'server/lib/agentSession/editorServiceFactory';
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
 import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeManager';
 import { buildAgentNetworkPolicy } from 'server/lib/kubernetes/networkPolicyFactory';
-import UserApiKeyService from 'server/services/userApiKey';
-import GlobalConfigService from 'server/services/globalConfig';
 import { DevConfig } from 'server/models/yaml/YamlService';
 import RedisClient from 'server/lib/redisClient';
 import { extractContextForQueue, getLogger } from 'server/lib/logger';
@@ -42,12 +47,12 @@ import type { RequestUserIdentity } from 'server/lib/get-user';
 import {
   type ResolvedAgentSessionReadinessConfig,
   type ResolvedAgentSessionResources,
-  resolveAgentSessionClaudeConfig,
-  renderAgentSessionClaudeAttribution,
 } from 'server/lib/agentSession/runtimeConfig';
 import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
+import { EMPTY_AGENT_SESSION_SKILL_PLAN, resolveAgentSessionSkillPlan } from 'server/lib/agentSession/skillPlan';
+import { generateSkillBootstrapCommand } from 'server/lib/agentSession/skillBootstrap';
 import {
-  AGENT_WORKSPACE_ROOT,
+  SESSION_WORKSPACE_ROOT,
   type AgentSessionSelectedService,
   type AgentSessionWorkspaceRepo,
 } from 'server/lib/agentSession/workspace';
@@ -72,12 +77,23 @@ import {
   toPublicAgentSessionStartupFailure,
 } from 'server/lib/agentSession/startupFailureState';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
+import { McpConfigService } from 'server/services/ai/mcp/config';
+import {
+  SESSION_POD_MCP_CONFIG_SECRET_KEY,
+  serializeSessionWorkspaceGatewayServers,
+} from 'server/services/ai/mcp/sessionPod';
 import AgentPrewarmService from './agentPrewarm';
+import AgentSessionConfigService from './agentSessionConfig';
+import AgentPolicyService from './agent/PolicyService';
+import AgentProviderRegistry from './agent/ProviderRegistry';
+import { buildSessionWorkspacePromptLines } from './agent/sandboxToolCatalog';
 import {
   loadAgentSessionServiceCandidates,
   resolveRequestedAgentSessionServices,
   type RequestedAgentSessionServiceRef,
 } from './agentSessionCandidates';
+import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
+import type { AgentSessionSkillRef } from 'server/models/yaml/YamlService';
 
 const logger = () => getLogger();
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
@@ -107,6 +123,11 @@ type ActiveEnvironmentSessionSummary = {
   ownerGithubUsername: string | null;
   ownedByCurrentUser: boolean;
 };
+
+export function buildAgentSessionPodName(sessionUuid: string, buildUuid?: string | null): string {
+  const identifier = buildUuid ?? sessionUuid.slice(0, 8);
+  return normalizeKubernetesLabelValue(`agent-${identifier}`.toLowerCase()).replace(/[_.]/g, '-');
+}
 
 export class ActiveEnvironmentSessionError extends Error {
   activeSession: ActiveEnvironmentSessionSummary;
@@ -218,11 +239,11 @@ function getExecExitCode(status: any): number | null {
   return null;
 }
 
-async function runCommandInAgentPod(
+async function runCommandInSessionWorkspace(
   namespace: string,
   podName: string,
   command: string,
-  container = 'agent'
+  container = SESSION_WORKSPACE_GATEWAY_CONTAINER_NAME
 ): Promise<void> {
   if (!command.trim()) {
     return;
@@ -431,8 +452,8 @@ async function deleteAgentRuntimeResources(
   apiKeySecretName: string
 ): Promise<void> {
   await Promise.all([
-    deleteAgentEditorService(namespace, podName),
-    deleteAgentPod(namespace, podName),
+    deleteSessionWorkspaceService(namespace, podName),
+    deleteSessionWorkspacePod(namespace, podName),
     deleteAgentApiKeySecret(namespace, apiKeySecretName),
   ]);
 }
@@ -469,6 +490,8 @@ export interface CreateSessionOptions {
   userId: string;
   userIdentity?: RequestUserIdentity;
   githubToken?: string | null;
+  requestApiKey?: string | null;
+  requestApiKeyProvider?: string | null;
   buildUuid?: string;
   buildKind?: BuildKind;
   services?: Array<{
@@ -483,14 +506,16 @@ export interface CreateSessionOptions {
     workDir?: string | null;
   }>;
   model?: string;
+  environmentSkillRefs?: AgentSessionSkillRef[];
   repoUrl?: string;
   branch?: string;
   revision?: string;
   workspaceRepos?: AgentSessionWorkspaceRepo[];
   prNumber?: number;
   namespace: string;
-  agentImage: string;
-  editorImage: string;
+  workspaceImage?: string;
+  workspaceEditorImage?: string;
+  workspaceGatewayImage?: string;
   nodeSelector?: Record<string, string>;
   readiness?: ResolvedAgentSessionReadinessConfig;
   resources?: ResolvedAgentSessionResources;
@@ -672,29 +697,18 @@ export default class AgentSessionService {
   }
 
   static async createSession(opts: CreateSessionOptions) {
-    const apiKey = await UserApiKeyService.getDecryptedKey(opts.userId, 'anthropic', opts.userIdentity?.githubUsername);
-    if (!apiKey) {
-      throw new Error('API_KEY_REQUIRED');
-    }
-
     const sessionUuid = uuid();
     const buildKind = opts.buildKind || BuildKind.ENVIRONMENT;
-    const podName = `agent-${sessionUuid.slice(0, 8)}`;
+    const podName = buildAgentSessionPodName(sessionUuid, opts.buildUuid);
     const apiKeySecretName = `agent-secret-${sessionUuid.slice(0, 8)}`;
-    const model = opts.model || 'claude-sonnet-4-6';
+    const requestedModelId = opts.model?.trim() || undefined;
     const mutatedDeploys: number[] = [];
     const devModeSnapshots: SessionSnapshotMap = {};
     let failureStage: AgentSessionStartupFailureStage = 'create_session';
     let sessionPersisted = false;
     let session: AgentSession | null = null;
+    let resolvedModelId = requestedModelId || 'unresolved-model';
     const redis = RedisClient.getInstance().getRedis();
-    const claudeConfig = await resolveAgentSessionClaudeConfig();
-    const githubAppName = await GlobalConfigService.getInstance().getGithubAppName();
-    const claudeCommitAttribution = renderAgentSessionClaudeAttribution(
-      claudeConfig.attribution.commitTemplate,
-      githubAppName
-    );
-    const claudePrAttribution = renderAgentSessionClaudeAttribution(claudeConfig.attribution.prTemplate, githubAppName);
     const templatedServices = await resolveTemplatedDevConfigEnvs(opts.buildUuid, opts.namespace, opts.services);
     const {
       workspaceRepos,
@@ -709,7 +723,43 @@ export default class AgentSessionService {
       },
       templatedServices
     );
+    const skillPlan = resolveAgentSessionSkillPlan({
+      environmentSkillRefs: opts.environmentSkillRefs,
+      services: resolvedServices || [],
+    });
     const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+    const selection = await AgentProviderRegistry.resolveSelection({
+      repoFullName: primaryWorkspaceRepo?.repo,
+      requestedModelId,
+    });
+    resolvedModelId = selection.modelId;
+    await AgentProviderRegistry.getRequiredStoredApiKey({
+      provider: selection.provider,
+      userIdentity: {
+        userId: opts.userId,
+        githubUsername: opts.userIdentity?.githubUsername || null,
+      },
+      requestApiKey: opts.requestApiKey,
+      requestApiKeyProvider: opts.requestApiKeyProvider,
+    });
+    const providerApiKeys = await AgentProviderRegistry.resolveCredentialEnvMap({
+      repoFullName: primaryWorkspaceRepo?.repo,
+      userIdentity: {
+        userId: opts.userId,
+        githubUsername: opts.userIdentity?.githubUsername || null,
+      },
+      requestApiKey: opts.requestApiKey,
+      requestApiKeyProvider: opts.requestApiKeyProvider,
+    });
+    const sessionPodMcpConfigJson = primaryWorkspaceRepo?.repo
+      ? serializeSessionWorkspaceGatewayServers(
+          await new McpConfigService().resolveSessionPodServersForRepo(
+            primaryWorkspaceRepo.repo,
+            undefined,
+            opts.userIdentity || null
+          )
+        )
+      : '[]';
     const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
     const compatiblePrewarm =
       workspaceRepos.length === 1
@@ -748,12 +798,13 @@ export default class AgentSessionService {
         podName,
         namespace: opts.namespace,
         pvcName,
-        model,
+        model: resolvedModelId,
         status: 'starting',
         devModeSnapshots,
         forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
         workspaceRepos,
         selectedServices,
+        skillPlan,
       } as unknown as Partial<AgentSession>);
       sessionPersisted = true;
 
@@ -762,10 +813,13 @@ export default class AgentSessionService {
         createAgentApiKeySecret(
           opts.namespace,
           apiKeySecretName,
-          apiKey,
+          providerApiKeys,
           opts.githubToken,
           opts.buildUuid,
-          forwardedPlainAgentEnv
+          forwardedPlainAgentEnv,
+          {
+            [SESSION_POD_MCP_CONFIG_SECRET_KEY]: sessionPodMcpConfigJson,
+          }
         ),
         ensureAgentSessionServiceAccount(opts.namespace),
       ]);
@@ -774,24 +828,22 @@ export default class AgentSessionService {
       const combinedInstallCommand = buildCombinedInstallCommand(resolvedServices);
 
       failureStage = 'connect_runtime';
-      const agentPod = await createAgentPod({
+      const workspacePod = await createSessionWorkspacePod({
         podName,
         namespace: opts.namespace,
         pvcName,
-        image: opts.agentImage,
-        editorImage: opts.editorImage,
+        workspaceImage: opts.workspaceImage,
+        workspaceEditorImage: opts.workspaceEditorImage,
+        workspaceGatewayImage: opts.workspaceGatewayImage,
         apiKeySecretName,
         hasGitHubToken: Boolean(opts.githubToken),
-        model,
         repoUrl: primaryWorkspaceRepo?.repoUrl,
         branch: primaryWorkspaceRepo?.branch,
         revision: primaryWorkspaceRepo?.revision || undefined,
-        workspacePath: AGENT_WORKSPACE_ROOT,
+        workspacePath: SESSION_WORKSPACE_ROOT,
         workspaceRepos,
+        skillPlan,
         installCommand: combinedInstallCommand,
-        claudePermissions: claudeConfig.permissions,
-        claudeCommitAttribution,
-        claudePrAttribution,
         forwardedAgentEnv: forwardedAgentEnv.env,
         forwardedAgentSecretRefs: forwardedAgentEnv.secretRefs,
         forwardedAgentSecretServiceName: forwardedAgentEnv.secretServiceName,
@@ -804,10 +856,10 @@ export default class AgentSessionService {
         serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
       });
-      const agentNodeName = agentPod.spec?.nodeName || null;
+      const agentNodeName = workspacePod.spec?.nodeName || null;
 
       if ((resolvedServices || []).length > 0 && !agentNodeName) {
-        throw new Error(`Agent pod ${podName} did not report a scheduled node`);
+        throw new Error(`Session workspace pod ${podName} did not report a scheduled node`);
       }
 
       const devModeManager = new DevModeManager();
@@ -834,7 +886,7 @@ export default class AgentSessionService {
         });
       }
 
-      await createAgentEditorService(opts.namespace, podName, opts.buildUuid);
+      await createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid);
 
       const kc = new k8s.KubeConfig();
       kc.loadFromDefault();
@@ -867,6 +919,15 @@ export default class AgentSessionService {
           resolvedServiceNames.join(',') || 'none'
         } prewarm=${compatiblePrewarm ? 'reused' : 'new'}`
       );
+
+      const AgentThreadService = (await import('server/services/agent/ThreadService')).default;
+      const readySession = session;
+      await AgentThreadService.getDefaultThreadForSession(readySession.uuid, opts.userId).catch((error: unknown) => {
+        logger().warn(
+          { error, sessionId: readySession.uuid },
+          `Session: default thread creation skipped sessionId=${readySession.uuid}`
+        );
+      });
 
       return session!;
     } catch (err) {
@@ -912,7 +973,7 @@ export default class AgentSessionService {
             podName,
             namespace: opts.namespace,
             pvcName,
-            model,
+            model: resolvedModelId,
             status: 'error',
             buildUuid: opts.buildUuid || null,
             buildKind,
@@ -1140,6 +1201,10 @@ export default class AgentSessionService {
       templatedServices,
       workspaceRepos
     );
+    const skillPlan = resolveAgentSessionSkillPlan({
+      basePlan: session.skillPlan || EMPTY_AGENT_SESSION_SKILL_PLAN,
+      services: resolvedServices || [],
+    });
     const installCommand = buildCombinedInstallCommand(resolvedServices);
 
     logger().info(
@@ -1149,13 +1214,21 @@ export default class AgentSessionService {
     );
 
     if (installCommand) {
-      await runCommandInAgentPod(session.namespace, session.podName, installCommand);
+      await runCommandInSessionWorkspace(session.namespace, session.podName, installCommand);
+    }
+
+    if ((skillPlan.skills || []).length > 0) {
+      await runCommandInSessionWorkspace(
+        session.namespace,
+        session.podName,
+        generateSkillBootstrapCommand(skillPlan, { useGitHubToken: true })
+      );
     }
 
     const agentNodeName = await resolveAgentPodNodeName(session.namespace, session.podName);
 
     if (!agentNodeName) {
-      throw new Error(`Agent pod ${session.podName} did not report a scheduled node`);
+      throw new Error(`Session workspace pod ${session.podName} did not report a scheduled node`);
     }
 
     const devModeManager = new DevModeManager();
@@ -1191,6 +1264,7 @@ export default class AgentSessionService {
             ...(session.devModeSnapshots || {}),
             ...addedSnapshots,
           },
+          skillPlan,
         } as unknown as Partial<AgentSession>);
 
       const serviceNames = resolvedServices?.map((service) => service.name) || [];
@@ -1238,15 +1312,21 @@ export default class AgentSessionService {
     return enrichedSession || null;
   }
 
-  static async getSessionAppendSystemPrompt(sessionId: string): Promise<string | undefined> {
-    const [session, claudeConfig] = await Promise.all([
-      AgentSession.query().findOne({ uuid: sessionId }).select('id', 'namespace', 'buildUuid'),
-      resolveAgentSessionClaudeConfig(),
+  static async getSessionAppendSystemPrompt(
+    sessionId: string,
+    repoFullName?: string,
+    configuredPrompt?: string
+  ): Promise<string | undefined> {
+    const [session, effectiveConfig, approvalPolicy] = await Promise.all([
+      AgentSession.query().findOne({ uuid: sessionId }).select('id', 'namespace', 'buildUuid', 'skillPlan'),
+      AgentSessionConfigService.getInstance().getEffectiveConfig(repoFullName),
+      AgentPolicyService.getEffectivePolicy(repoFullName),
     ]);
-    const configuredPrompt = claudeConfig.appendSystemPrompt;
+    const resolvedConfiguredPrompt =
+      configuredPrompt !== undefined ? configuredPrompt : effectiveConfig?.appendSystemPrompt;
 
     if (!session) {
-      return configuredPrompt;
+      return resolvedConfiguredPrompt;
     }
 
     try {
@@ -1255,11 +1335,24 @@ export default class AgentSessionService {
         namespace: session.namespace,
         buildUuid: session.buildUuid,
       });
+      const toolLines = repoFullName
+        ? buildSessionWorkspacePromptLines({
+            approvalPolicy,
+            toolRules: effectiveConfig.toolRules,
+            includeSkills: Boolean(session.skillPlan?.skills?.length),
+          })
+        : [];
 
-      return combineAgentSessionAppendSystemPrompt(configuredPrompt, buildAgentSessionDynamicSystemPrompt(context));
+      return combineAgentSessionAppendSystemPrompt(
+        resolvedConfiguredPrompt,
+        buildAgentSessionDynamicSystemPrompt({
+          ...context,
+          toolLines,
+        })
+      );
     } catch (error) {
       logger().warn({ error, sessionId }, `Session: prompt context resolution failed sessionId=${sessionId}`);
-      return configuredPrompt;
+      return resolvedConfiguredPrompt;
     }
   }
 

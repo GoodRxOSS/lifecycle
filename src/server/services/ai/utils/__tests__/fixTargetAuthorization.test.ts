@@ -40,7 +40,7 @@ describe('authorizeToolForFixTarget', () => {
   it('allows file writes only for selected target files', () => {
     const allowDecision = authorizeToolForFixTarget(
       {
-        serviceName: 'lc-test-helm-local',
+        serviceName: 'sample-helm-service',
         suggestedFix: "Change dockerfilePath from 'a' to 'b' in lifecycle.yaml",
         filePath: 'lifecycle.yaml',
       },
@@ -57,7 +57,7 @@ describe('authorizeToolForFixTarget', () => {
 
     const denyDecision = authorizeToolForFixTarget(
       {
-        serviceName: 'lc-test-helm-local',
+        serviceName: 'sample-helm-service',
         suggestedFix: "Change dockerfilePath from 'a' to 'b' in lifecycle.yaml",
         filePath: 'lifecycle.yaml',
       },

@@ -544,7 +544,7 @@ describe('Native Helm', () => {
   describe('createHelmContainer', () => {
     it('should create helm container with correct configuration', async () => {
       const result = await createHelmContainer(
-        'org/repo',
+        'example-org/example-repo',
         'my-chart',
         'my-release',
         'my-namespace',
@@ -1148,13 +1148,13 @@ describe('Native Helm', () => {
         deployableId: 99,
         deployable: {
           name: 'sample-cosmos-emulator',
-          repository: { fullName: 'Lifecycle/example' },
+          repository: { fullName: 'example-org/example-chart' },
         },
         build: {
           uuid: 'preview-build-123456',
           namespace: 'testns',
           isStatic: false,
-          pullRequest: { repository: { fullName: 'Lifecycle/example' } },
+          pullRequest: { repository: { fullName: 'example-org/example-chart' } },
         },
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
         $query: jest.fn().mockReturnValue({

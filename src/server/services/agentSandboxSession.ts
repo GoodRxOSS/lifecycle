@@ -129,11 +129,14 @@ export interface LaunchSandboxSessionOptions {
   userId: string;
   userIdentity?: RequestUserIdentity;
   githubToken?: string | null;
+  requestApiKey?: string | null;
+  requestApiKeyProvider?: string | null;
   baseBuildUuid: string;
   services?: RequestedSandboxServices;
   model?: string;
-  agentImage: string;
-  editorImage: string;
+  workspaceImage?: string;
+  workspaceEditorImage?: string;
+  workspaceGatewayImage?: string;
   nodeSelector?: Record<string, string>;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
@@ -240,11 +243,14 @@ export default class AgentSandboxSessionService extends BaseService {
         sandboxDeploysByBaseDeployId
       );
 
-      await opts.onProgress?.('creating_agent_session', `Starting agent session for ${selectedServiceSummary}`);
+      await opts.onProgress?.('opening_session', `Opening sandbox for ${selectedServiceSummary}`);
       const session = await AgentSessionService.createSession({
         userId: opts.userId,
         buildUuid: sandboxBuild.uuid,
+        buildKind: BuildKind.SANDBOX,
         githubToken: opts.githubToken,
+        requestApiKey: opts.requestApiKey,
+        requestApiKeyProvider: opts.requestApiKeyProvider,
         services: selectedSandboxServices.map(({ selectedService, sandboxDeploy }) => ({
           name: selectedService.name,
           deployId: sandboxDeploy.id,
@@ -255,10 +261,12 @@ export default class AgentSandboxSessionService extends BaseService {
           revision: selectedService.baseDeploy.sha || undefined,
         })),
         model: opts.model,
+        environmentSkillRefs: lifecycleConfig.environment?.agentSession?.skills,
         prNumber: baseBuild.pullRequest?.pullRequestNumber,
         namespace: sandboxBuild.namespace,
-        agentImage: opts.agentImage,
-        editorImage: opts.editorImage,
+        workspaceImage: opts.workspaceImage,
+        workspaceEditorImage: opts.workspaceEditorImage,
+        workspaceGatewayImage: opts.workspaceGatewayImage,
         nodeSelector: opts.nodeSelector,
         readiness: mergeAgentSessionReadinessForServices(
           opts.readiness,

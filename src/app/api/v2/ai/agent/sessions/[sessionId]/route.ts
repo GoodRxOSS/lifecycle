@@ -15,29 +15,12 @@
  */
 
 import { NextRequest } from 'next/server';
+import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
-import { getRequestUserSub } from 'server/lib/get-user';
+import { getRequestUserIdentity } from 'server/lib/get-user';
+import { serializeAgentSessionSummary } from 'server/services/agent/serializeSessionSummary';
 import AgentSessionService from 'server/services/agentSession';
-
-function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
-  const sessionId = session.uuid || String(session.id);
-  const {
-    id: _internalId,
-    uuid: _uuid,
-    ...serialized
-  } = session as T & {
-    uuid?: string | null;
-    id: string | number;
-  };
-
-  return {
-    ...serialized,
-    id: sessionId,
-    websocketUrl: `/api/agent/session?sessionId=${sessionId}`,
-    editorUrl: `/api/agent/editor/${sessionId}/`,
-  };
-}
 
 /**
  * @openapi
@@ -85,7 +68,6 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                     - updatedAt
  *                     - endedAt
  *                     - startupFailure
- *                     - websocketUrl
  *                     - editorUrl
  *                   properties:
  *                     id:
@@ -204,8 +186,6 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *                         recordedAt:
  *                           type: string
  *                           format: date-time
- *                     websocketUrl:
- *                       type: string
  *                     editorUrl:
  *                       type: string
  *                 error:
@@ -267,8 +247,8 @@ function serializeSessionSummary<T extends { id: string | number; uuid?: string 
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userId = getRequestUserSub(req);
-  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = getRequestUserIdentity(req);
+  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);
@@ -276,16 +256,16 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sess
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
-  if (session.userId !== userId) {
+  if (session.userId !== userIdentity.userId) {
     return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
   }
 
-  return successResponse(serializeSessionSummary(session), { status: 200 }, req);
+  return successResponse(serializeAgentSessionSummary(session), { status: 200 }, req);
 };
 
 const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userId = getRequestUserSub(req);
-  if (!userId) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = getRequestUserIdentity(req);
+  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);
@@ -293,7 +273,7 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
-  if (session.userId !== userId) {
+  if (session.userId !== userIdentity.userId) {
     return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
   }
 

@@ -142,6 +142,35 @@ describe('UserApiKeyService', () => {
         ownerGithubUsername: 'sample-user',
       });
     });
+
+    test('stores google alias keys under the gemini provider id', async () => {
+      mockEncrypt.mockReturnValue('encrypted-google-value');
+      mockQuery.first.mockResolvedValue(null);
+
+      const insertAndFetchMock = jest.fn().mockResolvedValue({
+        id: 10,
+        userId: 'user-1',
+        ownerGithubUsername: 'user-1',
+        provider: 'gemini',
+        encryptedKey: 'encrypted-google-value',
+      });
+      (UserApiKey.query as jest.Mock)
+        .mockReturnValueOnce(mockQuery)
+        .mockReturnValueOnce({ insertAndFetch: insertAndFetchMock });
+
+      await UserApiKeyService.storeKey('user-1', 'google', 'sample-google-key');
+
+      expect(mockQuery.where).toHaveBeenCalledWith({
+        ownerGithubUsername: 'user-1',
+        provider: 'gemini',
+      });
+      expect(insertAndFetchMock).toHaveBeenCalledWith({
+        userId: 'user-1',
+        ownerGithubUsername: 'user-1',
+        provider: 'gemini',
+        encryptedKey: 'encrypted-google-value',
+      });
+    });
   });
 
   describe('getMaskedKey', () => {
@@ -254,6 +283,25 @@ describe('UserApiKeyService', () => {
       expect(patchMock).toHaveBeenCalledWith({
         userId: 'user-1',
         ownerGithubUsername: 'sample-user',
+      });
+    });
+
+    test('resolves google alias lookups through gemini storage', async () => {
+      mockQuery.first.mockResolvedValue({
+        id: 6,
+        userId: 'user-1',
+        ownerGithubUsername: 'user-1',
+        provider: 'gemini',
+        encryptedKey: 'encrypted-google-value',
+      });
+      mockDecrypt.mockReturnValue('sample-google-key');
+
+      const result = await UserApiKeyService.getDecryptedKey('user-1', 'google');
+
+      expect(result).toBe('sample-google-key');
+      expect(mockQuery.where).toHaveBeenCalledWith({
+        ownerGithubUsername: 'user-1',
+        provider: 'gemini',
       });
     });
   });

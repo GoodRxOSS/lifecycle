@@ -42,7 +42,9 @@ jest.mock('../agentSession', () => ({
 
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
+    info: jest.fn(),
     warn: jest.fn(),
+    error: jest.fn(),
   })),
 }));
 
@@ -52,7 +54,10 @@ jest.mock('server/models/yaml', () => ({
 }));
 
 import AgentSandboxSessionService from '../agentSandboxSession';
+import AgentSessionService from '../agentSession';
+import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
+import { BuildStatus, BuildKind } from 'shared/constants';
 
 describe('agentSandboxSession', () => {
   beforeEach(() => {
@@ -214,18 +219,18 @@ describe('agentSandboxSession', () => {
   it('maps selected services to cloned sandbox deploys by base deploy id', () => {
     const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
     const selectedService = {
-      name: 'lc-test-3',
-      serviceRepo: 'org/lc-test-3',
+      name: 'sample-service-3',
+      serviceRepo: 'example-org/sample-service-3',
       baseDeploy: {
         id: 42,
-        repository: { fullName: 'org/lc-test-3' },
+        repository: { fullName: 'example-org/sample-service-3' },
       },
     } as any;
     const sandboxDeploy = {
       id: 7,
-      uuid: 'lc-test-3-sandbox',
-      deployable: { name: 'lc-test-3' },
-      repository: { fullName: 'org/other-repo' },
+      uuid: 'sample-service-3-sandbox',
+      deployable: { name: 'sample-service-3' },
+      repository: { fullName: 'example-org/other-service' },
     } as any;
 
     const mapped = (service as any).resolveSelectedSandboxDeploys(
@@ -239,5 +244,98 @@ describe('agentSandboxSession', () => {
         sandboxDeploy,
       },
     ]);
+  });
+
+  it('creates sandbox launches with sandbox buildKind', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const createSessionMock = AgentSessionService.createSession as jest.Mock;
+    const sandboxBuild = {
+      id: 200,
+      uuid: 'sandbox-build-1',
+      namespace: 'sample-namespace',
+      pullRequest: null,
+      $query: jest.fn().mockReturnValue({
+        patch: jest.fn().mockResolvedValue(undefined),
+      }),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const selectedService = {
+      name: 'frontend',
+      devConfig: {},
+      baseDeploy: {
+        id: 10,
+        branchName: 'main',
+        sha: 'abc123',
+      },
+      serviceRepo: 'example-org/frontend',
+      serviceBranch: 'main',
+    } as any;
+    const sandboxDeploy = {
+      id: 99,
+      uuid: 'sandbox-deploy-1',
+    } as any;
+
+    jest.spyOn(service as any, 'loadBaseBuildAndCandidates').mockResolvedValue({
+      baseBuild: {
+        pullRequest: null,
+      },
+      environmentSource: {
+        repo: 'example-org/environment',
+        branch: 'main',
+      },
+      lifecycleConfig: {
+        environment: {},
+      },
+      candidates: [selectedService],
+    });
+    jest.spyOn(service as any, 'createSandboxBuild').mockResolvedValue({
+      build: sandboxBuild,
+      sandboxDeploysByBaseDeployId: new Map([[10, sandboxDeploy]]),
+    });
+    jest.spyOn(service as any, 'resolveSelectedSandboxDeploys').mockReturnValue([{ selectedService, sandboxDeploy }]);
+    jest.spyOn(BuildEnvironmentVariables.prototype, 'resolve').mockResolvedValue(undefined);
+
+    (service as any).buildService.updateStatusAndComment = jest.fn().mockResolvedValue(undefined);
+    (service as any).buildService.generateAndApplyManifests = jest.fn().mockResolvedValue(true);
+    (service as any).buildService.deleteBuild = jest.fn().mockResolvedValue(undefined);
+    createSessionMock.mockResolvedValue({
+      uuid: 'session-1',
+    });
+
+    const result = await service.launch({
+      userId: 'user-1',
+      baseBuildUuid: 'base-build-1',
+      services: ['frontend'],
+      model: 'sample-model',
+      workspaceImage: 'sample-agent-image',
+      workspaceEditorImage: 'sample-editor-image',
+      readiness: { timeoutMs: 60000, pollMs: 2000 },
+      resources: {
+        workspace: { requests: {}, limits: {} },
+        editor: { requests: {}, limits: {} },
+        workspaceGateway: { requests: {}, limits: {} },
+      },
+    });
+
+    expect((service as any).buildService.updateStatusAndComment).toHaveBeenNthCalledWith(
+      1,
+      sandboxBuild,
+      BuildStatus.DEPLOYING,
+      expect.any(String),
+      false,
+      false
+    );
+    expect(createSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildUuid: 'sandbox-build-1',
+        buildKind: BuildKind.SANDBOX,
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: 'created',
+        buildUuid: 'sandbox-build-1',
+      })
+    );
   });
 });

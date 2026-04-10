@@ -30,13 +30,66 @@ import {
   mergeAgentSessionReadiness,
   mergeAgentSessionReadinessForServices,
   mergeAgentSessionResources,
-  renderAgentSessionClaudeAttribution,
-  resolveAgentSessionClaudeConfig,
-  resolveAgentSessionClaudeConfigFromDefaults,
+  resolveAgentSessionControlPlaneConfig,
+  resolveAgentSessionControlPlaneConfigFromDefaults,
   resolveAgentSessionReadinessFromDefaults,
   resolveAgentSessionResourcesFromDefaults,
   resolveAgentSessionRuntimeConfig,
 } from '../runtimeConfig';
+
+const DEFAULT_READINESS = {
+  timeoutMs: 60000,
+  pollMs: 2000,
+};
+
+const DEFAULT_RESOURCES = {
+  workspace: {
+    requests: {
+      cpu: '500m',
+      memory: '1Gi',
+    },
+    limits: {
+      cpu: '2',
+      memory: '4Gi',
+    },
+  },
+  editor: {
+    requests: {
+      cpu: '250m',
+      memory: '512Mi',
+    },
+    limits: {
+      cpu: '1',
+      memory: '1Gi',
+    },
+  },
+  workspaceGateway: {
+    requests: {
+      cpu: '100m',
+      memory: '256Mi',
+    },
+    limits: {
+      cpu: '500m',
+      memory: '512Mi',
+    },
+  },
+};
+
+function buildExpectedRuntimeConfig(overrides?: {
+  nodeSelector?: Record<string, string>;
+  readiness?: typeof DEFAULT_READINESS;
+  resources?: typeof DEFAULT_RESOURCES;
+}) {
+  return {
+    workspaceImage: 'lifecycle-workspace:sha-123',
+    workspaceEditorImage: 'codercom/code-server:4.98.2',
+    workspaceGatewayImage: 'lifecycle-workspace:sha-123',
+    nodeSelector: undefined,
+    readiness: DEFAULT_READINESS,
+    resources: DEFAULT_RESOURCES,
+    ...overrides,
+  };
+}
 
 describe('runtimeConfig', () => {
   beforeEach(() => {
@@ -46,58 +99,19 @@ describe('runtimeConfig', () => {
   it('returns the configured agent and editor images', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: 'lifecycle-agent:sha-123',
-        editorImage: 'codercom/code-server:4.98.2',
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
       },
     });
 
-    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
-      image: 'lifecycle-agent:sha-123',
-      editorImage: 'codercom/code-server:4.98.2',
-      readiness: {
-        timeoutMs: 60000,
-        pollMs: 2000,
-      },
-      resources: {
-        agent: {
-          requests: {
-            cpu: '500m',
-            memory: '1Gi',
-          },
-          limits: {
-            cpu: '2',
-            memory: '4Gi',
-          },
-        },
-        editor: {
-          requests: {
-            cpu: '250m',
-            memory: '512Mi',
-          },
-          limits: {
-            cpu: '1',
-            memory: '1Gi',
-          },
-        },
-      },
-      claude: {
-        permissions: {
-          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-          deny: [],
-        },
-        attribution: {
-          commitTemplate: 'Generated with ({appName})',
-          prTemplate: 'Generated with ({appName})',
-        },
-      },
-    });
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual(buildExpectedRuntimeConfig());
   });
 
   it('returns the configured agent scheduling when present', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: 'lifecycle-agent:sha-123',
-        editorImage: 'codercom/code-server:4.98.2',
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
         scheduling: {
           nodeSelector: {
             'app-long': 'deployments-m7i',
@@ -107,59 +121,23 @@ describe('runtimeConfig', () => {
       },
     });
 
-    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
-      image: 'lifecycle-agent:sha-123',
-      editorImage: 'codercom/code-server:4.98.2',
-      nodeSelector: {
-        'app-long': 'deployments-m7i',
-        pool: 'agents',
-      },
-      readiness: {
-        timeoutMs: 60000,
-        pollMs: 2000,
-      },
-      resources: {
-        agent: {
-          requests: {
-            cpu: '500m',
-            memory: '1Gi',
-          },
-          limits: {
-            cpu: '2',
-            memory: '4Gi',
-          },
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual(
+      buildExpectedRuntimeConfig({
+        nodeSelector: {
+          'app-long': 'deployments-m7i',
+          pool: 'agents',
         },
-        editor: {
-          requests: {
-            cpu: '250m',
-            memory: '512Mi',
-          },
-          limits: {
-            cpu: '1',
-            memory: '1Gi',
-          },
-        },
-      },
-      claude: {
-        permissions: {
-          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-          deny: [],
-        },
-        attribution: {
-          commitTemplate: 'Generated with ({appName})',
-          prTemplate: 'Generated with ({appName})',
-        },
-      },
-    });
+      })
+    );
   });
 
   it('returns configured agent and editor resources when present', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: 'lifecycle-agent:sha-123',
-        editorImage: 'codercom/code-server:4.98.2',
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
         resources: {
-          agent: {
+          workspace: {
             requests: {
               cpu: '900m',
             },
@@ -175,57 +153,61 @@ describe('runtimeConfig', () => {
               cpu: '1500m',
             },
           },
+          workspaceGateway: {
+            requests: {
+              cpu: '200m',
+            },
+            limits: {
+              memory: '768Mi',
+            },
+          },
         },
       },
     });
 
-    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
-      image: 'lifecycle-agent:sha-123',
-      editorImage: 'codercom/code-server:4.98.2',
-      readiness: {
-        timeoutMs: 60000,
-        pollMs: 2000,
-      },
-      resources: {
-        agent: {
-          requests: {
-            cpu: '900m',
-            memory: '1Gi',
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual(
+      buildExpectedRuntimeConfig({
+        resources: {
+          workspace: {
+            requests: {
+              cpu: '900m',
+              memory: '1Gi',
+            },
+            limits: {
+              cpu: '2',
+              memory: '6Gi',
+            },
           },
-          limits: {
-            cpu: '2',
-            memory: '6Gi',
+          editor: {
+            requests: {
+              cpu: '250m',
+              memory: '768Mi',
+            },
+            limits: {
+              cpu: '1500m',
+              memory: '1Gi',
+            },
+          },
+          workspaceGateway: {
+            requests: {
+              cpu: '200m',
+              memory: '256Mi',
+            },
+            limits: {
+              cpu: '500m',
+              memory: '768Mi',
+            },
           },
         },
-        editor: {
-          requests: {
-            cpu: '250m',
-            memory: '768Mi',
-          },
-          limits: {
-            cpu: '1500m',
-            memory: '1Gi',
-          },
-        },
-      },
-      claude: {
-        permissions: {
-          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-          deny: [],
-        },
-        attribution: {
-          commitTemplate: 'Generated with ({appName})',
-          prTemplate: 'Generated with ({appName})',
-        },
-      },
-    });
+      })
+    );
   });
 
   it('returns configured readiness settings when present', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: 'lifecycle-agent:sha-123',
-        editorImage: 'codercom/code-server:4.98.2',
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
         readiness: {
           timeoutMs: 120000,
           pollMs: 500,
@@ -233,96 +215,49 @@ describe('runtimeConfig', () => {
       },
     });
 
-    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual({
-      image: 'lifecycle-agent:sha-123',
-      editorImage: 'codercom/code-server:4.98.2',
-      readiness: {
-        timeoutMs: 120000,
-        pollMs: 500,
-      },
-      resources: {
-        agent: {
-          requests: {
-            cpu: '500m',
-            memory: '1Gi',
-          },
-          limits: {
-            cpu: '2',
-            memory: '4Gi',
-          },
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual(
+      buildExpectedRuntimeConfig({
+        readiness: {
+          timeoutMs: 120000,
+          pollMs: 500,
         },
-        editor: {
-          requests: {
-            cpu: '250m',
-            memory: '512Mi',
-          },
-          limits: {
-            cpu: '1',
-            memory: '1Gi',
-          },
-        },
-      },
-      claude: {
-        permissions: {
-          allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-          deny: [],
-        },
-        attribution: {
-          commitTemplate: 'Generated with ({appName})',
-          prTemplate: 'Generated with ({appName})',
-        },
-      },
-    });
+      })
+    );
   });
 
-  it('returns the configured Claude settings when present', async () => {
+  it('returns the configured control-plane append prompt from the neutral path', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        claude: {
-          permissions: {
-            allow: ['Read(*)'],
-            deny: ['Bash(*)'],
-          },
-          attribution: {
-            commitTemplate: 'Commit from ({appName})',
-            prTemplate: 'PR from ({appName})',
-          },
+        controlPlane: {
+          systemPrompt: 'You are Lifecycle Agent Session.',
           appendSystemPrompt: 'Use concise responses.',
         },
       },
     });
 
-    await expect(resolveAgentSessionClaudeConfig()).resolves.toEqual({
-      permissions: {
-        allow: ['Read(*)'],
-        deny: ['Bash(*)'],
-      },
-      attribution: {
-        commitTemplate: 'Commit from ({appName})',
-        prTemplate: 'PR from ({appName})',
-      },
+    await expect(resolveAgentSessionControlPlaneConfig()).resolves.toEqual({
+      systemPrompt: 'You are Lifecycle Agent Session.',
       appendSystemPrompt: 'Use concise responses.',
     });
   });
 
-  it('falls back to default Claude settings when config is empty', () => {
-    expect(resolveAgentSessionClaudeConfigFromDefaults()).toEqual({
-      permissions: {
-        allow: ['Bash(*)', 'Read(*)', 'Write(*)', 'Edit(*)', 'Glob(*)', 'Grep(*)'],
-        deny: [],
-      },
-      attribution: {
-        commitTemplate: 'Generated with ({appName})',
-        prTemplate: 'Generated with ({appName})',
-      },
-      appendSystemPrompt: undefined,
+  it('falls back to the default control-plane system prompt when unset', () => {
+    expect(resolveAgentSessionControlPlaneConfigFromDefaults({})).toEqual({
+      systemPrompt:
+        'You are Lifecycle Agent Session, a coding agent operating on a real workspace through tool calls.\n' +
+        'Use the available tools directly when you need to inspect files, search the workspace, run commands, or modify code.\n' +
+        'Do not emit pseudo-tool markup or pretend execution happened. Never write things like <read_file>, <write_file>, <attempt_completion>, <result>, or shell commands as if they were already executed.\n' +
+        'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.\n' +
+        'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
+      appendSystemPrompt:
+        'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.',
     });
   });
 
   it('merges lifecycle resource overrides over runtime defaults', () => {
     expect(
       mergeAgentSessionResources(resolveAgentSessionResourcesFromDefaults(), {
-        agent: {
+        workspace: {
           requests: {
             cpu: '1200m',
           },
@@ -334,7 +269,7 @@ describe('runtimeConfig', () => {
         },
       })
     ).toEqual({
-      agent: {
+      workspace: {
         requests: {
           cpu: '1200m',
           memory: '1Gi',
@@ -352,6 +287,16 @@ describe('runtimeConfig', () => {
         limits: {
           cpu: '1',
           memory: '2Gi',
+        },
+      },
+      workspaceGateway: {
+        requests: {
+          cpu: '100m',
+          memory: '256Mi',
+        },
+        limits: {
+          cpu: '500m',
+          memory: '512Mi',
         },
       },
     });
@@ -380,42 +325,34 @@ describe('runtimeConfig', () => {
     });
   });
 
-  it('renders attribution from the app name placeholder', () => {
-    expect(renderAgentSessionClaudeAttribution('Generated with ({appName})', 'sample-app')).toBe(
-      'Generated with (sample-app)'
-    );
-    expect(renderAgentSessionClaudeAttribution('Generated with ({appName})', null)).toBe('');
-    expect(renderAgentSessionClaudeAttribution('Static attribution', 'sample-app')).toBe('Static attribution');
-  });
-
-  it('throws when the agent image is missing', async () => {
+  it('throws when the workspace image is missing', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: null,
-        editorImage: 'codercom/code-server:4.98.2',
+        workspaceImage: null,
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
       },
     });
 
     await expect(resolveAgentSessionRuntimeConfig()).rejects.toEqual(
       expect.objectContaining<Partial<AgentSessionRuntimeConfigError>>({
         name: 'AgentSessionRuntimeConfigError',
-        missingFields: ['image'],
+        missingFields: ['workspaceImage'],
       })
     );
   });
 
-  it('throws when the editor image is missing', async () => {
+  it('throws when the workspace editor image is missing', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
-        image: 'lifecycle-agent:sha-123',
-        editorImage: '  ',
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: '  ',
       },
     });
 
     await expect(resolveAgentSessionRuntimeConfig()).rejects.toEqual(
       expect.objectContaining<Partial<AgentSessionRuntimeConfigError>>({
         name: 'AgentSessionRuntimeConfigError',
-        missingFields: ['editorImage'],
+        missingFields: ['workspaceEditorImage'],
       })
     );
   });
@@ -428,7 +365,7 @@ describe('runtimeConfig', () => {
     await expect(resolveAgentSessionRuntimeConfig()).rejects.toEqual(
       expect.objectContaining<Partial<AgentSessionRuntimeConfigError>>({
         name: 'AgentSessionRuntimeConfigError',
-        missingFields: ['image', 'editorImage'],
+        missingFields: ['workspaceImage', 'workspaceEditorImage'],
       })
     );
   });

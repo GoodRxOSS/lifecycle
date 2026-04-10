@@ -33,6 +33,8 @@ export interface AgentSessionPromptContext {
   namespace: string;
   buildUuid?: string | null;
   services: AgentSessionPromptServiceContext[];
+  skillsAvailable?: boolean;
+  toolLines?: string[];
 }
 
 type SessionPromptLookupContext = {
@@ -76,6 +78,15 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
 
       lines.push(`  - ${service.name}${details.length > 0 ? `: ${details.join(', ')}` : ''}`);
     }
+  }
+
+  if (context.skillsAvailable) {
+    lines.push('- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it');
+  }
+
+  if (context.toolLines?.length) {
+    lines.push('- equipped tools:');
+    lines.push(...context.toolLines.map((line) => `  ${line}`));
   }
 
   return lines.join('\n');
@@ -188,5 +199,6 @@ export async function resolveAgentSessionPromptContext(
     namespace: lookup.namespace,
     buildUuid: lookup.buildUuid,
     services,
+    skillsAvailable: Boolean(session?.skillPlan?.skills?.length),
   };
 }

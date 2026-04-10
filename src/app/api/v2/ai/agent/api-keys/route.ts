@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,66 +18,134 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
+import AIAgentConfigService from 'server/services/aiAgentConfig';
 import UserApiKeyService from 'server/services/userApiKey';
+import {
+  STORED_AGENT_PROVIDER_NAMES,
+  normalizeStoredAgentProviderName,
+  type StoredAgentProviderName,
+} from 'server/services/agent/providerConfig';
 
-const PROVIDER = 'anthropic';
+type SupportedProvider = StoredAgentProviderName;
 
-async function validateAnthropicKey(apiKey: string): Promise<boolean> {
+type ProviderKeyState = {
+  provider: SupportedProvider;
+  hasKey: boolean;
+  maskedKey?: string;
+  updatedAt?: string | null;
+};
+
+function normalizeProvider(value: unknown): SupportedProvider | null {
+  return normalizeStoredAgentProviderName(value);
+}
+
+function getSearchParam(req: NextRequest, key: string): string | null {
+  return req.nextUrl?.searchParams?.get(key) || null;
+}
+
+async function getConfiguredProviders(): Promise<SupportedProvider[]> {
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'hi' }],
-      }),
-    });
-    return res.status !== 401 && res.status !== 403;
+    const config = await AIAgentConfigService.getInstance().getEffectiveConfig();
+    const configuredProviders = (config.providers || [])
+      .map((provider: { name?: unknown; enabled?: unknown }) =>
+        provider.enabled !== false && typeof provider.name === 'string' ? normalizeProvider(provider.name) : null
+      )
+      .filter((provider): provider is SupportedProvider => provider != null);
+
+    return configuredProviders.length > 0 ? [...new Set(configuredProviders)] : [...STORED_AGENT_PROVIDER_NAMES];
+  } catch {
+    return [...STORED_AGENT_PROVIDER_NAMES];
+  }
+}
+
+async function validateProviderKey(provider: SupportedProvider, apiKey: string): Promise<boolean> {
+  try {
+    switch (provider) {
+      case 'anthropic': {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'hi' }],
+          }),
+        });
+        return response.status !== 401 && response.status !== 403;
+      }
+      case 'openai': {
+        const response = await fetch('https://api.openai.com/v1/models', {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+        });
+        return response.status !== 401 && response.status !== 403;
+      }
+      case 'gemini': {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        return response.status !== 401 && response.status !== 403;
+      }
+      default:
+        return false;
+    }
   } catch {
     return false;
   }
+}
+
+async function buildProviderState(
+  userId: string,
+  ownerGithubUsername: string | null | undefined,
+  provider: SupportedProvider
+): Promise<ProviderKeyState> {
+  const masked = await UserApiKeyService.getMaskedKey(userId, provider, ownerGithubUsername);
+  if (!masked) {
+    return {
+      provider,
+      hasKey: false,
+    };
+  }
+
+  return {
+    provider,
+    hasKey: true,
+    maskedKey: masked.maskedKey,
+    updatedAt: masked.updatedAt,
+  };
 }
 
 /**
  * @openapi
  * /api/v2/ai/agent/api-keys:
  *   get:
- *     summary: Get the authenticated user's Anthropic API key status
+ *     summary: Get stored API key status for enabled agent providers
  *     tags:
  *       - Agent Sessions
- *     operationId: getAgentApiKey
+ *     operationId: getAgentApiKeys
+ *     parameters:
+ *       - in: query
+ *         name: provider
+ *         schema:
+ *           type: string
+ *           enum: [anthropic, openai, gemini]
+ *         description: Optionally narrow the response to one provider.
  *     responses:
  *       '200':
- *         description: API key state
+ *         description: Provider API key states
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               required: [request_id, data, error]
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: object
- *                   required:
- *                     - hasKey
+ *               allOf:
+ *                 - $ref: '#/components/schemas/SuccessApiResponse'
+ *                 - type: object
+ *                   required: [data]
  *                   properties:
- *                     hasKey:
- *                       type: boolean
- *                     provider:
- *                       type: string
- *                     maskedKey:
- *                       type: string
- *                     updatedAt:
- *                       type: string
- *                       format: date-time
- *                 error:
- *                   nullable: true
+ *                     data:
+ *                       $ref: '#/components/schemas/AgentApiKeyStatusResponse'
  *       '401':
  *         description: Unauthorized
  *         content:
@@ -85,7 +153,7 @@ async function validateAnthropicKey(apiKey: string): Promise<boolean> {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
- *     summary: Save or replace the authenticated user's Anthropic API key
+ *     summary: Save or replace a stored API key for an agent provider
  *     tags:
  *       - Agent Sessions
  *     operationId: upsertAgentApiKey
@@ -95,9 +163,11 @@ async function validateAnthropicKey(apiKey: string): Promise<boolean> {
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - apiKey
+ *             required: [provider, apiKey]
  *             properties:
+ *               provider:
+ *                 type: string
+ *                 enum: [anthropic, openai, gemini]
  *               apiKey:
  *                 type: string
  *     responses:
@@ -106,32 +176,15 @@ async function validateAnthropicKey(apiKey: string): Promise<boolean> {
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               required: [request_id, data, error]
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: object
- *                   required:
- *                     - hasKey
- *                     - provider
- *                     - maskedKey
- *                     - updatedAt
+ *               allOf:
+ *                 - $ref: '#/components/schemas/SuccessApiResponse'
+ *                 - type: object
+ *                   required: [data]
  *                   properties:
- *                     hasKey:
- *                       type: boolean
- *                     provider:
- *                       type: string
- *                     maskedKey:
- *                       type: string
- *                     updatedAt:
- *                       type: string
- *                       format: date-time
- *                 error:
- *                   nullable: true
+ *                     data:
+ *                       $ref: '#/components/schemas/AgentApiKeyStatus'
  *       '400':
- *         description: Invalid API key payload
+ *         description: Invalid provider or API key
  *         content:
  *           application/json:
  *             schema:
@@ -143,30 +196,43 @@ async function validateAnthropicKey(apiKey: string): Promise<boolean> {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   delete:
- *     summary: Delete the authenticated user's Anthropic API key
+ *     summary: Delete a stored API key for an agent provider
  *     tags:
  *       - Agent Sessions
  *     operationId: deleteAgentApiKey
+ *     parameters:
+ *       - in: query
+ *         name: provider
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [anthropic, openai, gemini]
  *     responses:
  *       '200':
  *         description: API key deleted
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               required: [request_id, data, error]
- *               properties:
- *                 request_id:
- *                   type: string
- *                 data:
- *                   type: object
- *                   required:
- *                     - deleted
+ *               allOf:
+ *                 - $ref: '#/components/schemas/SuccessApiResponse'
+ *                 - type: object
+ *                   required: [data]
  *                   properties:
- *                     deleted:
- *                       type: boolean
- *                 error:
- *                   nullable: true
+ *                     data:
+ *                       type: object
+ *                       required: [deleted, provider]
+ *                       properties:
+ *                         deleted:
+ *                           type: boolean
+ *                         provider:
+ *                           type: string
+ *                           enum: [anthropic, openai, gemini]
+ *       '400':
+ *         description: Provider is required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '401':
  *         description: Unauthorized
  *         content:
@@ -182,15 +248,33 @@ async function validateAnthropicKey(apiKey: string): Promise<boolean> {
  */
 const getHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-
-  const masked = await UserApiKeyService.getMaskedKey(userIdentity.userId, PROVIDER, userIdentity.githubUsername);
-  if (!masked) {
-    return successResponse({ hasKey: false }, { status: 200 }, req);
+  if (!userIdentity) {
+    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
+  const providerParam = getSearchParam(req, 'provider');
+  const requestedProvider = providerParam == null ? null : normalizeProvider(providerParam);
+  if (providerParam != null && !requestedProvider) {
+    return errorResponse(new Error('provider must be one of anthropic, openai, gemini'), { status: 400 }, req);
+  }
+  const configuredProviders = await getConfiguredProviders();
+  const providers = requestedProvider ? [requestedProvider] : configuredProviders;
+  const states = await Promise.all(
+    providers.map((provider) => buildProviderState(userIdentity.userId, userIdentity.githubUsername, provider))
+  );
+  const primaryState = states[0] || {
+    provider: configuredProviders[0],
+    hasKey: false,
+  };
+
   return successResponse(
-    { hasKey: true, provider: masked.provider, maskedKey: masked.maskedKey, updatedAt: masked.updatedAt },
+    {
+      hasKey: primaryState.hasKey,
+      provider: primaryState.provider,
+      maskedKey: primaryState.maskedKey,
+      updatedAt: primaryState.updatedAt,
+      providers: states,
+    },
     { status: 200 },
     req
   );
@@ -198,40 +282,49 @@ const getHandler = async (req: NextRequest) => {
 
 const postHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  if (!userIdentity) {
+    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  }
 
-  const body = await req.json();
-  const { apiKey } = body;
+  const body = await req.json().catch(() => ({}));
+  const provider = normalizeProvider(body?.provider);
+  if (!provider) {
+    return errorResponse(new Error('provider must be one of anthropic, openai, gemini'), { status: 400 }, req);
+  }
+  const apiKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : '';
 
-  if (!apiKey || typeof apiKey !== 'string') {
+  if (!apiKey) {
     return errorResponse(new Error('apiKey is required and must be a string'), { status: 400 }, req);
   }
 
-  const valid = await validateAnthropicKey(apiKey);
+  const valid = await validateProviderKey(provider, apiKey);
   if (!valid) {
-    return errorResponse(new Error('Invalid API key: authentication failed with Anthropic'), { status: 400 }, req);
+    return errorResponse(new Error(`Invalid API key: authentication failed with ${provider}`), { status: 400 }, req);
   }
 
-  await UserApiKeyService.storeKey(userIdentity.userId, PROVIDER, apiKey, userIdentity.githubUsername);
-  const masked = await UserApiKeyService.getMaskedKey(userIdentity.userId, PROVIDER, userIdentity.githubUsername);
+  await UserApiKeyService.storeKey(userIdentity.userId, provider, apiKey, userIdentity.githubUsername);
+  const state = await buildProviderState(userIdentity.userId, userIdentity.githubUsername, provider);
 
-  return successResponse(
-    { hasKey: true, provider: masked!.provider, maskedKey: masked!.maskedKey, updatedAt: masked!.updatedAt },
-    { status: 201 },
-    req
-  );
+  return successResponse(state, { status: 201 }, req);
 };
 
 const deleteHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  if (!userIdentity) {
+    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  }
 
-  const deleted = await UserApiKeyService.deleteKey(userIdentity.userId, PROVIDER, userIdentity.githubUsername);
+  const provider = normalizeProvider(getSearchParam(req, 'provider'));
+  if (!provider) {
+    return errorResponse(new Error('provider must be one of anthropic, openai, gemini'), { status: 400 }, req);
+  }
+
+  const deleted = await UserApiKeyService.deleteKey(userIdentity.userId, provider, userIdentity.githubUsername);
   if (!deleted) {
     return errorResponse(new Error('No API key found'), { status: 404 }, req);
   }
 
-  return successResponse({ deleted: true }, { status: 200 }, req);
+  return successResponse({ deleted: true, provider }, { status: 200 }, req);
 };
 
 export const GET = createApiHandler(getHandler);

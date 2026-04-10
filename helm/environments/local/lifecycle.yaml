@@ -46,6 +46,14 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
+    - name: ALLOWED_ORIGINS
+      value: 'http://localhost:3000'
+    - name: AGENT_SESSION_WORKSPACE_IMAGE
+      value: 'lifecycle-workspace:latest'
+    - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
+      value: 'codercom/code-server:4.98.2'
+    - name: AGENT_SESSION_WORKSPACE_GATEWAY_IMAGE
+      value: 'lifecycle-workspace:latest'
   envFrom:
     - secretRef:
         name: app-secrets
@@ -92,17 +100,18 @@ components:
         httpGet:
           path: /api/health
           port: 80
-        initialDelaySeconds: 60
-        periodSeconds: 10
+        initialDelaySeconds: 5
+        periodSeconds: 30
         failureThreshold: 6
-        timeoutSeconds: 10
+        timeoutSeconds: 60
       readinessProbe:
         httpGet:
           path: /api/health
           port: 80
-        periodSeconds: 15
-        failureThreshold: 3
-        timeoutSeconds: 10
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 12
+        timeoutSeconds: 60
 
   worker:
     enabled: true

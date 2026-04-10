@@ -435,7 +435,7 @@ export class AIAgentCore {
   private buildMcpToolInfos(servers: ResolvedMcpServer[]): McpToolInfo[] {
     const infos: McpToolInfo[] = [];
     for (const server of servers) {
-      for (const tool of server.cachedTools) {
+      for (const tool of server.discoveredTools) {
         infos.push({
           serverName: server.name,
           serverSlug: server.slug,

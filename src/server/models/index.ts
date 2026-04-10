@@ -35,6 +35,12 @@ import ConversationFeedback from './ConversationFeedback';
 import AgentSession from './AgentSession';
 import AgentPrewarm from './AgentPrewarm';
 import UserApiKey from './UserApiKey';
+import AgentThread from './AgentThread';
+import AgentRun from './AgentRun';
+import AgentMessage from './AgentMessage';
+import AgentPendingAction from './AgentPendingAction';
+import AgentToolExecution from './AgentToolExecution';
+import UserMcpConnection from './UserMcpConnection';
 
 export interface IModels {
   Build: typeof Build;
@@ -58,6 +64,12 @@ export interface IModels {
   AgentSession: typeof AgentSession;
   AgentPrewarm: typeof AgentPrewarm;
   UserApiKey: typeof UserApiKey;
+  AgentThread: typeof AgentThread;
+  AgentRun: typeof AgentRun;
+  AgentMessage: typeof AgentMessage;
+  AgentPendingAction: typeof AgentPendingAction;
+  AgentToolExecution: typeof AgentToolExecution;
+  UserMcpConnection: typeof UserMcpConnection;
 }
 
 export {
@@ -82,4 +94,10 @@ export {
   AgentSession,
   AgentPrewarm,
   UserApiKey,
+  AgentThread,
+  AgentRun,
+  AgentMessage,
+  AgentPendingAction,
+  AgentToolExecution,
+  UserMcpConnection,
 };

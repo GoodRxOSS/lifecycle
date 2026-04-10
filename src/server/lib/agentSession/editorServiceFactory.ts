@@ -16,7 +16,11 @@
 
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from 'server/lib/logger';
-import { AGENT_EDITOR_PORT } from './podFactory';
+import {
+  SESSION_WORKSPACE_EDITOR_PORT,
+  SESSION_WORKSPACE_GATEWAY_PORT_NAME,
+  SESSION_WORKSPACE_GATEWAY_PORT,
+} from './podFactory';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 function getCoreApi(): k8s.CoreV1Api {
@@ -25,7 +29,7 @@ function getCoreApi(): k8s.CoreV1Api {
   return kc.makeApiClient(k8s.CoreV1Api);
 }
 
-export async function createAgentEditorService(
+export async function createSessionWorkspaceService(
   namespace: string,
   serviceName: string,
   buildUuid?: string
@@ -51,28 +55,37 @@ export async function createAgentEditorService(
       ports: [
         {
           name: 'editor',
-          port: AGENT_EDITOR_PORT,
-          targetPort: AGENT_EDITOR_PORT,
+          port: SESSION_WORKSPACE_EDITOR_PORT,
+          targetPort: SESSION_WORKSPACE_EDITOR_PORT,
+        },
+        {
+          name: SESSION_WORKSPACE_GATEWAY_PORT_NAME,
+          port: SESSION_WORKSPACE_GATEWAY_PORT,
+          targetPort: SESSION_WORKSPACE_GATEWAY_PORT,
         },
       ],
     },
   };
 
   const { body: result } = await coreApi.createNamespacedService(namespace, service);
-  logger.info(`AgentEditor: ready serviceName=${serviceName} namespace=${namespace} port=${AGENT_EDITOR_PORT}`);
+  logger.info(
+    `Session: workspace editor ready serviceName=${serviceName} namespace=${namespace} port=${SESSION_WORKSPACE_EDITOR_PORT}`
+  );
   return result;
 }
 
-export async function deleteAgentEditorService(namespace: string, serviceName: string): Promise<void> {
+export async function deleteSessionWorkspaceService(namespace: string, serviceName: string): Promise<void> {
   const logger = getLogger();
   const coreApi = getCoreApi();
 
   try {
     await coreApi.deleteNamespacedService(serviceName, namespace);
-    logger.info(`AgentEditor: cleaned serviceName=${serviceName} namespace=${namespace}`);
+    logger.info(`Session: workspace editor cleaned serviceName=${serviceName} namespace=${namespace}`);
   } catch (error: any) {
     if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      logger.info(`AgentEditor: cleanup skipped reason=not_found serviceName=${serviceName} namespace=${namespace}`);
+      logger.info(
+        `Session: workspace editor cleanup skipped reason=not_found serviceName=${serviceName} namespace=${namespace}`
+      );
       return;
     }
 
