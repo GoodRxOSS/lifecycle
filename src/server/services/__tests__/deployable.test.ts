@@ -74,11 +74,11 @@ describe('Deployable Service', () => {
         name: 'github-app',
         requires: [
           { name: 'github-db' },
-          { name: 'test-db', repository: 'iceycake/test', branch: 'main' },
+          { name: 'test-db', repository: 'example-org/example-database', branch: 'main' },
           { serviceId: 23 },
         ],
         github: {
-          repository: 'org/lifecycle-test',
+          repository: 'example-org/example-service',
           branchName: 'unit-test',
           docker: {
             defaultTag: 'main',
@@ -235,11 +235,11 @@ describe('Deployable Service', () => {
         name: 'github-app',
         requires: [
           { name: 'github-db' },
-          { name: 'test-db', repository: 'iceycake/test', branch: 'main' },
+          { name: 'test-db', repository: 'example-org/example-database', branch: 'main' },
           { serviceId: 23 },
         ],
         github: {
-          repository: 'org/lifecycle-test',
+          repository: 'example-org/example-service',
           branchName: 'unit-test',
           docker: {
             defaultTag: 'main',

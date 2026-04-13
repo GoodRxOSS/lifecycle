@@ -28,12 +28,36 @@ export interface Service001 {
   };
 }
 
+export interface AgentSessionSkillRef {
+  readonly repo: string;
+  readonly branch: string;
+  readonly path: string;
+}
+
+export interface DevConfig {
+  image: string;
+  command: string;
+  installCommand?: string;
+  workDir?: string;
+  ports?: number[];
+  env?: Record<string, string>;
+  forwardEnvVarsToAgent?: string[];
+  agentSession?: {
+    readiness?: {
+      timeoutMs?: number;
+      pollMs?: number;
+    };
+    skills?: AgentSessionSkillRef[];
+  };
+}
+
 export interface Service {
   readonly name: string;
   appShort?: string;
   readonly defaultUUID?: string;
   readonly requires?: DependencyService[];
   readonly deploymentDependsOn?: string[];
+  readonly dev?: DevConfig;
 }
 
 export interface DependencyService {
@@ -370,6 +394,22 @@ export function getDeployType(service: Service): DeployTypes {
   }
 
   return result;
+}
+
+/**
+ * Returns true when Lifecycle owns the service image build inputs.
+ * This is narrower than "participates in build flow" because some services
+ * only reference externally managed images and are not safe dev-mode targets.
+ */
+export function hasLifecycleManagedDockerBuild(service: Service): boolean {
+  switch (getDeployType(service)) {
+    case DeployTypes.GITHUB:
+      return !!(service as GithubService)?.github?.docker?.app?.dockerfilePath;
+    case DeployTypes.HELM:
+      return !!(service as HelmService)?.helm?.docker?.app?.dockerfilePath;
+    default:
+      return false;
+  }
 }
 
 /**

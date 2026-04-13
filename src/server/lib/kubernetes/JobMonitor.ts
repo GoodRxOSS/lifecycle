@@ -260,15 +260,19 @@ export class JobMonitor {
           await this.sleep(JobMonitor.POLL_INTERVAL);
         }
       } catch (error: any) {
-        getLogger().debug(
-          `Job status check failed for ${this.jobName}, will retry: ${error.message || 'Unknown error'}`
-        );
+        const errMsg = typeof error === 'string' ? error : error.message || error.stderr || 'Unknown error';
+        if (errMsg.includes('NotFound') || errMsg.includes('not found')) {
+          getLogger().info(`Job deleted externally, treating as completed: ${this.jobName}`);
+          jobCompleted = true;
+          break;
+        }
+        getLogger().debug(`Job status check failed for ${this.jobName}, will retry: ${errMsg}`);
         await this.sleep(JobMonitor.POLL_INTERVAL);
       }
     }
   }
 
-  private async getJobStatus(logPrefix?: string): Promise<{
+  private async getJobStatus(_logPrefix?: string): Promise<{
     success: boolean;
     status: 'succeeded' | 'failed' | 'superseded';
     startedAt?: string;

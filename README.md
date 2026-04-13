@@ -64,6 +64,8 @@ brew install --cask docker
     ```
 > [!IMPORTANT]  
 > We need to use a custom `kind` config file to allow insecure registries setup for local development.
+> The local `kind` config also publishes ports `80` and `443` from the control-plane node back to `127.0.0.1` so host-based ingress works without `kubectl port-forward`.
+> If you already have an older `lfc` cluster, recreate it so the new port mappings and fresh seeded domain defaults are applied.
 
 -  Switch your Kubernetes context to the newly created cluster:
     ```shell
@@ -81,6 +83,7 @@ brew install --cask docker
       githubAppId: "<app_id>"
       githubClientId: "<client_id>"
       githubInstallationId: "<installation_id>"
+      encryptionKey: "<64-char hex string, e.g. output of openssl rand -hex 32>"
     ```
 > [!NOTE]  
 > You can create the GitHub app with the app creation setup flow and then copy the secrets created for local development.
@@ -89,3 +92,10 @@ brew install --cask docker
     ```shell
     tilt up
     ```
+
+-  Access deployed HTTP services directly from the host using the generated ingress host:
+    ```text
+    http://<deploy-uuid>.127.0.0.1.nip.io
+    ```
+> [!NOTE]
+> `nip.io` resolves names like `foo.127.0.0.1.nip.io` to `127.0.0.1`, so local lifecycle deploys can use host-based ingress without editing `/etc/hosts`.

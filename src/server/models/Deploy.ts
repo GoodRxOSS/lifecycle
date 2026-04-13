@@ -64,6 +64,8 @@ export default class Deploy extends Model {
   deployOutput: string;
   buildJobName: string;
   manifest: string;
+  devMode: boolean;
+  devModeSessionId: number | null;
 
   static tableName = 'deploys';
   static timestamps = true;
@@ -78,40 +80,51 @@ export default class Deploy extends Model {
     },
   };
 
-  static relationMappings = {
-    service: {
-      relation: Model.BelongsToOneRelation,
-      modelClass: Service,
-      join: {
-        from: 'deploys.serviceId',
-        to: 'services.id',
+  static get relationMappings() {
+    const AgentSession = require('./AgentSession').default;
+    return {
+      service: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: Service,
+        join: {
+          from: 'deploys.serviceId',
+          to: 'services.id',
+        },
       },
-    },
-    build: {
-      relation: Model.BelongsToOneRelation,
-      modelClass: () => Build,
-      join: {
-        from: 'deploys.buildId',
-        to: 'builds.id',
+      build: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: () => Build,
+        join: {
+          from: 'deploys.buildId',
+          to: 'builds.id',
+        },
       },
-    },
-    repository: {
-      relation: Model.BelongsToOneRelation,
-      modelClass: () => Repository,
-      join: {
-        from: 'deploys.githubRepositoryId',
-        to: 'repositories.githubRepositoryId',
+      repository: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: () => Repository,
+        join: {
+          from: 'deploys.githubRepositoryId',
+          to: 'repositories.githubRepositoryId',
+        },
       },
-    },
-    deployable: {
-      relation: Model.BelongsToOneRelation,
-      modelClass: () => Deployable,
-      join: {
-        from: 'deploys.deployableId',
-        to: 'deployables.id',
+      deployable: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: () => Deployable,
+        join: {
+          from: 'deploys.deployableId',
+          to: 'deployables.id',
+        },
       },
-    },
-  };
+      agentSession: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: AgentSession,
+        join: {
+          from: 'deploys.devModeSessionId',
+          to: 'agent_sessions.id',
+        },
+      },
+    };
+  }
 
   static get jsonAttributes() {
     return ['env', 'initEnv'];

@@ -74,12 +74,12 @@ export class Metrics {
   };
 
   public updateEventDetails = (eventDetails: MetricsEvent) => {
-    this.config.eventDetails = Object.assign(this.config.eventDetails, eventDetails);
+    this.config.eventDetails = Object.assign({}, this.config.eventDetails, eventDetails);
     return this;
   };
 
   public updateConfigTags = (tags) => {
-    this.config.tags = Object.assign(this.config.tags, tags);
+    this.config.tags = Object.assign({}, this.config.tags, tags);
     return this;
   };
 

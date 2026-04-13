@@ -19,7 +19,7 @@ import { Environment, Build, Service, Deploy, Deployable } from 'server/models';
 import * as codefresh from 'server/lib/codefresh';
 import { getLogger, withLogContext, extractContextForQueue } from 'server/lib/logger';
 import hash from 'object-hash';
-import { DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, DeployStatus, DeployTypes } from 'shared/constants';
 import * as cli from 'server/lib/cli';
 import RDS from 'aws-sdk/clients/rds';
 import resourceGroupsTagging from 'aws-sdk/clients/resourcegroupstaggingapi';
@@ -37,11 +37,12 @@ import { getLogs } from 'server/lib/codefresh';
 import { buildWithNative } from 'server/lib/nativeBuild';
 import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
 
 export interface DeployOptions {
   ownerId?: number;
-  repositoryId?: string;
+  repositoryId?: number;
   installationId?: number;
   repositoryBranchName?: string;
   isDeploy?: boolean;
@@ -52,7 +53,6 @@ export interface DeployOptions {
 
 export interface PipelineWaitItem {
   dependentDeploy: Deploy;
-  awaitingDeploy: Deploy;
   pipelineId: string;
   serviceName: string;
   patternInfo: PatternInfo[];
@@ -84,7 +84,8 @@ export default class DeployService extends BaseService {
         deployables.map(async (deployable) => {
           const uuid = `${deployable.name}-${build?.uuid}`;
           const patchFields: Objection.PartialModelObject<Deploy> = {};
-          const isTargetRepo = !githubRepositoryId || deployable.repositoryId === githubRepositoryId;
+          const deployableRepositoryId = Number(deployable.repositoryId);
+          const isTargetRepo = !githubRepositoryId || deployableRepositoryId === githubRepositoryId;
 
           let deploy = existingDeployMap.get(deployable.id) ?? null;
           if (!deploy) {
@@ -117,7 +118,7 @@ export default class DeployService extends BaseService {
               deployableId: deployable?.id ?? null,
               uuid,
               internalHostname: uuid,
-              githubRepositoryId: deployable.repositoryId,
+              githubRepositoryId: deployableRepositoryId,
               active: deployable.active,
             });
 
@@ -260,7 +261,7 @@ export default class DeployService extends BaseService {
         deployableId: deployable?.id ?? null,
         uuid,
         internalHostname: uuid,
-        githubRepositoryId: service.repositoryId,
+        githubRepositoryId: Number(service.repositoryId),
         active,
       });
 
@@ -801,6 +802,7 @@ export default class DeployService extends BaseService {
       await deploy.$fetchGraph('build.pullRequest');
       build = deploy?.build;
       const pullRequest = build?.pullRequest;
+      const isSandboxBuild = build?.kind === BuildKind.SANDBOX;
 
       const terminalStatuses = [
         DeployStatus.READY,
@@ -812,24 +814,26 @@ export default class DeployService extends BaseService {
       ];
       const isTerminalStatus = terminalStatuses.includes(params.status as DeployStatus);
 
-      if (isTerminalStatus && build?.githubDeployments) {
+      if (isTerminalStatus && build?.githubDeployments && !isSandboxBuild) {
         await deploy.$fetchGraph('[service, deployable]');
         if (await this.shouldTriggerGithubDeployment(deploy)) {
           await this.triggerGithubDeploymentUpdate(deploy);
         }
       }
 
-      await this.db.services.ActivityStream.updatePullRequestActivityStream(
-        build,
-        [],
-        pullRequest,
-        null,
-        true,
-        true,
-        null,
-        true,
-        targetGithubRepositoryId
-      );
+      if (!isSandboxBuild && pullRequest) {
+        await this.db.services.ActivityStream.updatePullRequestActivityStream(
+          build,
+          [],
+          pullRequest,
+          null,
+          true,
+          true,
+          null,
+          true,
+          targetGithubRepositoryId
+        );
+      }
     } catch (error) {
       getLogger().warn({ error }, 'ActivityFeed: update failed');
     }
@@ -875,7 +879,6 @@ export default class DeployService extends BaseService {
   private async patchDeployWithTag({ tag, deploy, initTag, ecrDomain }) {
     await deploy.$fetchGraph('[build, service, deployable]');
     const { build, deployable, service } = deploy;
-    const _uuid = build?.uuid;
     let ecrRepo = deployable?.ecr as string;
 
     const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
@@ -1039,46 +1042,83 @@ export default class DeployService extends BaseService {
           const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
           const secretProviders = globalConfigs.secretProviders;
 
-          if (secretProviders && deploy.env) {
-            const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
-            await ensureNamespaceExists(deploy.build.namespace);
+          if (secretProviders) {
+            const buildEnvToProcess = (deploy.env || {}) as Record<string, string>;
+            const initEnvToProcess = (deploy.initEnv || {}) as Record<string, string>;
+            const buildSecretRefs = parseSecretRefsFromEnv(buildEnvToProcess);
+            const initSecretRefs = parseSecretRefsFromEnv(initEnvToProcess);
+            const buildSecretRefKeys = new Set(buildSecretRefs.map((ref) => ref.envKey));
+            const combinedSecretEnvEntries = new Map<string, string>();
+            const conflictingSecretEnvKeys = new Set<string>();
 
-            const secretProcessor = new SecretProcessor(secretProviders);
-            const envToProcess = deploy.env as Record<string, string>;
+            const addSecretRef = (envKey: string, value: string) => {
+              const existingValue = combinedSecretEnvEntries.get(envKey);
 
-            const secretResult = await secretProcessor.processEnvSecrets({
-              env: envToProcess,
-              serviceName: deployable.name,
-              namespace: deploy.build.namespace,
-              buildUuid: deploy.uuid,
-            });
+              if (existingValue && existingValue !== value) {
+                conflictingSecretEnvKeys.add(envKey);
+                return;
+              }
 
-            secretEnvKeys = new Set(secretResult.secretRefs.map((ref) => ref.envKey));
+              combinedSecretEnvEntries.set(envKey, value);
+            };
 
-            if (secretResult.warnings.length > 0) {
-              getLogger().warn(
-                `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
-                  ', '
-                )}`
+            buildSecretRefs.forEach((ref) => addSecretRef(ref.envKey, buildEnvToProcess[ref.envKey]));
+            initSecretRefs.forEach((ref) => addSecretRef(ref.envKey, initEnvToProcess[ref.envKey]));
+
+            if (conflictingSecretEnvKeys.size > 0) {
+              getLogger().error(
+                `Build: secret env conflict service=${deployable.name} keys=[${Array.from(
+                  conflictingSecretEnvKeys
+                ).join(', ')}]`
               );
+              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+              return false;
             }
 
-            if (secretResult.secretNames.length > 0) {
-              getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+            const envToProcess = Object.fromEntries(combinedSecretEnvEntries);
 
-              const providerTimeouts = Object.values(secretProviders)
-                .map((p) => p.secretSyncTimeout)
-                .filter((t): t is number => t !== undefined);
-              const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+            if (Object.keys(envToProcess).length > 0) {
+              const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
+              await ensureNamespaceExists(deploy.build.namespace);
 
-              try {
-                await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
-                buildSecretNames = secretResult.secretNames;
-                getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
-              } catch (error) {
-                getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
-                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-                return false;
+              const secretProcessor = new SecretProcessor(secretProviders);
+
+              const secretResult = await secretProcessor.processEnvSecrets({
+                env: envToProcess,
+                serviceName: deployable.name,
+                namespace: deploy.build.namespace,
+                buildUuid: deploy.uuid,
+              });
+
+              secretEnvKeys = new Set(
+                secretResult.secretRefs.filter((ref) => buildSecretRefKeys.has(ref.envKey)).map((ref) => ref.envKey)
+              );
+
+              if (secretResult.warnings.length > 0) {
+                getLogger().warn(
+                  `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
+                    ', '
+                  )}`
+                );
+              }
+
+              if (secretResult.secretNames.length > 0) {
+                getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+
+                const providerTimeouts = Object.values(secretProviders)
+                  .map((p) => p.secretSyncTimeout)
+                  .filter((t): t is number => t !== undefined);
+                const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+
+                try {
+                  await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
+                  buildSecretNames = secretResult.secretNames;
+                  getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
+                } catch (error) {
+                  getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
+                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+                  return false;
+                }
               }
             }
           }
@@ -1160,13 +1200,11 @@ export default class DeployService extends BaseService {
 
   async waitAndResolveForBuildDependentEnvVars(deploy: Deploy, envVariables: Record<string, string>, runUUID: string) {
     const pipelineIdsToWaitFor: PipelineWaitItem[] = [];
-    const awaitingDeploy = deploy;
     const { build } = deploy;
     const deploys = build.deploys;
     const servicesToWaitFor = extractEnvVarsWithBuildDependencies(deploy.deployable.env);
 
     for (const [serviceName, patternsInfo] of Object.entries(servicesToWaitFor)) {
-      const _awaitingService = deploy.uuid;
       const waitingForService = `${serviceName}-${build.uuid}`;
 
       const dependentDeploy = deploys.find((d) => d.uuid === waitingForService);
@@ -1185,7 +1223,6 @@ export default class DeployService extends BaseService {
         if (updatedDeploy?.buildPipelineId) {
           pipelineIdsToWaitFor.push({
             dependentDeploy,
-            awaitingDeploy,
             pipelineId: updatedDeploy.buildPipelineId,
             serviceName,
             patternInfo: patternsInfo,
@@ -1196,7 +1233,7 @@ export default class DeployService extends BaseService {
 
     const extractedValues = {};
     const pipelinePromises = pipelineIdsToWaitFor.map(
-      async ({ dependentDeploy, awaitingDeploy, pipelineId, serviceName, patternInfo }: PipelineWaitItem) => {
+      async ({ dependentDeploy, pipelineId, serviceName, patternInfo }: PipelineWaitItem) => {
         try {
           const updatedDeploy = await waitForColumnValue(dependentDeploy, 'buildOutput', 240, 5000);
 

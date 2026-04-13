@@ -77,6 +77,42 @@ environment:
       # @param environment.webhooks.env (required)
       env:
 
+  # @param environment.agentSession
+  agentSession:
+    # @param environment.agentSession.resources
+    resources:
+      # @param environment.agentSession.resources.agent
+      agent:
+        # @param environment.agentSession.resources.agent.requests
+        requests:
+
+        # @param environment.agentSession.resources.agent.limits
+        limits:
+
+      # @param environment.agentSession.resources.editor
+      editor:
+        # @param environment.agentSession.resources.editor.requests
+        requests:
+
+        # @param environment.agentSession.resources.editor.limits
+        limits:
+
+    # @param environment.agentSession.prewarm
+    prewarm:
+      # @param environment.agentSession.prewarm.services
+      services:
+        # @param environment.agentSession.prewarm.services[]
+        - ''
+    # @param environment.agentSession.skills
+    skills:
+      # @param environment.agentSession.skills[]
+      -
+        # @param environment.agentSession.skills.repo (required)
+        repo: ''
+        # @param environment.agentSession.skills.branch (required)
+        branch: ''
+        # @param environment.agentSession.skills.path (required)
+        path: ''
 # @section services
 services:
   # @param services[]
@@ -677,3 +713,42 @@ services:
       defaultTag: ''
       # @param services.configuration.branchName (required)
       branchName: ''
+    # @param services.dev
+    dev:
+      # @param services.dev.image (required)
+      image: ''
+      # @param services.dev.command (required)
+      command: ''
+      # @param services.dev.installCommand
+      installCommand: ''
+      # @param services.dev.workDir
+      workDir: ''
+      # @param services.dev.ports
+      ports:
+        # @param services.dev.ports[]
+        - 0
+      # @param services.dev.env
+      env:
+
+      # @param services.dev.forwardEnvVarsToAgent
+      forwardEnvVarsToAgent:
+        # @param services.dev.forwardEnvVarsToAgent[]
+        - ''
+      # @param services.dev.agentSession
+      agentSession:
+        # @param services.dev.agentSession.readiness
+        readiness:
+          # @param services.dev.agentSession.readiness.timeoutMs
+          timeoutMs: 0
+          # @param services.dev.agentSession.readiness.pollMs
+          pollMs: 0
+        # @param services.dev.agentSession.skills
+        skills:
+          # @param services.dev.agentSession.skills[]
+          -
+            # @param services.dev.agentSession.skills.repo (required)
+            repo: ''
+            # @param services.dev.agentSession.skills.branch (required)
+            branch: ''
+            # @param services.dev.agentSession.skills.path (required)
+            path: ''

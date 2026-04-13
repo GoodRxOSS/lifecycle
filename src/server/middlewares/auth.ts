@@ -20,6 +20,11 @@ import { verifyAuth } from 'server/lib/auth';
 import { ErrorResponse } from 'server/lib/response';
 
 const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj ?? {}), 'utf8').toString('base64url');
+const MCP_OAUTH_CALLBACK_PATH = /^\/api\/v2\/ai\/agent\/mcp-connections\/[^/]+\/oauth\/callback$/;
+
+function isBearerAuthExemptPath(request: NextRequest): boolean {
+  return MCP_OAUTH_CALLBACK_PATH.test(request.nextUrl.pathname);
+}
 
 export const authMiddleware: Middleware = async (request, next) => {
   if (!request.url.includes('/api/v2/')) {
@@ -27,6 +32,10 @@ export const authMiddleware: Middleware = async (request, next) => {
   }
 
   if (process.env.ENABLE_AUTH !== 'true') {
+    return next(request);
+  }
+
+  if (isBearerAuthExemptPath(request)) {
     return next(request);
   }
 

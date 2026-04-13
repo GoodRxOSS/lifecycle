@@ -14,11 +14,14 @@
  * limitations under the License.
  */
 
-import * as Webhooks from '@octokit/webhooks';
 import { GithubService } from 'server/models/yaml';
 import Service from 'server/services/_service';
 
-export type PullRequestLabel = Partial<Webhooks.EventPayloads.WebhookPayloadPullRequestPullRequestLabelsItem>;
+export type PullRequestLabel = Partial<{
+  id: number;
+  name: string;
+  color: string;
+}>;
 export type BranchData = {
   action: string;
   branch: string;
@@ -37,7 +40,7 @@ export type BranchData = {
 };
 
 export type GithubPullRequestData = {
-  action: Webhooks.EventPayloads.WebhookPayloadPullRequest['action'] | string;
+  action: string;
   installation: {
     id: number;
   };
@@ -79,13 +82,19 @@ export type GithubIssueCommentData = {
 };
 
 export type GithubInstallationData = {
-  action: Webhooks.EventPayloads.WebhookPayloadInstallation['action'] | string;
+  action: string;
   installation: {
     account: {
       login: string;
     };
   };
-  repositories: Partial<Webhooks.EventPayloads.WebhookPayloadInstallationRepositoriesItem>[];
+  repositories: Array<
+    Partial<{
+      id: number;
+      name: string;
+      full_name: string;
+    }>
+  >;
 };
 
 // findOrCreateDefaultService take in a Repository Model but only needs an ID

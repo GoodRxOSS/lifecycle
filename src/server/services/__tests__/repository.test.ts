@@ -29,6 +29,7 @@ describe('RepositoryService', () => {
         Repository: {
           findOne: jest.fn(),
           create: jest.fn(),
+          query: jest.fn(),
         },
       },
     };
@@ -75,6 +76,50 @@ describe('RepositoryService', () => {
         htmlUrl: repoData.htmlUrl,
         defaultEnvId: repoData.defaultEnvId,
       });
+    });
+  });
+
+  describe('searchRepositories', () => {
+    test('returns ranked repository matches for valid queries', async () => {
+      const limit = jest.fn().mockResolvedValue([
+        {
+          githubRepositoryId: 12,
+          fullName: 'example-org/example-repo',
+          htmlUrl: 'https://github.com/example-org/example-repo',
+        },
+      ]);
+      const orderBy = jest.fn().mockReturnValue({ limit });
+      const orderByRaw = jest.fn().mockReturnValue({ orderBy });
+      const whereRaw = jest.fn().mockReturnValue({ orderByRaw });
+      const select = jest.fn().mockReturnValue({ whereRaw });
+
+      db.models.Repository.query.mockReturnValue({ select });
+
+      const result = await service.searchRepositories('Example-Org/Example', 50);
+
+      expect(result).toEqual([
+        {
+          githubRepositoryId: 12,
+          fullName: 'example-org/example-repo',
+          htmlUrl: 'https://github.com/example-org/example-repo',
+        },
+      ]);
+      expect(db.models.Repository.query).toHaveBeenCalled();
+      expect(select).toHaveBeenCalledWith('githubRepositoryId', 'fullName', 'htmlUrl');
+      expect(whereRaw).toHaveBeenCalledWith('lower("fullName") like ?', ['%example-org/example%']);
+      expect(orderByRaw).toHaveBeenCalledWith(
+        'case when lower("fullName") = ? then 0 when lower("fullName") like ? then 1 else 2 end',
+        ['example-org/example', 'example-org/example%']
+      );
+      expect(orderBy).toHaveBeenCalledWith('updatedAt', 'desc');
+      expect(limit).toHaveBeenCalledWith(25);
+    });
+
+    test('returns an empty array for blank queries', async () => {
+      const result = await service.searchRepositories('   ', 10);
+
+      expect(result).toEqual([]);
+      expect(db.models.Repository.query).not.toHaveBeenCalled();
     });
   });
 });

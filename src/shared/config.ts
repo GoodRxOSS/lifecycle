@@ -116,6 +116,9 @@ export const QUEUE_NAMES = {
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
   LABEL: `label_${JOB_VERSION}`,
+  AGENT_SESSION_CLEANUP: 'agent_session_cleanup',
+  AGENT_SESSION_PREWARM: 'agent_session_prewarm',
+  AGENT_SANDBOX_SESSION_LAUNCH: 'agent_sandbox_session_launch',
 } as const;
 
 export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');

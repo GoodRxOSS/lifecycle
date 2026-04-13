@@ -157,6 +157,92 @@
               "env"
             ]
           }
+        },
+        "agentSession": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "editor": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "prewarm": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "services": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "branch": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "branch",
+                  "path"
+                ]
+              }
+            }
+          }
         }
       }
     },
@@ -1288,6 +1374,89 @@
             "required": [
               "defaultTag",
               "branchName"
+            ]
+          },
+          "dev": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "image": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "installCommand": {
+                "type": "string"
+              },
+              "workDir": {
+                "type": "string"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "env": {
+                "type": "object"
+              },
+              "forwardEnvVarsToAgent": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "agentSession": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pollMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "skills": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "repo": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "branch": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "repo",
+                        "branch",
+                        "path"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "image",
+              "command"
             ]
           }
         },

@@ -24,7 +24,7 @@ interface Metadata {
 
 type SuccessStatusCode = 200 | 201;
 
-type ErrorStatusCode = 400 | 401 | 404 | 500 | 502;
+type ErrorStatusCode = 400 | 401 | 404 | 409 | 500 | 502 | 503;
 
 interface SuccessResponse<T> {
   request_id: string;
@@ -54,7 +54,7 @@ export function successResponse<T>(data: T, options: SuccessResponseOptions, req
   const { status, metadata } = options;
 
   const body: SuccessResponse<T> = {
-    request_id: req.headers.get('x-request-id'),
+    request_id: req.headers.get('x-request-id') || '',
     data,
     error: null,
   };
@@ -80,7 +80,7 @@ export function errorResponse(error: unknown, options: ErrorResponseOptions, req
   const { status } = options;
 
   const body: ErrorResponse = {
-    request_id: req.headers.get('x-request-id'),
+    request_id: req.headers.get('x-request-id') || '',
     data: null,
     error: {
       message: error instanceof Error ? error.message : 'An unknown error occurred.',

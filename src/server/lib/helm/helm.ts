@@ -26,7 +26,13 @@ import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';
 import { staticEnvTolerations } from './constants';
 import { getResourceType, mergeKeyValueArrays } from 'shared/utils';
-import { generateNodeSelector, generateTolerationsCustomValues, renderTemplate } from 'server/lib/helm/utils';
+import {
+  generateNodeSelector,
+  generateTolerationsCustomValues,
+  renderTemplate,
+  serializeHelmEnvMap,
+  scaffoldHelmSecretRefs,
+} from 'server/lib/helm/utils';
 import { generateCheckoutStep } from 'server/lib/codefresh/utils';
 import { merge } from 'lodash';
 import {
@@ -36,6 +42,7 @@ import {
 import { randomAlphanumeric } from '../random';
 
 const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
+const escapeCodefreshEnvKey = (key: string) => key.replace(/_/g, '__');
 
 /**
  * Generates codefresh deployment step for public Helm charts.
@@ -113,8 +120,16 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
 
   const templateResolvedValues = await renderTemplate(deploy?.build, chart?.values);
 
-  const initEnvVars = merge(deploy.initEnv || {}, build.commentRuntimeEnv || {});
-  const appEnvVars = merge(deploy.env, build.commentRuntimeEnv || {});
+  const initEnvVars = scaffoldHelmSecretRefs(
+    merge(deploy.initEnv || {}, build.commentRuntimeEnv || {}),
+    deployable?.name,
+    deployable?.builder?.engine
+  );
+  const appEnvVars = scaffoldHelmSecretRefs(
+    merge(deploy.env || {}, build.commentRuntimeEnv || {}),
+    deployable?.name,
+    deployable?.builder?.engine
+  );
   const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
 
   const partialCustomValues = mergeKeyValueArrays(configs[orgChartName].chart?.values, chart?.values, '=');
@@ -140,9 +155,9 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
     version = constructImageVersion(deploy.initDockerImage);
     customValues.push(
       `${resourceType}.initImage=${deploy.initDockerImage}`,
-      ...Object.entries(initEnvVars).map(
-        ([key, value]) => `${resourceType}.initEnv.${key.replace(/_/g, '__')}=${value}`
-      )
+      ...serializeHelmEnvMap(initEnvVars, `${resourceType}.initEnv`, {
+        keyTransform: escapeCodefreshEnvKey,
+      })
     );
   } else {
     // if there is no init image, we need to disable init container
@@ -183,9 +198,10 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
         // we have to replace _ with __ because codefresh helm step will turn ingle _ into . (dot).
         // double __ will be replaced by _
         `lc__uuid=${deploy.deployable.buildUUID}`,
-        ...Object.entries(appEnvVars).map(
-          ([key, value]) => `${resourceType}.env.${key.replace(/_/g, '__')}="${value}"`
-        ),
+        ...serializeHelmEnvMap(appEnvVars, `${resourceType}.env`, {
+          keyTransform: escapeCodefreshEnvKey,
+          quoteStringValues: true,
+        }),
         ...customValues,
       ],
       custom_value_files: [...(chart?.valueFiles || [])],

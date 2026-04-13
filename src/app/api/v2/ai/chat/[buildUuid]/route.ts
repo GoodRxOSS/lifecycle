@@ -34,6 +34,7 @@ import {
   isAuthError,
 } from 'server/services/ai/errors';
 import { isBrokenCircuitError } from 'cockatiel';
+import type { ConfirmationDetails } from 'server/services/ai/types/tool';
 import type { AIChatSSEEvent, SSEErrorEvent } from 'shared/types/aiChat';
 
 export const dynamic = 'force-dynamic';
@@ -157,6 +158,9 @@ export const dynamic = 'force-dynamic';
  *                 description: >
  *                   Optional service-scoped fix target. When provided in fix mode,
  *                   mutating tool calls are constrained to this selected issue.
+ *                   The additional action hint fields are used by fix-target
+ *                   authorization to distinguish file edits from PR label
+ *                   updates and Kubernetes patch actions.
  *                 properties:
  *                   serviceName:
  *                     type: string
@@ -171,6 +175,16 @@ export const dynamic = 'force-dynamic';
  *                       properties:
  *                         path:
  *                           type: string
+ *                   autoFixAction:
+ *                     type: string
+ *                   actionType:
+ *                     type: string
+ *                   fixType:
+ *                     type: string
+ *                   tool:
+ *                     type: string
+ *                   toolName:
+ *                     type: string
  *     responses:
  *       '200':
  *         description: >
@@ -336,9 +350,11 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
 
         const repoFullName = context.lifecycleContext?.pullRequest?.fullName;
 
+        const mode = requestedMode === 'fix' ? 'fix' : 'investigate';
+
         try {
           if (provider && modelId) {
-            await llmService.initializeWithMode('investigate', provider, modelId, repoFullName);
+            await llmService.initializeWithMode(mode, provider, modelId, repoFullName);
           } else {
             await llmService.initialize(repoFullName);
           }
@@ -381,10 +397,14 @@ const postHandler = async (req: NextRequest, { params }: { params: { buildUuid: 
         >();
         let collectedDebugMetrics: any = null;
         try {
-          const mode = requestedMode === 'fix' ? 'fix' : 'investigate';
           getLogger().info(`AI: using mode=${mode} (requestedMode=${requestedMode})`);
 
-          const onToolConfirmation = mode === 'fix' ? async () => true : undefined;
+          const onToolConfirmation =
+            mode === 'fix'
+              ? async (details: ConfirmationDetails) => {
+                  return true;
+                }
+              : undefined;
           const onToolAuthorization =
             mode === 'fix' && fixTarget
               ? async (

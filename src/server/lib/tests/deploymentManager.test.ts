@@ -131,7 +131,7 @@ describe('DeploymentManager', () => {
       // This test matches the exact configuration from the provided lifecycle.yaml
       const lifecycleYamlDeploys = [
         {
-          deployable: { name: 'lc-test', deploymentDependsOn: [], type: 'helm' },
+          deployable: { name: 'sample-web', deploymentDependsOn: [], type: 'helm' },
           service: { type: 'helm' },
         },
         {
@@ -151,11 +151,11 @@ describe('DeploymentManager', () => {
           service: { type: 'helm' },
         },
         {
-          deployable: { name: 'lc-test-gh-type', deploymentDependsOn: ['redis'], type: 'github' },
+          deployable: { name: 'sample-git-service', deploymentDependsOn: ['redis'], type: 'github' },
           service: { type: 'github' },
         },
         {
-          deployable: { name: 'grpc-echo', deploymentDependsOn: ['lc-test-gh-type'], type: 'helm' },
+          deployable: { name: 'sample-rpc', deploymentDependsOn: ['sample-git-service'], type: 'helm' },
           service: { type: 'helm' },
         },
       ] as Deploy[];
@@ -168,28 +168,28 @@ describe('DeploymentManager', () => {
         .get(0)
         .map((d) => d.deployable.name)
         .sort();
-      expect(level0Names).toEqual(['jenkins', 'lc-test', 'nginx', 'postgres-db']);
+      expect(level0Names).toEqual(['jenkins', 'nginx', 'postgres-db', 'sample-web']);
 
       // Level 1: redis (depends on postgres-db)
       const level1Names = levels.get(1).map((d) => d.deployable.name);
       expect(level1Names).toEqual(['redis']);
 
-      // Level 2: lc-test-gh-type (depends on redis)
+      // Level 2: sample-git-service (depends on redis)
       const level2Names = levels.get(2).map((d) => d.deployable.name);
-      expect(level2Names).toEqual(['lc-test-gh-type']);
+      expect(level2Names).toEqual(['sample-git-service']);
 
-      // Level 3: grpc-echo (depends on lc-test-gh-type)
+      // Level 3: sample-rpc (depends on sample-git-service)
       const level3Names = levels.get(3).map((d) => d.deployable.name);
-      expect(level3Names).toEqual(['grpc-echo']);
+      expect(level3Names).toEqual(['sample-rpc']);
 
-      // Verify that lc-test-gh-type (GitHub type) waits for redis (Helm type)
+      // Verify that sample-git-service (GitHub type) waits for redis (Helm type)
       // Find which level each service is in
       let lcTestGhTypeLevel = -1;
       let redisLevel = -1;
 
       for (let i = 0; i < levels.size; i++) {
         const levelDeploys = levels.get(i);
-        if (levelDeploys.some((d) => d.deployable.name === 'lc-test-gh-type')) {
+        if (levelDeploys.some((d) => d.deployable.name === 'sample-git-service')) {
           lcTestGhTypeLevel = i;
         }
         if (levelDeploys.some((d) => d.deployable.name === 'redis')) {
@@ -197,7 +197,7 @@ describe('DeploymentManager', () => {
         }
       }
 
-      // lc-test-gh-type should be deployed AFTER redis
+      // sample-git-service should be deployed AFTER redis
       expect(lcTestGhTypeLevel).toBeGreaterThan(redisLevel);
       expect(lcTestGhTypeLevel).toBe(2);
       expect(redisLevel).toBe(1);

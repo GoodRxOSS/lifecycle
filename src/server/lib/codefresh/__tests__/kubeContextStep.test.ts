@@ -67,8 +67,8 @@ describe('kubeContextStep', () => {
         arguments: {
           app: context,
           cluster,
-          aws_access_key_id: '${{DEPLOYMENT_AWS_ACCESS_KEY_ID}}',
-          aws_secret_access_key: '${{DEPLOYMENT_AWS_SECRET_ACCESS_KEY}}',
+          aws_access_key_id: '${{AWS_ACCESS_KEY_ID_LFC_PRD}}',
+          aws_secret_access_key: '${{AWS_SECRET_ACCESS_KEY_LFC_PRD}}',
         },
       });
     });

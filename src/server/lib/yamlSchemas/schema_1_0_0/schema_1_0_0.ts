@@ -18,6 +18,60 @@ import { deployment } from './deployment';
 import { docker } from './docker';
 import { webhooks } from './webhooks';
 
+const resourceRequirements = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    requests: { type: 'object', additionalProperties: { type: 'string' } },
+    limits: { type: 'object', additionalProperties: { type: 'string' } },
+  },
+};
+
+const agentSessionResources = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    agent: resourceRequirements,
+    editor: resourceRequirements,
+  },
+};
+
+const agentSessionPrewarm = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    services: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+};
+
+const agentSessionReadiness = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    timeoutMs: { type: 'integer', minimum: 0 },
+    pollMs: { type: 'integer', minimum: 0 },
+  },
+};
+
+const agentSessionSkillRef = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    repo: { type: 'string', minLength: 1 },
+    branch: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+  },
+  required: ['repo', 'branch', 'path'],
+};
+
+const agentSessionSkills = {
+  type: 'array',
+  items: agentSessionSkillRef,
+};
+
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
   type: 'object',
@@ -32,6 +86,15 @@ const schema_1_0_0 = {
         autoDeploy: { type: 'boolean' },
         githubDeployments: { type: 'boolean' },
         useGithubStatusComment: { type: 'boolean' },
+        agentSession: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            resources: agentSessionResources,
+            prewarm: agentSessionPrewarm,
+            skills: agentSessionSkills,
+          },
+        },
         defaultServices: {
           type: 'array',
           minItems: 1,
@@ -204,6 +267,28 @@ const schema_1_0_0 = {
               branchName: { type: 'string' },
             },
             required: ['defaultTag', 'branchName'],
+          },
+          dev: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              image: { type: 'string' },
+              command: { type: 'string' },
+              installCommand: { type: 'string' },
+              workDir: { type: 'string' },
+              ports: { type: 'array', items: { type: 'number' } },
+              env: { type: 'object' },
+              forwardEnvVarsToAgent: { type: 'array', items: { type: 'string' } },
+              agentSession: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  readiness: agentSessionReadiness,
+                  skills: agentSessionSkills,
+                },
+              },
+            },
+            required: ['image', 'command'],
           },
         },
         required: ['name'],

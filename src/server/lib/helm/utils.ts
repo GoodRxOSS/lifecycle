@@ -21,6 +21,8 @@ import mustache from 'mustache';
 import { HYPHEN_REPLACEMENT, HYPHEN_REPLACEMENT_REGEX } from 'shared/constants';
 import { NodeAffinity, Toleration } from './types';
 import { LIFECYCLE_UI_URL, APP_HOST } from 'shared/config';
+import { generateSecretName } from 'server/lib/kubernetes/externalSecret';
+import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 
 export const renderTemplate = async (build: Build, values: string[] = []): Promise<string[]> => {
   const db = build.$knex();
@@ -33,6 +35,132 @@ export const renderTemplate = async (build: Build, values: string[] = []): Promi
 
   return renderedString.replace(HYPHEN_REPLACEMENT_REGEX, '-').split('%%SPLIT%%');
 };
+
+const NATIVE_BUILD_ENGINES = new Set(['buildkit', 'kaniko']);
+
+function extractStringEnvVars(envVars: Record<string, any> | null | undefined): Record<string, string> {
+  if (!envVars) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(envVars).flatMap(([key, value]) => (typeof value === 'string' ? [[key, value]] : []))
+  );
+}
+
+export function scaffoldHelmSecretRefs(
+  envVars: Record<string, any> | null | undefined,
+  serviceName?: string,
+  builderEngine?: string
+): Record<string, any> {
+  if (!envVars || !serviceName || !NATIVE_BUILD_ENGINES.has(builderEngine || '')) {
+    return envVars || {};
+  }
+
+  const secretRefs = parseSecretRefsFromEnv(extractStringEnvVars(envVars));
+
+  if (secretRefs.length === 0) {
+    return envVars;
+  }
+
+  const secretRefMap = new Map(secretRefs.map((ref) => [ref.envKey, ref]));
+
+  return Object.fromEntries(
+    Object.entries(envVars).map(([key, value]) => {
+      const secretRef = secretRefMap.get(key);
+
+      if (!secretRef) {
+        return [key, value];
+      }
+
+      return [
+        key,
+        {
+          valueFrom: {
+            secretKeyRef: {
+              name: generateSecretName(serviceName, secretRef.provider),
+              key,
+            },
+          },
+        },
+      ];
+    })
+  );
+}
+
+function isHelmScalarValue(value: unknown): value is string | number | boolean {
+  return ['string', 'number', 'boolean'].includes(typeof value);
+}
+
+function formatHelmScalarValue(value: string | number | boolean, quoteStrings: boolean): string {
+  if (typeof value === 'string') {
+    return quoteStrings ? JSON.stringify(value) : value;
+  }
+
+  return String(value);
+}
+
+function serializeHelmNestedValue(path: string, value: unknown, quoteStrings: boolean): string[] {
+  if (value == null) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => serializeHelmNestedValue(`${path}[${index}]`, entry, quoteStrings));
+  }
+
+  if (isHelmScalarValue(value)) {
+    return [`${path}=${formatHelmScalarValue(value, quoteStrings)}`];
+  }
+
+  if (typeof value !== 'object') {
+    return [`${path}=${quoteStrings ? JSON.stringify(String(value)) : String(value)}`];
+  }
+
+  return Object.entries(value).flatMap(([key, nestedValue]) =>
+    serializeHelmNestedValue(`${path}.${key}`, nestedValue, quoteStrings)
+  );
+}
+
+export function serializeHelmEnvMap(
+  envVars: Record<string, any> | null | undefined,
+  pathPrefix: string,
+  { keyTransform = (key: string) => key, quoteStringValues = false } = {}
+): string[] {
+  if (!envVars) {
+    return [];
+  }
+
+  return Object.entries(envVars).flatMap(([key, value]) =>
+    serializeHelmNestedValue(`${pathPrefix}.${keyTransform(key)}`, value, quoteStringValues)
+  );
+}
+
+export function serializeHelmEnvArray(
+  envVars: Record<string, any> | null | undefined,
+  pathPrefix: string,
+  { quoteStringValues = false } = {}
+): string[] {
+  if (!envVars) {
+    return [];
+  }
+
+  return Object.entries(envVars).flatMap(([key, value], index) => {
+    const values = [`${pathPrefix}[${index}].name=${key}`];
+
+    if (value == null) {
+      return values;
+    }
+
+    if (isHelmScalarValue(value)) {
+      values.push(`${pathPrefix}[${index}].value=${formatHelmScalarValue(value, quoteStringValues)}`);
+      return values;
+    }
+
+    values.push(`${pathPrefix}[${index}].value=${quoteStringValues ? JSON.stringify(String(value)) : String(value)}`);
+    return values;
+  });
+}
 
 export function generateTolerationsCustomValues(key: string, tolerations: Toleration[]): string[] {
   return tolerations

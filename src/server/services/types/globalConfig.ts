@@ -20,6 +20,7 @@ export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
   helmDefaults: HelmDefaults;
   buildDefaults?: BuildDefaults;
+  agentSessionDefaults?: AgentSessionDefaults;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -47,7 +48,44 @@ export type AppSetup = {
   restarted: boolean;
   url: string;
   state: string;
+  name?: string;
   org?: string;
+};
+
+export type AgentSessionControlPlaneConfig = {
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  toolRules?: import('./agentSessionConfig').AgentSessionToolRule[];
+};
+
+export type AgentSessionSchedulingConfig = {
+  nodeSelector?: Record<string, string> | null;
+};
+
+export type AgentSessionReadinessConfig = {
+  timeoutMs?: number | string | null;
+  pollMs?: number | string | null;
+};
+
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+};
+
+export type AgentSessionResourcesConfig = {
+  workspace?: ResourceRequirements | null;
+  editor?: ResourceRequirements | null;
+  workspaceGateway?: ResourceRequirements | null;
+};
+
+export type AgentSessionDefaults = {
+  workspaceImage?: string | null;
+  workspaceEditorImage?: string | null;
+  workspaceGatewayImage?: string | null;
+  scheduling?: AgentSessionSchedulingConfig;
+  readiness?: AgentSessionReadinessConfig;
+  resources?: AgentSessionResourcesConfig;
+  controlPlane?: AgentSessionControlPlaneConfig;
 };
 
 export type RoleSettings = {
@@ -145,11 +183,6 @@ export type BuildDefaults = {
     healthCheckTimeout?: number;
     insecure?: boolean;
   };
-};
-
-export type ResourceRequirements = {
-  requests?: Record<string, string>;
-  limits?: Record<string, string>;
 };
 
 export type CommentToggleConfig = {

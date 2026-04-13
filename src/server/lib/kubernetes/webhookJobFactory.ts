@@ -17,6 +17,7 @@
 import { V1Job } from '@kubernetes/client-node';
 import { createKubernetesJob, JobConfig } from './jobFactory';
 import { randomAlphanumeric } from 'server/lib/random';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export interface WebhookJobConfig {
   name: string;
@@ -91,7 +92,7 @@ export function createWebhookJob(config: WebhookJobConfig): V1Job {
     timeout,
     ttl,
     labels: {
-      lc_uuid: config.buildUuid,
+      ...buildLifecycleLabels({ buildUuid: config.buildUuid }),
       'lfc/uuid': config.buildUuid,
       'lfc/build_id': String(config.buildId),
       'lfc/webhook_name': sanitizedWebhookName,
