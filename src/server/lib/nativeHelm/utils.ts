@@ -41,6 +41,8 @@ import {
   NativeHelmPostRendererConfig,
 } from 'server/services/types/globalConfig';
 
+export type HelmPostRendererConfig = NativeHelmPostRendererConfig;
+
 export interface HelmDeployOptions {
   namespace: string;
   deploymentMethod?: 'native' | 'ci';
@@ -338,8 +340,8 @@ export async function mergeHelmConfigWithGlobal(deploy: Deploy): Promise<any> {
   const helm: any = deployable.helm || {};
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
   const chartName = helm?.chart?.name;
-  const helmDefaults = configs.helmDefaults || {};
-  const chartConfig = chartName ? configs[chartName] || {} : {};
+  const helmDefaults: any = configs.helmDefaults || {};
+  const chartConfig: any = chartName ? configs[chartName] || {} : {};
 
   if (!chartName && !helmDefaults.nativeHelm) {
     return helm;

@@ -24,7 +24,7 @@ jobs:
         uses: xom9ikk/dotenv@v2
         with:
           mode: ci
-      - run: pnpm install -r --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       # - run: pnpm ts-check need fixes
       - run: pnpm test
