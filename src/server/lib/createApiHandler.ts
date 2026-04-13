@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { errorResponse } from './response';
+import { requireRole, type LifecycleRole } from './roles';
 
 /**
  * Defines the shape of a Next.js route handler function.
@@ -23,17 +24,32 @@ import { errorResponse } from './response';
 // eslint-disable-next-line no-unused-vars
 type RouteHandler = (req: NextRequest, ...args: any[]) => Promise<NextResponse>;
 
+interface ApiHandlerOptions {
+  roles?: LifecycleRole[];
+}
+
 /**
  * A higher-order function that wraps a Next.js route handler with
  * a try-catch block to handle errors gracefully.
  *
+ * When `options.roles` is provided, the handler is additionally
+ * guarded by a role check that returns 403 if the user lacks the
+ * required role.
+ *
  * @param handler The route handler function to wrap.
+ * @param options Optional configuration (e.g. required roles).
  * @returns A new route handler function with error handling.
  */
-export function createApiHandler(handler: RouteHandler): RouteHandler {
+export function createApiHandler(handler: RouteHandler, options?: ApiHandlerOptions): RouteHandler {
+  let wrapped = handler;
+
+  if (options?.roles?.length) {
+    wrapped = requireRole(...options.roles)(handler);
+  }
+
   return async (req: NextRequest, ...args: any[]) => {
     try {
-      return await handler(req, ...args);
+      return await wrapped(req, ...args);
     } catch (error) {
       return errorResponse(error, { status: 500 }, req);
     }
