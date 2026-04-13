@@ -363,6 +363,9 @@ export class AIAgentCore {
     if (this.mode === 'investigate') {
       const writingToolNames = [UpdateFileTool.Name, UpdatePrLabelsTool.Name, PatchK8sResourceTool.Name];
       allTools = allTools.filter((tool) => !writingToolNames.includes(tool.name));
+    } else if (this.mode === 'fix') {
+      const directWriteTools = [UpdateFileTool.Name, PatchK8sResourceTool.Name];
+      allTools = allTools.filter((tool) => !directWriteTools.includes(tool.name));
     }
 
     if (this.excludedTools && this.excludedTools.length > 0) {
@@ -398,7 +401,7 @@ export class AIAgentCore {
     if (this.mode === 'investigate') {
       const existing = new Set(tools.map((tool) => tool.name));
       const excluded = new Set(this.excludedTools || []);
-      const fixModeToolHints = [
+      const fixModeToolHints: typeof tools = [
         {
           name: UpdateFileTool.Name,
           description: 'Update repository files (available in fix mode)',
@@ -432,7 +435,7 @@ export class AIAgentCore {
   private buildMcpToolInfos(servers: ResolvedMcpServer[]): McpToolInfo[] {
     const infos: McpToolInfo[] = [];
     for (const server of servers) {
-      for (const tool of server.cachedTools) {
+      for (const tool of server.discoveredTools) {
         infos.push({
           serverName: server.name,
           serverSlug: server.slug,

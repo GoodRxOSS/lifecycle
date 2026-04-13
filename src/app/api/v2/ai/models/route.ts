@@ -21,6 +21,8 @@ import { getLogger } from 'server/lib/logger';
 import AIAgentConfigService from 'server/services/aiAgentConfig';
 import { transformProviderModels } from 'server/services/ai/utils/modelTransformation';
 
+export const dynamic = 'force-dynamic';
+
 /**
  * @openapi
  * /api/v2/ai/models:

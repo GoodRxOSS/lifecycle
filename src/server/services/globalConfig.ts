@@ -15,6 +15,7 @@
  */
 
 import { createAppAuth } from '@octokit/auth-app';
+import { Octokit } from '@octokit/core';
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import { GlobalConfig, LabelsConfig } from './types/globalConfig';
@@ -24,6 +25,7 @@ import { redisClient } from 'server/lib/dependencies';
 
 const REDIS_CACHE_KEY = 'global_config';
 const GITHUB_CACHED_CLIENT_TOKEN = 'github_cached_client_token';
+const GITHUB_CACHED_APP_INFO = 'github_cached_app_info';
 
 export default class GlobalConfigService extends BaseService {
   private static instance: GlobalConfigService;
@@ -151,8 +153,12 @@ export default class GlobalConfigService extends BaseService {
   }
 
   private deserialize(config: unknown): GlobalConfig {
-    const deserializedConfigs = {};
-    for (const [key, value] of Object.entries(config)) {
+    if (!config || typeof config !== 'object') {
+      return {} as GlobalConfig;
+    }
+
+    const deserializedConfigs: Partial<GlobalConfig> = {};
+    for (const [key, value] of Object.entries(config as Record<string, unknown>)) {
       try {
         deserializedConfigs[key as keyof GlobalConfig] = JSON.parse(value as string);
       } catch (e) {
@@ -178,6 +184,41 @@ export default class GlobalConfigService extends BaseService {
     return cachedGithubClientToken?.token;
   }
 
+  async getGithubAppName(refreshCache = false): Promise<string | null> {
+    const cachedGithubAppInfo = (await this.redis.hgetall(GITHUB_CACHED_APP_INFO)) || {};
+    const cachedName = typeof cachedGithubAppInfo?.name === 'string' ? cachedGithubAppInfo.name.trim() : '';
+    if (cachedName && !refreshCache) {
+      return cachedName;
+    }
+
+    try {
+      const appAuth = createAppAuth(APP_AUTH);
+      const { token } = await appAuth({ type: 'app' });
+      const octokit = new Octokit({ auth: token });
+      const response = await octokit.request('GET /app');
+      const resolvedName = String(response.data?.name || response.data?.slug || '').trim();
+
+      if (resolvedName) {
+        await this.redis.hmset(GITHUB_CACHED_APP_INFO, { name: resolvedName });
+        return resolvedName;
+      }
+    } catch (error) {
+      getLogger().warn({ error }, 'Config: GitHub app metadata lookup failed');
+    }
+
+    try {
+      const { app_setup } = await this.getAllConfigs();
+      const configuredName = app_setup?.name?.trim();
+      if (configuredName) {
+        return configuredName;
+      }
+    } catch (error) {
+      getLogger().warn({ error }, 'Config: app setup fallback lookup failed');
+    }
+
+    return null;
+  }
+
   /**
    * Setup a job to refresh the global config cache every hour
    *
@@ -188,6 +229,7 @@ export default class GlobalConfigService extends BaseService {
     if (isDev) {
       try {
         await this.getGithubClientToken(true);
+        await this.getGithubAppName(true);
       } catch (error) {
         getLogger().error({ error }, 'Config: cache refresh failed during=boot');
       }
@@ -211,9 +253,12 @@ export default class GlobalConfigService extends BaseService {
 
     return withLogContext({ correlationId: correlationId || `cache-refresh-${Date.now()}` }, async () => {
       try {
-        getLogger({ stage: LogStage.CONFIG_REFRESH }).info('Config: refreshing type=global_config,github_token');
+        getLogger({ stage: LogStage.CONFIG_REFRESH }).info(
+          'Config: refreshing type=global_config,github_token,github_app'
+        );
         await this.getAllConfigs(true);
         await this.getGithubClientToken(true);
+        await this.getGithubAppName(true);
         getLogger({ stage: LogStage.CONFIG_REFRESH }).debug('GlobalConfig and Github cache refreshed successfully');
       } catch (error) {
         getLogger({ stage: LogStage.CONFIG_FAILED }).error({ error }, 'Config: cache refresh failed');

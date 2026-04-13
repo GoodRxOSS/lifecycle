@@ -133,7 +133,7 @@ describe('ConversationPersistenceService', () => {
     it('returns false when Redis has no conversation', async () => {
       mockGetConversation.mockResolvedValue(null);
 
-      const result = await service.persistConversation('uuid-1', 'my-org/my-repo');
+      const result = await service.persistConversation('uuid-1', 'example-org/example-repo');
 
       expect(result).toBe(false);
       expect(mockGetConversation).toHaveBeenCalledWith('uuid-1');
@@ -147,7 +147,7 @@ describe('ConversationPersistenceService', () => {
         lastActivity: 1000,
       });
 
-      const result = await service.persistConversation('uuid-1', 'my-org/my-repo');
+      const result = await service.persistConversation('uuid-1', 'example-org/example-repo');
 
       expect(result).toBe(false);
       expect(MockConversation.transact).not.toHaveBeenCalled();
@@ -179,12 +179,12 @@ describe('ConversationPersistenceService', () => {
         },
       });
 
-      const result = await service.persistConversation('uuid-1', 'my-org/my-repo', 'gpt-4');
+      const result = await service.persistConversation('uuid-1', 'example-org/example-repo', 'gpt-4');
 
       expect(result).toBe(true);
       expect(insertedConversation).toMatchObject({
         buildUuid: 'uuid-1',
-        repo: 'my-org/my-repo',
+        repo: 'example-org/example-repo',
         model: 'gpt-4',
         messageCount: 3,
         metadata: {
@@ -211,7 +211,7 @@ describe('ConversationPersistenceService', () => {
       let patchedConversation: any;
       let insertedMessages: any[] = [];
       setupTransaction({
-        existingConversation: { buildUuid: 'uuid-2', repo: 'org/repo', model: null },
+        existingConversation: { buildUuid: 'uuid-2', repo: 'example-org/example-repo', model: null },
         existingMessages: [
           { role: 'user', timestamp: 1000 },
           { role: 'assistant', timestamp: 1001 },
@@ -224,7 +224,7 @@ describe('ConversationPersistenceService', () => {
         },
       });
 
-      const result = await service.persistConversation('uuid-2', 'org/repo');
+      const result = await service.persistConversation('uuid-2', 'example-org/example-repo');
 
       expect(result).toBe(true);
       expect(insertedMessages).toHaveLength(1);
@@ -235,7 +235,7 @@ describe('ConversationPersistenceService', () => {
         timestamp: 1002,
       });
       expect(patchedConversation).toMatchObject({
-        repo: 'org/repo',
+        repo: 'example-org/example-repo',
         messageCount: 3,
       });
     });
@@ -272,7 +272,7 @@ describe('ConversationPersistenceService', () => {
         },
       });
 
-      await service.persistConversation('uuid-3', 'org/repo');
+      await service.persistConversation('uuid-3', 'example-org/example-repo');
 
       expect(insertedMessages).toHaveLength(1);
       const storedToolData = insertedMessages[0].metadata.debugToolData;
@@ -290,7 +290,7 @@ describe('ConversationPersistenceService', () => {
 
       MockConversation.transact.mockRejectedValue(new Error('persistent failure'));
 
-      const result = await service.persistConversation('uuid-fail', 'org/repo');
+      const result = await service.persistConversation('uuid-fail', 'example-org/example-repo');
 
       expect(result).toBe(false);
       expect(MockConversation.transact).toHaveBeenCalledTimes(3);

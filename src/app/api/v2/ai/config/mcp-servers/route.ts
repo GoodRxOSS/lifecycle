@@ -17,17 +17,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import { McpConfigService } from 'server/services/ai/mcp/config';
+import { McpConfigService, redactSharedConfigSecrets } from 'server/services/ai/mcp/config';
 import 'server/lib/dependencies';
-
-function redactHeaders(config: any): any {
-  if (!config.headers || typeof config.headers !== 'object') return config;
-  const redacted: Record<string, string> = {};
-  for (const key of Object.keys(config.headers)) {
-    redacted[key] = '******';
-  }
-  return { ...config, headers: redacted };
-}
 
 /**
  * @openapi
@@ -35,11 +26,13 @@ function redactHeaders(config: any): any {
  *   get:
  *     summary: List MCP server configs
  *     description: >
- *       Returns all MCP server configurations for the given scope. Header values are
- *       redacted to "******" in responses for security. Each config includes its
- *       cachedTools array, which is populated during creation and refreshed by the
- *       health endpoint. Use scope "global" (default) for org-wide servers or pass
- *       a repository full name (e.g. "goodrx/lifecycle") for repo-scoped servers.
+ *       Returns all shared MCP definitions for the given scope. Shared
+ *       secrets are redacted in responses. Each MCP includes its transport,
+ *       shared runtime config, auth mode, optional preset key, and shared
+ *       discovery results for MCPs that do not depend on per-user auth.
+ *       Use scope "global" (default) for org-wide MCPs or pass a
+ *       repository full name (e.g. "example-org/example-repo") for repo-scoped
+ *       MCPs.
  *     tags:
  *       - MCP Server Config
  *     operationId: listMcpServerConfigs
@@ -51,11 +44,11 @@ function redactHeaders(config: any): any {
  *           default: global
  *         description: >
  *           Scope to filter by. Use "global" for org-wide configs or a repository
- *           full name (e.g. "goodrx/lifecycle") for repo-scoped configs.
+ *           full name (e.g. "example-org/example-repo") for repo-scoped configs.
  *         example: global
  *     responses:
  *       '200':
- *         description: List of MCP server configurations (header values redacted)
+ *         description: List of shared MCP definitions
  *         content:
  *           application/json:
  *             schema:
@@ -71,7 +64,7 @@ const getHandler = async (req: NextRequest) => {
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
   const service = new McpConfigService();
   const configs = await service.listByScope(scope);
-  const redacted = configs.map((c) => redactHeaders(c.toJSON ? c.toJSON() : c));
+  const redacted = configs.map((config) => redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config));
   return successResponse(redacted, { status: 200 }, req);
 };
 
@@ -81,11 +74,9 @@ const getHandler = async (req: NextRequest) => {
  *   post:
  *     summary: Create an MCP server config
  *     description: >
- *       Creates a new MCP server configuration. Validates the slug format
- *       (lowercase alphanumeric/hyphens, max 100 chars), checks slug uniqueness
- *       within the scope, and validates server connectivity before persisting.
- *       Cached tools are populated from the connectivity check.
- *       Header values are redacted in the response.
+ *       Creates a new shared MCP definition. Validates the slug format
+ *       and uniqueness within the selected scope. Shared discovery runs during
+ *       creation only for MCPs that do not depend on per-user auth.
  *     tags:
  *       - MCP Server Config
  *     operationId: createMcpServerConfig
@@ -103,7 +94,7 @@ const getHandler = async (req: NextRequest) => {
  *             schema:
  *               $ref: '#/components/schemas/GetMcpServerConfigSuccessResponse'
  *       '400':
- *         description: Missing required fields (slug, name, url)
+ *         description: Missing required fields (slug, name, transport)
  *         content:
  *           application/json:
  *             schema:
@@ -115,7 +106,7 @@ const getHandler = async (req: NextRequest) => {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '422':
- *         description: Invalid slug format or MCP server connectivity validation failed
+ *         description: Invalid slug format or non-auth MCP server connectivity validation failed
  *         content:
  *           application/json:
  *             schema:
@@ -129,14 +120,14 @@ const getHandler = async (req: NextRequest) => {
  */
 const postHandler = async (req: NextRequest) => {
   const body = await req.json();
-  const { slug, name, url } = body;
+  const { slug, name, transport } = body;
 
-  if (!slug || !name || !url) {
+  if (!slug || !name || !transport) {
     return NextResponse.json(
       {
         request_id: req.headers.get('x-request-id'),
         data: null,
-        error: { message: 'Missing required fields: slug, name, url' },
+        error: { message: 'Missing required fields: slug, name, transport' },
       },
       { status: 400 }
     );
@@ -146,18 +137,19 @@ const postHandler = async (req: NextRequest) => {
   const input = {
     slug,
     name,
-    url,
     scope: body.scope || 'global',
     description: body.description,
-    headers: body.headers,
-    envVars: body.envVars,
+    transport: body.transport,
+    preset: body.preset,
+    sharedConfig: body.sharedConfig,
+    authConfig: body.authConfig,
     enabled: body.enabled,
     timeout: body.timeout,
   };
 
   try {
     const config = await service.create(input);
-    const result = redactHeaders(config.toJSON ? config.toJSON() : config);
+    const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
     return successResponse(result, { status: 201 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

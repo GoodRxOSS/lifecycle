@@ -116,7 +116,7 @@ describe('POST /api/v2/ai/chat/[buildUuid]/messages/[messageId]/feedback', () =>
 
   it('derives userIdentifier from auth claims when present', async () => {
     const response = await POST(
-      makeRequest({ rating: 'up', messageTimestamp: 1700000000000 }, { preferred_username: 'vmelikyan' }),
+      makeRequest({ rating: 'up', messageTimestamp: 1700000000000 }, { preferred_username: 'sample-user' }),
       {
         params: { buildUuid: 'uuid-3', messageId: '0' },
       }
@@ -129,7 +129,7 @@ describe('POST /api/v2/ai/chat/[buildUuid]/messages/[messageId]/feedback', () =>
       messageTimestamp: 1700000000000,
       rating: 'up',
       text: undefined,
-      userIdentifier: 'vmelikyan',
+      userIdentifier: 'sample-user',
       repo: 'org/repo',
       prNumber: 123,
     });

@@ -32,6 +32,15 @@ import Conversation from './Conversation';
 import ConversationMessage from './ConversationMessage';
 import MessageFeedback from './MessageFeedback';
 import ConversationFeedback from './ConversationFeedback';
+import AgentSession from './AgentSession';
+import AgentPrewarm from './AgentPrewarm';
+import UserApiKey from './UserApiKey';
+import AgentThread from './AgentThread';
+import AgentRun from './AgentRun';
+import AgentMessage from './AgentMessage';
+import AgentPendingAction from './AgentPendingAction';
+import AgentToolExecution from './AgentToolExecution';
+import UserMcpConnection from './UserMcpConnection';
 
 export interface IModels {
   Build: typeof Build;
@@ -52,6 +61,15 @@ export interface IModels {
   ConversationMessage: typeof ConversationMessage;
   MessageFeedback: typeof MessageFeedback;
   ConversationFeedback: typeof ConversationFeedback;
+  AgentSession: typeof AgentSession;
+  AgentPrewarm: typeof AgentPrewarm;
+  UserApiKey: typeof UserApiKey;
+  AgentThread: typeof AgentThread;
+  AgentRun: typeof AgentRun;
+  AgentMessage: typeof AgentMessage;
+  AgentPendingAction: typeof AgentPendingAction;
+  AgentToolExecution: typeof AgentToolExecution;
+  UserMcpConnection: typeof UserMcpConnection;
 }
 
 export {
@@ -73,4 +91,13 @@ export {
   ConversationMessage,
   MessageFeedback,
   ConversationFeedback,
+  AgentSession,
+  AgentPrewarm,
+  UserApiKey,
+  AgentThread,
+  AgentRun,
+  AgentMessage,
+  AgentPendingAction,
+  AgentToolExecution,
+  UserMcpConnection,
 };

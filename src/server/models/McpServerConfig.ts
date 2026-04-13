@@ -15,25 +15,31 @@
  */
 
 import Model from './_Model';
-import { McpCachedTool } from 'server/services/ai/mcp/types';
+import type {
+  McpAuthConfig,
+  McpDiscoveredTool,
+  McpSharedConnectionConfig,
+  McpTransportConfig,
+} from 'server/services/ai/mcp/types';
 
 export default class McpServerConfig extends Model {
   slug!: string;
   name!: string;
   description?: string | null;
-  url!: string;
   scope!: string;
-  headers!: Record<string, string>;
-  envVars!: Record<string, string>;
+  preset!: string | null;
+  transport!: McpTransportConfig;
+  sharedConfig!: McpSharedConnectionConfig;
+  authConfig!: McpAuthConfig;
   enabled!: boolean;
   timeout!: number;
-  cachedTools!: McpCachedTool[];
+  sharedDiscoveredTools!: McpDiscoveredTool[];
 
   static tableName = 'mcp_server_configs';
   static timestamps = true;
   static deleteable = true;
 
   static get jsonAttributes() {
-    return ['headers', 'envVars', 'cachedTools'];
+    return ['transport', 'sharedConfig', 'authConfig', 'sharedDiscoveredTools'];
   }
 }

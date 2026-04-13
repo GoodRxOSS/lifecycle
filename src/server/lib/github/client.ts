@@ -15,10 +15,18 @@
  */
 
 import PQueue from 'p-queue';
-import { constructOctokitClient, constructClientRequestData } from 'server/lib/github/utils';
+import { createAppAuth } from '@octokit/auth-app';
+import { constructOctokitClient, constructClientRequestData, getAppToken } from 'server/lib/github/utils';
 import { CreateOctokitClientOptions } from 'server/lib/github/types';
 import GlobalConfigService from 'server/services/globalConfig';
 import { Metrics } from 'server/lib/metrics';
+import { APP_AUTH } from 'shared/config';
+
+export type WebhookRequest = {
+  headers?: Record<string, string | undefined>;
+  rawBody?: string;
+  body?: unknown;
+};
 
 const queue = new PQueue({
   concurrency: 100,
@@ -27,9 +35,19 @@ const queue = new PQueue({
   carryoverConcurrencyCount: true,
 });
 
-export const createOctokitClient = async ({ accessToken, caller = '' }: CreateOctokitClientOptions = {}) => {
-  let token: string | undefined = await GlobalConfigService.getInstance().getGithubClientToken();
-  if (!token) token = accessToken;
+export const createOctokitClient = async ({
+  accessToken,
+  installationId,
+  caller = '',
+}: CreateOctokitClientOptions = {}): Promise<any> => {
+  let token: string | undefined = accessToken;
+  if (!token && installationId) {
+    const app = createAppAuth(APP_AUTH);
+    token = await getAppToken({ installationId, app });
+  }
+  if (!token) {
+    token = await GlobalConfigService.getInstance().getGithubClientToken();
+  }
   const octokit = constructOctokitClient({ token });
   const metrics = new Metrics('github.api.rate_limit', { caller });
   const eventDetails = {

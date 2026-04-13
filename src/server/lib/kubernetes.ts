@@ -32,6 +32,7 @@ import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 import { staticEnvTolerations } from './helm/constants';
 import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
 import { generateSecretName } from './kubernetes/externalSecret';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 interface VOLUME {
   name: string;
@@ -39,6 +40,14 @@ interface VOLUME {
   persistentVolumeClaim?: {
     claimName: string;
   };
+}
+
+type NamedKubernetesObject = k8s.KubernetesObject & {
+  metadata: k8s.V1ObjectMeta & { name: string; namespace?: string };
+};
+
+function hasMetadataName(spec: k8s.KubernetesObject | undefined): spec is NamedKubernetesObject {
+  return Boolean(spec?.kind && spec?.metadata?.name);
 }
 
 async function namespaceExists(client: k8s.CoreV1Api, name: string): Promise<boolean> {
@@ -57,7 +66,7 @@ async function namespaceExists(client: k8s.CoreV1Api, name: string): Promise<boo
 /**
  * Gets TTL configuration from global config with fallback to defaults
  */
-async function getTTLConfig(buildUUID: string): Promise<{ daysToExpire: number }> {
+async function getTTLConfig(_buildUUID: string): Promise<{ daysToExpire: number }> {
   let daysToExpire = DEFAULT_TTL_INACTIVITY_DAYS;
   try {
     const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
@@ -363,7 +372,7 @@ export async function applyManifests(build: Build): Promise<k8s.KubernetesObject
   const client = k8s.KubernetesObjectApi.makeApiClient(kc);
 
   const specs: k8s.KubernetesObject[] = yaml.loadAll(build.manifest);
-  const validSpecs = specs.filter((s) => s && s.kind && s.metadata);
+  const validSpecs = specs.filter(hasMetadataName);
   const created: k8s.KubernetesObject[] = [];
   for (const spec of validSpecs) {
     try {
@@ -448,7 +457,7 @@ async function generateHttpScaleObject(deploy: Deploy): Promise<Record<string, u
     metadata: {
       name: deploy.uuid,
       labels: {
-        lc_uuid: deploy.deployable?.buildUUID,
+        ...buildLifecycleLabels({ buildUuid: deploy.deployable?.buildUUID }),
       },
     },
     spec: {
@@ -485,7 +494,7 @@ function generateExternalService(deploy: Deploy): Record<string, unknown> {
     metadata: {
       name: `${deploy.uuid}-external-service`,
       labels: {
-        lc_uuid: deploy.deployable?.buildUUID,
+        ...buildLifecycleLabels({ buildUuid: deploy.deployable?.buildUUID }),
       },
     },
     spec: {
@@ -583,9 +592,32 @@ export async function waitForPodReady(build: Build) {
  */
 export async function deleteBuild(build: Build) {
   try {
+    await shellPromise(`kubectl delete all,pvc -l lc_uuid=${build.uuid} --namespace ${build.namespace}`).catch((e) => {
+      getLogger({
+        namespace: build.namespace,
+        error: e,
+      }).warn('Resources: base delete failed');
+      return null;
+    });
+
+    await shellPromise(`kubectl delete mapping -l lc_uuid=${build.uuid} --namespace ${build.namespace}`).catch((e) => {
+      getLogger({
+        namespace: build.namespace,
+        error: e,
+      }).debug('Resources: mapping delete skipped');
+      return null;
+    });
+
     await shellPromise(
-      `kubectl delete all,pvc,mapping,Httpscaledobjects -l lc_uuid=${build.uuid} --namespace ${build.namespace}`
-    );
+      `kubectl delete Httpscaledobjects -l lc_uuid=${build.uuid} --namespace ${build.namespace}`
+    ).catch((e) => {
+      getLogger({
+        namespace: build.namespace,
+        error: e,
+      }).debug('Resources: Httpscaledobjects delete skipped');
+      return null;
+    });
+
     getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
   } catch (e) {
     getLogger({
@@ -600,7 +632,7 @@ export async function deleteBuild(build: Build) {
  * @param name namespace to delete
  */
 export async function deleteNamespace(name: string) {
-  if (!name.startsWith('env-')) return;
+  if (!name.startsWith('env-') && !name.startsWith('sbx-')) return;
 
   try {
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
@@ -693,7 +725,7 @@ export function generatePersistentDisks(
                 namespace,
                 name: `${name}-${disk.name}-claim`,
                 labels: {
-                  lc_uuid: buildUUID,
+                  ...buildLifecycleLabels({ buildUuid: buildUUID }),
                   name: buildUUID,
                 },
               },
@@ -726,7 +758,7 @@ export function generatePersistentDisks(
                 namespace,
                 name: `${name}-${disk.name}-claim`,
                 labels: {
-                  lc_uuid: buildUUID,
+                  ...buildLifecycleLabels({ buildUuid: buildUUID }),
                   name: buildUUID,
                 },
               },
@@ -1235,8 +1267,8 @@ export function generateDeployManifests(
        * Labels for the Kubernetes deployment
        */
       const labels = {
+        ...buildLifecycleLabels({ buildUuid: buildUUID }),
         name: buildUUID,
-        lc_uuid: buildUUID,
         'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
         'tags.datadoghq.com/service': serviceName,
         'tags.datadoghq.com/version': buildUUID,
@@ -1247,8 +1279,8 @@ export function generateDeployManifests(
        * spec template
        */
       const metaDataLabels = {
+        ...buildLifecycleLabels({ buildUuid: buildUUID }),
         name,
-        lc_uuid: buildUUID,
         dd_name: `lifecycle-${buildUUID}`,
         'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
         'tags.datadoghq.com/service': serviceName,
@@ -1461,8 +1493,8 @@ export function generateNodePortManifests(
             namespace,
             name,
             labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
               name,
-              lc_uuid: buildUUID,
               dd_name: `lifecycle-${buildUUID}`,
               'tags.datadoghq.com/env': 'lifecycle',
               'tags.datadoghq.com/service': name,
@@ -1509,8 +1541,8 @@ export function generateGRPCMappings(deploys: Deploy[], buildUUID: string, enabl
             namespace,
             name,
             labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
               name,
-              lc_uuid: buildUUID,
               dd_name: `lifecycle-${buildUUID}`,
               'tags.datadoghq.com/env': 'lifecycle',
               'tags.datadoghq.com/service': name,
@@ -1555,7 +1587,7 @@ export function generateExternalNameManifests(deploys: Deploy[], buildUUID: stri
             namespace,
             name,
             labels: {
-              lc_uuid: buildUUID,
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
               name: buildUUID,
             },
           },
@@ -1609,8 +1641,8 @@ export function generateLoadBalancerManifests(
             namespace,
             name: `internal-lb-${name}`,
             labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
               name: buildUUID,
-              lc_uuid: buildUUID,
             },
           },
           spec: {
@@ -1778,9 +1810,8 @@ export function generateDeployManifest({
           namespace,
           name: deploy.uuid,
           labels: {
+            ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
             name: build.uuid,
-            lc_uuid: build.uuid,
-            deploy_uuid: deploy.uuid,
           },
         },
         spec: {
@@ -2205,9 +2236,8 @@ function generateSingleDeploymentManifest({
         'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
       },
       labels: {
+        ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
         name,
-        lc_uuid: build.uuid,
-        deploy_uuid: deploy.uuid,
         dd_name: `lifecycle-${build.uuid}`,
         'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
         ...datadogLabels,
@@ -2230,9 +2260,8 @@ function generateSingleDeploymentManifest({
             'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
           },
           labels: {
+            ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
             name,
-            lc_uuid: build.uuid,
-            deploy_uuid: deploy.uuid,
             dd_name: `lifecycle-${build.uuid}`,
             'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
             ...datadogLabels,

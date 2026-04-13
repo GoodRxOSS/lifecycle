@@ -36,12 +36,29 @@ if aws_role:
 ##################################
 lifecycle_app = 'lifecycle-app'
 app_namespace = 'lifecycle-app'
+kind_cluster_name = 'lfc'
+agent_session_workspace_image = 'lifecycle-workspace'
+agent_session_workspace_image_ref = '{}:latest'.format(agent_session_workspace_image)
+legacy_agent_session_workspace_image_ref = 'lifecycle-agent:latest'
+agent_session_workspace_image_deps = [
+    '.dockerignore',
+    'sysops/dockerfiles/agent.Dockerfile',
+    'sysops/workspace-gateway',
+]
 
 # NGROK Configuration
 ngrok_authtoken = os.getenv("NGROK_AUTHTOKEN", "")
 ngrok_domain = os.getenv("NGROK_LIFECYCLE_DOMAIN", "")
 ngrok_keycloak_domain = os.getenv("NGROK_KEYCLOAK_DOMAIN", "")
 ngrok_ui_domain = os.getenv("NGROK_LIFECYCLE_UI_DOMAIN", "")
+keycloak_scheme = "https" if ngrok_keycloak_domain else "http"
+app_scheme = "https" if ngrok_domain else "http"
+ui_scheme = "https" if ngrok_ui_domain else "http"
+keycloak_host = ngrok_keycloak_domain or "localhost:8081"
+app_host = ngrok_domain or "localhost:5001"
+ui_host = ngrok_ui_domain or "localhost:3000"
+company_idp_origin = "{}://{}".format(keycloak_scheme, keycloak_host)
+internal_keycloak_origin = "http://lifecycle-keycloak.{}.svc.cluster.local:8080".format(app_namespace)
 
 
 ##################################
@@ -66,6 +83,7 @@ secret_create_generic(
 # Bitnami Redis (Helm)
 ##################################
 helm_repo('bitnami', 'https://charts.bitnami.com/bitnami')
+helm_repo('ingress-nginx-chart', 'https://kubernetes.github.io/ingress-nginx')
 
 helm_resource(
     name='redis',
@@ -101,6 +119,36 @@ k8s_yaml('sysops/tilt/local-postgres.yaml')
 k8s_resource(
     'local-postgres',
     port_forwards=['5434:5432'],
+    labels=["infra"]
+)
+
+##################################
+# Agent Session Workspace Runtime
+##################################
+local_resource(
+    'agent-session-workspace-image',
+    cmd='docker build -t {workspace_ref} -t {legacy_ref} -f sysops/dockerfiles/agent.Dockerfile . && kind load docker-image {workspace_ref} {legacy_ref} --name {cluster}'.format(
+        workspace_ref=agent_session_workspace_image_ref,
+        legacy_ref=legacy_agent_session_workspace_image_ref,
+        cluster=kind_cluster_name,
+    ),
+    deps=agent_session_workspace_image_deps,
+    labels=['infra'],
+)
+
+##################################
+# Ingress NGINX (Helm)
+##################################
+helm_resource(
+    name='ingress-nginx',
+    chart='ingress-nginx-chart/ingress-nginx',
+    namespace='ingress-nginx',
+    resource_deps=['ingress-nginx-chart'],
+    flags=[
+        '--create-namespace',
+        '--version', '4.15.1',
+        '-f', 'sysops/tilt/ingress-nginx-values.yaml',
+    ],
     labels=["infra"]
 )
 
@@ -164,15 +212,19 @@ helm_set_args = [
     'namespace={}'.format(app_namespace),
     'image.repository={}'.format(lifecycle_app),
     'image.tag=dev',
-    'keycloak.url={}'.format(ngrok_keycloak_domain or 'localhost'),
-    'keycloak.appUrl={}'.format(ngrok_domain or 'localhost:5001'),
-    'keycloak.uiUrl={}'.format(ngrok_ui_domain or 'localhost:3000'),
+    'keycloak.scheme={}'.format(keycloak_scheme),
+    'keycloak.url={}'.format(keycloak_host),
+    'keycloak.appUrl={}'.format(app_host),
+    'keycloak.uiScheme={}'.format(ui_scheme),
+    'keycloak.uiUrl={}'.format(ui_host),
+    'secrets.keycloakIssuerPublic={}/realms/lifecycle'.format(company_idp_origin),
+    'secrets.keycloakIssuerInternal={}/realms/lifecycle'.format(internal_keycloak_origin),
     # Update IDP URLs to use ngrok domain or localhost
-    'keycloak.companyIdp.tokenUrl=https://{}/realms/company/protocol/openid-connect/token'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.tokenUrl=http://localhost:8080/realms/company/protocol/openid-connect/token',
-    'keycloak.companyIdp.authorizationUrl=https://{}/realms/company/protocol/openid-connect/auth'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.authorizationUrl=http://localhost:8080/realms/company/protocol/openid-connect/auth',
-    'keycloak.companyIdp.userInfoUrl=https://{}/realms/company/protocol/openid-connect/userinfo'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.userInfoUrl=http://localhost:8080/realms/company/protocol/openid-connect/userinfo',
-    'keycloak.companyIdp.jwksUrl=https://{}/realms/company/protocol/openid-connect/certs'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.jwksUrl=http://localhost:8080/realms/company/protocol/openid-connect/certs',
-    'keycloak.companyIdp.issuer=https://{}/realms/company'.format(ngrok_keycloak_domain) if ngrok_keycloak_domain else 'keycloak.companyIdp.issuer=http://localhost:8080/realms/company',
+    'keycloak.companyIdp.tokenUrl={}/realms/company/protocol/openid-connect/token'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.authorizationUrl={}/realms/company/protocol/openid-connect/auth'.format(company_idp_origin),
+    'keycloak.companyIdp.userInfoUrl={}/realms/company/protocol/openid-connect/userinfo'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.jwksUrl={}/realms/company/protocol/openid-connect/certs'.format(internal_keycloak_origin),
+    'keycloak.companyIdp.issuer={}/realms/company'.format(company_idp_origin),
     'secrets.aiApiKey={}'.format(os.getenv("AI_API_KEY", "")),
     'secrets.geminiApiKey={}'.format(os.getenv("GEMINI_API_KEY", "")),
 ]
@@ -219,7 +271,7 @@ for r in patched_deploy:
 
         # Don't add postgres/redis deps for keycloak resources
         if "keycloak" not in name:
-            resource_deps = ['local-postgres', 'redis']
+            resource_deps = ['local-postgres', 'redis', 'agent-session-workspace-image']
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']

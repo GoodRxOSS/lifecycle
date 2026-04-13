@@ -20,8 +20,14 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import { getLogger } from 'server/lib/logger';
 import AIAgentConfigService from 'server/services/aiAgentConfig';
 import JsonSchema from 'jsonschema';
-import { aiAgentRepoOverrideSchema } from 'server/lib/validation/aiAgentConfigSchemas';
+import {
+  aiAgentAdditiveRulesUpdateSchema,
+  aiAgentRepoOverrideSchema,
+} from 'server/lib/validation/aiAgentConfigSchemas';
 import { normalizeRepoFullName } from 'server/lib/normalizeRepoFullName';
+import { AIAgentConfigValidationError } from 'server/lib/validation/aiAgentConfigValidator';
+
+export const dynamic = 'force-dynamic';
 
 function parseFullNameParams(segments: string[]): { fullName: string; isEffective: boolean } {
   if (segments.length < 2) {
@@ -68,14 +74,14 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *         schema:
  *           type: string
  *         description: The repository owner
- *         example: goodrx
+ *         example: example-org
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
- *         example: lifecycle
+ *         example: example-repo
  *     responses:
  *       '200':
  *         description: Repository AI agent config override
@@ -118,14 +124,14 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *         schema:
  *           type: string
  *         description: The repository owner
- *         example: goodrx
+ *         example: example-org
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
- *         example: lifecycle
+ *         example: example-repo
  *     responses:
  *       '200':
  *         description: Effective merged AI agent configuration
@@ -191,14 +197,14 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *         schema:
  *           type: string
  *         description: The repository owner
- *         example: goodrx
+ *         example: example-org
  *       - in: path
  *         name: repo
  *         required: true
  *         schema:
  *           type: string
  *         description: The repository name
- *         example: lifecycle
+ *         example: example-repo
  *     requestBody:
  *       required: true
  *       content:
@@ -217,6 +223,50 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *           Validation error. Possible reasons: JSON schema violation,
  *           systemPromptOverride exceeds maximum length, excluded tool is a core tool,
  *           invalid exclusion pattern, overly broad file pattern.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   patch:
+ *     summary: Update repository additive rules
+ *     description: >
+ *       Updates only the additiveRules field for a repository override while preserving
+ *       any other repository-specific settings that already exist.
+ *     tags:
+ *       - AI Agent Config
+ *     operationId: patchRepoAIAgentAdditiveRules
+ *     parameters:
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AIAgentAdditiveRulesUpdateRequest'
+ *     responses:
+ *       '200':
+ *         description: Updated repository AI agent config override
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetRepoAIAgentConfigSuccessResponse'
+ *       '400':
+ *         description: Validation error
  *         content:
  *           application/json:
  *             schema:
@@ -264,14 +314,7 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
   try {
     await service.setRepoConfig(parsed.fullName, body as any);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message.includes('exceeds maximum') ||
-        error.message.includes('core tool') ||
-        error.message.includes('exclusion pattern') ||
-        error.message.includes('not allowed') ||
-        error.message.includes('Overly broad'))
-    ) {
+    if (error instanceof AIAgentConfigValidationError) {
       return errorResponse(error, { status: 400 }, req);
     }
     throw error;
@@ -280,6 +323,54 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
   const updated = await service.getRepoConfig(parsed.fullName);
   getLogger().info('AIAgentConfig: repo config updated repo=' + parsed.fullName + ' via=api');
   return successResponse({ repoFullName: parsed.fullName, config: updated }, { status: 200 }, req);
+};
+
+const patchHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+  let parsed: { fullName: string; isEffective: boolean };
+  try {
+    parsed = parseFullNameParams(params.fullName);
+  } catch {
+    return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
+  }
+
+  if (parsed.isEffective) {
+    return errorResponse(
+      new Error('Cannot PATCH the effective config endpoint. Use the repo config endpoint instead.'),
+      { status: 400 },
+      req
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(new Error('Invalid JSON in request body'), { status: 400 }, req);
+  }
+
+  const validator = new JsonSchema.Validator();
+  const result = validator.validate(body, aiAgentAdditiveRulesUpdateSchema);
+
+  if (!result.valid) {
+    const messages = result.errors.map((e) => e.stack).join('; ');
+    return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
+  }
+
+  const service = AIAgentConfigService.getInstance();
+
+  try {
+    const updated = await service.updateRepoAdditiveRules(
+      parsed.fullName,
+      (body as { additiveRules: string[] }).additiveRules
+    );
+    getLogger().info('AIAgentConfig: repo additive rules updated repo=' + parsed.fullName + ' via=api');
+    return successResponse({ repoFullName: parsed.fullName, config: updated }, { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof AIAgentConfigValidationError) {
+      return errorResponse(error, { status: 400 }, req);
+    }
+    throw error;
+  }
 };
 
 /**
@@ -349,4 +440,5 @@ const deleteHandler = async (req: NextRequest, { params }: { params: { fullName:
 
 export const GET = createApiHandler(getHandler);
 export const PUT = createApiHandler(putHandler);
+export const PATCH = createApiHandler(patchHandler);
 export const DELETE = createApiHandler(deleteHandler);

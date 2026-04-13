@@ -15,6 +15,8 @@ limitations under the License.
 */}}
 
 {{- if .Values.keycloak.enabled }}
+{{- $keycloakScheme := .Values.keycloak.scheme | default "https" -}}
+{{- $keycloakOrigin := printf "%s://%s" $keycloakScheme .Values.keycloak.url -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -55,8 +57,8 @@ spec:
         - '--db-url-host={{ .Release.Name }}-keycloak-postgresql'
         - '--db-username=$(KC_DB_USER)'
         - '--db-password=$(KC_DB_PASSWORD)'
-        - '--hostname=https://{{ .Values.keycloak.url }}'
-        - '--hostname-admin=https://{{ .Values.keycloak.url }}'
+        - '--hostname={{ $keycloakOrigin }}'
+        - '--hostname-admin={{ $keycloakOrigin }}'
         - '--hostname-strict=false'
         - '--health-enabled=true'
         - '--import-realm'

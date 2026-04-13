@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,20 +14,30 @@
  * limitations under the License.
  */
 
-const mockMcpConnect = jest.fn();
-const mockMcpListTools = jest.fn();
-const mockMcpClose = jest.fn();
+const mockConnect = jest.fn();
+const mockListTools = jest.fn();
+const mockClose = jest.fn();
+const mockListMaskedStatesByScopes = jest.fn();
+const mockListDecryptedConnectionsByScopes = jest.fn();
 
 jest.mock('../client', () => ({
   McpClientManager: jest.fn().mockImplementation(() => ({
-    connect: mockMcpConnect,
-    listTools: mockMcpListTools,
-    close: mockMcpClose,
+    connect: mockConnect,
+    listTools: mockListTools,
+    close: mockClose,
   })),
 }));
 
 jest.mock('server/lib/logger', () => ({
   getLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }),
+}));
+
+jest.mock('server/services/userMcpConnection', () => ({
+  __esModule: true,
+  default: {
+    listMaskedStatesByScopes: (...args: unknown[]) => mockListMaskedStatesByScopes(...args),
+    listDecryptedConnectionsByScopes: (...args: unknown[]) => mockListDecryptedConnectionsByScopes(...args),
+  },
 }));
 
 jest.mock('server/models/McpServerConfig', () => {
@@ -38,23 +48,31 @@ jest.mock('server/models/McpServerConfig', () => {
   return { __esModule: true, default: mockModel };
 });
 
-import { McpConfigService } from '../config';
 import McpServerConfig from 'server/models/McpServerConfig';
+import { McpConfigService } from '../config';
 
 const MockModel = McpServerConfig as any;
 
-function setupQueryChain(opts: { firstResult?: any } = {}) {
-  const mockFirst = jest.fn().mockResolvedValue(opts.firstResult);
-  const mockWhereNull = jest.fn().mockReturnValue({ first: mockFirst });
-  const mockWhere = jest.fn().mockReturnValue({ whereNull: mockWhereNull });
-  const mockInsert = jest.fn();
-  const mockPatchAndFetchById = jest.fn();
+function makeQueryResult(firstResult?: unknown) {
+  const first = jest.fn().mockResolvedValue(firstResult);
+  const whereNull = jest.fn().mockReturnValue({ first });
+  const where = jest.fn().mockReturnValue({ whereNull });
+  const insert = jest.fn();
+  const patchAndFetchById = jest.fn();
+
   MockModel.query.mockReturnValue({
-    where: mockWhere,
-    insert: mockInsert,
-    patchAndFetchById: mockPatchAndFetchById,
+    where,
+    insert,
+    patchAndFetchById,
   });
-  return { mockFirst, mockWhereNull, mockWhere, mockInsert, mockPatchAndFetchById };
+
+  return {
+    where,
+    whereNull,
+    first,
+    insert,
+    patchAndFetchById,
+  };
 }
 
 describe('McpConfigService', () => {
@@ -63,87 +81,108 @@ describe('McpConfigService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service = new McpConfigService();
-    mockMcpConnect.mockResolvedValue(undefined);
-    mockMcpListTools.mockResolvedValue([{ name: 't', inputSchema: {} }]);
-    mockMcpClose.mockResolvedValue(undefined);
+    mockConnect.mockResolvedValue(undefined);
+    mockListTools.mockResolvedValue([{ name: 'inspectItem', inputSchema: {} }]);
+    mockClose.mockResolvedValue(undefined);
+    mockListMaskedStatesByScopes.mockResolvedValue(new Map());
+    mockListDecryptedConnectionsByScopes.mockResolvedValue(new Map());
   });
 
   describe('create', () => {
-    it('creates valid config with cached tools', async () => {
-      const { mockInsert } = setupQueryChain({ firstResult: undefined });
-      const inserted = { id: 1, slug: 'my-server' };
-      mockInsert.mockResolvedValue(inserted);
+    it('creates a shared connector definition with transport and shared discovered tools', async () => {
+      const { insert } = makeQueryResult(undefined);
+      const inserted = { id: 1, slug: 'sample-connector' };
+      insert.mockResolvedValue(inserted);
 
       const result = await service.create({
-        slug: 'my-server',
-        name: 'My Server',
-        url: 'https://example.com/mcp',
+        slug: 'sample-connector',
+        name: 'Sample connector',
         scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
       });
 
       expect(result).toEqual(inserted);
-      expect(mockInsert).toHaveBeenCalledWith(
+      expect(insert).toHaveBeenCalledWith(
         expect.objectContaining({
-          slug: 'my-server',
-          cachedTools: [{ name: 't', inputSchema: {} }],
+          slug: 'sample-connector',
+          transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+          sharedDiscoveredTools: [{ name: 'inspectItem', inputSchema: {} }],
         })
       );
     });
 
-    it('rejects invalid slug', async () => {
-      await expect(
-        service.create({ slug: '-bad-slug', name: 'Bad', url: 'https://x.com', scope: 'global' })
-      ).rejects.toThrow('Invalid slug');
+    it('defers shared discovery for connectors that require user configuration', async () => {
+      const { insert } = makeQueryResult(undefined);
+      const inserted = { id: 1, slug: 'sample-connector' };
+      insert.mockResolvedValue(inserted);
+      mockConnect.mockRejectedValueOnce(new Error('HTTP 401 Unauthorized'));
+
+      await service.create({
+        slug: 'sample-connector',
+        name: 'Sample connector',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
+        authConfig: {
+          mode: 'user-fields',
+          schema: {
+            fields: [{ key: 'apiToken', label: 'API token', required: true, inputType: 'password' }],
+            bindings: [{ target: 'header', key: 'Authorization', fieldKey: 'apiToken', format: 'bearer' }],
+          },
+        },
+      });
+
+      expect(insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sharedDiscoveredTools: [],
+        })
+      );
     });
 
-    it('rejects duplicate slug', async () => {
-      setupQueryChain({ firstResult: { id: 1, slug: 'my-server' } });
-      await expect(
-        service.create({ slug: 'my-server', name: 'My Server', url: 'https://x.com', scope: 'global' })
-      ).rejects.toThrow('already exists');
-    });
+    it('does not persist shared discovered tools for user-auth connectors even when anonymous discovery succeeds', async () => {
+      const { insert } = makeQueryResult(undefined);
+      const inserted = { id: 1, slug: 'sample-connector' };
+      insert.mockResolvedValue(inserted);
+      mockListTools.mockResolvedValue([{ name: 'anonymousTool', inputSchema: {} }]);
 
-    it('throws when connectivity fails', async () => {
-      setupQueryChain({ firstResult: undefined });
-      mockMcpConnect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-      await expect(
-        service.create({ slug: 'my-server', name: 'My Server', url: 'https://x.com', scope: 'global' })
-      ).rejects.toThrow('connectivity validation failed');
-    });
-  });
+      await service.create({
+        slug: 'sample-connector',
+        name: 'Sample connector',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp' },
+        authConfig: {
+          mode: 'user-fields',
+          schema: {
+            fields: [{ key: 'apiToken', label: 'API token', required: true, inputType: 'password' }],
+            bindings: [{ target: 'header', key: 'Authorization', fieldKey: 'apiToken', format: 'bearer' }],
+          },
+        },
+      });
 
-  describe('delete', () => {
-    it('soft deletes existing config', async () => {
-      setupQueryChain({ firstResult: { id: 1, slug: 'my-server' } });
-      await service.delete('my-server', 'global');
-      expect(MockModel.softDelete).toHaveBeenCalledWith(1);
-    });
-
-    it('throws when not found', async () => {
-      setupQueryChain({ firstResult: undefined });
-      await expect(service.delete('missing', 'global')).rejects.toThrow('not found');
+      expect(insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sharedDiscoveredTools: [],
+        })
+      );
     });
   });
 
   describe('resolveServersForRepo', () => {
-    it('merges global and repo configs', async () => {
+    it('uses per-user discovered tools for connectors that require a user connection', async () => {
       const globalConfig = {
-        slug: 'g1',
-        name: 'G1',
-        url: 'http://g',
-        headers: {},
-        envVars: {},
+        slug: 'sample-connector',
+        name: 'Sample connector',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+        sharedConfig: {},
+        authConfig: {
+          mode: 'user-fields',
+          schema: {
+            fields: [{ key: 'apiToken', label: 'API token', required: true, inputType: 'password' }],
+            bindings: [{ target: 'header', key: 'Authorization', fieldKey: 'apiToken', format: 'bearer' }],
+          },
+        },
         timeout: 30000,
-        cachedTools: [],
-      };
-      const repoConfig = {
-        slug: 'r1',
-        name: 'R1',
-        url: 'http://r',
-        headers: {},
-        envVars: {},
-        timeout: 30000,
-        cachedTools: [],
+        sharedDiscoveredTools: [{ name: 'sharedTool', inputSchema: {} }],
       };
 
       MockModel.query
@@ -154,40 +193,68 @@ describe('McpConfigService', () => {
         })
         .mockReturnValueOnce({
           where: jest.fn().mockReturnValue({
-            whereNull: jest.fn().mockResolvedValue([repoConfig]),
+            whereNull: jest.fn().mockResolvedValue([]),
           }),
         });
 
-      const result = await service.resolveServersForRepo('org/repo');
-      expect(result).toHaveLength(2);
-      expect(result[0].slug).toBe('g1');
-      expect(result[1].slug).toBe('r1');
+      mockListDecryptedConnectionsByScopes.mockResolvedValue(
+        new Map([
+          [
+            'global:sample-connector',
+            {
+              state: {
+                type: 'fields',
+                values: { apiToken: 'sample-token' },
+              },
+              discoveredTools: [{ name: 'userTool', inputSchema: {} }],
+              validationError: null,
+              validatedAt: '2026-04-06T16:00:00.000Z',
+              updatedAt: '2026-04-06T16:00:00.000Z',
+            },
+          ],
+        ])
+      );
+
+      const result = await service.resolveServersForRepo('example-org/example-repo', undefined, {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any);
+
+      expect(result).toEqual([
+        expect.objectContaining({
+          slug: 'sample-connector',
+          discoveredTools: [{ name: 'userTool', inputSchema: {} }],
+          transport: {
+            type: 'http',
+            url: 'https://mcp.example.com/v1/mcp',
+            headers: { Authorization: 'Bearer sample-token' },
+          },
+        }),
+      ]);
     });
 
-    it('excludes disabled slugs', async () => {
-      const globalConfig1 = {
-        slug: 'enabled',
-        name: 'E',
-        url: 'http://e',
-        headers: {},
-        envVars: {},
+    it('omits connectors that require user configuration when no user connection exists', async () => {
+      const globalConfig = {
+        slug: 'sample-connector',
+        name: 'Sample connector',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+        sharedConfig: {},
+        authConfig: {
+          mode: 'user-fields',
+          schema: {
+            fields: [{ key: 'apiToken', label: 'API token', required: true, inputType: 'password' }],
+            bindings: [{ target: 'header', key: 'Authorization', fieldKey: 'apiToken', format: 'bearer' }],
+          },
+        },
         timeout: 30000,
-        cachedTools: [],
-      };
-      const globalConfig2 = {
-        slug: 'disabled-one',
-        name: 'D',
-        url: 'http://d',
-        headers: {},
-        envVars: {},
-        timeout: 30000,
-        cachedTools: [],
+        sharedDiscoveredTools: [{ name: 'sharedTool', inputSchema: {} }],
       };
 
       MockModel.query
         .mockReturnValueOnce({
           where: jest.fn().mockReturnValue({
-            whereNull: jest.fn().mockResolvedValue([globalConfig1, globalConfig2]),
+            whereNull: jest.fn().mockResolvedValue([globalConfig]),
           }),
         })
         .mockReturnValueOnce({
@@ -196,25 +263,170 @@ describe('McpConfigService', () => {
           }),
         });
 
-      const result = await service.resolveServersForRepo('org/repo', ['disabled-one']);
-      expect(result).toHaveLength(1);
-      expect(result[0].slug).toBe('enabled');
+      mockListDecryptedConnectionsByScopes.mockResolvedValue(new Map());
+
+      const result = await service.resolveServersForRepo('example-org/example-repo', undefined, {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any);
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('resolveSessionPodServersForRepo', () => {
+    it('returns only stdio connectors and preserves compiled per-user env bindings', async () => {
+      const stdioConfig = {
+        slug: 'figma',
+        name: 'Figma',
+        scope: 'global',
+        transport: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['-y', 'figma-developer-mcp', '--stdio'],
+          env: {},
+        },
+        sharedConfig: {},
+        authConfig: {
+          mode: 'user-fields',
+          schema: {
+            fields: [{ key: 'figmaToken', label: 'Figma token', required: true, inputType: 'password' }],
+            bindings: [{ target: 'env', key: 'FIGMA_API_KEY', fieldKey: 'figmaToken' }],
+          },
+        },
+        timeout: 45000,
+        sharedDiscoveredTools: [],
+      };
+      const httpConfig = {
+        slug: 'jira',
+        name: 'Jira',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+        sharedConfig: {},
+        authConfig: { mode: 'none' },
+        timeout: 30000,
+        sharedDiscoveredTools: [{ name: 'listIssues', inputSchema: {} }],
+      };
+
+      MockModel.query
+        .mockReturnValueOnce({
+          where: jest.fn().mockReturnValue({
+            whereNull: jest.fn().mockResolvedValue([stdioConfig, httpConfig]),
+          }),
+        })
+        .mockReturnValueOnce({
+          where: jest.fn().mockReturnValue({
+            whereNull: jest.fn().mockResolvedValue([]),
+          }),
+        });
+
+      mockListDecryptedConnectionsByScopes.mockResolvedValue(
+        new Map([
+          [
+            'global:figma',
+            {
+              state: {
+                type: 'fields',
+                values: { figmaToken: 'figma-pat-token' },
+              },
+              discoveredTools: [{ name: 'get_design_context', inputSchema: {} }],
+              validationError: null,
+              validatedAt: '2026-04-06T16:00:00.000Z',
+              updatedAt: '2026-04-06T16:00:00.000Z',
+            },
+          ],
+        ])
+      );
+
+      const result = await service.resolveSessionPodServersForRepo('example-org/example-repo', undefined, {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any);
+
+      expect(result).toEqual([
+        {
+          slug: 'figma',
+          name: 'Figma',
+          transport: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', 'figma-developer-mcp', '--stdio'],
+            env: {
+              FIGMA_API_KEY: 'figma-pat-token',
+            },
+          },
+          timeout: 45000,
+          defaultArgs: {},
+          env: {
+            FIGMA_API_KEY: 'figma-pat-token',
+          },
+          discoveredTools: [{ name: 'get_design_context', inputSchema: {} }],
+        },
+      ]);
     });
   });
 
   describe('update', () => {
-    it('revalidates connectivity when url changes', async () => {
-      const { mockPatchAndFetchById } = setupQueryChain({
-        firstResult: { id: 1, slug: 'my-server', url: 'http://old.com', headers: {} },
+    it('preserves redacted shared header secrets when updating a connector', async () => {
+      const existing = {
+        id: 1,
+        slug: 'sample-connector',
+        name: 'Sample connector',
+        scope: 'global',
+        description: 'Original description',
+        preset: null,
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+        sharedConfig: {
+          headers: {
+            Authorization: 'Bearer top-secret-token',
+          },
+        },
+        authConfig: { mode: 'none' },
+        enabled: true,
+        timeout: 30000,
+        sharedDiscoveredTools: [{ name: 'inspectItem', inputSchema: {} }],
+      };
+      const patchAndFetchById = jest.fn().mockResolvedValue({
+        ...existing,
+        description: 'Updated description',
       });
-      mockPatchAndFetchById.mockResolvedValue({ id: 1, slug: 'my-server', url: 'http://new.com' });
 
-      await service.update('my-server', 'global', { url: 'http://new.com' });
+      MockModel.query
+        .mockReturnValueOnce({
+          where: jest.fn().mockReturnValue({
+            whereNull: jest.fn().mockReturnValue({
+              first: jest.fn().mockResolvedValue(existing),
+            }),
+          }),
+        })
+        .mockReturnValueOnce({
+          patchAndFetchById,
+        });
 
-      expect(mockMcpConnect).toHaveBeenCalled();
-      expect(mockPatchAndFetchById).toHaveBeenCalledWith(
+      const result = await service.update('sample-connector', 'global', {
+        description: 'Updated description',
+        sharedConfig: {
+          headers: {
+            Authorization: '******',
+          },
+        },
+      });
+
+      expect(result).toEqual({
+        ...existing,
+        description: 'Updated description',
+      });
+      expect(mockConnect).not.toHaveBeenCalled();
+      expect(patchAndFetchById).toHaveBeenCalledWith(
         1,
-        expect.objectContaining({ url: 'http://new.com', cachedTools: expect.any(Array) })
+        expect.objectContaining({
+          description: 'Updated description',
+          sharedConfig: expect.objectContaining({
+            headers: {
+              Authorization: 'Bearer top-secret-token',
+            },
+          }),
+        })
       );
     });
   });

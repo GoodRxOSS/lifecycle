@@ -20,18 +20,28 @@ import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_
 import { RegistryAuthConfig, generateRegistryLoginScript } from './registryAuth';
 import { mergeKeyValueArrays, getResourceType } from 'shared/utils';
 import { merge } from 'lodash';
-import { renderTemplate, generateTolerationsCustomValues, generateNodeSelector } from 'server/lib/helm/utils';
+import {
+  renderTemplate,
+  generateTolerationsCustomValues,
+  generateNodeSelector,
+  serializeHelmEnvArray,
+  serializeHelmEnvMap,
+  scaffoldHelmSecretRefs,
+} from 'server/lib/helm/utils';
 import { staticEnvTolerations } from 'server/lib/helm/constants';
 import {
   createServiceAccountUsingExistingFunction,
   setupDeployServiceAccountInNamespace,
 } from 'server/lib/kubernetes/rbac';
 import { getLogger } from 'server/lib/logger';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 import {
   NativeHelmConfig as GlobalNativeHelmConfig,
   NativeHelmPostRendererConfig,
 } from 'server/services/types/globalConfig';
+
+export type HelmPostRendererConfig = NativeHelmPostRendererConfig;
 
 export interface HelmDeployOptions {
   namespace: string;
@@ -330,8 +340,8 @@ export async function mergeHelmConfigWithGlobal(deploy: Deploy): Promise<any> {
   const helm: any = deployable.helm || {};
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
   const chartName = helm?.chart?.name;
-  const helmDefaults = configs.helmDefaults || {};
-  const chartConfig = chartName ? configs[chartName] || {} : {};
+  const helmDefaults: any = configs.helmDefaults || {};
+  const chartConfig: any = chartName ? configs[chartName] || {} : {};
 
   if (!chartName && !helmDefaults.nativeHelm) {
     return helm;
@@ -417,6 +427,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },
@@ -437,6 +448,7 @@ export async function createNamespacedRoleAndBinding(namespace: string, serviceA
       name: roleBindingName,
       namespace: namespace,
       labels: {
+        ...buildLifecycleLabels(),
         'app.kubernetes.io/name': 'native-helm',
         'app.kubernetes.io/component': 'rbac',
       },
@@ -714,8 +726,16 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
 
   if (chartType === ChartType.ORG_CHART) {
     const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
-    const initEnvVars = merge(deploy.initEnv || {}, build.commentRuntimeEnv || {});
-    const appEnvVars = merge(deploy.env, build.commentRuntimeEnv || {});
+    const initEnvVars = scaffoldHelmSecretRefs(
+      merge(deploy.initEnv || {}, build.commentRuntimeEnv || {}),
+      deployable?.name,
+      deployable?.builder?.engine
+    );
+    const appEnvVars = scaffoldHelmSecretRefs(
+      merge(deploy.env || {}, build.commentRuntimeEnv || {}),
+      deployable?.name,
+      deployable?.builder?.engine
+    );
     const resourceType = getResourceType(helm?.type);
 
     const partialCustomValues = mergeKeyValueArrays(
@@ -733,16 +753,12 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
 
     if (deploy.initDockerImage) {
       customValues.push(`${resourceType}.initImage=${deploy.initDockerImage}`);
-      Object.entries(initEnvVars).forEach(([key, value]) => {
-        customValues.push(`${resourceType}.initEnv.${key}=${value}`);
-      });
+      customValues.push(...serializeHelmEnvMap(initEnvVars, `${resourceType}.initEnv`));
     } else {
       customValues.push(`${resourceType}.disableInit=true`);
     }
 
-    Object.entries(appEnvVars).forEach(([key, value]) => {
-      customValues.push(`${resourceType}.env.${key}="${value}"`);
-    });
+    customValues.push(...serializeHelmEnvMap(appEnvVars, `${resourceType}.env`, { quoteStringValues: true }));
 
     const isDisableIngressHost: boolean | undefined = helm?.disableIngressHost;
     const grpc: boolean | undefined = helm?.grpc;
@@ -812,7 +828,7 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     // Handle environment variables for LOCAL charts with envMapping
     if (helm?.envMapping && helm?.docker) {
       const initEnvVars = merge(deploy.initEnv || {}, build.commentRuntimeEnv || {});
-      const appEnvVars = merge(deploy.env, build.commentRuntimeEnv || {});
+      const appEnvVars = merge(deploy.env || {}, build.commentRuntimeEnv || {});
 
       // Process app environment variables
       if (helm.envMapping.app && Object.keys(appEnvVars).length > 0) {
@@ -845,31 +861,15 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
  * @param format - Either 'array' or 'map' format
  * @param path - The Helm path where the values should be set
  */
-function transformEnvVarsToHelmFormat(
-  envVars: Record<string, string>,
-  format: 'array' | 'map',
-  path: string
-): string[] {
-  const values: string[] = [];
-
+function transformEnvVarsToHelmFormat(envVars: Record<string, any>, format: 'array' | 'map', path: string): string[] {
   if (format === 'array') {
-    // Array format: path[0].name=KEY, path[0].value=VALUE
-    let index = 0;
-    for (const [key, value] of Object.entries(envVars)) {
-      values.push(`${path}[${index}].name=${key}`);
-      values.push(`${path}[${index}].value=${value}`);
-      index++;
-    }
-  } else if (format === 'map') {
-    // Map format: path.KEY=VALUE
-    for (const [key, value] of Object.entries(envVars)) {
-      // Replace underscores with double underscores for Helm compatibility
-      const helmKey = key.replace(/_/g, '__');
-      values.push(`${path}.${helmKey}="${value}"`);
-    }
+    return serializeHelmEnvArray(envVars, path);
   }
 
-  return values;
+  return serializeHelmEnvMap(envVars, path, {
+    keyTransform: (key) => key.replace(/_/g, '__'),
+    quoteStringValues: true,
+  });
 }
 
 export function getRepoUrl(repoName: string): string {

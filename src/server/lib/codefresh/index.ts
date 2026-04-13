@@ -23,7 +23,7 @@ import { Metrics } from 'server/lib/metrics';
 import { ENVIRONMENT } from 'shared/config';
 import GlobalConfigService from 'server/services/globalConfig';
 
-export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid = '' }) => {
+export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid: _uuid = '' }) => {
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   const repoName = ecrRepo;
   const registryId = (lifecycleDefaults.ecrDomain?.split?.('.') || [])[0] || '';
@@ -113,8 +113,8 @@ export const triggerPipeline = async (
 };
 
 export async function kubeContextStep({ context, cluster }: { context: string; cluster: string }) {
-  let awsAccessKeyId = '${{DEPLOYMENT_AWS_ACCESS_KEY_ID}}';
-  let awsSecretAccessKey = '${{DEPLOYMENT_AWS_SECRET_ACCESS_KEY}}';
+  let awsAccessKeyId = '${{AWS_ACCESS_KEY_ID_LFC_PRD}}';
+  let awsSecretAccessKey = '${{AWS_SECRET_ACCESS_KEY_LFC_PRD}}';
 
   if (ENVIRONMENT === 'staging') {
     awsAccessKeyId = '${{STG_AWS_ACCESS_KEY_ID}}';

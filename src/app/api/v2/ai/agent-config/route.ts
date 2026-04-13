@@ -20,7 +20,14 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import { getLogger } from 'server/lib/logger';
 import AIAgentConfigService from 'server/services/aiAgentConfig';
 import JsonSchema from 'jsonschema';
-import { aiAgentConfigSchema } from 'server/lib/validation/aiAgentConfigSchemas';
+import {
+  aiAgentAdditiveRulesUpdateSchema,
+  aiAgentApprovalPolicyUpdateSchema,
+  aiAgentConfigPatchSchema,
+  aiAgentConfigSchema,
+} from 'server/lib/validation/aiAgentConfigSchemas';
+import { AIAgentConfigValidationError } from 'server/lib/validation/aiAgentConfigValidator';
+import type { ApprovalPolicyConfig } from 'server/services/types/aiAgentConfig';
 
 /**
  * @openapi
@@ -98,6 +105,40 @@ const getHandler = async (req: NextRequest) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   patch:
+ *     summary: Patch global AI agent configuration
+ *     description: >
+ *       Updates one patchable global AI agent configuration section without replacing
+ *       the rest of the configuration. Supported patch targets are additive rules and
+ *       approval policy. This avoids revalidating unrelated provider/model settings.
+ *     tags:
+ *       - AI Agent Config
+ *     operationId: patchGlobalAIAgentConfig
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AIAgentConfigPatchRequest'
+ *     responses:
+ *       '200':
+ *         description: Updated global AI agent configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetGlobalAIAgentConfigSuccessResponse'
+ *       '400':
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const putHandler = async (req: NextRequest) => {
   let body: unknown;
@@ -120,12 +161,7 @@ const putHandler = async (req: NextRequest) => {
   try {
     await service.setGlobalConfig(body as any);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message.includes('exceeds maximum') ||
-        error.message.includes('core tool') ||
-        error.message.includes('exclusion pattern'))
-    ) {
+    if (error instanceof AIAgentConfigValidationError) {
       return errorResponse(error, { status: 400 }, req);
     }
     throw error;
@@ -135,5 +171,56 @@ const putHandler = async (req: NextRequest) => {
   return successResponse(updatedConfig, { status: 200 }, req);
 };
 
+const patchHandler = async (req: NextRequest) => {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(new Error('Invalid JSON in request body'), { status: 400 }, req);
+  }
+
+  const validator = new JsonSchema.Validator();
+  const result = validator.validate(body, aiAgentConfigPatchSchema);
+
+  if (!result.valid) {
+    const messages = result.errors.map((e) => e.stack).join('; ');
+    return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
+  }
+
+  const service = AIAgentConfigService.getInstance();
+
+  try {
+    if ('additiveRules' in (body as Record<string, unknown>)) {
+      const additiveRulesResult = validator.validate(body, aiAgentAdditiveRulesUpdateSchema);
+      if (!additiveRulesResult.valid) {
+        const messages = additiveRulesResult.errors.map((e) => e.stack).join('; ');
+        return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
+      }
+
+      const updatedConfig = await service.updateGlobalAdditiveRules(
+        (body as { additiveRules: string[] }).additiveRules
+      );
+      return successResponse(updatedConfig, { status: 200 }, req);
+    }
+
+    const approvalPolicyResult = validator.validate(body, aiAgentApprovalPolicyUpdateSchema);
+    if (!approvalPolicyResult.valid) {
+      const messages = approvalPolicyResult.errors.map((e) => e.stack).join('; ');
+      return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
+    }
+
+    const updatedConfig = await service.updateGlobalApprovalPolicy(
+      (body as { approvalPolicy: ApprovalPolicyConfig }).approvalPolicy
+    );
+    return successResponse(updatedConfig, { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof AIAgentConfigValidationError) {
+      return errorResponse(error, { status: 400 }, req);
+    }
+    throw error;
+  }
+};
+
 export const GET = createApiHandler(getHandler);
 export const PUT = createApiHandler(putHandler);
+export const PATCH = createApiHandler(patchHandler);
