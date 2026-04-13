@@ -17,24 +17,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import { McpConfigService } from 'server/services/ai/mcp/config';
+import { McpConfigService, redactSharedConfigSecrets } from 'server/services/ai/mcp/config';
 import 'server/lib/dependencies';
-
-function redactHeaders(config: any): any {
-  if (!config.headers || typeof config.headers !== 'object') return config;
-  const redacted: Record<string, string> = {};
-  for (const key of Object.keys(config.headers)) {
-    redacted[key] = '******';
-  }
-  return { ...config, headers: redacted };
-}
 
 /**
  * @openapi
  * /api/v2/ai/config/mcp-servers/{slug}:
  *   get:
  *     summary: Get an MCP server config by slug
- *     description: Returns a single MCP server configuration. Header values are redacted in the response.
+ *     description: >
+ *       Returns a single shared MCP definition for the requested
+ *       scope. Shared secrets are redacted in the response.
  *     tags:
  *       - MCP Server Config
  *     operationId: getMcpServerConfig
@@ -88,7 +81,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     );
   }
 
-  const result = redactHeaders(config.toJSON ? config.toJSON() : config);
+  const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
   return successResponse(result, { status: 200 }, req);
 };
 
@@ -98,9 +91,10 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
  *   put:
  *     summary: Update an MCP server config
  *     description: >
- *       Updates an existing MCP server configuration. If url or headers are
- *       changed, server connectivity is re-validated before persisting.
- *       Header values are redacted in the response.
+ *       Updates an existing shared MCP definition. If the transport,
+ *       shared runtime config, auth mode, or preset changes, shared discovery
+ *       is revalidated when possible. MCPs that depend on per-user auth
+ *       can still be updated without shared credentials.
  *     tags:
  *       - MCP Server Config
  *     operationId: updateMcpServerConfig
@@ -137,7 +131,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '422':
- *         description: MCP server connectivity validation failed
+ *         description: Shared MCP discovery validation failed
  *         content:
  *           application/json:
  *             schema:
@@ -157,7 +151,7 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
 
   try {
     const config = await service.update(slug, scope, body);
-    const result = redactHeaders(config.toJSON ? config.toJSON() : config);
+    const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
     return successResponse(result, { status: 200 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -30,6 +30,25 @@ jest.mock('server/services/userApiKey', () => ({
   },
 }));
 
+jest.mock('server/services/aiAgentConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getEffectiveConfig: jest.fn().mockResolvedValue({
+        enabled: true,
+        providers: [
+          {
+            name: 'anthropic',
+            enabled: true,
+            apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+            models: [],
+          },
+        ],
+      }),
+    })),
+  },
+}));
+
 const mockFetch = jest.fn();
 (global as any).fetch = mockFetch;
 
@@ -40,13 +59,24 @@ const mockGetMaskedKey = UserApiKeyService.getMaskedKey as jest.Mock;
 const mockStoreKey = UserApiKeyService.storeKey as jest.Mock;
 const mockDeleteKey = UserApiKeyService.deleteKey as jest.Mock;
 
-function makeRequest(body?: unknown, userClaims?: Record<string, unknown>): NextRequest {
+function makeRequest(
+  body?: unknown,
+  userClaims?: Record<string, unknown>,
+  searchParams?: Record<string, string>
+): NextRequest {
   const headers = new Headers([['x-request-id', 'req-test']]);
   if (userClaims) {
     headers.set('x-user', Buffer.from(JSON.stringify(userClaims), 'utf8').toString('base64url'));
   }
+
+  const nextUrl = new URL('http://localhost/api/v2/ai/agent/api-keys');
+  for (const [key, value] of Object.entries(searchParams || {})) {
+    nextUrl.searchParams.set(key, value);
+  }
+
   return {
     headers,
+    nextUrl,
     json: jest.fn().mockResolvedValue(body || {}),
   } as unknown as NextRequest;
 }
@@ -116,6 +146,11 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       expect(json.data.hasKey).toBe(true);
       expect(json.data.maskedKey).toBe('sk-ant...xyz9');
     });
+
+    it('returns 400 when provider is invalid', async () => {
+      const res = await GET(makeRequest(undefined, { sub: 'user-1' }, { provider: 'sample' }));
+      expect(res.status).toBe(400);
+    });
   });
 
   describe('POST', () => {
@@ -126,13 +161,20 @@ describe('API /api/v2/ai/agent/api-keys', () => {
     });
 
     it('returns 400 when apiKey is missing', async () => {
-      const res = await POST(makeRequest({}, { sub: 'user-1' }));
+      const res = await POST(makeRequest({ provider: 'anthropic' }, { sub: 'user-1' }));
       expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when provider is missing', async () => {
+      const res = await POST(makeRequest({ apiKey: 'sk-test' }, { sub: 'user-1' }));
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error.message).toContain('provider must be one of');
     });
 
     it('returns 400 when Anthropic validation fails', async () => {
       mockFetch.mockResolvedValue({ status: 401 });
-      const res = await POST(makeRequest({ apiKey: 'bad-key' }, { sub: 'user-1' }));
+      const res = await POST(makeRequest({ provider: 'anthropic', apiKey: 'bad-key' }, { sub: 'user-1' }));
       expect(res.status).toBe(400);
       const json = await res.json();
       expect(json.error.message).toContain('Invalid API key');
@@ -143,12 +185,12 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       mockStoreKey.mockResolvedValue(undefined);
       mockGetMaskedKey.mockResolvedValue({
         provider: 'anthropic',
-        maskedKey: 'sk-ant...abcd',
+        maskedKey: 'sample...abcd',
         updatedAt: '2026-01-01T00:00:00Z',
       });
-      const res = await POST(makeRequest({ apiKey: 'sk-ant-valid' }, { sub: 'user-1' }));
+      const res = await POST(makeRequest({ provider: 'anthropic', apiKey: 'sample-provider-key' }, { sub: 'user-1' }));
       expect(res.status).toBe(201);
-      expect(mockStoreKey).toHaveBeenCalledWith('user-1', 'anthropic', 'sk-ant-valid', null);
+      expect(mockStoreKey).toHaveBeenCalledWith('user-1', 'anthropic', 'sample-provider-key', null);
     });
 
     it('stores the key for the local dev user when auth is disabled', async () => {
@@ -158,14 +200,14 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       mockStoreKey.mockResolvedValue(undefined);
       mockGetMaskedKey.mockResolvedValue({
         provider: 'anthropic',
-        maskedKey: 'sk-ant...abcd',
+        maskedKey: 'sample...abcd',
         updatedAt: '2026-01-01T00:00:00Z',
       });
 
-      const res = await POST(makeRequest({ apiKey: 'sk-ant-valid' }));
+      const res = await POST(makeRequest({ provider: 'anthropic', apiKey: 'sample-provider-key' }));
 
       expect(res.status).toBe(201);
-      expect(mockStoreKey).toHaveBeenCalledWith('vm-local', 'anthropic', 'sk-ant-valid', null);
+      expect(mockStoreKey).toHaveBeenCalledWith('vm-local', 'anthropic', 'sample-provider-key', null);
     });
   });
 
@@ -178,13 +220,18 @@ describe('API /api/v2/ai/agent/api-keys', () => {
 
     it('returns 404 when no key exists', async () => {
       mockDeleteKey.mockResolvedValue(false);
-      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }, { provider: 'anthropic' }));
       expect(res.status).toBe(404);
+    });
+
+    it('returns 400 when provider is missing', async () => {
+      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }));
+      expect(res.status).toBe(400);
     });
 
     it('returns 200 on successful deletion', async () => {
       mockDeleteKey.mockResolvedValue(true);
-      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }, { provider: 'anthropic' }));
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json.data.deleted).toBe(true);

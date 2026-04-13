@@ -93,6 +93,459 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['items', 'total', 'current', 'limit'],
         },
 
+        AgentApiKeyStatus: {
+          type: 'object',
+          properties: {
+            provider: { type: 'string', enum: ['anthropic', 'openai', 'gemini'] },
+            hasKey: { type: 'boolean' },
+            maskedKey: { type: 'string', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['provider', 'hasKey'],
+        },
+
+        AgentApiKeyStatusResponse: {
+          type: 'object',
+          properties: {
+            hasKey: { type: 'boolean' },
+            provider: { type: 'string', enum: ['anthropic', 'openai', 'gemini'] },
+            maskedKey: { type: 'string', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            providers: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentApiKeyStatus' },
+            },
+          },
+          required: ['hasKey', 'provider', 'providers'],
+        },
+
+        AgentSettings: {
+          type: 'object',
+          properties: {
+            providers: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentApiKeyStatus' },
+            },
+            mcpConnections: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentMcpConnection' },
+            },
+          },
+          required: ['providers', 'mcpConnections'],
+        },
+
+        RepositorySearchResult: {
+          type: 'object',
+          properties: {
+            githubRepositoryId: { type: 'integer' },
+            fullName: { type: 'string' },
+            htmlUrl: { type: 'string', nullable: true },
+          },
+          required: ['githubRepositoryId', 'fullName'],
+        },
+
+        SearchRepositoriesResponse: {
+          type: 'object',
+          properties: {
+            repositories: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/RepositorySearchResult' },
+            },
+          },
+          required: ['repositories'],
+        },
+
+        SearchRepositoriesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/SearchRepositoriesResponse' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AgentModel: {
+          type: 'object',
+          properties: {
+            provider: { type: 'string' },
+            modelId: { type: 'string' },
+            displayName: { type: 'string' },
+            default: { type: 'boolean' },
+            maxTokens: { type: 'integer' },
+            inputCostPerMillion: { type: 'number', nullable: true },
+            outputCostPerMillion: { type: 'number', nullable: true },
+          },
+          required: ['provider', 'modelId', 'displayName', 'default', 'maxTokens'],
+        },
+
+        AgentApprovalMode: {
+          type: 'string',
+          enum: ['allow', 'require_approval', 'deny'],
+        },
+
+        AgentApprovalPolicy: {
+          type: 'object',
+          properties: {
+            defaultMode: { $ref: '#/components/schemas/AgentApprovalMode' },
+            rules: {
+              type: 'object',
+              properties: {
+                read: { $ref: '#/components/schemas/AgentApprovalMode' },
+                workspace_write: { $ref: '#/components/schemas/AgentApprovalMode' },
+                shell_exec: { $ref: '#/components/schemas/AgentApprovalMode' },
+                git_write: { $ref: '#/components/schemas/AgentApprovalMode' },
+                network_access: { $ref: '#/components/schemas/AgentApprovalMode' },
+                deploy_k8s_mutation: { $ref: '#/components/schemas/AgentApprovalMode' },
+                external_mcp_write: { $ref: '#/components/schemas/AgentApprovalMode' },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: false,
+        },
+
+        AgentUIMessageMetadata: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', nullable: true },
+            threadId: { type: 'string', nullable: true },
+            runId: { type: 'string', nullable: true },
+            provider: { type: 'string', nullable: true },
+            model: { type: 'string', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            completedAt: { type: 'string', format: 'date-time', nullable: true },
+            usage: { type: 'object', nullable: true, additionalProperties: true },
+          },
+          additionalProperties: true,
+        },
+
+        AgentUIMessagePart: {
+          type: 'object',
+          properties: {
+            type: { type: 'string' },
+          },
+          required: ['type'],
+          additionalProperties: true,
+        },
+
+        AgentUIMessage: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            role: { type: 'string', enum: ['system', 'user', 'assistant', 'tool'] },
+            metadata: { $ref: '#/components/schemas/AgentUIMessageMetadata' },
+            parts: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentUIMessagePart' },
+            },
+          },
+          required: ['id', 'role', 'parts'],
+          additionalProperties: true,
+        },
+
+        AgentThread: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            sessionId: { type: 'string', nullable: true },
+            title: { type: 'string', nullable: true },
+            isDefault: { type: 'boolean' },
+            archivedAt: { type: 'string', format: 'date-time', nullable: true },
+            lastRunAt: { type: 'string', format: 'date-time', nullable: true },
+            metadata: { type: 'object', additionalProperties: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'isDefault', 'metadata'],
+        },
+
+        AgentSessionSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            buildUuid: { type: 'string', nullable: true },
+            baseBuildUuid: { type: 'string', nullable: true },
+            buildKind: { $ref: '#/components/schemas/BuildKind' },
+            userId: { type: 'string' },
+            ownerGithubUsername: { type: 'string', nullable: true },
+            podName: { type: 'string' },
+            namespace: { type: 'string' },
+            pvcName: { type: 'string' },
+            model: { type: 'string' },
+            status: { type: 'string', enum: ['starting', 'active', 'ended', 'error'] },
+            repo: { type: 'string', nullable: true },
+            branch: { type: 'string', nullable: true },
+            primaryRepo: { type: 'string', nullable: true },
+            primaryBranch: { type: 'string', nullable: true },
+            services: { type: 'array', items: { type: 'string' } },
+            workspaceRepos: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            selectedServices: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            startupFailure: { type: 'object', additionalProperties: true, nullable: true },
+            lastActivity: { type: 'string', format: 'date-time', nullable: true },
+            endedAt: { type: 'string', format: 'date-time', nullable: true },
+            threadCount: { type: 'integer' },
+            pendingActionsCount: { type: 'integer' },
+            lastRunAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            editorUrl: { type: 'string' },
+          },
+          required: [
+            'id',
+            'buildUuid',
+            'baseBuildUuid',
+            'buildKind',
+            'userId',
+            'ownerGithubUsername',
+            'podName',
+            'namespace',
+            'pvcName',
+            'model',
+            'status',
+            'repo',
+            'branch',
+            'primaryRepo',
+            'primaryBranch',
+            'services',
+            'workspaceRepos',
+            'selectedServices',
+            'startupFailure',
+            'lastActivity',
+            'endedAt',
+            'threadCount',
+            'pendingActionsCount',
+            'lastRunAt',
+            'createdAt',
+            'updatedAt',
+            'editorUrl',
+          ],
+        },
+
+        AgentRun: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            threadId: { type: 'string', nullable: true },
+            sessionId: { type: 'string', nullable: true },
+            status: {
+              type: 'string',
+              enum: [
+                'queued',
+                'running',
+                'waiting_for_approval',
+                'waiting_for_input',
+                'completed',
+                'failed',
+                'cancelled',
+              ],
+            },
+            provider: { type: 'string' },
+            model: { type: 'string' },
+            queuedAt: { type: 'string', format: 'date-time', nullable: true },
+            startedAt: { type: 'string', format: 'date-time', nullable: true },
+            completedAt: { type: 'string', format: 'date-time', nullable: true },
+            cancelledAt: { type: 'string', format: 'date-time', nullable: true },
+            usageSummary: { type: 'object', additionalProperties: true },
+            policySnapshot: { type: 'object', additionalProperties: true },
+            streamState: { type: 'object', additionalProperties: true },
+            error: { type: 'object', additionalProperties: true, nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'status', 'provider', 'model', 'usageSummary', 'policySnapshot', 'streamState'],
+        },
+
+        AgentPendingAction: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            threadId: { type: 'string', nullable: true },
+            runId: { type: 'string', nullable: true },
+            kind: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'approved', 'denied'] },
+            capabilityKey: { type: 'string' },
+            title: { type: 'string' },
+            description: { type: 'string' },
+            payload: { type: 'object', additionalProperties: true },
+            resolution: { type: 'object', additionalProperties: true, nullable: true },
+            resolvedAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'kind', 'status', 'capabilityKey', 'title', 'description', 'payload'],
+        },
+
+        AgentToolExecution: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            threadId: { type: 'string', nullable: true },
+            runId: { type: 'string', nullable: true },
+            pendingActionId: { type: 'string', nullable: true },
+            source: { type: 'string' },
+            serverSlug: { type: 'string', nullable: true },
+            toolName: { type: 'string' },
+            args: { type: 'object', additionalProperties: true },
+            result: { type: 'object', additionalProperties: true, nullable: true },
+            status: { type: 'string', enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] },
+            safetyLevel: { type: 'string', nullable: true },
+            approved: { type: 'boolean', nullable: true },
+            startedAt: { type: 'string', format: 'date-time', nullable: true },
+            completedAt: { type: 'string', format: 'date-time', nullable: true },
+            durationMs: { type: 'integer', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: [
+            'id',
+            'threadId',
+            'runId',
+            'pendingActionId',
+            'source',
+            'serverSlug',
+            'toolName',
+            'args',
+            'result',
+            'status',
+            'safetyLevel',
+            'approved',
+            'startedAt',
+            'completedAt',
+            'durationMs',
+            'createdAt',
+            'updatedAt',
+          ],
+        },
+
+        AgentAdminThreadSummary: {
+          allOf: [
+            { $ref: '#/components/schemas/AgentThread' },
+            {
+              type: 'object',
+              properties: {
+                messageCount: { type: 'integer' },
+                runCount: { type: 'integer' },
+                pendingActionsCount: { type: 'integer' },
+                latestRun: { $ref: '#/components/schemas/AgentRun', nullable: true },
+              },
+              required: ['messageCount', 'runCount', 'pendingActionsCount', 'latestRun'],
+            },
+          ],
+        },
+
+        AgentAdminSessionDetail: {
+          type: 'object',
+          properties: {
+            session: { $ref: '#/components/schemas/AgentSessionSummary' },
+            threads: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentAdminThreadSummary' },
+            },
+          },
+          required: ['session', 'threads'],
+        },
+
+        AgentAdminThreadConversation: {
+          type: 'object',
+          properties: {
+            session: { $ref: '#/components/schemas/AgentSessionSummary' },
+            thread: { $ref: '#/components/schemas/AgentAdminThreadSummary' },
+            messages: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentUIMessage' },
+            },
+            runs: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentRun' },
+            },
+            pendingActions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentPendingAction' },
+            },
+            toolExecutions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentToolExecution' },
+            },
+          },
+          required: ['session', 'thread', 'messages', 'runs', 'pendingActions', 'toolExecutions'],
+        },
+
+        AgentAdminMcpServerCoverage: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string' },
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            scope: { type: 'string' },
+            preset: { type: 'string', nullable: true },
+            transport: { $ref: '#/components/schemas/McpTransportConfig' },
+            sharedConfig: { $ref: '#/components/schemas/McpSharedConnectionConfig' },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
+            enabled: { type: 'boolean' },
+            timeout: { type: 'integer' },
+            connectionRequired: { type: 'boolean' },
+            sharedDiscoveredTools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpDiscoveredTool' },
+            },
+            userConnectionCount: { type: 'integer' },
+            latestUserValidatedAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: [
+            'slug',
+            'name',
+            'description',
+            'scope',
+            'preset',
+            'transport',
+            'sharedConfig',
+            'authConfig',
+            'enabled',
+            'timeout',
+            'connectionRequired',
+            'sharedDiscoveredTools',
+            'userConnectionCount',
+            'latestUserValidatedAt',
+            'createdAt',
+            'updatedAt',
+          ],
+        },
+
+        AgentAdminMcpServerUserConnection: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string' },
+            githubUsername: { type: 'string', nullable: true },
+            authMode: { type: 'string', enum: ['none', 'fields', 'oauth'] },
+            stale: { type: 'boolean' },
+            configuredFieldKeys: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            discoveredToolCount: { type: 'integer' },
+            validationError: { type: 'string', nullable: true },
+            validatedAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: [
+            'userId',
+            'githubUsername',
+            'authMode',
+            'stale',
+            'configuredFieldKeys',
+            'discoveredToolCount',
+            'validationError',
+            'validatedAt',
+            'updatedAt',
+          ],
+        },
+
         // ===================================================================
         // Resource-Specific Schemas
         // ===================================================================
@@ -695,7 +1148,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         Repository: {
           type: 'object',
           properties: {
-            fullName: { type: 'string', example: 'goodrx/lifecycle' },
+            fullName: { type: 'string', example: 'example-org/example-repo' },
           },
           required: ['fullName'],
         },
@@ -765,8 +1218,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             id: { type: 'integer' },
             title: { type: 'string', example: 'Add new feature' },
-            fullName: { type: 'string', example: 'goodrx/lifecycle' },
-            githubLogin: { type: 'string', example: 'lifecycle-bot' },
+            fullName: { type: 'string', example: 'example-org/example-repo' },
+            githubLogin: { type: 'string', example: 'sample-bot' },
             pullRequestNumber: { type: 'integer', example: 42 },
             status: { type: 'string', example: 'open' },
             branchName: { type: 'string', example: 'feature/new-feature' },
@@ -868,7 +1321,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             name: { type: 'string' },
             enabled: { type: 'boolean' },
-            apiKeyEnvVar: { type: 'string' },
+            apiKeyEnvVar: {
+              type: 'string',
+              pattern: '^[A-Z_][A-Z0-9_]*$',
+              description: 'Environment variable name used to resolve the provider API key.',
+            },
             models: {
               type: 'array',
               items: { $ref: '#/components/schemas/AIAgentModelConfig' },
@@ -881,6 +1338,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             enabled: { type: 'boolean' },
+            approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
             providers: {
               type: 'array',
               items: { $ref: '#/components/schemas/AIAgentProviderConfig' },
@@ -891,6 +1349,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+            allowedWritePatterns: { type: 'array', items: { type: 'string' } },
             maxIterations: { type: 'integer', description: 'Maximum orchestration loop iterations' },
             maxToolCalls: { type: 'integer', description: 'Maximum total tool calls per query' },
             maxRepeatedCalls: {
@@ -922,11 +1381,43 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             enabled: { type: 'boolean' },
             maxMessagesPerSession: { type: 'integer' },
             sessionTTL: { type: 'integer' },
+            approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
             additiveRules: { type: 'array', items: { type: 'string' } },
             systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
+            allowedWritePatterns: { type: 'array', items: { type: 'string' } },
           },
+        },
+
+        AIAgentAdditiveRulesUpdateRequest: {
+          type: 'object',
+          properties: {
+            additiveRules: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['additiveRules'],
+          additionalProperties: false,
+        },
+
+        AIAgentApprovalPolicyUpdateRequest: {
+          type: 'object',
+          properties: {
+            approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
+          },
+          required: ['approvalPolicy'],
+          additionalProperties: false,
+        },
+
+        AIAgentConfigPatchRequest: {
+          type: 'object',
+          properties: {
+            additiveRules: { type: 'array', items: { type: 'string' } },
+            approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
+          },
+          additionalProperties: false,
+          minProperties: 1,
+          maxProperties: 1,
+          description: 'Provide exactly one patch target: additiveRules or approvalPolicy.',
         },
 
         AIAgentRepoConfigEntry: {
@@ -996,6 +1487,120 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 data: {
                   type: 'array',
                   items: { $ref: '#/components/schemas/AIAgentRepoConfigEntry' },
+                },
+              },
+            },
+          ],
+        },
+
+        AgentSessionToolRule: {
+          type: 'object',
+          properties: {
+            toolKey: { type: 'string' },
+            mode: {
+              type: 'string',
+              enum: ['allow', 'deny'],
+            },
+          },
+          required: ['toolKey', 'mode'],
+        },
+
+        AgentSessionControlPlaneConfig: {
+          type: 'object',
+          properties: {
+            systemPrompt: { type: 'string', maxLength: 50000 },
+            appendSystemPrompt: { type: 'string', maxLength: 50000 },
+            toolRules: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentSessionToolRule' },
+            },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionToolInventoryEntry: {
+          type: 'object',
+          properties: {
+            toolKey: { type: 'string' },
+            toolName: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            serverSlug: { type: 'string' },
+            serverName: { type: 'string' },
+            sourceType: {
+              type: 'string',
+              enum: ['builtin', 'mcp'],
+            },
+            sourceScope: { type: 'string' },
+            capabilityKey: { type: 'string' },
+            approvalMode: { $ref: '#/components/schemas/AgentApprovalMode' },
+            scopeRuleMode: {
+              type: 'string',
+              enum: ['inherit', 'allow', 'deny'],
+            },
+            effectiveRuleMode: {
+              type: 'string',
+              enum: ['inherit', 'allow', 'deny'],
+            },
+            availability: {
+              type: 'string',
+              enum: ['available', 'blocked_by_tool_rule', 'blocked_by_policy'],
+            },
+          },
+          required: [
+            'toolKey',
+            'toolName',
+            'serverSlug',
+            'serverName',
+            'sourceType',
+            'sourceScope',
+            'capabilityKey',
+            'approvalMode',
+            'scopeRuleMode',
+            'effectiveRuleMode',
+            'availability',
+          ],
+        },
+
+        GetGlobalAgentSessionConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentSessionControlPlaneConfig' },
+              },
+            },
+          ],
+        },
+
+        GetRepoAgentSessionConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    repoFullName: { type: 'string' },
+                    config: { $ref: '#/components/schemas/AgentSessionControlPlaneConfig' },
+                  },
+                  required: ['repoFullName', 'config'],
+                },
+              },
+            },
+          ],
+        },
+
+        GetAdminAgentToolInventorySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentSessionToolInventoryEntry' },
                 },
               },
             },
@@ -1612,7 +2217,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         // MCP Server Config Schemas
         // ===================================================================
 
-        McpCachedTool: {
+        McpDiscoveredTool: {
           type: 'object',
           properties: {
             name: { type: 'string' },
@@ -1630,6 +2235,210 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['name', 'inputSchema'],
         },
 
+        McpTransportConfig: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['http'] },
+                url: { type: 'string', example: 'https://mcp.example.com/v1/mcp' },
+                headers: {
+                  type: 'object',
+                  additionalProperties: { type: 'string' },
+                },
+              },
+              required: ['type', 'url'],
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['sse'] },
+                url: { type: 'string', example: 'https://mcp.example.com/sse' },
+                headers: {
+                  type: 'object',
+                  additionalProperties: { type: 'string' },
+                },
+              },
+              required: ['type', 'url'],
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['stdio'] },
+                command: { type: 'string', example: 'npx' },
+                args: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  example: ['-y', '@example/mcp-server'],
+                },
+                env: {
+                  type: 'object',
+                  additionalProperties: { type: 'string' },
+                },
+              },
+              required: ['type', 'command'],
+            },
+          ],
+        },
+
+        McpSharedConnectionConfig: {
+          type: 'object',
+          properties: {
+            headers: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+              description: 'Shared header values. Redacted in responses.',
+            },
+            query: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+            env: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+            defaultArgs: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+          },
+        },
+
+        McpConfigField: {
+          type: 'object',
+          properties: {
+            key: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            placeholder: { type: 'string' },
+            required: { type: 'boolean' },
+            inputType: { type: 'string', enum: ['text', 'password', 'email', 'url'] },
+          },
+          required: ['key', 'label'],
+        },
+
+        McpConfigBinding: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                target: { type: 'string', enum: ['header'] },
+                key: { type: 'string' },
+                fieldKey: { type: 'string' },
+                format: { type: 'string', enum: ['plain', 'bearer'] },
+              },
+              required: ['target', 'key', 'fieldKey'],
+            },
+            {
+              type: 'object',
+              properties: {
+                target: { type: 'string', enum: ['header'] },
+                key: { type: 'string' },
+                format: { type: 'string', enum: ['basic'] },
+                usernameFieldKey: { type: 'string' },
+                passwordFieldKey: { type: 'string' },
+              },
+              required: ['target', 'key', 'format', 'usernameFieldKey', 'passwordFieldKey'],
+            },
+            {
+              type: 'object',
+              properties: {
+                target: { type: 'string', enum: ['query', 'env', 'defaultArg'] },
+                key: { type: 'string' },
+                fieldKey: { type: 'string' },
+              },
+              required: ['target', 'key', 'fieldKey'],
+            },
+          ],
+        },
+
+        McpFieldSchema: {
+          type: 'object',
+          properties: {
+            fields: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpConfigField' },
+            },
+            bindings: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpConfigBinding' },
+            },
+          },
+          required: ['fields', 'bindings'],
+        },
+
+        McpAuthConfig: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['none'] },
+              },
+              required: ['mode'],
+            },
+            {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['user-fields'] },
+                schema: { $ref: '#/components/schemas/McpFieldSchema' },
+              },
+              required: ['mode', 'schema'],
+            },
+            {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['shared-fields'] },
+                schema: { $ref: '#/components/schemas/McpFieldSchema' },
+              },
+              required: ['mode', 'schema'],
+            },
+            {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['oauth'] },
+                provider: { type: 'string', enum: ['generic-oauth2.1'] },
+                scope: { type: 'string' },
+                resource: { type: 'string' },
+                clientName: { type: 'string' },
+                instructions: { type: 'string' },
+              },
+              required: ['mode', 'provider'],
+            },
+          ],
+        },
+
+        McpPresetField: {
+          allOf: [
+            { $ref: '#/components/schemas/McpConfigField' },
+            {
+              type: 'object',
+              properties: {
+                target: { type: 'string', enum: ['header', 'query', 'env', 'defaultArg'] },
+                targetKey: { type: 'string' },
+              },
+              required: ['target', 'targetKey'],
+            },
+          ],
+        },
+
+        McpPreset: {
+          type: 'object',
+          properties: {
+            key: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            transportType: { type: 'string', enum: ['http', 'sse', 'stdio'] },
+            endpointPlaceholder: { type: 'string', nullable: true },
+            commandPlaceholder: { type: 'string', nullable: true },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
+            sharedFields: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpPresetField' },
+            },
+          },
+          required: ['key', 'label', 'description', 'transportType', 'authConfig'],
+        },
+
         McpServerConfig: {
           type: 'object',
           properties: {
@@ -1637,47 +2446,54 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             slug: {
               type: 'string',
               description: 'Unique identifier (lowercase alphanumeric and hyphens, max 100 chars).',
-              example: 'my-mcp-server',
+              example: 'example-mcp',
             },
-            name: { type: 'string', example: 'My MCP Server' },
+            name: { type: 'string', example: 'Example MCP' },
             description: { type: 'string', nullable: true },
-            url: { type: 'string', example: 'https://mcp.example.com/sse' },
             scope: { type: 'string', example: 'global' },
-            headers: {
-              type: 'object',
-              additionalProperties: { type: 'string' },
-              description: 'Header values are redacted to "******" in responses.',
-            },
-            envVars: {
-              type: 'object',
-              additionalProperties: { type: 'string' },
-            },
+            preset: { type: 'string', nullable: true, example: 'oauth-http' },
+            transport: { $ref: '#/components/schemas/McpTransportConfig' },
+            sharedConfig: { $ref: '#/components/schemas/McpSharedConnectionConfig' },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
             enabled: { type: 'boolean' },
             timeout: { type: 'integer', example: 30000 },
-            cachedTools: {
+            sharedDiscoveredTools: {
               type: 'array',
-              items: { $ref: '#/components/schemas/McpCachedTool' },
+              items: { $ref: '#/components/schemas/McpDiscoveredTool' },
             },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
           },
-          required: ['id', 'slug', 'name', 'url', 'scope', 'headers', 'envVars', 'enabled', 'timeout', 'cachedTools'],
+          required: [
+            'id',
+            'slug',
+            'name',
+            'scope',
+            'preset',
+            'transport',
+            'sharedConfig',
+            'authConfig',
+            'enabled',
+            'timeout',
+            'sharedDiscoveredTools',
+          ],
         },
 
         CreateMcpServerConfigRequest: {
           type: 'object',
           properties: {
-            slug: { type: 'string', example: 'my-mcp-server' },
-            name: { type: 'string', example: 'My MCP Server' },
-            url: { type: 'string', example: 'https://mcp.example.com/sse' },
+            slug: { type: 'string', example: 'example-mcp' },
+            name: { type: 'string', example: 'Example MCP' },
+            transport: { $ref: '#/components/schemas/McpTransportConfig' },
             scope: { type: 'string', default: 'global' },
             description: { type: 'string' },
-            headers: { type: 'object', additionalProperties: { type: 'string' } },
-            envVars: { type: 'object', additionalProperties: { type: 'string' } },
+            preset: { type: 'string', nullable: true },
+            sharedConfig: { $ref: '#/components/schemas/McpSharedConnectionConfig' },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
             enabled: { type: 'boolean', default: true },
             timeout: { type: 'integer', default: 30000 },
           },
-          required: ['slug', 'name', 'url'],
+          required: ['slug', 'name', 'transport'],
         },
 
         UpdateMcpServerConfigRequest: {
@@ -1685,9 +2501,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             name: { type: 'string' },
             description: { type: 'string' },
-            url: { type: 'string' },
-            headers: { type: 'object', additionalProperties: { type: 'string' } },
-            envVars: { type: 'object', additionalProperties: { type: 'string' } },
+            preset: { type: 'string', nullable: true },
+            transport: { $ref: '#/components/schemas/McpTransportConfig' },
+            sharedConfig: { $ref: '#/components/schemas/McpSharedConnectionConfig' },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
             enabled: { type: 'boolean' },
             timeout: { type: 'integer' },
           },
@@ -1722,30 +2539,255 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
-        McpServerHealthResult: {
+        AgentMcpConnection: {
           type: 'object',
           properties: {
             slug: { type: 'string' },
             name: { type: 'string' },
-            reachable: { type: 'boolean' },
-            toolCount: { type: 'integer' },
-            latencyMs: { type: 'integer' },
-            error: { type: 'string', nullable: true },
-            cacheRefreshed: { type: 'boolean' },
-          },
-          required: ['slug', 'name', 'reachable', 'toolCount', 'latencyMs', 'error', 'cacheRefreshed'],
-        },
-
-        GetMcpServerHealthResponse: {
-          type: 'object',
-          properties: {
-            healthy: { type: 'boolean' },
-            servers: {
+            description: { type: 'string', nullable: true },
+            scope: { type: 'string' },
+            preset: { type: 'string', nullable: true },
+            transport: { $ref: '#/components/schemas/McpTransportConfig' },
+            sharedConfig: { $ref: '#/components/schemas/McpSharedConnectionConfig' },
+            authConfig: { $ref: '#/components/schemas/McpAuthConfig' },
+            connectionRequired: { type: 'boolean' },
+            configured: { type: 'boolean' },
+            stale: { type: 'boolean' },
+            configuredFieldKeys: {
               type: 'array',
-              items: { $ref: '#/components/schemas/McpServerHealthResult' },
+              items: { type: 'string' },
+            },
+            validationError: { type: 'string', nullable: true },
+            validatedAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            discoveredTools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpDiscoveredTool' },
+            },
+            sharedDiscoveredTools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpDiscoveredTool' },
             },
           },
-          required: ['healthy', 'servers'],
+          required: [
+            'slug',
+            'name',
+            'description',
+            'scope',
+            'preset',
+            'transport',
+            'sharedConfig',
+            'authConfig',
+            'connectionRequired',
+            'configured',
+            'stale',
+            'configuredFieldKeys',
+            'validationError',
+            'validatedAt',
+            'updatedAt',
+            'discoveredTools',
+            'sharedDiscoveredTools',
+          ],
+        },
+
+        AgentMcpConnectionState: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string' },
+            scope: { type: 'string' },
+            authMode: { type: 'string', enum: ['none', 'fields', 'oauth'] },
+            configured: { type: 'boolean' },
+            stale: { type: 'boolean' },
+            configuredFieldKeys: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            validationError: { type: 'string', nullable: true },
+            validatedAt: { type: 'string', format: 'date-time', nullable: true },
+            discoveredTools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/McpDiscoveredTool' },
+            },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: [
+            'slug',
+            'scope',
+            'authMode',
+            'configured',
+            'stale',
+            'configuredFieldKeys',
+            'validationError',
+            'validatedAt',
+            'discoveredTools',
+            'updatedAt',
+          ],
+        },
+
+        UpsertAgentMcpConnectionBody: {
+          type: 'object',
+          properties: {
+            values: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+          },
+          required: ['values'],
+        },
+
+        StartAgentMcpConnectionOAuthResult: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['AUTHORIZED', 'REDIRECT'] },
+            authorizationUrl: { type: 'string', nullable: true },
+          },
+          required: ['status', 'authorizationUrl'],
+        },
+
+        StartAgentMcpConnectionOAuthSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/StartAgentMcpConnectionOAuthResult' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAgentMcpConnectionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentMcpConnectionState' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ListMcpPresetsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/McpPreset' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ListAgentMcpConnectionsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentMcpConnection' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAgentSettingsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentSettings' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentSessionsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                metadata: { $ref: '#/components/schemas/ResponseMetadata' },
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentSessionSummary' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentSessionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentAdminSessionDetail' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentThreadConversationSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentAdminThreadConversation' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentMcpServersSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentAdminMcpServerCoverage' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentMcpServerUsersSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentAdminMcpServerUserConnection' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
         },
       },
     },

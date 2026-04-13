@@ -15,6 +15,7 @@
  */
 
 import { NextRequest } from 'next/server';
+import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
@@ -25,12 +26,15 @@ import {
   mergeAgentSessionResources,
   resolveAgentSessionRuntimeConfig,
 } from 'server/lib/agentSession/runtimeConfig';
+import { MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
+import { AGENT_API_KEY_HEADER, AGENT_API_KEY_PROVIDER_HEADER } from 'server/services/agent/providerConfig';
 import AgentSessionService, { ActiveEnvironmentSessionError } from 'server/services/agentSession';
 import {
   resolveAgentSessionServiceCandidatesForBuild,
   resolveRequestedAgentSessionServices,
   type RequestedAgentSessionServiceRef,
 } from 'server/services/agentSessionCandidates';
+import { serializeAgentSessionSummary } from 'server/services/agent/serializeSessionSummary';
 import Build from 'server/models/Build';
 import { fetchLifecycleConfig, type LifecycleConfig } from 'server/models/yaml';
 import type { DevConfig } from 'server/models/yaml/YamlService';
@@ -86,25 +90,6 @@ async function resolveLifecycleConfigForSession({
   }
 
   return fetchLifecycleConfig(repositoryName, branch);
-}
-
-function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
-  const sessionId = session.uuid || String(session.id);
-  const {
-    id: _internalId,
-    uuid: _uuid,
-    ...serialized
-  } = session as T & {
-    uuid?: string | null;
-    id: string | number;
-  };
-
-  return {
-    ...serialized,
-    id: sessionId,
-    websocketUrl: `/api/agent/session?sessionId=${sessionId}`,
-    editorUrl: `/api/agent/editor/${sessionId}/`,
-  };
 }
 
 function isResolvedSessionService(value: unknown): value is ResolvedSessionService {
@@ -230,7 +215,6 @@ async function resolveRequestedServices(
  *                       - updatedAt
  *                       - endedAt
  *                       - startupFailure
- *                       - websocketUrl
  *                       - editorUrl
  *                     properties:
  *                       id:
@@ -349,8 +333,6 @@ async function resolveRequestedServices(
  *                           recordedAt:
  *                             type: string
  *                             format: date-time
- *                       websocketUrl:
- *                         type: string
  *                       editorUrl:
  *                         type: string
  *                 error:
@@ -421,7 +403,6 @@ async function resolveRequestedServices(
  *                     - repo
  *                     - branch
  *                     - services
- *                     - websocketUrl
  *                     - editorUrl
  *                     - lastActivity
  *                     - createdAt
@@ -513,8 +494,6 @@ async function resolveRequestedServices(
  *                       type: array
  *                       items:
  *                         type: string
- *                     websocketUrl:
- *                       type: string
  *                     editorUrl:
  *                       type: string
  *                     lastActivity:
@@ -583,7 +562,7 @@ const getHandler = async (req: NextRequest) => {
   const includeEnded = req.nextUrl.searchParams.get('includeEnded') === 'true';
   const sessions = await AgentSessionService.getSessions(userIdentity.userId, { includeEnded });
   return successResponse(
-    sessions.map((session) => serializeSessionSummary(session)),
+    sessions.map((session) => serializeAgentSessionSummary(session)),
     { status: 200 },
     req
   );
@@ -645,16 +624,20 @@ const postHandler = async (req: NextRequest) => {
       userId: userIdentity.userId,
       userIdentity,
       githubToken,
+      requestApiKey: req.headers.get(AGENT_API_KEY_HEADER),
+      requestApiKeyProvider: req.headers.get(AGENT_API_KEY_PROVIDER_HEADER),
       buildUuid,
       buildKind,
       services: resolvedServices,
       model,
+      environmentSkillRefs: lifecycleConfig?.environment?.agentSession?.skills,
       repoUrl,
       branch,
       prNumber,
       namespace,
-      agentImage: runtimeConfig.image,
-      editorImage: runtimeConfig.editorImage,
+      workspaceImage: runtimeConfig.workspaceImage,
+      workspaceEditorImage: runtimeConfig.workspaceEditorImage,
+      workspaceGatewayImage: runtimeConfig.workspaceGatewayImage,
       nodeSelector: runtimeConfig.nodeSelector,
       readiness: mergeAgentSessionReadinessForServices(
         runtimeConfig.readiness,
@@ -667,7 +650,7 @@ const postHandler = async (req: NextRequest) => {
     });
 
     return successResponse(
-      serializeSessionSummary({
+      serializeAgentSessionSummary({
         ...session,
         baseBuildUuid: null,
         repo: repoNameFromRepoUrl(repoUrl),
@@ -682,13 +665,8 @@ const postHandler = async (req: NextRequest) => {
     if (err instanceof ActiveEnvironmentSessionError) {
       return errorResponse(err, { status: 409 }, req);
     }
-
-    if (err instanceof Error && err.message === 'API_KEY_REQUIRED') {
-      return errorResponse(
-        new Error('An Anthropic API key is required. Please add one in settings.'),
-        { status: 400 },
-        req
-      );
+    if (err instanceof MissingAgentProviderApiKeyError) {
+      return errorResponse(err, { status: 400 }, req);
     }
     if (err instanceof AgentSessionRuntimeConfigError) {
       return errorResponse(err, { status: 503 }, req);

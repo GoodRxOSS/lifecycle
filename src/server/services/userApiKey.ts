@@ -17,8 +17,14 @@
 import 'server/lib/dependencies';
 import UserApiKey from 'server/models/UserApiKey';
 import { encrypt, decrypt, maskApiKey } from 'server/lib/encryption';
+import { normalizeStoredAgentProviderName } from 'server/services/agent/providerConfig';
 
 export default class UserApiKeyService {
+  private static normalizeProvider(provider: string): string {
+    const normalized = normalizeStoredAgentProviderName(provider);
+    return normalized ?? provider.trim().toLowerCase();
+  }
+
   private static getOwnerKey(userId: string, ownerGithubUsername?: string | null): string {
     const normalizedOwner = ownerGithubUsername?.trim();
     return normalizedOwner || userId;
@@ -41,9 +47,12 @@ export default class UserApiKeyService {
   }
 
   private static async findRecord(userId: string, provider: string, ownerGithubUsername?: string | null) {
+    const normalizedProvider = this.normalizeProvider(provider);
     const canonicalOwner = this.getOwnerKey(userId, ownerGithubUsername);
 
-    const ownerMatch = await UserApiKey.query().where({ ownerGithubUsername: canonicalOwner, provider }).first();
+    const ownerMatch = await UserApiKey.query()
+      .where({ ownerGithubUsername: canonicalOwner, provider: normalizedProvider })
+      .first();
     if (ownerMatch) {
       return this.reconcileRecordOwnership(ownerMatch, userId, canonicalOwner);
     }
@@ -52,7 +61,7 @@ export default class UserApiKeyService {
       return null;
     }
 
-    const fallbackMatch = await UserApiKey.query().where({ userId, provider }).first();
+    const fallbackMatch = await UserApiKey.query().where({ userId, provider: normalizedProvider }).first();
     if (!fallbackMatch) {
       return null;
     }
@@ -67,6 +76,7 @@ export default class UserApiKeyService {
     ownerGithubUsername?: string | null
   ): Promise<void> {
     const encryptedKey = encrypt(apiKey);
+    const normalizedProvider = this.normalizeProvider(provider);
     const canonicalOwner = this.getOwnerKey(userId, ownerGithubUsername);
     const existing = await this.findRecord(userId, provider, ownerGithubUsername);
     if (existing) {
@@ -77,7 +87,7 @@ export default class UserApiKeyService {
       await UserApiKey.query().insertAndFetch({
         userId,
         ownerGithubUsername: canonicalOwner,
-        provider,
+        provider: normalizedProvider,
         encryptedKey,
       });
     }

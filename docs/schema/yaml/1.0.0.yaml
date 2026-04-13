@@ -103,6 +103,16 @@ environment:
       services:
         # @param environment.agentSession.prewarm.services[]
         - ''
+    # @param environment.agentSession.skills
+    skills:
+      # @param environment.agentSession.skills[]
+      -
+        # @param environment.agentSession.skills.repo (required)
+        repo: ''
+        # @param environment.agentSession.skills.branch (required)
+        branch: ''
+        # @param environment.agentSession.skills.path (required)
+        path: ''
 # @section services
 services:
   # @param services[]
@@ -760,3 +770,13 @@ services:
           timeoutMs: 0
           # @param services.dev.agentSession.readiness.pollMs
           pollMs: 0
+        # @param services.dev.agentSession.skills
+        skills:
+          # @param services.dev.agentSession.skills[]
+          -
+            # @param services.dev.agentSession.skills.repo (required)
+            repo: ''
+            # @param services.dev.agentSession.skills.branch (required)
+            branch: ''
+            # @param services.dev.agentSession.skills.path (required)
+            path: ''

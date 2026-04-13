@@ -15,11 +15,14 @@
  */
 
 import { NextRequest } from 'next/server';
+import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentSessionService from 'server/services/agentSession';
 import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionCandidates';
+
+export const dynamic = 'force-dynamic';
 
 /**
  * @openapi

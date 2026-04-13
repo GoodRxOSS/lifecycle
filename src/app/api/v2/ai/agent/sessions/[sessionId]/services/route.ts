@@ -15,30 +15,13 @@
  */
 
 import { NextRequest } from 'next/server';
+import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
+import { serializeAgentSessionSummary } from 'server/services/agent/serializeSessionSummary';
 import AgentSessionService from 'server/services/agentSession';
 import type { RequestedAgentSessionServiceRef } from 'server/services/agentSessionCandidates';
-
-function serializeSessionSummary<T extends { id: string | number; uuid?: string | null }>(session: T) {
-  const sessionId = session.uuid || String(session.id);
-  const {
-    id: _internalId,
-    uuid: _uuid,
-    ...serialized
-  } = session as T & {
-    uuid?: string | null;
-    id: string | number;
-  };
-
-  return {
-    ...serialized,
-    id: sessionId,
-    websocketUrl: `/api/agent/session?sessionId=${sessionId}`,
-    editorUrl: `/api/agent/editor/${sessionId}/`,
-  };
-}
 
 function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
   return (
@@ -115,7 +98,6 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                     - repo
  *                     - branch
  *                     - services
- *                     - websocketUrl
  *                     - editorUrl
  *                     - lastActivity
  *                     - createdAt
@@ -207,8 +189,6 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                       type: array
  *                       items:
  *                         type: string
- *                     websocketUrl:
- *                       type: string
  *                     editorUrl:
  *                       type: string
  *                     lastActivity:
@@ -305,7 +285,7 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ses
       return errorResponse(new Error('Session not found'), { status: 404 }, req);
     }
 
-    return successResponse(serializeSessionSummary(updatedSession), { status: 200 }, req);
+    return successResponse(serializeAgentSessionSummary(updatedSession), { status: 200 }, req);
   } catch (error) {
     if (error instanceof Error && /session not found/i.test(error.message)) {
       return errorResponse(error, { status: 404 }, req);

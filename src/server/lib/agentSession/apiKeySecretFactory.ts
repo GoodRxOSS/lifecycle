@@ -27,10 +27,11 @@ function getCoreApi(): k8s.CoreV1Api {
 export async function createAgentApiKeySecret(
   namespace: string,
   secretName: string,
-  apiKey: string,
+  providerApiKeys?: Record<string, string | null | undefined>,
   githubToken?: string | null,
   buildUuid?: string,
-  forwardedEnv?: Record<string, string>
+  forwardedEnv?: Record<string, string>,
+  additionalStringData?: Record<string, string>
 ): Promise<k8s.V1Secret> {
   const logger = getLogger();
   const coreApi = getCoreApi();
@@ -48,13 +49,18 @@ export async function createAgentApiKeySecret(
     },
     type: 'Opaque',
     stringData: {
-      ANTHROPIC_API_KEY: apiKey,
+      ...Object.fromEntries(
+        Object.entries(providerApiKeys || {}).filter(
+          ([envKey, value]) => typeof envKey === 'string' && envKey.trim() && typeof value === 'string' && value.trim()
+        )
+      ),
       ...(githubToken
         ? {
             GITHUB_TOKEN: githubToken,
           }
         : {}),
       ...(forwardedEnv || {}),
+      ...(additionalStringData || {}),
     },
   };
 

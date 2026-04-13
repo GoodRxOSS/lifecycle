@@ -53,20 +53,10 @@ export type AppSetup = {
   org?: string;
 };
 
-export type AgentSessionClaudePermissions = {
-  allow?: string[];
-  deny?: string[];
-};
-
-export type AgentSessionClaudeAttribution = {
-  commitTemplate?: string;
-  prTemplate?: string;
-};
-
-export type AgentSessionClaudeConfig = {
-  permissions?: AgentSessionClaudePermissions;
-  attribution?: AgentSessionClaudeAttribution;
+export type AgentSessionControlPlaneConfig = {
+  systemPrompt?: string;
   appendSystemPrompt?: string;
+  toolRules?: import('./agentSessionConfig').AgentSessionToolRule[];
 };
 
 export type AgentSessionSchedulingConfig = {
@@ -84,17 +74,19 @@ export type ResourceRequirements = {
 };
 
 export type AgentSessionResourcesConfig = {
-  agent?: ResourceRequirements | null;
+  workspace?: ResourceRequirements | null;
   editor?: ResourceRequirements | null;
+  workspaceGateway?: ResourceRequirements | null;
 };
 
 export type AgentSessionDefaults = {
-  image?: string | null;
-  editorImage?: string | null;
+  workspaceImage?: string | null;
+  workspaceEditorImage?: string | null;
+  workspaceGatewayImage?: string | null;
   scheduling?: AgentSessionSchedulingConfig;
   readiness?: AgentSessionReadinessConfig;
   resources?: AgentSessionResourcesConfig;
-  claude?: AgentSessionClaudeConfig;
+  controlPlane?: AgentSessionControlPlaneConfig;
 };
 
 export type RoleSettings = {

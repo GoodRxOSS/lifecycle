@@ -36,6 +36,8 @@ const logger = () => getLogger();
 export interface SandboxSessionLaunchJob extends Omit<LaunchSandboxSessionOptions, 'onProgress' | 'githubToken'> {
   launchId: string;
   encryptedGithubToken?: string | null;
+  encryptedRequestApiKey?: string | null;
+  requestApiKeyProvider?: string | null;
 }
 
 export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLaunchJob>): Promise<void> {
@@ -45,11 +47,14 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     userId,
     userIdentity,
     encryptedGithubToken,
+    encryptedRequestApiKey,
+    requestApiKeyProvider,
     baseBuildUuid,
     services,
     model,
-    agentImage,
-    editorImage,
+    workspaceImage,
+    workspaceEditorImage,
+    workspaceGatewayImage,
     nodeSelector,
     readiness,
     resources,
@@ -69,11 +74,14 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       userId,
       userIdentity,
       githubToken: encryptedGithubToken ? decrypt(encryptedGithubToken) : null,
+      requestApiKey: encryptedRequestApiKey ? decrypt(encryptedRequestApiKey) : null,
+      requestApiKeyProvider,
       baseBuildUuid,
       services,
       model,
-      agentImage,
-      editorImage,
+      workspaceImage,
+      workspaceEditorImage,
+      workspaceGatewayImage,
       nodeSelector,
       readiness,
       resources,
@@ -103,6 +111,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
         sessionId: result.session.uuid,
         baseBuildUuid,
       }),
+      error: null,
     });
   } catch (error) {
     logger().error(

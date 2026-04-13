@@ -26,7 +26,7 @@ export type SandboxLaunchStage =
   | 'creating_sandbox_build'
   | 'resolving_environment'
   | 'deploying_resources'
-  | 'creating_agent_session'
+  | 'opening_session'
   | 'ready'
   | 'error';
 
@@ -40,14 +40,12 @@ export interface SandboxLaunchState {
   updatedAt: string;
   baseBuildUuid?: string;
   service?: string;
-  buildUuid?: string;
-  namespace?: string;
-  sessionId?: string;
-  focusUrl?: string;
-  error?: string;
+  buildUuid?: string | null;
+  namespace?: string | null;
+  sessionId?: string | null;
+  focusUrl?: string | null;
+  error?: string | null;
 }
-
-export interface PublicSandboxLaunchState extends Omit<SandboxLaunchState, 'userId'> {}
 
 function sandboxLaunchKey(launchId: string): string {
   return `${SANDBOX_LAUNCH_REDIS_PREFIX}${launchId}`;
@@ -61,10 +59,6 @@ export function buildSandboxFocusUrl(params: { buildUuid: string; sessionId: str
   return `/environments/${params.buildUuid}/agent-session/${params.sessionId}?${searchParams.toString()}`;
 }
 
-export function buildSandboxLaunchStatusUrl(launchId: string): string {
-  return `/api/v2/ai/agent/sandbox-sessions/launches/${launchId}`;
-}
-
 export async function setSandboxLaunchState(redis: Redis, state: SandboxLaunchState): Promise<void> {
   await redis.setex(sandboxLaunchKey(state.launchId), SANDBOX_LAUNCH_TTL_SECONDS, JSON.stringify(state));
 }
@@ -76,7 +70,16 @@ export async function getSandboxLaunchState(redis: Redis, launchId: string): Pro
   }
 
   try {
-    return JSON.parse(raw) as SandboxLaunchState;
+    const parsed = JSON.parse(raw) as SandboxLaunchState;
+
+    return {
+      ...parsed,
+      buildUuid: parsed.buildUuid ?? null,
+      namespace: parsed.namespace ?? null,
+      sessionId: parsed.sessionId ?? null,
+      focusUrl: parsed.focusUrl ?? null,
+      error: parsed.error ?? null,
+    };
   } catch {
     return null;
   }
@@ -101,7 +104,14 @@ export async function patchSandboxLaunchState(
   return next;
 }
 
-export function toPublicSandboxLaunchState(state: SandboxLaunchState): PublicSandboxLaunchState {
+export function toPublicSandboxLaunchState(state: SandboxLaunchState): Omit<SandboxLaunchState, 'userId'> {
   const { userId: _userId, ...publicState } = state;
-  return publicState;
+  return {
+    ...publicState,
+    buildUuid: publicState.buildUuid ?? null,
+    namespace: publicState.namespace ?? null,
+    sessionId: publicState.sessionId ?? null,
+    focusUrl: publicState.focusUrl ?? null,
+    error: publicState.error ?? null,
+  };
 }

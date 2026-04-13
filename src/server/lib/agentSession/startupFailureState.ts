@@ -50,8 +50,8 @@ function normalizeFailureMessage(error: unknown): string {
       ? error.message
       : typeof error === 'string'
       ? error
-      : 'Lifecycle could not start the agent runtime.';
-  const message = rawMessage.trim() || 'Lifecycle could not start the agent runtime.';
+      : 'Lifecycle could not start the session workspace.';
+  const message = rawMessage.trim() || 'Lifecycle could not start the session workspace.';
 
   return truncateMessage(message);
 }
@@ -69,23 +69,23 @@ function classifyFailure(
   message: string,
   stage: AgentSessionStartupFailureStage
 ): Pick<PublicAgentSessionStartupFailure, 'title' | 'message'> {
-  if (/^Agent pod failed to start:/i.test(message)) {
+  if (/^Session workspace pod failed to start:/i.test(message)) {
     return {
-      title: 'Agent pod failed to start',
-      message: stripMessagePrefix(message, 'Agent pod failed to start:'),
+      title: 'Session workspace pod failed to start',
+      message: stripMessagePrefix(message, 'Session workspace pod failed to start:'),
     };
   }
 
-  if (/^Agent pod did not become ready within/i.test(message)) {
+  if (/^Session workspace pod did not become ready within/i.test(message)) {
     return {
-      title: 'Agent runtime did not become ready',
+      title: 'Session workspace did not become ready',
       message,
     };
   }
 
   if (/ImagePullBackOff|ErrImagePull/i.test(message)) {
     return {
-      title: 'Agent image could not be pulled',
+      title: 'Session workspace image could not be pulled',
       message,
     };
   }
@@ -97,15 +97,22 @@ function classifyFailure(
     };
   }
 
+  if (/init-skills/i.test(message)) {
+    return {
+      title: 'Skill initialization failed',
+      message,
+    };
+  }
+
   if (/editor/i.test(message)) {
     return {
-      title: 'Agent editor failed to start',
+      title: 'Workspace editor failed to start',
       message,
     };
   }
 
   return {
-    title: stage === 'create_session' ? 'Agent session failed to start' : 'Agent runtime connection failed',
+    title: stage === 'create_session' ? 'Agent session failed to start' : 'Session workspace connection failed',
     message,
   };
 }
