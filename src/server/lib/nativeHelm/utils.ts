@@ -646,7 +646,7 @@ export function createHelmJob(
   return jobSpec;
 }
 
-function addNativeHelmCustomValues(deploy: Deploy): string[] {
+function addNativeHelmCustomValues(): string[] {
   return [];
 }
 

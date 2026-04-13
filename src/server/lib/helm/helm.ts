@@ -442,9 +442,8 @@ export async function uninstallHelmReleases(build: Build) {
 /**
  * Add helm Custom Values to use in helm install --set flag to override defalt values or values.yaml
  *
- * @param {Deploy} deploy - The deploy object containing deploy details.
  */
-function addHelmCustomValues(deploy: Deploy): string[] {
+function addHelmCustomValues(): string[] {
   return [];
 }
 
