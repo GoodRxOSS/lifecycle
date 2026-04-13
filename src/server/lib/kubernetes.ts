@@ -398,104 +398,6 @@ export async function applyManifests(build: Build): Promise<k8s.KubernetesObject
   return created;
 }
 
-export async function applyHttpScaleObjectManifestYaml(deploy: Deploy, namespace: string) {
-  const manifest = await generateHttpScaleObject(deploy);
-  const scaleHttpObject = yaml.dump(manifest, { skipInvalid: true });
-  getLogger({ namespace }).debug('HttpScaleObject: creating');
-  try {
-    const localPath = `${TMP_PATH}/keda/${deploy.uuid}-scaleHttpObject.yaml`;
-    await fs.promises.mkdir(`${TMP_PATH}/keda/`, {
-      recursive: true,
-    });
-    await fs.promises.writeFile(localPath, scaleHttpObject, 'utf8');
-    await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
-    getLogger({ namespace }).debug('HttpScaleObject: applied');
-  } catch (error) {
-    getLogger({
-      namespace,
-      error,
-    }).error('HttpScaleObject: apply failed');
-    throw new Error(`Failed to apply HTTP scale object manifest for deploy ${error}`);
-  }
-}
-
-export async function applyExternalServiceManifestYaml(deploy: Deploy, namespace: string) {
-  const manifest = generateExternalService(deploy);
-  const externalService = yaml.dump(manifest, { skipInvalid: true });
-  getLogger({ namespace }).debug('ExternalService: creating');
-  try {
-    const localPath = `${TMP_PATH}/keda/${deploy.uuid}-externalService.yaml`;
-    await fs.promises.mkdir(`${TMP_PATH}/keda/`, {
-      recursive: true,
-    });
-    await fs.promises.writeFile(localPath, externalService, 'utf8');
-    await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
-    getLogger({ namespace }).debug('ExternalService: applied');
-  } catch (error) {
-    getLogger({
-      namespace,
-      error,
-    }).error('ExternalService: apply failed');
-    throw new Error(`Failed to apply ExternalService object manifest for deploy ${error}`);
-  }
-}
-
-async function generateHttpScaleObject(deploy: Deploy): Promise<Record<string, unknown>> {
-  const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  const httpScaledObject = {
-    apiVersion: 'http.keda.sh/v1alpha1',
-    kind: 'HTTPScaledObject',
-    metadata: {
-      name: deploy.uuid,
-      labels: {
-        lc_uuid: deploy.deployable?.buildUUID,
-      },
-    },
-    spec: {
-      // this added fastly domain to handle origin and fastly hits
-      hosts: [deploy.publicUrl, `fastly-${deploy.deployable.buildUUID}.fastly.${domainDefaults?.http}`],
-      scaleTargetRef: {
-        name: deploy.uuid,
-        kind: 'Deployment',
-        apiVersion: 'apps/v1',
-        service: deploy.uuid,
-        port: parseInt(deploy.deployable.port),
-      },
-      replicas: {
-        min: deploy.kedaScaleToZero.replicas.min,
-        max: deploy.kedaScaleToZero.replicas.max,
-      },
-      scaledownPeriod: deploy.kedaScaleToZero.scaledownPeriod,
-      scalingMetric: {
-        requestRate: {
-          granularity: deploy.kedaScaleToZero.scalingMetric.requestRate.granularity,
-          targetValue: deploy.kedaScaleToZero.scalingMetric.requestRate.targetValue,
-          window: deploy.kedaScaleToZero.scalingMetric.requestRate.window,
-        },
-      },
-    },
-  };
-  return httpScaledObject;
-}
-
-function generateExternalService(deploy: Deploy): Record<string, unknown> {
-  const externalService = {
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      name: `${deploy.uuid}-external-service`,
-      labels: {
-        lc_uuid: deploy.deployable?.buildUUID,
-      },
-    },
-    spec: {
-      type: 'ExternalName',
-      externalName: 'keda-add-ons-http-interceptor-proxy.keda.svc.cluster.local',
-    },
-  };
-  return externalService;
-}
-
 export const getK8sApi = () => {
   const kc = new KubeConfig();
   kc.loadFromDefault();
@@ -583,9 +485,7 @@ export async function waitForPodReady(build: Build) {
  */
 export async function deleteBuild(build: Build) {
   try {
-    await shellPromise(
-      `kubectl delete all,pvc,mapping,Httpscaledobjects -l lc_uuid=${build.uuid} --namespace ${build.namespace}`
-    );
+    await shellPromise(`kubectl delete all,pvc,mapping -l lc_uuid=${build.uuid} --namespace ${build.namespace}`);
     getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
   } catch (e) {
     getLogger({

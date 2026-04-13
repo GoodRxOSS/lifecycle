@@ -97,34 +97,6 @@ services:
     deploymentDependsOn:
       # @param services.deploymentDependsOn[]
       - ''
-    # @param services.kedaScaleToZero
-    kedaScaleToZero:
-      # @param services.kedaScaleToZero.type
-      type: ''
-      # @param services.kedaScaleToZero.replicas
-      replicas:
-        # @param services.kedaScaleToZero.replicas.min
-        min: 0
-        # @param services.kedaScaleToZero.replicas.max
-        max: 0
-      # @param services.kedaScaleToZero.scaledownPeriod
-      scaledownPeriod: 0
-      # @param services.kedaScaleToZero.maxRetries
-      maxRetries: 0
-      # @param services.kedaScaleToZero.scalingMetric
-      scalingMetric:
-        # @param services.kedaScaleToZero.scalingMetric.requestRate
-        requestRate:
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.granularity
-          granularity: ''
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.targetValue
-          targetValue: 0
-          # @param services.kedaScaleToZero.scalingMetric.requestRate.window
-          window: ''
-        # @param services.kedaScaleToZero.scalingMetric.concurrency
-        concurrency:
-          # @param services.kedaScaleToZero.scalingMetric.concurrency.targetValue
-          targetValue: 0
     # @param services.helm
     helm:
       # @param services.helm.cfStepType

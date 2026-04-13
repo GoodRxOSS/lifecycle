@@ -635,19 +635,6 @@ export function createHelmJob(
 }
 
 function addNativeHelmCustomValues(deploy: Deploy): string[] {
-  getLogger().debug(
-    `Helm: custom values kedaScaleToZeroType=${deploy?.kedaScaleToZero?.type} isStatic=${deploy?.build?.isStatic}`
-  );
-
-  if (
-    deploy?.kedaScaleToZero?.type === 'http' &&
-    deploy.build.isStatic == false &&
-    deploy?.build.isStatic != undefined
-  ) {
-    getLogger().debug('Helm: enabling autoscaling for KEDA scale-to-zero');
-    return ['autoscaling.enabled=true'];
-  }
-
   return [];
 }
 
@@ -690,15 +677,6 @@ async function constructHttpIngressValues(deploy: Deploy): Promise<string[]> {
       .split(',')
       .map((ip, index) => `ingress.ipAllowlist[${index}]=${ip.trim()}`);
     ingressValues.push(...ipWhitelist);
-  }
-
-  if (
-    deploy?.kedaScaleToZero?.type === 'http' &&
-    deploy.build.isStatic === false &&
-    deploy?.build.isStatic != undefined
-  ) {
-    ingressValues.push(`ingress.backendService=${deploy.uuid}-external-service`, 'ingress.port=8080');
-    getLogger().debug('Helm: redirecting ingress to KEDA proxy');
   }
 
   return ingressValues;

@@ -34,24 +34,6 @@ export interface Service {
   readonly defaultUUID?: string;
   readonly requires?: DependencyService[];
   readonly deploymentDependsOn?: string[];
-  readonly kedaScaleToZero?: KedaScaleToZero;
-}
-
-export interface KedaScaleToZero {
-  readonly type: string;
-  readonly replicas: { readonly min: number; readonly max: number };
-  readonly scaledownPeriod: number;
-  readonly maxRetries: number;
-  readonly scalingMetric: {
-    readonly requestRate: {
-      readonly granularity: string;
-      readonly targetValue: number;
-      readonly window: string;
-    };
-    readonly concurrency: {
-      readonly targetValue: number;
-    };
-  };
 }
 
 export interface DependencyService {
@@ -783,24 +765,6 @@ export function getDeployPipelineConfig(service: Service): CodefreshConfig {
   return result;
 }
 
-export function getScaleToZeroConfig(service: Service): KedaScaleToZero {
-  let result: KedaScaleToZero;
-  switch (service?.kedaScaleToZero?.type?.toLowerCase()) {
-    case 'http':
-      result = service.kedaScaleToZero;
-      break;
-    default:
-      break;
-  }
-
-  return result;
-}
-
-/**
- *
- * @param service
- * @returns
- */
 export function getDestroyPipelineConfig(service: Service): CodefreshConfig {
   let result: CodefreshConfig;
 

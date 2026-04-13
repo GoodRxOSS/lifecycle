@@ -25,14 +25,9 @@ import { nanoid } from 'nanoid';
 import { Metrics } from 'server/lib/metrics';
 import DeployService from 'server/services/deploy';
 import { DeployStatus } from 'shared/constants';
-import {
-  applyHttpScaleObjectManifestYaml,
-  applyExternalServiceManifestYaml,
-  patchIngress,
-} from 'server/lib/kubernetes';
+import { patchIngress } from 'server/lib/kubernetes';
 import { ingressBannerSnippet } from 'server/lib/helm/utils';
 import { constructHelmDeploysBuildMetaData } from 'server/lib/helm/helm';
-import { fetchUntilSuccess } from 'server/lib/helm/helm';
 import {
   HelmDeployOptions,
   ChartType,
@@ -285,11 +280,6 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
 
   getLogger().info('Helm: deploying method=native');
 
-  if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
-    await applyHttpScaleObjectManifestYaml(deploy, build.namespace);
-    await applyExternalServiceManifestYaml(deploy, build.namespace);
-  }
-
   const validationErrors = await validateHelmConfiguration(deploy);
   if (validationErrors.length > 0) {
     throw new Error(`Native helm configuration validation failed: ${validationErrors.join(', ')}`);
@@ -322,25 +312,10 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
       'Unable to patch ingress'
     );
   }
-
-  if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
-    const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-    await fetchUntilSuccess(
-      `https://${deploy.uuid}.${domainDefaults.http}`,
-      deploy.kedaScaleToZero.maxRetries,
-      deploy.uuid,
-      build.namespace
-    );
-  }
 }
 
 async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService, runUUID: string): Promise<void> {
   const { deployable, build } = deploy;
-
-  if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
-    await applyHttpScaleObjectManifestYaml(deploy, build.namespace);
-    await applyExternalServiceManifestYaml(deploy, build.namespace);
-  }
 
   const { generateCodefreshRunCommand } = await import('server/lib/helm/helm');
   const { getCodefreshPipelineIdFromOutput } = await import('server/lib/codefresh/utils');
@@ -376,16 +351,6 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
         error,
       },
       'Unable to patch ingress'
-    );
-  }
-
-  if (deploy?.kedaScaleToZero?.type === 'http' && !build.isStatic) {
-    const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-    await fetchUntilSuccess(
-      `https://${deploy.uuid}.${domainDefaults.http}`,
-      deploy.kedaScaleToZero.maxRetries,
-      deploy.uuid,
-      build.namespace
     );
   }
 }

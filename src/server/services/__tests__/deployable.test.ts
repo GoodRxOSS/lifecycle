@@ -225,7 +225,6 @@ describe('Deployable Service', () => {
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
-        kedaScaleToZero: null,
         deploymentDependsOn: [],
         helm: undefined,
       });
@@ -311,7 +310,6 @@ describe('Deployable Service', () => {
       expect(result).toEqual({
         name: 'github-app',
         serviceId: null,
-        kedaScaleToZero: null,
         type: 'github',
         buildUUID: 'unit-test-12345',
         buildId: 100,

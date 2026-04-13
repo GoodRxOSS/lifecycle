@@ -422,12 +422,6 @@ services:
     requires:
       - name: postgres
       - name: redis
-    kedaScaleToZero:
-      enabled: true
-      minReplicaCount: 0
-      maxReplicaCount: 5
-      cooldownPeriod: 300
-      pollingInterval: 30
     helm:
       type: install
       action: install
@@ -536,11 +530,6 @@ services:
       - redis
     requires:
       - name: postgres
-    kedaScaleToZero:
-      enabled: true
-      minReplicaCount: 0
-      maxReplicaCount: 10
-      cooldownPeriod: 600
     helm:
       type: install
       repository: org/api-service
