@@ -16,6 +16,13 @@
 
 import { merge, cloneDeep } from 'lodash';
 import { mergeKeyValueArrays } from 'shared/utils';
+import {
+  NativeHelmConfig as GlobalNativeHelmConfig,
+  NativeHelmPostRendererConfig as GlobalNativeHelmPostRendererConfig,
+} from 'server/services/types/globalConfig';
+
+export type HelmPostRendererConfig = GlobalNativeHelmPostRendererConfig;
+export type NativeHelmConfig = Partial<GlobalNativeHelmConfig>;
 
 export interface HelmConfig {
   releaseName?: string;
@@ -28,10 +35,7 @@ export interface HelmConfig {
   values?: Array<{ key: string; value: string }>;
   valueFiles?: string[];
   deploymentMethod?: 'native' | 'ci';
-  nativeHelm?: {
-    enabled?: boolean;
-    defaultArgs?: string;
-  };
+  nativeHelm?: NativeHelmConfig;
 }
 
 export interface BuildConfig {
@@ -54,9 +58,30 @@ export interface GlobalConfig {
     name?: string;
     role?: string;
   };
-  nativeHelm?: {
-    enabled?: boolean;
-    defaultArgs?: string;
+  nativeHelm?: NativeHelmConfig;
+}
+
+function mergePostRendererConfig(defaults?: HelmPostRendererConfig, current?: HelmPostRendererConfig) {
+  if (!defaults && !current) {
+    return undefined;
+  }
+
+  return {
+    ...defaults,
+    ...current,
+    args: current?.args !== undefined ? current.args : defaults?.args,
+  };
+}
+
+function mergeNativeHelmConfig(defaults?: NativeHelmConfig, current?: NativeHelmConfig) {
+  if (!defaults && !current) {
+    return undefined;
+  }
+
+  return {
+    ...defaults,
+    ...current,
+    postRenderer: mergePostRendererConfig(defaults?.postRenderer, current?.postRenderer),
   };
 }
 
@@ -139,7 +164,7 @@ export class HelmConfigBuilder extends ConfigBuilder<HelmConfig> {
       ...current,
       values: mergedValues,
       valueFiles: current.valueFiles?.length ? current.valueFiles : defaults.valueFiles || current.valueFiles || [],
-      nativeHelm: merge({}, defaults.nativeHelm, current.nativeHelm),
+      nativeHelm: mergeNativeHelmConfig(defaults.nativeHelm, current.nativeHelm),
     };
     return new HelmConfigBuilder(merged);
   }

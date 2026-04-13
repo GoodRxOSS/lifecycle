@@ -72,6 +72,41 @@ describe('ConfigBuilder', () => {
       expect(config.values).toContainEqual({ key: 'namespace', value: 'default' }); // Keep default
       expect(config.values).toContainEqual({ key: 'image.tag', value: 'v2.0.0' }); // Keep new value
     });
+
+    it('replaces post-renderer args while preserving inherited renderer config', () => {
+      const defaults = {
+        nativeHelm: {
+          enabled: true,
+          image: 'registry.example.com/helm-runner:1.0.0',
+          postRenderer: {
+            enabled: true,
+            command: '/opt/bin/post-renderer',
+            args: ['--global'],
+          },
+        },
+      };
+
+      const config = new HelmConfigBuilder()
+        .merge({
+          nativeHelm: {
+            postRenderer: {
+              args: ['--service'],
+            },
+          },
+        })
+        .mergeWithDefaults(defaults)
+        .build();
+
+      expect(config.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/helm-runner:1.0.0',
+        postRenderer: {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--service'],
+        },
+      });
+    });
   });
 
   describe('BuildConfigBuilder', () => {

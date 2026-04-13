@@ -116,12 +116,20 @@ export type HelmDefaults = {
   nativeHelm?: NativeHelmConfig;
 };
 
+export type NativeHelmPostRendererConfig = {
+  enabled?: boolean;
+  command?: string;
+  args?: string[];
+};
+
 export type NativeHelmConfig = {
   enabled: boolean;
   defaultHelmVersion?: string;
   jobTimeout?: number;
   serviceAccount?: string;
   defaultArgs?: string;
+  image?: string;
+  postRenderer?: NativeHelmPostRendererConfig;
 };
 
 export type BuildDefaults = {

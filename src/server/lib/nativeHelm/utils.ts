@@ -26,9 +26,12 @@ import {
   createServiceAccountUsingExistingFunction,
   setupDeployServiceAccountInNamespace,
 } from 'server/lib/kubernetes/rbac';
-import { HelmConfigBuilder } from 'server/lib/config/ConfigBuilder';
 import { getLogger } from 'server/lib/logger';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
+import {
+  NativeHelmConfig as GlobalNativeHelmConfig,
+  NativeHelmPostRendererConfig,
+} from 'server/services/types/globalConfig';
 
 export interface HelmDeployOptions {
   namespace: string;
@@ -44,6 +47,59 @@ export interface HelmConfiguration {
   helmVersion: string;
 }
 
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildPostRendererFlags(postRenderer?: NativeHelmPostRendererConfig): string {
+  if (!postRenderer?.command || postRenderer.enabled === false) {
+    return '';
+  }
+
+  let flags = ` --post-renderer ${shellEscape(postRenderer.command)}`;
+
+  (postRenderer.args || []).forEach((arg) => {
+    flags += ` --post-renderer-args ${shellEscape(arg)}`;
+  });
+
+  return flags;
+}
+
+function mergePostRendererConfig(
+  defaults?: NativeHelmPostRendererConfig,
+  chartConfig?: NativeHelmPostRendererConfig,
+  current?: NativeHelmPostRendererConfig
+): NativeHelmPostRendererConfig | undefined {
+  if (!defaults && !chartConfig && !current) {
+    return undefined;
+  }
+
+  return {
+    ...defaults,
+    ...chartConfig,
+    ...current,
+    args:
+      current?.args !== undefined ? current.args : chartConfig?.args !== undefined ? chartConfig.args : defaults?.args,
+  };
+}
+
+function mergeNativeHelmConfig(
+  defaults?: Partial<GlobalNativeHelmConfig>,
+  chartConfig?: Partial<GlobalNativeHelmConfig>,
+  current?: Partial<GlobalNativeHelmConfig>
+) {
+  if (!defaults && !chartConfig && !current) {
+    return undefined;
+  }
+
+  return {
+    ...defaults,
+    ...chartConfig,
+    ...current,
+    postRenderer: mergePostRendererConfig(defaults?.postRenderer, chartConfig?.postRenderer, current?.postRenderer),
+  };
+}
+
 export function constructHelmCommand(
   action: string,
   chartPath: string,
@@ -55,7 +111,8 @@ export function constructHelmCommand(
   args?: string,
   chartRepoUrl?: string,
   defaultArgs?: string,
-  chartVersion?: string
+  chartVersion?: string,
+  postRenderer?: NativeHelmPostRendererConfig
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -89,6 +146,8 @@ export function constructHelmCommand(
   if (chartVersion && (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART)) {
     command += ` --version ${chartVersion}`;
   }
+
+  command += buildPostRendererFlags(postRenderer);
 
   customValues.forEach((value) => {
     const equalIndex = value.indexOf('=');
@@ -130,7 +189,8 @@ export function generateHelmInstallScript(
   chartRepoUrl?: string,
   defaultArgs?: string,
   chartVersion?: string,
-  registryAuth?: RegistryAuthConfig
+  registryAuth?: RegistryAuthConfig,
+  postRenderer?: NativeHelmPostRendererConfig
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -143,7 +203,8 @@ export function generateHelmInstallScript(
     args,
     chartRepoUrl,
     defaultArgs,
-    chartVersion
+    chartVersion,
+    postRenderer
   );
 
   let script = [
@@ -269,61 +330,48 @@ export async function mergeHelmConfigWithGlobal(deploy: Deploy): Promise<any> {
   const helm: any = deployable.helm || {};
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
   const chartName = helm?.chart?.name;
+  const helmDefaults = configs.helmDefaults || {};
+  const chartConfig = chartName ? configs[chartName] || {} : {};
 
-  const globalConfig = configs[chartName];
-  if (!globalConfig) {
+  if (!chartName && !helmDefaults.nativeHelm) {
     return helm;
   }
 
-  // Use builder pattern for cleaner configuration merging
-  const builder = new HelmConfigBuilder(helm);
-
-  // Apply global config with proper precedence
-  if (globalConfig.version && !helm.version) {
-    builder.set('helmVersion', globalConfig.version);
-  }
-  if (globalConfig.args && !helm.args) {
-    builder.set('args', globalConfig.args);
-  }
-
-  // Build merged config with original structure
   const mergedConfig = {
+    ...helmDefaults,
+    ...chartConfig,
     ...helm,
 
-    ...(globalConfig.version && { version: globalConfig.version }),
-    ...(globalConfig.args && { args: globalConfig.args }),
-    ...(globalConfig.action && { action: globalConfig.action }),
-
-    label: globalConfig.label,
-    tolerations: globalConfig.tolerations,
-    affinity: globalConfig.affinity,
-    nodeSelector: globalConfig.nodeSelector,
+    label: helm.label ?? chartConfig.label ?? helmDefaults.label,
+    tolerations: helm.tolerations ?? chartConfig.tolerations ?? helmDefaults.tolerations,
+    affinity: helm.affinity ?? chartConfig.affinity ?? helmDefaults.affinity,
+    nodeSelector: helm.nodeSelector ?? chartConfig.nodeSelector ?? helmDefaults.nodeSelector,
 
     grpc: helm.grpc,
     disableIngressHost: helm.disableIngressHost,
     deploymentMethod: helm.deploymentMethod,
-    nativeHelm: helm.nativeHelm,
     type: helm.type,
     docker: helm.docker,
     envMapping: helm.envMapping,
-
-    ...(helm.version && { version: helm.version }),
-    ...(helm.args && { args: helm.args }),
-    ...(helm.action && { action: helm.action }),
+    nativeHelm: mergeNativeHelmConfig(helmDefaults.nativeHelm, chartConfig.nativeHelm, helm.nativeHelm),
   };
 
-  if (globalConfig.chart || helm.chart) {
-    mergedConfig.chart = mergeChartConfig(helm.chart, globalConfig.chart);
+  if (helmDefaults.chart || chartConfig.chart || helm.chart) {
+    mergedConfig.chart = mergeChartConfig(helmDefaults.chart, chartConfig.chart, helm.chart);
   }
 
   return mergedConfig;
 }
 
-function mergeChartConfig(helmChart: any, globalChart: any): any {
-  return {
-    ...(helmChart || {}),
+function mergeChartConfig(defaultChart: any, chartConfig: any, helmChart: any): any {
+  const mergedGlobalValues = chartConfig?.values?.length
+    ? mergeKeyValueArrays(defaultChart?.values || [], chartConfig.values, '=')
+    : defaultChart?.values || chartConfig?.values || [];
 
-    ...(globalChart || {}),
+  return {
+    ...(defaultChart || {}),
+    ...(chartConfig || {}),
+    ...(helmChart || {}),
 
     ...(helmChart?.name && { name: helmChart.name }),
     ...(helmChart?.repoUrl && { repoUrl: helmChart.repoUrl }),
@@ -331,13 +379,15 @@ function mergeChartConfig(helmChart: any, globalChart: any): any {
 
     values:
       helmChart?.values && helmChart.values.length > 0
-        ? mergeKeyValueArrays(globalChart?.values || [], helmChart.values, '=')
-        : globalChart?.values || helmChart?.values || [],
+        ? mergeKeyValueArrays(mergedGlobalValues, helmChart.values, '=')
+        : mergedGlobalValues,
 
     valueFiles:
       helmChart?.valueFiles && helmChart.valueFiles.length > 0
         ? helmChart.valueFiles
-        : globalChart?.valueFiles || helmChart?.valueFiles || [],
+        : chartConfig?.valueFiles?.length
+        ? chartConfig.valueFiles
+        : defaultChart?.valueFiles || helmChart?.valueFiles || [],
   };
 }
 
@@ -849,8 +899,7 @@ export function escapeHelmValue(value: string): string {
 
 export async function validateHelmConfiguration(deploy: Deploy): Promise<string[]> {
   const errors: string[] = [];
-  const { deployable } = deploy;
-  const helm = deployable.helm;
+  const helm = await mergeHelmConfigWithGlobal(deploy);
 
   if (!helm) {
     errors.push('Helm configuration is missing');
@@ -863,8 +912,16 @@ export async function validateHelmConfiguration(deploy: Deploy): Promise<string[
 
   // Check for helm version in multiple locations
   const helmVersion = helm.version || helm.nativeHelm?.defaultHelmVersion;
-  if (!helmVersion) {
+  if (!helmVersion && !helm.nativeHelm?.image) {
     errors.push('Helm version is required');
+  }
+
+  if (
+    helm.nativeHelm?.postRenderer?.enabled !== false &&
+    helm.nativeHelm?.postRenderer &&
+    !helm.nativeHelm.postRenderer.command
+  ) {
+    errors.push('Native Helm post-renderer command is required when post-renderer is enabled');
   }
 
   const chartType = await determineChartType(deploy);
