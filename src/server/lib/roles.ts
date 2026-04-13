@@ -20,15 +20,19 @@ import { NextResponse } from 'next/server';
 import type { ErrorResponse } from './response';
 import { getUser } from './get-user';
 
-export type LifecycleRole = 'lifecycle_user' | 'lifecycle_admin';
+const LIFECYCLE_ROLES = ['user', 'admin'] as const;
+
+export type LifecycleRole = (typeof LIFECYCLE_ROLES)[number];
 
 // eslint-disable-next-line no-unused-vars
 type RouteHandler = (req: NextRequest, ...args: any[]) => Promise<NextResponse>;
 
+const roleSet: Set<string> = new Set(LIFECYCLE_ROLES);
+
 export function getUserRoles(payload: JWTPayload): LifecycleRole[] {
   const realmAccess = payload.realm_access as { roles?: string[] } | undefined;
   const allRoles = realmAccess?.roles ?? [];
-  return allRoles.filter((r): r is LifecycleRole => r === 'lifecycle_user' || r === 'lifecycle_admin');
+  return allRoles.filter((r): r is LifecycleRole => roleSet.has(r));
 }
 
 export function requireRole(...roles: LifecycleRole[]) {
