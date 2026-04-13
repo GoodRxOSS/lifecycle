@@ -107,6 +107,7 @@ const schema_1_0_0 = {
               action: { type: 'string' },
               repository: { type: 'string' },
               branchName: { type: 'string' },
+              deploymentMethod: { type: 'string', enum: ['native', 'ci'] },
               chart: {
                 type: 'object',
                 additionalProperties: false,
@@ -118,6 +119,27 @@ const schema_1_0_0 = {
                   valueFiles: { type: 'array', items: { type: 'string' } },
                 },
                 required: ['name'],
+              },
+              nativeHelm: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  enabled: { type: 'boolean' },
+                  defaultHelmVersion: { type: 'string' },
+                  jobTimeout: { type: 'number' },
+                  serviceAccount: { type: 'string' },
+                  defaultArgs: { type: 'string' },
+                  image: { type: 'string' },
+                  postRenderer: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      enabled: { type: 'boolean' },
+                      command: { type: 'string' },
+                      args: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
               },
               envLens: { type: 'boolean' },
               grpc: { type: 'boolean' },
