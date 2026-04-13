@@ -28,6 +28,10 @@ import {
 } from 'server/lib/kubernetes/rbac';
 import { getLogger } from 'server/lib/logger';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
+import {
+  NativeHelmConfig as GlobalNativeHelmConfig,
+  NativeHelmPostRendererConfig,
+} from 'server/services/types/globalConfig';
 
 export interface HelmDeployOptions {
   namespace: string;
@@ -43,17 +47,11 @@ export interface HelmConfiguration {
   helmVersion: string;
 }
 
-export interface HelmPostRendererConfig {
-  enabled?: boolean;
-  command?: string;
-  args?: string[];
-}
-
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildPostRendererFlags(postRenderer?: HelmPostRendererConfig): string {
+function buildPostRendererFlags(postRenderer?: NativeHelmPostRendererConfig): string {
   if (!postRenderer?.command || postRenderer.enabled === false) {
     return '';
   }
@@ -68,10 +66,10 @@ function buildPostRendererFlags(postRenderer?: HelmPostRendererConfig): string {
 }
 
 function mergePostRendererConfig(
-  defaults?: HelmPostRendererConfig,
-  chartConfig?: HelmPostRendererConfig,
-  current?: HelmPostRendererConfig
-): HelmPostRendererConfig | undefined {
+  defaults?: NativeHelmPostRendererConfig,
+  chartConfig?: NativeHelmPostRendererConfig,
+  current?: NativeHelmPostRendererConfig
+): NativeHelmPostRendererConfig | undefined {
   if (!defaults && !chartConfig && !current) {
     return undefined;
   }
@@ -85,20 +83,10 @@ function mergePostRendererConfig(
   };
 }
 
-interface NativeHelmOverrideConfig {
-  enabled?: boolean;
-  defaultHelmVersion?: string;
-  jobTimeout?: number;
-  serviceAccount?: string;
-  defaultArgs?: string;
-  image?: string;
-  postRenderer?: HelmPostRendererConfig;
-}
-
 function mergeNativeHelmConfig(
-  defaults?: NativeHelmOverrideConfig,
-  chartConfig?: NativeHelmOverrideConfig,
-  current?: NativeHelmOverrideConfig
+  defaults?: Partial<GlobalNativeHelmConfig>,
+  chartConfig?: Partial<GlobalNativeHelmConfig>,
+  current?: Partial<GlobalNativeHelmConfig>
 ) {
   if (!defaults && !chartConfig && !current) {
     return undefined;
@@ -124,7 +112,7 @@ export function constructHelmCommand(
   chartRepoUrl?: string,
   defaultArgs?: string,
   chartVersion?: string,
-  postRenderer?: HelmPostRendererConfig
+  postRenderer?: NativeHelmPostRendererConfig
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -202,7 +190,7 @@ export function generateHelmInstallScript(
   defaultArgs?: string,
   chartVersion?: string,
   registryAuth?: RegistryAuthConfig,
-  postRenderer?: HelmPostRendererConfig
+  postRenderer?: NativeHelmPostRendererConfig
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',

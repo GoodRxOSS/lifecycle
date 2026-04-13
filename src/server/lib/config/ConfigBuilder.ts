@@ -16,19 +16,13 @@
 
 import { merge, cloneDeep } from 'lodash';
 import { mergeKeyValueArrays } from 'shared/utils';
+import {
+  NativeHelmConfig as GlobalNativeHelmConfig,
+  NativeHelmPostRendererConfig as GlobalNativeHelmPostRendererConfig,
+} from 'server/services/types/globalConfig';
 
-export interface HelmPostRendererConfig {
-  enabled?: boolean;
-  command?: string;
-  args?: string[];
-}
-
-export interface NativeHelmConfig {
-  enabled?: boolean;
-  defaultArgs?: string;
-  image?: string;
-  postRenderer?: HelmPostRendererConfig;
-}
+export type HelmPostRendererConfig = GlobalNativeHelmPostRendererConfig;
+export type NativeHelmConfig = Partial<GlobalNativeHelmConfig>;
 
 export interface HelmConfig {
   releaseName?: string;
