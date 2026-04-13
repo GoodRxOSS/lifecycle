@@ -14,9 +14,16 @@
  * limitations under the License.
  */
 
-import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy } from '../helm';
+import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy, generateHelmManifest } from '../helm';
 import * as nativeHelmUtils from '../utils';
-import { determineChartType, constructHelmCommand, ChartType, constructHelmCustomValues } from '../utils';
+import {
+  determineChartType,
+  constructHelmCommand,
+  ChartType,
+  constructHelmCustomValues,
+  mergeHelmConfigWithGlobal,
+  validateHelmConfiguration,
+} from '../utils';
 import { RegistryAuthConfig } from '../registryAuth';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
@@ -24,6 +31,8 @@ import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
 import { shellPromise } from 'server/lib/shell';
 import { getLogArchivalService } from 'server/services/logArchival';
+import { YamlConfigParser } from 'server/lib/yamlConfigParser';
+import * as YamlService from 'server/models/yaml';
 
 jest.mock('server/services/globalConfig');
 jest.mock('../utils', () => {
@@ -398,6 +407,32 @@ describe('Native Helm', () => {
       expect(result).not.toContain('--timeout 30m');
     });
 
+    it('should include a post-renderer command and args when configured', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--force --timeout 60m0s --wait',
+        undefined,
+        '--wait --timeout 30m',
+        '1.2.3',
+        {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--mode=prod', '--flag'],
+        }
+      );
+
+      expect(result).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(result).toContain("--post-renderer-args '--mode=prod'");
+      expect(result).toContain("--post-renderer-args '--flag'");
+      expect(result).toContain('--version 1.2.3');
+    });
+
     it('should handle OCI chart URLs correctly', () => {
       const result = constructHelmCommand(
         'upgrade --install',
@@ -573,6 +608,170 @@ describe('Native Helm', () => {
       expect(result.args).toHaveLength(1);
       expect(result.args[0]).toContain('helm upgrade --install');
       expect(result.args[0]).toContain('--force --timeout 60m0s --wait');
+    });
+
+    it('should use a configured custom helm image and post-renderer config', async () => {
+      const result = await createHelmContainer(
+        'org/repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        '--force --timeout 60m0s --wait',
+        'https://charts.example.com',
+        '--wait --timeout 30m',
+        '1.2.3',
+        undefined,
+        'registry.example.com/custom-helm-runner:1.2.3',
+        {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--mode=prod'],
+        }
+      );
+
+      expect(result.image).toBe('registry.example.com/custom-helm-runner:1.2.3');
+      expect(result.args[0]).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(result.args[0]).toContain("--post-renderer-args '--mode=prod'");
+    });
+  });
+
+  describe('mergeHelmConfigWithGlobal', () => {
+    it('applies helmDefaults nativeHelm config when no service override is provided', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+            repoUrl: 'https://charts.bitnami.com/bitnami',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/default-helm-runner:1.0.0',
+        postRenderer: {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--global'],
+        },
+      });
+    });
+
+    it('allows service config to override global image and renderer args', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          nativeHelm: {
+            postRenderer: {
+              args: ['--chart'],
+            },
+          },
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+            nativeHelm: {
+              image: 'registry.example.com/service-helm-runner:2.0.0',
+              postRenderer: {
+                args: ['--service'],
+              },
+            },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/service-helm-runner:2.0.0',
+        postRenderer: {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--service'],
+        },
+      });
+    });
+
+    it('allows service config to disable an inherited global renderer', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+            nativeHelm: {
+              postRenderer: {
+                enabled: false,
+              },
+            },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm?.postRenderer?.enabled).toBe(false);
     });
   });
 
@@ -1062,6 +1261,67 @@ describe('Native Helm', () => {
     });
   });
 
+  describe('validateHelmConfiguration', () => {
+    it('accepts a globally configured custom image without a service-level helm version', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toEqual([]);
+    });
+
+    it('requires a post-renderer command when renderer is enabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toContain('Native Helm post-renderer command is required when post-renderer is enabled');
+    });
+  });
+
   describe('nativeHelmDeploy', () => {
     it('uses the canonical deploy job name for monitoring and archival', async () => {
       const deploy = {
@@ -1142,6 +1402,230 @@ describe('Native Helm', () => {
       });
 
       setTimeoutSpy.mockRestore();
+    });
+  });
+
+  describe('generateHelmManifest', () => {
+    it('builds the expected manifest for plain native Helm without a renderer', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        publicChart: { block: false },
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            defaultArgs: '--wait --timeout 30m',
+            defaultHelmVersion: '3.12.0',
+          },
+        },
+        'sample-chart': {
+          chart: {
+            name: 'sample-chart',
+            repoUrl: 'https://charts.example.com',
+            version: '2.5.1',
+          },
+        },
+      });
+
+      const parser = new YamlConfigParser();
+      const lifecycleYaml = `---
+version: '1.0.0'
+services:
+  - name: sample-service
+    helm:
+      deploymentMethod: native
+      chart:
+        name: sample-chart
+`;
+
+      const config = parser.parseYamlConfigFromString(lifecycleYaml);
+      const service = YamlService.getDeployingServicesByName(config, 'sample-service');
+      const helmConfig = await YamlService.getHelmConfigFromYaml(service);
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: helmConfig.chart?.name || 'sample-chart',
+        releaseName: 'sample-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'sample-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'sample-service',
+          helm: helmConfig,
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+
+      expect(manifest).toContain('image: alpine/helm:3.12.0');
+      expect(manifest).not.toContain('--post-renderer');
+      expect(manifest).not.toContain('--post-renderer-args');
+      expect(manifest).toContain('--wait --timeout 30m');
+    });
+
+    it('uses merged global nativeHelm image and post-renderer config', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/custom-helm-runner:1.2.3',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--mode=prod'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+            repoUrl: 'https://charts.bitnami.com/bitnami',
+          },
+        },
+      });
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: 'redis',
+        releaseName: 'test-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'test-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'redis',
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+
+      expect(manifest).toContain('image: registry.example.com/custom-helm-runner:1.2.3');
+      expect(manifest).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(manifest).toContain("--post-renderer-args '--mode=prod'");
+    });
+
+    it('builds the expected manifest from global config plus lifecycle yaml', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        publicChart: { block: false },
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        'sample-chart': {
+          chart: {
+            name: 'sample-chart',
+            repoUrl: 'https://charts.example.com',
+            version: '2.5.1',
+            valueFiles: ['global-values.yaml'],
+          },
+        },
+      });
+
+      const parser = new YamlConfigParser();
+      const lifecycleYaml = `---
+version: '1.0.0'
+services:
+  - name: sample-service
+    helm:
+      deploymentMethod: native
+      chart:
+        name: sample-chart
+        valueFiles:
+          - service-values.yaml
+      nativeHelm:
+        image: registry.example.com/service-helm-runner:2.0.0
+        postRenderer:
+          enabled: true
+          args:
+            - --service-override
+`;
+
+      const config = parser.parseYamlConfigFromString(lifecycleYaml);
+      const service = YamlService.getDeployingServicesByName(config, 'sample-service');
+      const helmConfig = await YamlService.getHelmConfigFromYaml(service);
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: helmConfig.chart?.valueFiles || [],
+        chartPath: helmConfig.chart?.name || 'sample-chart',
+        releaseName: 'sample-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'sample-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'sample-service',
+          helm: helmConfig,
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+
+      expect(manifest).toContain('image: registry.example.com/service-helm-runner:2.0.0');
+      expect(manifest).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(manifest).toContain("--post-renderer-args '--service-override'");
+      expect(manifest).not.toContain("--post-renderer-args '--global'");
+      expect(manifest).toContain('-f service-values.yaml');
+      expect(manifest).not.toContain('-f global-values.yaml');
     });
   });
 });
