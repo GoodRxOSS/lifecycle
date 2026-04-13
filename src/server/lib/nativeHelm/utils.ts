@@ -745,10 +745,10 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     if (grpc) {
       customValues.push(...(await constructGrpcMappings(deploy)));
       if (isDisableIngressHost === false) {
-        customValues.push(...ingressValues, ...addNativeHelmCustomValues(deploy));
+        customValues.push(...ingressValues, ...addNativeHelmCustomValues());
       }
     } else if (!isDisableIngressHost && resourceType === 'deployment') {
-      customValues.push(...ingressValues, ...addNativeHelmCustomValues(deploy));
+      customValues.push(...ingressValues, ...addNativeHelmCustomValues());
     }
 
     customValues.push(

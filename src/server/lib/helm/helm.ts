@@ -169,9 +169,9 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
   if (grpc) {
     const mappings = await grpcMapping(deploy);
     customValues.push(...mappings);
-    if (isDisableIngressHost === false) customValues.push(...ingress, ...addHelmCustomValues(deploy));
+    if (isDisableIngressHost === false) customValues.push(...ingress, ...addHelmCustomValues());
   } else if (!isDisableIngressHost && resourceType === 'deployment') {
-    customValues.push(...ingress, ...addHelmCustomValues(deploy));
+    customValues.push(...ingress, ...addHelmCustomValues());
   }
 
   const chartName = helm?.chart?.name;
