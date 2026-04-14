@@ -28,18 +28,16 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
     const comment = [
       'Status comment',
       CommentParser.HEADER,
-      '// **Override Environment Variables**',
-      '// Add one override per line below.',
-      '// Only lines that start with ENV: are applied.',
-      '// Example boolean: ENV:FEATURE_ENABLED:true',
-      '// Example URL: ENV:LIFECYCLE_API_URL:https://lifecycle.example.com/api',
-      'ENV:LIFECYCLE_API_URL:https://lifecycle.example.com/api/v1',
+      '// Override Environment Variables (add one override per line below)',
+      '// Example ENV:FEATURE_ENABLED:true',
+      '// Example ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api',
+      'ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api/v1',
       'ENV:FEATURE_FLAGS.checkout:true',
       CommentParser.FOOTER,
     ].join('\n');
 
     expect(CommentHelper.parseEnvironmentOverrides(comment)).toEqual({
-      LIFECYCLE_API_URL: 'https://lifecycle.example.com/api/v1',
+      LIFECYCLE_API_URL: 'https://app.lifecycle.com/api/v1',
       FEATURE_FLAGS: {
         checkout: 'true',
       },
