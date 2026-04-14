@@ -65,7 +65,7 @@ export class CommentHelper {
     const textToParse = comment.split(CommentParser.HEADER)[1].split(CommentParser.FOOTER)[0];
     const lines = textToParse
       .match(/[^\r\n]+/g) // Match by newline
-      .map((line) => line.replace(/ /g, '')); // Remove all whitespace
+      .map((line) => line.trim());
     const envLines = lines.filter((line) => {
       return line.startsWith('ENV:');
     });
@@ -73,8 +73,8 @@ export class CommentHelper {
     envLines.forEach((line) => {
       getLogger().debug(`Parsing environment override line=${line}`);
       const match = line.match(/ENV:([^:]*):(.*)/m);
-      const key = match[1];
-      const value = match[2];
+      const key = match[1].trim();
+      const value = match[2].trim();
       set(obj, key, value);
     });
     return obj;

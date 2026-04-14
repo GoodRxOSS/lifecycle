@@ -575,8 +575,9 @@ export default class ActivityStream extends BaseService {
     message += '\n\n// **UUID** *(Pick your own custom subdomain)*\n';
     message += `url: ${build.uuid}\n`;
 
-    message +=
-      '\n\n// **Override Environment Variables:** *ENV:[KEY]:[VALUE]* --- Example *ENV:GORILLA_FUND:`https://gorillafund.org/`* 🦍 🤝 💪\n';
+    message += '\n\n// **Override Environment Variables (add one override per line below)**\n';
+    message += '// ENV:FEATURE_ENABLED:true\n';
+    message += '// ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api\n';
     message += this.generateEnvBlockForBuild(build);
 
     message += `\n\n${CommentParser.FOOTER}\n\n`;
