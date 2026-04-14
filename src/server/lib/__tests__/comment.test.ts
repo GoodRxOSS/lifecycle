@@ -29,8 +29,8 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
       'Status comment',
       CommentParser.HEADER,
       '// **Override Environment Variables (add one override per line below)**',
-      '// Example ENV:FEATURE_ENABLED:true',
-      '// Example ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api',
+      '// ENV:FEATURE_ENABLED:true',
+      '// ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api',
       'ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api/v1',
       'ENV:FEATURE_FLAGS.checkout:true',
       CommentParser.FOOTER,
@@ -54,6 +54,23 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
 
     expect(CommentHelper.parseEnvironmentOverrides(comment)).toEqual({
       BANNER_TEXT: 'sample lifecycle banner',
+    });
+  });
+
+  test('trims separator-adjacent whitespace from keys and values', () => {
+    const comment = [
+      'Status comment',
+      CommentParser.HEADER,
+      'ENV: FEATURE_ENABLED:true',
+      'ENV:BANNER_TEXT: sample lifecycle banner',
+      'ENV: LIFECYCLE_API_URL : https://app.lifecycle.com/api/v1 ',
+      CommentParser.FOOTER,
+    ].join('\n');
+
+    expect(CommentHelper.parseEnvironmentOverrides(comment)).toEqual({
+      FEATURE_ENABLED: 'true',
+      BANNER_TEXT: 'sample lifecycle banner',
+      LIFECYCLE_API_URL: 'https://app.lifecycle.com/api/v1',
     });
   });
 });

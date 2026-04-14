@@ -73,8 +73,8 @@ export class CommentHelper {
     envLines.forEach((line) => {
       getLogger().debug(`Parsing environment override line=${line}`);
       const match = line.match(/ENV:([^:]*):(.*)/m);
-      const key = match[1];
-      const value = match[2];
+      const key = match[1].trim();
+      const value = match[2].trim();
       set(obj, key, value);
     });
     return obj;
