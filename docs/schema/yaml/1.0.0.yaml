@@ -255,6 +255,32 @@ services:
           # @param services.helm.docker.init.env
           env:
 
+      # @param services.helm.deploymentMethod
+      deploymentMethod: ''
+      # @param services.helm.nativeHelm
+      nativeHelm:
+        # @param services.helm.nativeHelm.enabled
+        enabled: false
+        # @param services.helm.nativeHelm.defaultHelmVersion
+        defaultHelmVersion: ''
+        # @param services.helm.nativeHelm.jobTimeout
+        jobTimeout: 0
+        # @param services.helm.nativeHelm.serviceAccount
+        serviceAccount: ''
+        # @param services.helm.nativeHelm.defaultArgs
+        defaultArgs: ''
+        # @param services.helm.nativeHelm.image
+        image: ''
+        # @param services.helm.nativeHelm.postRenderer
+        postRenderer:
+          # @param services.helm.nativeHelm.postRenderer.enabled
+          enabled: false
+          # @param services.helm.nativeHelm.postRenderer.command
+          command: ''
+          # @param services.helm.nativeHelm.postRenderer.args
+          args:
+            # @param services.helm.nativeHelm.postRenderer.args[]
+            - ''
     # @param services.codefresh
     codefresh:
       # @param services.codefresh.repository (required)
