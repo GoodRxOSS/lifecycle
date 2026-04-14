@@ -16,6 +16,7 @@
 
 import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy, generateHelmManifest } from '../helm';
 import * as nativeHelmUtils from '../utils';
+import yaml from 'js-yaml';
 import {
   determineChartType,
   constructHelmCommand,
@@ -1537,6 +1538,9 @@ services:
         deployableId: 99,
         deployable: {
           name: 'sample-service',
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
           helm: helmConfig,
         },
         build: {
@@ -1633,7 +1637,7 @@ services:
         'sample-chart': {
           chart: {
             name: 'sample-chart',
-            repoUrl: 'https://charts.example.com',
+            repoUrl: 'oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/sample-chart',
             version: '2.5.1',
             valueFiles: ['global-values.yaml'],
           },
@@ -1695,13 +1699,21 @@ services:
       } as any;
 
       const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+      const parsed = yaml.load(manifest) as any;
+      const initContainerNames = parsed.spec.template.spec.initContainers.map((container: any) => container.name);
+      const helmContainer = parsed.spec.template.spec.containers.find(
+        (container: any) => container.name === 'helm-deploy'
+      );
 
       expect(manifest).toContain('image: registry.example.com/service-helm-runner:2.0.0');
-      expect(manifest).toContain("--post-renderer '/opt/bin/post-renderer'");
-      expect(manifest).toContain("--post-renderer-args '--service-override'");
-      expect(manifest).not.toContain("--post-renderer-args '--global'");
       expect(manifest).toContain('-f service-values.yaml');
       expect(manifest).not.toContain('-f global-values.yaml');
+      expect(helmContainer.args[0]).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(helmContainer.args[0]).toContain("--post-renderer-args '--service-override'");
+      expect(helmContainer.args[0]).not.toContain("--post-renderer-args '--global'");
+      expect(initContainerNames[initContainerNames.length - 1]).toBe('wait-for-prior-deploys');
+      expect(initContainerNames).toContain('ecr-auth');
+      expect(initContainerNames.indexOf('ecr-auth')).toBeLessThan(initContainerNames.indexOf('wait-for-prior-deploys'));
     });
   });
 });

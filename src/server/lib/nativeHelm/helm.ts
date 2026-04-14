@@ -44,7 +44,7 @@ import {
   validateHelmConfiguration,
 } from './utils';
 import { detectRegistryAuth, RegistryAuthConfig } from './registryAuth';
-import { HELM_IMAGE_PREFIX } from './constants';
+import { HELM_IMAGE_PREFIX, HELM_WAIT_IMAGE, HELM_WAIT_TIMEOUT_SECONDS } from './constants';
 import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import {
   createCloneScript,
@@ -127,6 +127,50 @@ export async function createHelmContainer(
   };
 }
 
+export function createWaitForPriorDeploysInitContainer(namespace: string, serviceName: string, jobName: string): any {
+  const script = [
+    'set -euo pipefail',
+    `echo "Checking for prior deploy jobs for service=${serviceName}"`,
+    `MY_CREATED=$(kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.metadata.creationTimestamp}')`,
+    `WAIT_TIMEOUT=${HELM_WAIT_TIMEOUT_SECONDS}`,
+    'POLL_INTERVAL=10',
+    'wait_start=$(date +%s)',
+    'while true; do',
+    '  elapsed=$(( $(date +%s) - wait_start ))',
+    '  if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then',
+    '    echo "ERROR: Timed out after ${WAIT_TIMEOUT}s waiting for prior deploy jobs to complete"',
+    '    exit 1',
+    '  fi',
+    '',
+    `  blocking_jobs=$(kubectl get jobs -n ${namespace} -l "service=${serviceName},app.kubernetes.io/name=native-helm" -o jsonpath='{range .items[*]}{.metadata.name}{"\\t"}{.metadata.creationTimestamp}{"\\t"}{.status.active}{"\\n"}{end}' | awk -v my_name="${jobName}" -v my_ts="$MY_CREATED" '`,
+    '    BEGIN { result = "" }',
+    '    $1 != my_name && (($2 < my_ts) || ($2 == my_ts && $1 < my_name)) && ($3 + 0) > 0 {',
+    '      result = result (result ? " " : "") $1',
+    '    }',
+    `    END { print result }')`,
+    '',
+    '  if [ -z "$blocking_jobs" ]; then',
+    '    echo "No prior deploy jobs in progress, proceeding"',
+    '    break',
+    '  fi',
+    '',
+    '  echo "Waiting for prior deploy jobs to complete: $blocking_jobs (${elapsed}s/${WAIT_TIMEOUT}s)"',
+    '  sleep $POLL_INTERVAL',
+    'done',
+  ].join('\n');
+
+  return {
+    name: 'wait-for-prior-deploys',
+    image: HELM_WAIT_IMAGE,
+    command: ['/bin/bash', '-c'],
+    args: [script],
+    resources: {
+      requests: { cpu: '100m', memory: '128Mi' },
+      limits: { cpu: '500m', memory: '512Mi' },
+    },
+  };
+}
+
 export async function generateHelmManifest(
   deploy: Deploy,
   jobName: string,
@@ -161,6 +205,7 @@ export async function generateHelmManifest(
   const registryAuth = detectRegistryAuth(chartRepoUrl);
   const helmImage = mergedHelmConfig.nativeHelm?.image;
   const postRenderer = mergedHelmConfig.nativeHelm?.postRenderer;
+  const waitForPriorDeploys = createWaitForPriorDeploysInitContainer(options.namespace, deployable.name, jobName);
 
   const helmContainer = await createHelmContainer(
     repository?.fullName || 'no-repo',
@@ -209,6 +254,7 @@ export async function generateHelmManifest(
     gitUsername: GIT_USERNAME,
     gitToken,
     cloneScript,
+    initContainers: [waitForPriorDeploys],
     containers: [helmContainer],
     volumes: volumeConfig.volumes,
     deployMetadata,

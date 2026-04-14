@@ -19,6 +19,8 @@ export const HELM_JOB_TIMEOUT_SECONDS = HELM_TIMEOUT_MINUTES * 60;
 export const STATIC_ENV_JOB_TTL_SECONDS = 86400; // 24 hours
 export const DEFAULT_HELM_VERSION = '3.12.0';
 export const HELM_IMAGE_PREFIX = 'alpine/helm';
+export const HELM_WAIT_IMAGE = 'bitnamilegacy/kubectl:1.30';
+export const HELM_WAIT_TIMEOUT_SECONDS = 900;
 
 export const REPO_MAPPINGS = {
   bitnami: 'https://charts.bitnami.com/bitnami',

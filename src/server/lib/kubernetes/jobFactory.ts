@@ -180,6 +180,7 @@ export interface HelmJobConfig {
   };
   includeGitClone?: boolean;
   registryAuth?: RegistryAuthConfig;
+  initContainers?: any[];
 }
 
 export function createHelmJob(config: HelmJobConfig): V1Job {
@@ -219,6 +220,10 @@ export function createHelmJob(config: HelmJobConfig): V1Job {
 
   if (config.registryAuth) {
     initContainers.push(createRegistryAuthInitContainer(config.registryAuth));
+  }
+
+  if (config.initContainers?.length) {
+    initContainers.push(...config.initContainers);
   }
 
   const containers = config.containers.map((container) => ({
