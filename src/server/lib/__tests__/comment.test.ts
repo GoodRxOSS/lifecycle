@@ -73,4 +73,17 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
       LIFECYCLE_API_URL: 'https://app.lifecycle.com/api/v1',
     });
   });
+
+  test('parses host and port values after the env key separator', () => {
+    const comment = [
+      'Status comment',
+      CommentParser.HEADER,
+      'ENV:URL:app-dev-0.lifecycle-grpc.example.com:443',
+      CommentParser.FOOTER,
+    ].join('\n');
+
+    expect(CommentHelper.parseEnvironmentOverrides(comment)).toEqual({
+      URL: 'app-dev-0.lifecycle-grpc.example.com:443',
+    });
+  });
 });
