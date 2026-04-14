@@ -28,7 +28,7 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
     const comment = [
       'Status comment',
       CommentParser.HEADER,
-      '// Override Environment Variables (add one override per line below)',
+      '// **Override Environment Variables (add one override per line below)**',
       '// Example ENV:FEATURE_ENABLED:true',
       '// Example ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api',
       'ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api/v1',
