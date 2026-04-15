@@ -130,7 +130,18 @@ export default class BuildService extends BaseService {
     const exclude = excludeStatuses ? excludeStatuses.split(',').map((s) => s.trim()) : [];
 
     const baseQuery = this.db.models.Build.query()
-      .select('id', 'uuid', 'status', 'namespace', 'createdAt', 'updatedAt', 'isStatic', 'kind', 'baseBuildId')
+      .select(
+        'id',
+        'uuid',
+        'status',
+        'statusMessage',
+        'namespace',
+        'createdAt',
+        'updatedAt',
+        'isStatic',
+        'kind',
+        'baseBuildId'
+      )
       .where('kind', BuildKind.ENVIRONMENT)
       .whereNotIn('status', exclude)
       .modify((qb) => {
@@ -181,6 +192,7 @@ export default class BuildService extends BaseService {
         'id',
         'uuid',
         'status',
+        'statusMessage',
         'namespace',
         'manifest',
         'sha',
