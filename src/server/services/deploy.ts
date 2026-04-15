@@ -39,6 +39,7 @@ import { constructEcrTag } from 'server/lib/codefresh/utils';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
+import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -375,13 +376,15 @@ export default class DeployService extends BaseService {
     return withLogContext(
       { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
       async () => {
+        let runUUID = deploy.runUUID;
         try {
           await deploy.reload();
           await deploy.$fetchGraph('[build, deployable]');
+          runUUID = deploy.runUUID;
 
           if (!deploy.deployable) {
             getLogger().error('Aurora: deployable missing for=restore');
-            return false;
+            throw new Error('Aurora restore deployable is missing.');
           }
 
           if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
@@ -400,11 +403,13 @@ export default class DeployService extends BaseService {
           }
 
           const uuid = nanoid();
+          runUUID = nanoid();
           await deploy.$query().patch({
             status: DeployStatus.BUILDING,
             buildLogs: uuid,
-            runUUID: nanoid(),
+            runUUID,
           });
+          deploy.runUUID = runUUID;
           getLogger().info('Aurora: restoring');
           await cli.cliDeploy(deploy);
 
@@ -425,10 +430,11 @@ export default class DeployService extends BaseService {
           return true;
         } catch (e) {
           getLogger().error({ error: e }, 'Aurora: cluster restore failed');
-          await deploy.$query().patch({
+          return this.recordDeployFailure(deploy, runUUID || deploy.runUUID, {
             status: DeployStatus.ERROR,
+            error: e,
+            fallbackMessage: 'Aurora restore failed.',
           });
-          return false;
         }
       }
     );
@@ -444,25 +450,16 @@ export default class DeployService extends BaseService {
         await deploy.$query().patch({
           runUUID,
         });
+        deploy.runUUID = runUUID;
 
         await deploy.reload();
         await deploy.$fetchGraph('[service.[repository], deployable.[repository], build]');
         const { build, service, deployable } = deploy;
-        const { repository } = build.enableFullYaml ? deployable : service;
-        const repo = repository?.fullName;
-        const [owner, name] = repo?.split('/') || [];
-        const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name).catch((error) => {
-          getLogger().warn(
-            { error, owner, name, branch: deploy.branchName },
-            'Failed to retrieve commit SHA from github'
-          );
-        });
+        const source = build.enableFullYaml ? deployable : service;
+        const repo = source?.repository?.fullName;
 
-        if (!fullSha) {
-          getLogger().warn({ owner, name, branch: deploy.branchName }, 'Git: SHA missing');
-
-          result = false;
-        } else {
+        try {
+          const fullSha = await this.resolveSourceSha(repo, deploy.branchName);
           const shortSha = fullSha.substring(0, 7);
           const envSha = hash(merge(deploy.env || {}, build.commentRuntimeEnv));
           const buildSha = `${shortSha}-${envSha}`;
@@ -539,6 +536,12 @@ export default class DeployService extends BaseService {
               result = false;
             }
           }
+        } catch (error) {
+          return this.recordDeployFailure(deploy, runUUID, {
+            status: DeployStatus.BUILD_FAILED,
+            error,
+            fallbackMessage: 'CI build failed.',
+          });
         }
 
         return result;
@@ -570,11 +573,12 @@ export default class DeployService extends BaseService {
     return withLogContext(
       { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
       async () => {
+        const runUUID = deploy.runUUID ?? nanoid();
         try {
-          const runUUID = deploy.runUUID ?? nanoid();
           await deploy.$query().patch({
             runUUID,
           });
+          deploy.runUUID = runUUID;
 
           await deploy.$fetchGraph('[service, build.[environment], deployable]');
           const { service, build, deployable } = deploy;
@@ -612,8 +616,7 @@ export default class DeployService extends BaseService {
                 const enabledFeatures = build?.enabledFeatures || [];
                 const repository = service?.repository;
                 const repo = repository?.fullName;
-                const [owner, name] = repo?.split('/') || [];
-                const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
+                const fullSha = await this.resolveSourceSha(repo, deploy.branchName);
 
                 let repositoryName: string = service.repository.fullName;
                 let branchName: string = deploy.branchName;
@@ -635,13 +638,6 @@ export default class DeployService extends BaseService {
                       initDockerfilePath = githubService.github.docker.init.dockerfilePath;
                     }
                   }
-                }
-
-                // Verify we actually have a SHA from github before proceeding
-                if (!fullSha) {
-                  // We were unable to retrieve this branch/repo combo
-                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-                  return false;
                 }
 
                 const shortSha = fullSha.substring(0, 7);
@@ -732,7 +728,7 @@ export default class DeployService extends BaseService {
           } else {
             switch (deployable.type) {
               case DeployTypes.GITHUB:
-                return this.buildImageForHelmAndGithub(deploy, runUUID);
+                return await this.buildImageForHelmAndGithub(deploy, runUUID);
               case DeployTypes.DOCKER:
                 await this.patchAndUpdateActivityFeed(
                   deploy,
@@ -749,7 +745,7 @@ export default class DeployService extends BaseService {
                   const chartType = await determineChartType(deploy);
 
                   if (chartType !== ChartType.PUBLIC) {
-                    return this.buildImageForHelmAndGithub(deploy, runUUID);
+                    return await this.buildImageForHelmAndGithub(deploy, runUUID);
                   }
 
                   let fullSha = null;
@@ -788,9 +784,70 @@ export default class DeployService extends BaseService {
           }
         } catch (e) {
           getLogger().error({ error: e }, 'Docker: build error');
-          return false;
+          return this.recordDeployFailure(deploy, runUUID, {
+            status: DeployStatus.BUILD_FAILED,
+            error: e,
+            fallbackMessage: 'Build failed unexpectedly. Check build logs for details.',
+          });
         }
       }
+    );
+  }
+
+  async recordDeployFailure(
+    deploy: Deploy,
+    runUUID: string | null | undefined,
+    {
+      status,
+      error,
+      fallbackMessage,
+    }: {
+      status: DeployStatus;
+      error?: unknown;
+      fallbackMessage: string;
+    }
+  ): Promise<false> {
+    const activeRunUUID = runUUID || deploy.runUUID || nanoid();
+
+    if (deploy.runUUID !== activeRunUUID) {
+      await deploy.$query().patch({ runUUID: activeRunUUID });
+      deploy.runUUID = activeRunUUID;
+    }
+
+    await this.patchAndUpdateActivityFeed(
+      deploy,
+      {
+        status,
+        statusMessage: statusMessageFromError(error, fallbackMessage),
+      },
+      activeRunUUID
+    );
+
+    return false;
+  }
+
+  private async resolveSourceSha(repo: string | null | undefined, branchName: string | null): Promise<string> {
+    const [owner, name] = repo?.split('/') || [];
+
+    if (!owner || !name || !branchName) {
+      throw this.sourceResolutionFailure(repo, branchName);
+    }
+
+    try {
+      const fullSha = await github.getSHAForBranch(branchName, owner, name);
+      if (fullSha) return fullSha;
+    } catch (error) {
+      getLogger().warn({ error, repo, branch: branchName }, 'Git: source resolution failed');
+    }
+
+    throw this.sourceResolutionFailure(repo, branchName);
+  }
+
+  private sourceResolutionFailure(repo?: string | null, branchName?: string | null): Error {
+    const repositoryLabel = repo || 'the selected repository';
+    const branchLabel = branchName || 'the selected branch';
+    return new Error(
+      `Unable to resolve branch "${branchLabel}" in repository "${repositoryLabel}". Verify the branch exists and the repository matches the selected service.`
     );
   }
 
@@ -803,7 +860,13 @@ export default class DeployService extends BaseService {
     let build: Build;
     try {
       const id = deploy?.id;
-      await this.db.models.Deploy.query().where({ id, runUUID }).patch(params);
+      const failureStatuses = [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED];
+      const status = params.status as DeployStatus;
+      const fallbackStatusMessage =
+        !params.statusMessage && failureStatuses.includes(status) ? fallbackDeployStatusMessage(status) : '';
+      const patchParams = fallbackStatusMessage ? { ...params, statusMessage: fallbackStatusMessage } : params;
+
+      await this.db.models.Deploy.query().where({ id, runUUID }).patch(patchParams);
       if (deploy.runUUID !== runUUID) {
         getLogger().debug(`runUUID mismatch: deployRunUUID=${deploy.runUUID} providedRunUUID=${runUUID}`);
         return;
@@ -822,7 +885,7 @@ export default class DeployService extends BaseService {
         DeployStatus.DEPLOY_FAILED,
         DeployStatus.TORN_DOWN,
       ];
-      const isTerminalStatus = terminalStatuses.includes(params.status as DeployStatus);
+      const isTerminalStatus = terminalStatuses.includes(status);
 
       if (isTerminalStatus && build?.githubDeployments && !isSandboxBuild) {
         await deploy.$fetchGraph('[service, deployable]');
@@ -954,25 +1017,16 @@ export default class DeployService extends BaseService {
       const repository = deployable?.repository;
 
       if (!repository) {
-        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-        return false;
+        throw this.sourceResolutionFailure(null, deploy.branchName);
       }
 
       const repo = repository?.fullName;
-      const [owner, name] = repo?.split('/') || [];
-      const fullSha = await github.getSHAForBranch(deploy.branchName, owner, name);
+      const fullSha = await this.resolveSourceSha(repo, deploy.branchName);
 
       const repositoryName: string = deployable.repository.fullName;
       const branchName: string = deploy.branchName;
       const dockerfilePath: string = deployable.dockerfilePath;
       const initDockerfilePath: string = deployable.initDockerfilePath;
-
-      // Verify we actually have a SHA from github before proceeding
-      if (!fullSha) {
-        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.ERROR }, runUUID);
-        getLogger().error({ owner, name, branch: deploy.branchName }, 'Git: SHA fetch failed');
-        return false;
-      }
 
       const shortSha = fullSha.substring(0, 7);
 

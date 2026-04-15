@@ -1082,6 +1082,13 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             manifest: { type: 'string', example: 'version: 1.0.0\nservices:\n  web:\n    image: myapp:web\n' },
             uuid: { type: 'string', example: 'white-poetry-596195' },
             status: { $ref: '#/components/schemas/BuildStatus' },
+            statusMessage: {
+              type: 'string',
+              maxLength: 1000,
+              nullable: true,
+              example:
+                'Build failed because web: Unable to resolve branch "feature/sample" in repository "example-org/example-repo".',
+            },
             kind: { $ref: '#/components/schemas/BuildKind' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
@@ -1170,7 +1177,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             id: { type: 'integer' },
             uuid: { type: 'string', example: 'deploy-uuid' },
             status: { $ref: '#/components/schemas/DeployStatus' },
-            statusMessage: { type: 'string', example: 'Deployment in progress' },
+            statusMessage: { type: 'string', maxLength: 1000, example: 'Deployment in progress' },
             dockerImage: { type: 'string', example: 'myapp:web' },
             buildLogs: { type: 'string', example: 'https://g.codefresh.io/build/123...' },
             active: { type: 'boolean', example: true },
