@@ -1472,16 +1472,7 @@ export default class BuildService extends BaseService {
         return true;
       } catch (e) {
         getLogger().warn({ error: e }, 'K8s: deploy failed');
-        await Promise.all(
-          deploys.map((deploy) =>
-            this.db.services.Deploy.recordDeployFailure(deploy, build.runUUID, {
-              status: DeployStatus.DEPLOY_FAILED,
-              error: e,
-              fallbackMessage: 'Kubernetes deployment failed.',
-            })
-          )
-        );
-        return false;
+        throw e;
       }
     }
   }

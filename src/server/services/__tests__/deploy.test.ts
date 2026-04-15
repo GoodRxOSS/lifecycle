@@ -22,6 +22,8 @@ import * as github from 'server/lib/github';
 
 mockRedisClient();
 
+const mockCliDeploy = jest.fn();
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
     error: jest.fn(),
@@ -55,6 +57,12 @@ jest.mock('server/lib/github', () => ({
   getShaForDeploy: jest.fn(),
 }));
 
+jest.mock('server/lib/cli', () => ({
+  cliDeploy: (...args: any[]) => mockCliDeploy(...args),
+  codefreshDeploy: jest.fn(),
+  waitForCodefresh: jest.fn(),
+}));
+
 describe('DeployService - shouldTriggerGithubDeployment', () => {
   let deployService: DeployService;
   let mockDb: any;
@@ -82,6 +90,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockCliDeploy.mockReset();
     mockDetermineChartType.mockResolvedValue(ChartType.PUBLIC);
 
     mockDb = {
@@ -340,6 +349,51 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
             'Unable to resolve branch "missing-branch" in repository "example-org/example-repo". Verify the branch exists and the repository matches the selected service.',
         },
         'run-1'
+      );
+    });
+
+    test('deployAurora records failures with the newly assigned runUUID', async () => {
+      const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      jest.spyOn(deployService as any, 'findExistingAuroraDatabase').mockResolvedValue(null);
+      mockCliDeploy.mockRejectedValue(new Error('restore command failed'));
+
+      const patches: any[] = [];
+      const deploy = {
+        uuid: 'sample-aurora-restore',
+        runUUID: 'old-run',
+        status: DeployStatus.PENDING,
+        buildLogs: null,
+        build: {
+          uuid: 'sample-build',
+        },
+        deployable: {
+          name: 'sample-database',
+          type: DeployTypes.AURORA_RESTORE,
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({
+          patch: jest.fn((params) => {
+            patches.push(params);
+            return Promise.resolve(undefined);
+          }),
+        })),
+      };
+
+      const result = await deployService.deployAurora(deploy as any);
+      const assignedRunUUID = patches.find((params) => params.status === DeployStatus.BUILDING)?.runUUID;
+
+      expect(result).toBe(false);
+      expect(assignedRunUUID).toBeDefined();
+      expect(assignedRunUUID).not.toBe('old-run');
+      expect(deploy.runUUID).toBe(assignedRunUUID);
+      expect(patchSpy).toHaveBeenLastCalledWith(
+        deploy,
+        {
+          status: DeployStatus.ERROR,
+          statusMessage: 'restore command failed',
+        },
+        assignedRunUUID
       );
     });
   });

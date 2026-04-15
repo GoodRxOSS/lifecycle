@@ -376,9 +376,11 @@ export default class DeployService extends BaseService {
     return withLogContext(
       { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
       async () => {
+        let runUUID = deploy.runUUID;
         try {
           await deploy.reload();
           await deploy.$fetchGraph('[build, deployable]');
+          runUUID = deploy.runUUID;
 
           if (!deploy.deployable) {
             getLogger().error('Aurora: deployable missing for=restore');
@@ -401,11 +403,13 @@ export default class DeployService extends BaseService {
           }
 
           const uuid = nanoid();
+          runUUID = nanoid();
           await deploy.$query().patch({
             status: DeployStatus.BUILDING,
             buildLogs: uuid,
-            runUUID: nanoid(),
+            runUUID,
           });
+          deploy.runUUID = runUUID;
           getLogger().info('Aurora: restoring');
           await cli.cliDeploy(deploy);
 
@@ -426,7 +430,7 @@ export default class DeployService extends BaseService {
           return true;
         } catch (e) {
           getLogger().error({ error: e }, 'Aurora: cluster restore failed');
-          return this.recordDeployFailure(deploy, deploy.runUUID, {
+          return this.recordDeployFailure(deploy, runUUID || deploy.runUUID, {
             status: DeployStatus.ERROR,
             error: e,
             fallbackMessage: 'Aurora restore failed.',
