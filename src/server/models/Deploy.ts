@@ -17,7 +17,6 @@
 import Model from './_Model';
 import { DeployStatus } from 'shared/constants';
 import { Service, Build, Deployable, Repository } from '.';
-import { KedaScaleToZero } from './yaml/YamlService';
 
 export default class Deploy extends Model {
   uuid: string;
@@ -60,7 +59,6 @@ export default class Deploy extends Model {
   isRunningLatest?: boolean;
   githubDeploymentId?: number;
   deployPipelineId?: string;
-  kedaScaleToZero: KedaScaleToZero;
   buildPipelineId: string;
   buildOutput: string;
   deployOutput: string;

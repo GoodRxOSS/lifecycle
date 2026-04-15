@@ -72,11 +72,6 @@ export default class DeployService extends BaseService {
     const { deployables } = build;
 
     if (build?.enableFullYaml) {
-      //
-      // With full yaml enable. Creating deploys from deployables instead of services. This will include YAML only config.
-      //
-      const { kedaScaleToZero: defaultKedaScaleToZero } = await GlobalConfigService.getInstance().getAllConfigs();
-
       const buildId = build?.id;
       if (!buildId) {
         getLogger().error('Deploy: build id missing for=findOrCreateDeploys');
@@ -144,11 +139,6 @@ export default class DeployService extends BaseService {
               getLogger().debug({ error }, 'Deploy: SHA fetch failed continuing=true');
             }
           }
-
-          patchFields.kedaScaleToZero =
-            deployable?.kedaScaleToZero?.type === 'http' && defaultKedaScaleToZero?.enabled
-              ? { ...defaultKedaScaleToZero, ...deployable.kedaScaleToZero }
-              : null;
 
           await deploy.$query().patch(patchFields);
         })

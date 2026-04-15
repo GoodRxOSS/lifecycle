@@ -285,63 +285,6 @@
               "type": "string"
             }
           },
-          "kedaScaleToZero": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "type": {
-                "type": "string"
-              },
-              "replicas": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "min": {
-                    "type": "number"
-                  },
-                  "max": {
-                    "type": "number"
-                  }
-                }
-              },
-              "scaledownPeriod": {
-                "type": "number"
-              },
-              "maxRetries": {
-                "type": "number"
-              },
-              "scalingMetric": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "requestRate": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "granularity": {
-                        "type": "string"
-                      },
-                      "targetValue": {
-                        "type": "number"
-                      },
-                      "window": {
-                        "type": "string"
-                      }
-                    }
-                  },
-                  "concurrency": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "targetValue": {
-                        "type": "number"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
           "helm": {
             "type": "object",
             "additionalProperties": true,

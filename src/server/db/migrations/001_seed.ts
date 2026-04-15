@@ -189,8 +189,6 @@ export async function up(knex: Knex): Promise<any> {
       "destroyPipelineId" varchar(255),
       "destroyTrigger" varchar(255),
       "ipWhitelist" text[],
-      "scaleToZero" boolean DEFAULT false,
-      "scaleToZeroMetricsCheckInterval" integer DEFAULT 1800,
       "pathPortMapping" json DEFAULT '{}'::json,
       "afterBuildPipelineId" varchar(255) DEFAULT NULL::character varying,
       "detatchAfterBuildPipeline" boolean DEFAULT false,
@@ -324,8 +322,6 @@ export async function up(knex: Knex): Promise<any> {
       "destroyPipelineId" varchar(255),
       "destroyTrigger" varchar(255),
       "ipWhitelist" text[],
-      "scaleToZero" boolean DEFAULT false,
-      "scaleToZeroMetricsCheckInterval" integer DEFAULT 1800,
       "pathPortMapping" json DEFAULT '{}'::json,
       "afterBuildPipelineId" varchar(255) DEFAULT NULL::character varying,
       "detatchAfterBuildPipeline" boolean DEFAULT false,
@@ -346,7 +342,6 @@ export async function up(knex: Knex): Promise<any> {
       "appShort" varchar(255) DEFAULT NULL::character varying,
       helm json DEFAULT '{}'::json,
       "deploymentDependsOn" text[] DEFAULT ARRAY[]::text[],
-      "kedaScaleToZero" json DEFAULT '{}'::json,
       builder jsonb DEFAULT '{}'::jsonb,
       "ecr" varchar(255) default NULL::character varying
     );
@@ -388,7 +383,6 @@ export async function up(knex: Knex): Promise<any> {
       "runningImage" varchar(255) DEFAULT NULL::character varying,
       "githubDeploymentId" integer,
       "deployPipelineId" varchar(255) DEFAULT NULL::character varying,
-      "kedaScaleToZero" json DEFAULT '{}'::json,
       "buildPipelineId" text,
       "buildOutput" text,
       "deployOutput" text,
@@ -452,9 +446,8 @@ export async function up(knex: Knex): Promise<any> {
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('lifecycleIgnores', '{"github":{"branches":[],"events":["closed","deleted"],"organizations":[],"botUsers":[]}}', now(), now(), null, 'Data values for Lifecycle to ignore');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('deletePendingHelmReleaseStep', '{"delete":true,"static_delete":true}', now(), now(), null, 'If deletePendingHelmReleaseStep is set to true');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('redpanda', '{"version":"3.7.2","args":"--force --timeout 60m0s --wait","action":"install","chart":{"name":"redpanda","repoUrl":"https://charts.redpanda.com","version":"5.9.0","values":[],"valueFiles":[]},"tolerations":"tolerations","affinity":"affinity","nodeSelector":"nodeSelector"}', now(), now(), null, 'Redpanda helm chart configuration default values.');
-    INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('kedaScaleToZero', '{"enabled":false,"type":"http","replicas":{"min":1,"max":3},"scaledownPeriod":10800,"maxRetries":10,"scalingMetric":{"requestRate":{"granularity":"1m","targetValue":30,"window":"1m"},"concurrency":{"targetValue":100}}}', now(), now(), null, 'This is the default configuration for Keda Scale To Zero');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('mongodb', '{"version":"3.7.2","args":"--force --timeout 60m0s --wait","action":"install","chart":{"name":"mongodb","repoUrl":"https://charts.bitnami.com/bitnami","version":"16.3.0","values":["auth.rootPassword=rootpassword","replicaCount=1","timeoutSeconds=20","periodSeconds=15","timeoutSeconds=20","periodSeconds=15","useStatefulSet=true"],"valueFiles":[]},"label":"labels","tolerations":"tolerations","affinity":"affinity","nodeSelector":"nodeSelector"}', now(), now(), null, 'MongoDB bitnami helm chart configuration default values.');
-    INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('serviceDefaults', '{"dockerfilePath":"Dockerfile","cpuRequest":"10m","memoryRequest":"100Mi","readinessInitialDelaySeconds":0,"readinessPeriodSeconds":10,"readinessTimeoutSeconds":1,"readinessSuccessThreshold":1,"readinessFailureThreshold":30,"readinessTcpSocketPort":8090,"readinessHttpGetPort":8080,"readinessHttpGetPath":"/__lbheartbeat__","acmARN":"replace_me","scaleToZero":false,"scaleToZeroMetricsCheckInterval":1800,"grpc":false,"defaultIPWhiteList":"{ 0.0.0.0/0 }"}', now(), now(), null, 'Default configuration for services for values that are not set in the configuration file');
+    INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('serviceDefaults', '{"dockerfilePath":"Dockerfile","cpuRequest":"10m","memoryRequest":"100Mi","readinessInitialDelaySeconds":0,"readinessPeriodSeconds":10,"readinessTimeoutSeconds":1,"readinessSuccessThreshold":1,"readinessFailureThreshold":30,"readinessTcpSocketPort":8090,"readinessHttpGetPort":8080,"readinessHttpGetPath":"/__lbheartbeat__","acmARN":"replace_me","grpc":false,"defaultIPWhiteList":"{ 0.0.0.0/0 }"}', now(), now(), null, 'Default configuration for services for values that are not set in the configuration file');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('domainDefaults', '{"http":"127.0.0.1.nip.io","grpc":"127.0.0.1.nip.io"}', now(), now(), null, 'Default domain hostnames for the lifecycle deployments');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('orgChart', '{"name":"replace_me"}', now(), now(), null, 'Default internal helm chart for the org.');
     INSERT INTO global_config (key, config, "createdAt", "updatedAt", "deletedAt", description) VALUES ('auroraRestoreSettings', '{"vpcId":"","accountId":"","region":"us-west-2","securityGroupIds":[],"subnetGroupName":"","engine":"aurora-mysql","engineVersion":"8.0.mysql_aurora.3.06.0","tagMatch":{"key":"restore-for"},"instanceSize":"db.t3.medium","restoreSize":"db.t3.small"}', now(), now(), null, 'Default aurora database settings to use for restore');

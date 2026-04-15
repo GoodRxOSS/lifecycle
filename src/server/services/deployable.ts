@@ -21,7 +21,7 @@ import Deployable from 'server/models/Deployable';
 import * as YamlService from 'server/models/yaml';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 
-import { Builder, Helm, KedaScaleToZero } from 'server/models/yaml';
+import { Builder, Helm } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
 
 export interface DeployableAttributes {
@@ -92,7 +92,6 @@ export interface DeployableAttributes {
   ingressAnnotations?: Record<string, any>;
   helm?: Helm;
   deploymentDependsOn?: string[];
-  kedaScaleToZero?: KedaScaleToZero;
   builder?: Builder;
   envLens?: boolean;
   nodeSelector?: Record<string, string>;
@@ -291,8 +290,7 @@ export default class DeployableService extends BaseService {
             }
           }
         }
-        const { serviceDefaults, lifecycleDefaults, domainDefaults, kedaScaleToZero } =
-          await GlobalConfigService.getInstance().getAllConfigs();
+        const { serviceDefaults, lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
         //TODO check and throw error here?
         const defaultUUID = lifecycleDefaults.defaultUUID;
         const dockerBuildPipelineName =
@@ -375,7 +373,6 @@ export default class DeployableService extends BaseService {
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
           deploymentDependsOn: service.deploymentDependsOn || [],
-          kedaScaleToZero: kedaScaleToZero?.enabled ? YamlService.getScaleToZeroConfig(service) : null,
           builder: YamlService.getBuilder(service) ?? {},
           envLens: await YamlService.getEnvLens(service),
         };

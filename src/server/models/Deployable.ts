@@ -16,7 +16,7 @@
 
 import Model from './_Model';
 import { Environment, Repository, Service, ServiceDisk } from '.';
-import { Builder, Helm, KedaScaleToZero } from './yaml/YamlService';
+import { Builder, Helm } from './yaml/YamlService';
 
 export default class Deployable extends Service {
   static tableName = 'deployables';
@@ -35,7 +35,6 @@ export default class Deployable extends Service {
   ecr?: string;
   helm: Helm;
   deploymentDependsOn: string[];
-  kedaScaleToZero: KedaScaleToZero;
   builder: Builder;
   envLens?: boolean;
 

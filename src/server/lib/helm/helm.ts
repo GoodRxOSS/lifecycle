@@ -169,9 +169,9 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
   if (grpc) {
     const mappings = await grpcMapping(deploy);
     customValues.push(...mappings);
-    if (isDisableIngressHost === false) customValues.push(...ingress, ...addHelmCustomValues(deploy));
+    if (isDisableIngressHost === false) customValues.push(...ingress, ...addHelmCustomValues());
   } else if (!isDisableIngressHost && resourceType === 'deployment') {
-    customValues.push(...ingress, ...addHelmCustomValues(deploy));
+    customValues.push(...ingress, ...addHelmCustomValues());
   }
 
   const chartName = helm?.chart?.name;
@@ -255,34 +255,6 @@ export async function helmDeployStep(deploy: Deploy): Promise<Record<string, any
 export async function deployHelm(deploys: Deploy[]) {
   const { deployHelm: nativeDeployHelm } = await import('server/lib/nativeHelm/helm');
   return await nativeDeployHelm(deploys);
-}
-/**
- * Make request with interval of 10 seconds until return 200 status code for Keda Scale to Zero
- *
- * @param  url - The url to fetch until success.
- * @param  interval - The interval to fetch the url in ms
- */
-
-export async function fetchUntilSuccess(url, retries, deploy, namespace) {
-  getLogger().debug(`Helm: waiting for pods url=${url} maxRetries=${retries}`);
-  for (let i = 0; i < retries; i++) {
-    const pods = await shellPromise(
-      `kubectl get deploy ${deploy} -n ${namespace} -o jsonpath='{.status.availableReplicas}'`
-    );
-    try {
-      const response = await fetch(url);
-      if (1 <= parseInt(pods, 10)) {
-        getLogger().debug(`Pods: available deploy=${deploy} pods=${pods}`);
-        return;
-      } else {
-        getLogger().debug(`Pods: unavailable deploy=${deploy}`);
-        getLogger().error(`Helm: request failed url=${url} status=${response.status}`);
-      }
-    } catch (error) {
-      getLogger().error({ error }, `Helm: fetch failed url=${url}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10000));
-  }
 }
 /**
  * Generates the Codefresh YAML configuration for Helm deployment, stores it in a temporary file,
@@ -470,20 +442,8 @@ export async function uninstallHelmReleases(build: Build) {
 /**
  * Add helm Custom Values to use in helm install --set flag to override defalt values or values.yaml
  *
- * @param {Deploy} deploy - The deploy object containing deploy details.
  */
-function addHelmCustomValues(deploy: Deploy): string[] {
-  getLogger().debug(
-    `Helm: custom values kedaScaleToZeroType=${deploy?.kedaScaleToZero?.type} isStatic=${deploy?.build?.isStatic}`
-  );
-  if (
-    deploy?.kedaScaleToZero?.type === 'http' &&
-    deploy.build.isStatic == false &&
-    deploy?.build.isStatic != undefined
-  ) {
-    getLogger().debug(`Helm: enabling autoscaling for KEDA scale-to-zero`);
-    return ['autoscaling.enabled=true'];
-  }
+function addHelmCustomValues(): string[] {
   return [];
 }
 
@@ -525,15 +485,6 @@ async function httpIngress(deploy: Deploy): Promise<string[]> {
       .map((ip, index) => `ingress.ipAllowlist[${index}]=${ip.trim()}`);
     ingressValues.push(...ipWhitelist);
   }
-  if (
-    deploy?.kedaScaleToZero?.type === 'http' &&
-    deploy.build.isStatic === false &&
-    deploy?.build.isStatic != undefined
-  ) {
-    ingressValues.push(`ingress.backendService=${deploy.uuid}-external-service`, 'ingress.port=8080');
-    getLogger().debug(`Helm: redirecting ingress to KEDA proxy`);
-  }
-
   return ingressValues;
 }
 

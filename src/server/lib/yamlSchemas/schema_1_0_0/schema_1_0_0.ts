@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { kedaScaleToZero } from './keda';
 import { deployment } from './deployment';
 import { docker } from './docker';
 import { webhooks } from './webhooks';
@@ -158,7 +157,6 @@ const schema_1_0_0 = {
               type: 'string',
             },
           },
-          kedaScaleToZero,
           helm: {
             type: 'object',
             additionalProperties: true,

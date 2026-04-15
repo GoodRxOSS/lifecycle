@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Helm, KedaScaleToZero } from 'server/models/yaml';
+import { Helm } from 'server/models/yaml';
 
 export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
@@ -28,7 +28,6 @@ export type GlobalConfig = {
   publicChart: PublicChart;
   lifecycleIgnores: LifecycleIgnores;
   deletePendingHelmReleaseStep: DeletePendingHelmReleaseStep;
-  kedaScaleToZero: KedaScaleToZero & { enabled: boolean };
   serviceDefaults: Record<string, any>;
   domainDefaults: DomainDefaults;
   orgChart: OrgChart;
