@@ -48,6 +48,7 @@ import AgentPrewarmService from './agentPrewarm';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
+import { compactStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -734,9 +735,16 @@ export default class BuildService extends BaseService {
             );
           }
         } catch (error) {
-          if (error instanceof ParsingError || error instanceof ValidationError) {
-            await this.updateStatusAndComment(build, BuildStatus.CONFIG_ERROR, runUUID, true, true, error);
-          }
+          const isConfigError = error instanceof ParsingError || error instanceof ValidationError;
+          await this.recordBuildFailure(
+            build,
+            isConfigError ? BuildStatus.CONFIG_ERROR : BuildStatus.ERROR,
+            runUUID,
+            error,
+            isConfigError
+              ? 'Lifecycle configuration failed validation.'
+              : 'Build setup failed before deploys could be created.'
+          );
         }
       } else {
         throw new Error('Missing build or deployment options from environment.');
@@ -827,7 +835,7 @@ export default class BuildService extends BaseService {
       }
     } catch (error) {
       getLogger().error({ error }, 'Build: deploy failed');
-      await this.updateStatusAndComment(build, BuildStatus.ERROR, runUUID, true, true, error);
+      await this.recordBuildFailure(build, BuildStatus.ERROR, runUUID, error, 'Build failed unexpectedly.');
     }
 
     return build;
@@ -994,7 +1002,7 @@ export default class BuildService extends BaseService {
     runUUID: string,
     updateMissionControl: boolean,
     updateStatus: boolean,
-    error: Error = null
+    error: Error | null = null
   ) {
     return withLogContext({ buildUuid: build.uuid }, async () => {
       try {
@@ -1008,8 +1016,10 @@ export default class BuildService extends BaseService {
         if (build.runUUID !== runUUID) {
           return;
         } else {
+          const statusMessage = this.resolveBuildStatusMessage(status, deploys || [], error);
           await build.$query().patch({
             status,
+            statusMessage,
           });
 
           // add dashboard links to build database
@@ -1052,6 +1062,56 @@ export default class BuildService extends BaseService {
         }
       }
     });
+  }
+
+  private async recordBuildFailure(
+    build: Build,
+    status: BuildStatus,
+    runUUID: string | null | undefined,
+    error: unknown,
+    fallbackMessage: string
+  ): Promise<void> {
+    const activeRunUUID = runUUID || build.runUUID || nanoid();
+    if (build.runUUID !== activeRunUUID) {
+      await build.$query().patch({ runUUID: activeRunUUID });
+      build.runUUID = activeRunUUID;
+    }
+
+    const statusError = error instanceof Error ? error : new Error(statusMessageFromError(error, fallbackMessage));
+    await this.updateStatusAndComment(build, status, activeRunUUID, true, true, statusError);
+  }
+
+  private resolveBuildStatusMessage(status: BuildStatus, deploys: Deploy[], error: Error | null): string {
+    if (status === BuildStatus.CONFIG_ERROR) {
+      return compactStatusMessage(error?.message || 'Lifecycle configuration failed validation.');
+    }
+
+    if (status !== BuildStatus.ERROR) {
+      return '';
+    }
+
+    if (error) {
+      return compactStatusMessage(error.message || 'Build failed unexpectedly.');
+    }
+
+    const failedDeployMessages = (deploys || [])
+      .filter(
+        (deploy) =>
+          deploy.active !== false &&
+          [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED].includes(
+            deploy.status as DeployStatus
+          )
+      )
+      .map((deploy) => {
+        const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid || 'unknown service';
+        return deploy.statusMessage ? `${serviceName}: ${deploy.statusMessage}` : `${serviceName}: ${deploy.status}`;
+      });
+
+    if (failedDeployMessages.length === 0) {
+      return 'Build failed. Check service status messages for details.';
+    }
+
+    return compactStatusMessage(`Build failed because ${failedDeployMessages.slice(0, 3).join('; ')}`);
   }
 
   async markConfigurationsAsBuilt(build: Build) {
@@ -1112,7 +1172,11 @@ export default class BuildService extends BaseService {
                   return result;
                 } catch (err) {
                   getLogger().error({ error: err }, `CLI: deploy failed uuid=${deploy?.uuid}`);
-                  return false;
+                  return this.db.services.Deploy.recordDeployFailure(deploy, deploy.runUUID || build.runUUID, {
+                    status: DeployStatus.ERROR,
+                    error: err,
+                    fallbackMessage: 'CLI deploy failed.',
+                  });
                 }
               })
           )
@@ -1128,7 +1192,11 @@ export default class BuildService extends BaseService {
                 }
                 const result = await this.db.services.Deploy.deployCLI(deploy).catch((error) => {
                   getLogger().error({ error }, 'CLI: deploy failed');
-                  return false;
+                  return this.db.services.Deploy.recordDeployFailure(deploy, deploy.runUUID || build.runUUID, {
+                    status: DeployStatus.ERROR,
+                    error,
+                    fallbackMessage: 'CLI deploy failed.',
+                  });
                 });
 
                 if (!result) getLogger().info(`CLI: deploy failed uuid=${deploy.uuid}`);
@@ -1345,6 +1413,7 @@ export default class BuildService extends BaseService {
         throw e;
       }
     } else {
+      let deploys: Deploy[] = [];
       try {
         const buildId = build?.id;
         if (!buildId) {
@@ -1354,7 +1423,7 @@ export default class BuildService extends BaseService {
         const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
         const serviceAccountName = serviceAccount?.name || 'default';
 
-        const deploys = (
+        deploys = (
           await Deploy.query()
             .where({ buildId })
             .withGraphFetched({
@@ -1403,6 +1472,15 @@ export default class BuildService extends BaseService {
         return true;
       } catch (e) {
         getLogger().warn({ error: e }, 'K8s: deploy failed');
+        await Promise.all(
+          deploys.map((deploy) =>
+            this.db.services.Deploy.recordDeployFailure(deploy, build.runUUID, {
+              status: DeployStatus.DEPLOY_FAILED,
+              error: e,
+              fallbackMessage: 'Kubernetes deployment failed.',
+            })
+          )
+        );
         return false;
       }
     }
@@ -1535,10 +1613,25 @@ export default class BuildService extends BaseService {
 
         getLogger({ stage: LogStage.BUILD_COMPLETE }).info('Build: completed');
       } catch (error) {
-        if (error instanceof ParsingError || error instanceof ValidationError) {
-          this.updateStatusAndComment(build, BuildStatus.CONFIG_ERROR, build?.runUUID, true, true, error);
+        if (!build) {
+          getLogger({ stage: LogStage.BUILD_FAILED }).fatal({ error }, `Build: queue failed buildId=${buildId}`);
+        } else if (error instanceof ParsingError || error instanceof ValidationError) {
+          await this.recordBuildFailure(
+            build,
+            BuildStatus.CONFIG_ERROR,
+            build.runUUID,
+            error,
+            'Lifecycle configuration failed validation.'
+          );
         } else {
           getLogger({ stage: LogStage.BUILD_FAILED }).fatal({ error }, 'Build: uncaught exception');
+          await this.recordBuildFailure(
+            build,
+            BuildStatus.ERROR,
+            build.runUUID,
+            error,
+            'Build queue processing failed.'
+          );
         }
       }
     });

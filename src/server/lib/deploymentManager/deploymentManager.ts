@@ -176,6 +176,10 @@ export class DeploymentManager {
       const jobId = generateJobId();
       const deployService = new DeployService();
       const runUUID = deploy.runUUID || nanoid();
+      if (deploy.runUUID !== runUUID) {
+        await deploy.$query().patch({ runUUID });
+        deploy.runUUID = runUUID;
+      }
 
       try {
         await deployService.patchAndUpdateActivityFeed(
@@ -239,14 +243,11 @@ export class DeploymentManager {
           throw new Error('Pods failed to become ready within timeout');
         }
       } catch (error) {
-        await deployService.patchAndUpdateActivityFeed(
-          deploy,
-          {
-            status: DeployStatus.DEPLOY_FAILED,
-            statusMessage: `Deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
-          },
-          runUUID
-        );
+        await deployService.recordDeployFailure(deploy, runUUID, {
+          status: DeployStatus.DEPLOY_FAILED,
+          error,
+          fallbackMessage: `Deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
+        });
         throw error;
       }
     });

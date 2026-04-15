@@ -470,6 +470,10 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
             const startTime = Date.now();
             const runUUID = deploy.runUUID ?? nanoid();
             const deployService = new DeployService();
+            if (deploy.runUUID !== runUUID) {
+              await deploy.$query().patch({ runUUID });
+              deploy.runUUID = runUUID;
+            }
 
             try {
               const useNative = await shouldUseNativeHelm(deploy);
@@ -503,18 +507,14 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
 
               await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
             } catch (error) {
-              await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, error.message);
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, errorMessage);
 
-              await deployService.patchAndUpdateActivityFeed(
-                deploy,
-                {
-                  status: DeployStatus.DEPLOY_FAILED,
-                  statusMessage: error.message.includes('timed out')
-                    ? error.message
-                    : `${error.message}. Check deploy logs in Console > Deploy tab for details.`,
-                },
-                runUUID
-              );
+              await deployService.recordDeployFailure(deploy, runUUID, {
+                status: DeployStatus.DEPLOY_FAILED,
+                error,
+                fallbackMessage: `Helm deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
+              });
 
               throw error;
             }

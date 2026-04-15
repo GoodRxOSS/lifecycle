@@ -16,8 +16,9 @@
 
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 import DeployService from '../deploy';
-import { DeployTypes } from 'shared/constants';
+import { DeployStatus, DeployTypes } from 'shared/constants';
 import { ChartType } from 'server/lib/nativeHelm';
+import * as github from 'server/lib/github';
 
 mockRedisClient();
 
@@ -47,6 +48,11 @@ const mockDetermineChartType = jest.fn();
 jest.mock('server/lib/nativeHelm', () => ({
   ...jest.requireActual('server/lib/nativeHelm'),
   determineChartType: (...args: any[]) => mockDetermineChartType(...args),
+}));
+
+jest.mock('server/lib/github', () => ({
+  getSHAForBranch: jest.fn(),
+  getShaForDeploy: jest.fn(),
 }));
 
 describe('DeployService - shouldTriggerGithubDeployment', () => {
@@ -256,6 +262,85 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
 
       const result = await deployService['shouldTriggerGithubDeployment'](deploy as any);
       expect(result).toBe(false);
+    });
+  });
+
+  describe('failure boundaries', () => {
+    test('recordDeployFailure writes a terminal status with the original error message', async () => {
+      const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deploy = {
+        uuid: 'sample-service-build',
+        runUUID: 'run-1',
+        $query: jest.fn(() => ({
+          patch: jest.fn().mockResolvedValue(undefined),
+        })),
+      };
+
+      const result = await deployService.recordDeployFailure(deploy as any, 'run-1', {
+        status: DeployStatus.DEPLOY_FAILED,
+        error: new Error('Kubernetes apply job failed: pod quota exceeded'),
+        fallbackMessage: 'Kubernetes deployment failed.',
+      });
+
+      expect(result).toBe(false);
+      expect(patchSpy).toHaveBeenCalledWith(
+        deploy,
+        {
+          status: DeployStatus.DEPLOY_FAILED,
+          statusMessage: 'Kubernetes apply job failed: pod quota exceeded',
+        },
+        'run-1'
+      );
+    });
+
+    test('buildImage boundary records a source resolution failure statusMessage', async () => {
+      (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('Not Found'));
+      const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deploy = {
+        uuid: 'sample-service-build',
+        runUUID: 'run-1',
+        branchName: 'missing-branch',
+        env: {},
+        tag: 'latest',
+        $query: jest.fn(() => ({
+          patch: jest.fn().mockResolvedValue(undefined),
+        })),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        deployable: {
+          name: 'sample-service',
+          type: DeployTypes.GITHUB,
+          dockerfilePath: './Dockerfile',
+          initDockerfilePath: null,
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        build: {
+          uuid: 'sample-build',
+          enableFullYaml: true,
+          commentRuntimeEnv: {},
+          enabledFeatures: [],
+          pullRequest: {
+            githubLogin: 'sample-user',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+      };
+
+      const result = await deployService.buildImage(deploy as any, true, 0);
+
+      expect(result).toBe(false);
+      expect(github.getSHAForBranch).toHaveBeenCalledWith('missing-branch', 'example-org', 'example-repo');
+      expect(patchSpy).toHaveBeenLastCalledWith(
+        deploy,
+        {
+          status: DeployStatus.BUILD_FAILED,
+          statusMessage:
+            'Unable to resolve branch "missing-branch" in repository "example-org/example-repo". Verify the branch exists and the repository matches the selected service.',
+        },
+        'run-1'
+      );
     });
   });
 });
