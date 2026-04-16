@@ -150,12 +150,14 @@ export async function resolveForwardedAgentEnv(
     throw new Error(secretResult.warnings.join(' '));
   }
 
-  if (secretResult.secretNames.length > 0) {
+  const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
+
+  if (secretNames.length > 0) {
     const providerTimeouts = Object.values(secretProviders)
       .map((provider) => provider.secretSyncTimeout)
       .filter((timeout): timeout is number => timeout !== undefined);
     const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
-    await secretProcessor.waitForSecretSync(secretResult.secretNames, namespace, timeout);
+    await secretProcessor.waitForSecretSync(secretResult.expectedKeysPerSecret, namespace, timeout);
   }
 
   return {

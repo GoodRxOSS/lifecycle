@@ -36,7 +36,7 @@ export interface ProcessEnvSecretsOptions {
 
 export interface ProcessEnvSecretsResult {
   secretRefs: SecretRefWithEnvKey[];
-  secretNames: string[];
+  expectedKeysPerSecret: Record<string, string[]>;
   warnings: string[];
 }
 
@@ -57,28 +57,39 @@ export class SecretProcessor {
     return this.k8sClient;
   }
 
-  async waitForSecretSync(secretNames: string[], namespace: string, timeoutMs?: number): Promise<void> {
+  // ExternalSecret updates reuse Secret names, so wait for this apply's keys instead of any existing data.
+  async waitForSecretSync(
+    expectedKeysPerSecret: Record<string, string[]>,
+    namespace: string,
+    timeoutMs?: number
+  ): Promise<void> {
     const timeout = timeoutMs ?? DEFAULT_SECRET_SYNC_TIMEOUT;
     const pollInterval = 1000;
     const startTime = Date.now();
 
     const k8sClient = this.getK8sClient();
 
-    for (const secretName of secretNames) {
+    for (const [secretName, expectedKeys] of Object.entries(expectedKeysPerSecret)) {
       let synced = false;
+      let missingKeys = expectedKeys;
 
       while (!synced) {
         if (Date.now() - startTime > timeout) {
-          throw new Error(`Secret sync timeout: ${secretName} not ready after ${timeout}ms`);
+          throw new Error(
+            `Secret sync timeout: ${secretName} missing keys=[${missingKeys.join(', ')}] after ${timeout}ms`
+          );
         }
 
         try {
           const response = await k8sClient.readNamespacedSecret(secretName, namespace);
-          if (response.body.data && Object.keys(response.body.data).length > 0) {
+          const data = response.body.data || {};
+          missingKeys = expectedKeys.filter((key) => !Object.prototype.hasOwnProperty.call(data, key));
+
+          if (missingKeys.length === 0) {
             getLogger().info(`Secret: synced name=${secretName} namespace=${namespace}`);
             synced = true;
           } else {
-            getLogger().debug(`Secret: waiting for data name=${secretName}`);
+            getLogger().debug(`Secret: waiting for keys name=${secretName} missing=[${missingKeys.join(', ')}]`);
             await this.sleep(pollInterval);
           }
         } catch (error: any) {
@@ -120,11 +131,11 @@ export class SecretProcessor {
     }
 
     if (validRefs.length === 0) {
-      return { secretRefs: [], secretNames: [], warnings };
+      return { secretRefs: [], expectedKeysPerSecret: {}, warnings };
     }
 
     const grouped = groupSecretRefsByProvider(validRefs);
-    const secretNames: string[] = [];
+    const expectedKeysPerSecret: Record<string, string[]> = {};
 
     for (const [provider, refs] of Object.entries(grouped)) {
       const providerConfig = this.secretProviders![provider];
@@ -141,7 +152,7 @@ export class SecretProcessor {
 
       try {
         await applyExternalSecret(manifest, namespace);
-        secretNames.push(secretName);
+        expectedKeysPerSecret[secretName] = [...new Set(refs.map((ref) => ref.envKey))];
       } catch (error) {
         const errorMsg = (error as any)?.message || (error as any)?.stderr || String(error);
         const warning = `Failed to apply ExternalSecret for ${serviceName}: ${errorMsg}`;
@@ -149,6 +160,6 @@ export class SecretProcessor {
       }
     }
 
-    return { secretRefs: validRefs, secretNames, warnings };
+    return { secretRefs: validRefs, expectedKeysPerSecret, warnings };
   }
 }

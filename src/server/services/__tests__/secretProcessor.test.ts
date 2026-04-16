@@ -56,10 +56,10 @@ describe('SecretProcessor', () => {
   });
 
   describe('waitForSecretSync', () => {
-    it('resolves when secret exists with data', async () => {
+    it('resolves when secret contains expected keys', async () => {
       const mockReadNamespacedSecret = jest.fn().mockResolvedValue({
         body: {
-          data: { key: 'dmFsdWU=' },
+          data: { API_TOKEN: 'dmFsdWU=' },
         },
       });
 
@@ -67,9 +67,27 @@ describe('SecretProcessor', () => {
         readNamespacedSecret: mockReadNamespacedSecret,
       });
 
-      await expect(processor.waitForSecretSync(['my-secret'], 'test-ns', 5000)).resolves.toBeUndefined();
+      await expect(
+        processor.waitForSecretSync({ 'my-secret': ['API_TOKEN'] }, 'test-ns', 5000)
+      ).resolves.toBeUndefined();
 
       expect(mockReadNamespacedSecret).toHaveBeenCalledWith('my-secret', 'test-ns');
+    });
+
+    it('treats empty secret values as present keys', async () => {
+      const mockReadNamespacedSecret = jest.fn().mockResolvedValue({
+        body: {
+          data: { EMPTY_TOKEN: '' },
+        },
+      });
+
+      jest.spyOn(processor as any, 'getK8sClient').mockReturnValue({
+        readNamespacedSecret: mockReadNamespacedSecret,
+      });
+
+      await expect(
+        processor.waitForSecretSync({ 'my-secret': ['EMPTY_TOKEN'] }, 'test-ns', 5000)
+      ).resolves.toBeUndefined();
     });
 
     it('throws error on timeout when secret does not exist', async () => {
@@ -79,10 +97,12 @@ describe('SecretProcessor', () => {
         readNamespacedSecret: mockReadNamespacedSecret,
       });
 
-      await expect(processor.waitForSecretSync(['my-secret'], 'test-ns', 1000)).rejects.toThrow('Secret sync timeout');
+      await expect(processor.waitForSecretSync({ 'my-secret': ['API_TOKEN'] }, 'test-ns', 1000)).rejects.toThrow(
+        /Secret sync timeout.*missing keys=\[API_TOKEN\]/
+      );
     });
 
-    it('throws error on timeout when secret has no data', async () => {
+    it('throws with missing keys listed when Secret data is empty', async () => {
       const mockReadNamespacedSecret = jest.fn().mockResolvedValue({
         body: { data: null },
       });
@@ -91,7 +111,89 @@ describe('SecretProcessor', () => {
         readNamespacedSecret: mockReadNamespacedSecret,
       });
 
-      await expect(processor.waitForSecretSync(['my-secret'], 'test-ns', 1000)).rejects.toThrow('Secret sync timeout');
+      await expect(processor.waitForSecretSync({ 'my-secret': ['API_TOKEN'] }, 'test-ns', 1000)).rejects.toThrow(
+        /Secret sync timeout.*missing keys=\[API_TOKEN\]/
+      );
+    });
+
+    it('waits until an existing secret contains newly requested keys', async () => {
+      const mockReadNamespacedSecret = jest
+        .fn()
+        .mockResolvedValueOnce({
+          body: { data: { EXISTING_TOKEN: 'b2xk' } },
+        })
+        .mockResolvedValueOnce({
+          body: { data: { EXISTING_TOKEN: 'b2xk', NEW_TOKEN: 'bmV3' } },
+        });
+
+      jest.spyOn(processor as any, 'getK8sClient').mockReturnValue({
+        readNamespacedSecret: mockReadNamespacedSecret,
+      });
+      jest.spyOn(processor as any, 'sleep').mockResolvedValue(undefined);
+
+      await expect(
+        processor.waitForSecretSync({ 'sample-service-aws-secrets': ['EXISTING_TOKEN', 'NEW_TOKEN'] }, 'test-ns', 5000)
+      ).resolves.toBeUndefined();
+
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits through not found and partial keys until all requested keys land', async () => {
+      const mockReadNamespacedSecret = jest
+        .fn()
+        .mockRejectedValueOnce({ statusCode: 404 })
+        .mockResolvedValueOnce({
+          body: { data: { FIRST_TOKEN: 'Zmlyc3Q=' } },
+        })
+        .mockResolvedValueOnce({
+          body: { data: { FIRST_TOKEN: 'Zmlyc3Q=', SECOND_TOKEN: 'c2Vjb25k' } },
+        });
+
+      jest.spyOn(processor as any, 'getK8sClient').mockReturnValue({
+        readNamespacedSecret: mockReadNamespacedSecret,
+      });
+      jest.spyOn(processor as any, 'sleep').mockResolvedValue(undefined);
+
+      await processor.waitForSecretSync(
+        { 'sample-service-aws-secrets': ['FIRST_TOKEN', 'SECOND_TOKEN'] },
+        'test-ns',
+        5000
+      );
+
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(3);
+    });
+
+    it('waits until the last requested key lands', async () => {
+      const mockReadNamespacedSecret = jest
+        .fn()
+        .mockResolvedValueOnce({
+          body: { data: { FIRST_TOKEN: 'Zmlyc3Q=' } },
+        })
+        .mockResolvedValueOnce({
+          body: { data: { FIRST_TOKEN: 'Zmlyc3Q=', SECOND_TOKEN: 'c2Vjb25k' } },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            data: {
+              FIRST_TOKEN: 'Zmlyc3Q=',
+              SECOND_TOKEN: 'c2Vjb25k',
+              THIRD_TOKEN: 'dGhpcmQ=',
+            },
+          },
+        });
+
+      jest.spyOn(processor as any, 'getK8sClient').mockReturnValue({
+        readNamespacedSecret: mockReadNamespacedSecret,
+      });
+      jest.spyOn(processor as any, 'sleep').mockResolvedValue(undefined);
+
+      await processor.waitForSecretSync(
+        { 'sample-service-aws-secrets': ['FIRST_TOKEN', 'SECOND_TOKEN', 'THIRD_TOKEN'] },
+        'test-ns',
+        5000
+      );
+
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(3);
     });
 
     it('waits for multiple secrets', async () => {
@@ -103,7 +205,7 @@ describe('SecretProcessor', () => {
         readNamespacedSecret: mockReadNamespacedSecret,
       });
 
-      await processor.waitForSecretSync(['secret-1', 'secret-2'], 'test-ns', 5000);
+      await processor.waitForSecretSync({ 'secret-1': ['key'], 'secret-2': ['key'] }, 'test-ns', 5000);
 
       expect(mockReadNamespacedSecret).toHaveBeenCalledWith('secret-1', 'test-ns');
       expect(mockReadNamespacedSecret).toHaveBeenCalledWith('secret-2', 'test-ns');
@@ -126,6 +228,9 @@ describe('SecretProcessor', () => {
 
       expect(result.secretRefs).toHaveLength(1);
       expect(result.secretRefs[0].envKey).toBe('DB_PASSWORD');
+      expect(result.expectedKeysPerSecret).toEqual({
+        'api-server-aws-secrets': ['DB_PASSWORD'],
+      });
       expect(result.warnings).toHaveLength(0);
     });
 
@@ -141,6 +246,7 @@ describe('SecretProcessor', () => {
       });
 
       expect(result.secretRefs).toHaveLength(0);
+      expect(result.expectedKeysPerSecret).toEqual({});
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('disabled');
     });
@@ -162,6 +268,7 @@ describe('SecretProcessor', () => {
       });
 
       expect(result.secretRefs).toHaveLength(0);
+      expect(result.expectedKeysPerSecret).toEqual({});
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('not configured');
     });
@@ -222,6 +329,7 @@ describe('SecretProcessor', () => {
       });
 
       expect(result.secretRefs).toHaveLength(0);
+      expect(result.expectedKeysPerSecret).toEqual({});
       expect(result.warnings).toHaveLength(0);
     });
 
@@ -240,11 +348,12 @@ describe('SecretProcessor', () => {
       });
 
       expect(result.secretRefs).toHaveLength(1);
+      expect(result.expectedKeysPerSecret).toEqual({});
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('Failed to apply ExternalSecret');
     });
 
-    it('returns secret names for mounting', async () => {
+    it('returns expected keys by secret for mounting', async () => {
       const env = {
         AWS_SECRET: '{{aws:path:key}}',
         GCP_SECRET: '{{gcp:path:key}}',
@@ -261,8 +370,10 @@ describe('SecretProcessor', () => {
         namespace: 'ns',
       });
 
-      expect(result.secretNames).toContain('api-server-aws-secrets');
-      expect(result.secretNames).toContain('api-server-gcp-secrets');
+      expect(result.expectedKeysPerSecret).toEqual({
+        'api-server-aws-secrets': ['AWS_SECRET'],
+        'api-server-gcp-secrets': ['GCP_SECRET'],
+      });
     });
   });
 });
