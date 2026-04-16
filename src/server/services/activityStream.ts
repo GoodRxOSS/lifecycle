@@ -145,7 +145,7 @@ export default class ActivityStream extends BaseService {
       try {
         if (isRedeployRequested) {
           getLogger().info('Deploy: redeploy reason=commentEdit');
-          await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+          await this.db.services.BuildService.enqueueResolveAndDeployBuild({
             buildId,
             runUUID: runUuid,
             ...extractContextForQueue(),
@@ -223,7 +223,7 @@ export default class ActivityStream extends BaseService {
 
     // if pull request should be built and deployed again, add it to build queue
     if (pullRequest.deployOnUpdate) {
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build.id,
         runUUID: runUuid,
         ...extractContextForQueue(),

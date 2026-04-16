@@ -136,6 +136,8 @@ export default class GithubService extends Service {
 
         // if auto deploy, add deploy label via queue
         if (isDeploy) {
+          // If autoDeploy is enabled but the label was not on the opened PR payload,
+          // add it asynchronously and let the follow-up label webhook advance the build.
           await this.db.services.LabelService.labelQueue.add('label', {
             pullRequestId: pullRequest.id,
             action: 'enable',
@@ -243,7 +245,7 @@ export default class GithubService extends Service {
       if (!buildId) {
         getLogger().error(`Build: id not found for=handleLabelWebhook`);
       }
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId,
         ...extractContextForQueue(),
       });
@@ -331,7 +333,7 @@ export default class GithubService extends Service {
           getLogger().info(`Push: deploying repo=${repoName} branch=${branchName}`);
         }
 
-        await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+        await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId,
           ...(hasFailedDeploys ? {} : { githubRepositoryId }),
           ...extractContextForQueue(),
@@ -376,7 +378,7 @@ export default class GithubService extends Service {
       if (!build) return;
 
       getLogger().info(`Push: redeploying reason=staticEnv`);
-      await this.db.services.BuildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build?.id,
         ...extractContextForQueue(),
       });

@@ -169,3 +169,157 @@ describe('BuildService failure boundaries', () => {
     expect(recordDeployFailure).not.toHaveBeenCalled();
   });
 });
+
+describe('BuildService queue fingerprinting', () => {
+  let buildService: BuildService;
+  let mockBuildQuery: any;
+  let mockBuildQueueAdd: jest.Mock;
+  let mockResolveQueueAdd: jest.Mock;
+
+  const createMockBuild = (overrides: any = {}) =>
+    ({
+      id: 1,
+      enableFullYaml: true,
+      commentRuntimeEnv: { FEATURE_FLAG: 'on' },
+      commentInitEnv: {},
+      pullRequest: { latestCommit: 'abcdef123456' },
+      deploys: [
+        {
+          id: 11,
+          uuid: 'api-deploy',
+          githubRepositoryId: 100,
+          branchName: 'feature-branch',
+          active: true,
+          publicUrl: 'https://example.test/api',
+          env: { API_URL: 'https://api.test' },
+          initEnv: { INIT_MODE: 'warm' },
+          deployable: { name: 'api', commentBranchName: null },
+          service: { name: 'api' },
+        },
+        {
+          id: 22,
+          uuid: 'worker-deploy',
+          githubRepositoryId: 200,
+          branchName: 'feature-branch',
+          active: true,
+          publicUrl: 'https://example.test/worker',
+          env: { QUEUE: 'jobs' },
+          initEnv: {},
+          deployable: { name: 'worker', commentBranchName: 'worker-override' },
+          service: { name: 'worker' },
+        },
+      ],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    } as any);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    mockBuildQueueAdd = jest.fn().mockResolvedValue(undefined);
+    mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+
+    mockBuildQuery = {
+      findOne: jest.fn().mockReturnThis(),
+      withGraphFetched: jest.fn(),
+    };
+
+    const queueManager = {
+      registerQueue: jest.fn(() => ({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      })),
+    };
+
+    buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => mockBuildQuery),
+          },
+        },
+        services: {},
+      } as any,
+      {} as any,
+      {} as any,
+      queueManager as any
+    );
+    (buildService as any).buildQueue = { add: mockBuildQueueAdd };
+    (buildService as any).resolveAndDeployBuildQueue = { add: mockResolveQueueAdd };
+  });
+
+  test('changes fingerprint when comment runtime env changes', async () => {
+    const baseBuild = createMockBuild();
+    const changedBuild = createMockBuild({
+      commentRuntimeEnv: { FEATURE_FLAG: 'off' },
+    });
+
+    const baseFingerprint = await buildService.computeBuildRequestFingerprint(baseBuild);
+    const changedFingerprint = await buildService.computeBuildRequestFingerprint(changedBuild);
+
+    expect(baseFingerprint).not.toEqual(changedFingerprint);
+  });
+
+  test('changes fingerprint when repository filter changes', async () => {
+    const build = createMockBuild();
+
+    const apiFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+    const workerFingerprint = await buildService.computeBuildRequestFingerprint(build, 200);
+
+    expect(apiFingerprint).not.toEqual(workerFingerprint);
+  });
+
+  test('enqueues resolve queue with deduplication derived from the current build fingerprint', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      correlationId: 'corr-1',
+    });
+
+    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
+      'resolve-deploy',
+      expect.objectContaining({
+        buildId: 1,
+        githubRepositoryId: 100,
+        correlationId: 'corr-1',
+      }),
+      expect.objectContaining({
+        deduplication: {
+          id: `resolve:1:${expectedFingerprint}`,
+          ttl: 30000,
+        },
+      })
+    );
+  });
+
+  test('enqueues build queue with a deterministic job id derived from the current build fingerprint', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueBuildJob({
+      buildId: 1,
+      githubRepositoryId: 100,
+      correlationId: 'corr-2',
+    });
+
+    expect(mockBuildQueueAdd).toHaveBeenCalledWith(
+      'build',
+      expect.objectContaining({
+        buildId: 1,
+        githubRepositoryId: 100,
+        correlationId: 'corr-2',
+      }),
+      expect.objectContaining({
+        jobId: `build:1:${expectedFingerprint}`,
+      })
+    );
+  });
+});

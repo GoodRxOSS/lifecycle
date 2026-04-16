@@ -98,6 +98,8 @@ describe('Github Service - handlePushWebhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    const mockEnqueueResolveAndDeployBuild = jest.fn((payload) => mockResolveQueueAdd('resolve-deploy', payload));
 
     mockDb = {
       models: {
@@ -110,8 +112,9 @@ describe('Github Service - handlePushWebhook', () => {
       },
       services: {
         BuildService: {
+          enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
-            add: jest.fn().mockResolvedValue(undefined),
+            add: mockResolveQueueAdd,
           },
         },
       },
@@ -366,6 +369,8 @@ describe('Github Service - handleLabelWebhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    const mockEnqueueResolveAndDeployBuild = jest.fn((payload) => mockResolveQueueAdd('resolve-deploy', payload));
 
     mockDb = {
       models: {
@@ -376,8 +381,9 @@ describe('Github Service - handleLabelWebhook', () => {
       services: {
         BuildService: {
           deleteBuild: jest.fn().mockResolvedValue(undefined),
+          enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
-            add: jest.fn().mockResolvedValue(undefined),
+            add: mockResolveQueueAdd,
           },
         },
         BotUser: {

@@ -28,6 +28,7 @@ import { BuildKind, BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } fro
 import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
 import BaseService from './_service';
+import hash from 'object-hash';
 import _ from 'lodash';
 import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
@@ -52,6 +53,8 @@ import { compactStatusMessage, statusMessageFromError } from 'server/lib/termina
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
+const RESOLVE_QUEUE_DEDUP_TTL_MS = 30000;
+
 export interface IngressConfiguration {
   host: string;
   altHosts?: string[];
@@ -97,6 +100,109 @@ export default class BuildService extends BaseService {
         getLogger().error({ error: e }, 'Build: cleanup failed');
       }
     }
+  }
+
+  private async getBuildForQueueFingerprint(buildId: number): Promise<Build | null> {
+    return this.db.models.Build.query()
+      .findOne({ id: buildId })
+      .withGraphFetched('[pullRequest, deploys.[service, deployable]]');
+  }
+
+  private getBuildFingerprintDeployKey(build: Build, deploy: Deploy): string {
+    if (build.enableFullYaml) {
+      return deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
+    }
+
+    return deploy.service?.name || deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
+  }
+
+  private buildFingerprintPayload(build: Build, githubRepositoryId?: number) {
+    const deploys = (build.deploys || [])
+      .filter((deploy) => !githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId)
+      .map((deploy) => ({
+        key: this.getBuildFingerprintDeployKey(build, deploy),
+        githubRepositoryId: deploy.githubRepositoryId ?? null,
+        branchName: deploy.branchName ?? null,
+        active: deploy.active ?? true,
+        publicUrl: deploy.publicUrl ?? null,
+        env: deploy.env || {},
+        initEnv: deploy.initEnv || {},
+        commentBranchName: deploy.deployable?.commentBranchName ?? null,
+      }));
+
+    return {
+      buildId: build.id,
+      githubRepositoryId: githubRepositoryId ?? null,
+      latestCommit: build.pullRequest?.latestCommit ?? null,
+      commentRuntimeEnv: build.commentRuntimeEnv || {},
+      commentInitEnv: build.commentInitEnv || {},
+      enableFullYaml: build.enableFullYaml ?? false,
+      deploys: _.sortBy(deploys, 'key'),
+    };
+  }
+
+  async computeBuildRequestFingerprint(buildOrId: Build | number, githubRepositoryId?: number): Promise<string> {
+    const build =
+      typeof buildOrId === 'number' ? await this.getBuildForQueueFingerprint(buildOrId) : (buildOrId as Build);
+
+    if (!build) {
+      throw new Error(`Build not found for fingerprint`);
+    }
+
+    if (!build.pullRequest || !build.deploys) {
+      await build.$fetchGraph('[pullRequest, deploys.[service, deployable]]');
+    }
+
+    return hash(this.buildFingerprintPayload(build, githubRepositoryId));
+  }
+
+  async enqueueResolveAndDeployBuild({
+    buildId,
+    githubRepositoryId,
+    ...jobData
+  }: {
+    buildId: number;
+    githubRepositoryId?: number | null;
+    [key: string]: any;
+  }) {
+    const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
+    return this.resolveAndDeployBuildQueue.add(
+      'resolve-deploy',
+      {
+        buildId,
+        ...(githubRepositoryId ? { githubRepositoryId } : {}),
+        ...jobData,
+      },
+      {
+        deduplication: {
+          id: `resolve:${buildId}:${fingerprint}`,
+          ttl: RESOLVE_QUEUE_DEDUP_TTL_MS,
+        },
+      }
+    );
+  }
+
+  async enqueueBuildJob({
+    buildId,
+    githubRepositoryId,
+    ...jobData
+  }: {
+    buildId: number;
+    githubRepositoryId?: number | null;
+    [key: string]: any;
+  }) {
+    const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
+    return this.buildQueue.add(
+      'build',
+      {
+        buildId,
+        ...(githubRepositoryId ? { githubRepositoryId } : {}),
+        ...jobData,
+      },
+      {
+        jobId: `build:${buildId}:${fingerprint}`,
+      }
+    );
   }
 
   /**
@@ -270,7 +376,7 @@ export default class BuildService extends BaseService {
 
     const runUUID = nanoid();
 
-    await this.resolveAndDeployBuildQueue.add('resolve-deploy', {
+    await this.enqueueResolveAndDeployBuild({
       buildId,
       githubRepositoryId,
       runUUID,
@@ -317,7 +423,7 @@ export default class BuildService extends BaseService {
 
       const buildId = build.id;
 
-      await this.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await this.enqueueResolveAndDeployBuild({
         buildId,
         runUUID: nanoid(),
         correlationId,
@@ -1676,7 +1782,7 @@ export default class BuildService extends BaseService {
           return;
         }
         // Enqueue a standard resolve build
-        await this.db.services.BuildService.buildQueue.add('build', {
+        await this.enqueueBuildJob({
           buildId,
           githubRepositoryId,
           ...extractContextForQueue(),
