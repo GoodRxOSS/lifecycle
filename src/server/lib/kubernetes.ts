@@ -33,6 +33,7 @@ import { staticEnvTolerations } from './helm/constants';
 import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
 import { generateSecretName } from './kubernetes/externalSecret';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 
 interface VOLUME {
   name: string;
@@ -77,6 +78,42 @@ async function getTTLConfig(_buildUUID: string): Promise<{ daysToExpire: number 
   return { daysToExpire };
 }
 
+type NamespaceMetadata = {
+  labels: Record<string, string>;
+};
+
+function buildNamespacePrMetadata({
+  repo,
+  pullRequestNumber,
+  author,
+}: {
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+} = {}): NamespaceMetadata {
+  const labels: Record<string, string> = {};
+
+  if (repo) {
+    const [org, repoName] = repo.split('/');
+    if (org) {
+      labels['lfc/org'] = normalizeKubernetesLabelValue(org);
+    }
+    if (repoName) {
+      labels['lfc/repo'] = normalizeKubernetesLabelValue(repoName);
+    }
+  }
+
+  if (pullRequestNumber != null) {
+    labels['lfc/pull-request'] = String(pullRequestNumber);
+  }
+
+  if (author) {
+    labels['lfc/author'] = normalizeKubernetesLabelValue(author);
+  }
+
+  return { labels };
+}
+
 /**
  * Generates TTL-related labels for namespace creation
  */
@@ -85,16 +122,24 @@ async function generateTTLLabels({
   staticEnv,
   ttl,
   buildUUID,
+  repo,
+  pullRequestNumber,
+  author,
 }: {
   uuid: string;
   staticEnv: boolean;
   ttl: boolean;
   buildUUID: string;
-}): Promise<{ labels: Record<string, string>; logMessage: string }> {
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+}): Promise<NamespaceMetadata & { logMessage: string }> {
+  const metadata = buildNamespacePrMetadata({ repo, pullRequestNumber, author });
   const baseLabels: Record<string, string> = {
     'lfc/uuid': uuid,
     'lfc/type': staticEnv ? 'static' : 'ephemeral',
     'app.kubernetes.io/managed-by': 'lifecycle',
+    ...metadata.labels,
   };
 
   // Static or TTL disabled - only set enable flag
@@ -134,16 +179,28 @@ async function generateTTLPatch({
   staticEnv,
   ttl,
   buildUUID,
+  repo,
+  pullRequestNumber,
+  author,
 }: {
   uuid: string;
   staticEnv: boolean;
   ttl: boolean;
   buildUUID: string;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
 }): Promise<{ patch: any[]; logMessage: string }> {
+  const metadata = buildNamespacePrMetadata({ repo, pullRequestNumber, author });
   const basePatch = [
     { op: 'add', path: '/metadata/labels/lfc~1uuid', value: uuid },
     { op: 'add', path: '/metadata/labels/lfc~1type', value: staticEnv ? 'static' : 'ephemeral' },
     { op: 'add', path: '/metadata/labels/app.kubernetes.io~1managed-by', value: 'lifecycle' },
+    ...Object.entries(metadata.labels).map(([key, value]) => ({
+      op: 'add',
+      path: `/metadata/labels/${key.replace(/\//g, '~1')}`,
+      value,
+    })),
   ];
 
   // TTL disabled - only update enable flag
@@ -206,11 +263,17 @@ export async function createOrUpdateNamespace({
   buildUUID,
   staticEnv,
   ttl = true,
+  repo,
+  pullRequestNumber,
+  author,
 }: {
   name: string;
   buildUUID: string;
   staticEnv: boolean;
   ttl?: boolean;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
 }) {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
@@ -224,6 +287,9 @@ export async function createOrUpdateNamespace({
     staticEnv,
     ttl,
     buildUUID,
+    repo,
+    pullRequestNumber,
+    author,
   });
 
   getLogger({ namespace: name }).info(`Deploy: creating namespace ${logMessage}`);
@@ -243,6 +309,9 @@ export async function createOrUpdateNamespace({
       staticEnv,
       ttl: staticEnv ? false : ttl,
       buildUUID,
+      repo,
+      pullRequestNumber,
+      author,
     });
 
     await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {

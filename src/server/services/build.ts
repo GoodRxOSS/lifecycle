@@ -1443,7 +1443,14 @@ export default class BuildService extends BaseService {
         const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
         const serviceAccountName = serviceAccount?.name || 'default';
         // create namespace and annotate the service account
-        await k8s.createOrUpdateNamespace({ name: build.namespace, buildUUID: build.uuid, staticEnv: build.isStatic });
+        await k8s.createOrUpdateNamespace({
+          name: build.namespace,
+          buildUUID: build.uuid,
+          staticEnv: build.isStatic,
+          repo: build.pullRequest?.fullName,
+          pullRequestNumber: build.pullRequest?.pullRequestNumber,
+          author: build.pullRequest?.githubLogin,
+        });
         await k8s.createOrUpdateServiceAccount({
           namespace: build.namespace,
           role: serviceAccount?.role,
