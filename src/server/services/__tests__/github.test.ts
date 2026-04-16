@@ -22,6 +22,9 @@ import * as githubLib from 'server/lib/github';
 
 mockRedisClient();
 
+const TEST_OWNER_URL = 'https://example.invalid/example-owner';
+const TEST_REPOSITORY_FULL_NAME = 'example-owner/example-repo';
+
 const mockIsLifecycleLabel = jest.fn();
 const mockHasDeployLabel = jest.fn();
 const mockEnableKillSwitch = jest.fn();
@@ -75,9 +78,9 @@ describe('Github Service - handlePullRequestHook', () => {
       number: 42,
       repository: {
         id: 12345,
-        owner: { id: 777, html_url: 'https://github.com/org' },
+        owner: { id: 777, html_url: TEST_OWNER_URL },
         name: 'repo',
-        full_name: 'org/repo',
+        full_name: TEST_REPOSITORY_FULL_NAME,
       },
       installation: { id: 999 },
       pull_request: {
@@ -98,7 +101,7 @@ describe('Github Service - handlePullRequestHook', () => {
       deployOnUpdate: false,
       latestCommit: null,
       githubLogin: 'test-user',
-      fullName: 'org/repo',
+      fullName: TEST_REPOSITORY_FULL_NAME,
       branchName: 'feature-branch',
       build: { id: 10, uuid: 'build-uuid' },
       repository: { id: 5 },
@@ -582,7 +585,7 @@ describe('Github Service - handleLabelWebhook', () => {
     id: 1,
     deployOnUpdate: false,
     githubLogin: 'test-user',
-    fullName: 'org/repo',
+    fullName: TEST_REPOSITORY_FULL_NAME,
     branchName: 'feature-branch',
     build: { id: 10, uuid: 'build-uuid' },
     repository: { id: 5 },
