@@ -1156,8 +1156,10 @@ export default class DeployService extends BaseService {
                 );
               }
 
-              if (secretResult.secretNames.length > 0) {
-                getLogger().info(`Build: waiting for secrets to sync secrets=[${secretResult.secretNames.join(', ')}]`);
+              const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
+
+              if (secretNames.length > 0) {
+                getLogger().info(`Build: waiting for secrets to sync secrets=[${secretNames.join(', ')}]`);
 
                 const providerTimeouts = Object.values(secretProviders)
                   .map((p) => p.secretSyncTimeout)
@@ -1165,8 +1167,12 @@ export default class DeployService extends BaseService {
                 const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
 
                 try {
-                  await secretProcessor.waitForSecretSync(secretResult.secretNames, deploy.build.namespace, timeout);
-                  buildSecretNames = secretResult.secretNames;
+                  await secretProcessor.waitForSecretSync(
+                    secretResult.expectedKeysPerSecret,
+                    deploy.build.namespace,
+                    timeout
+                  );
+                  buildSecretNames = secretNames;
                   getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
                 } catch (error) {
                   getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
