@@ -18,8 +18,12 @@ import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 import Github from '../github';
 import { DeployStatus, PullRequestStatus } from 'shared/constants';
 import { PushEvent } from '@octokit/webhooks-types';
+import * as githubLib from 'server/lib/github';
 
 mockRedisClient();
+
+const TEST_OWNER_URL = 'https://example.invalid/example-owner';
+const TEST_REPOSITORY_FULL_NAME = 'example-owner/example-repo';
 
 const mockIsLifecycleLabel = jest.fn();
 const mockHasDeployLabel = jest.fn();
@@ -46,6 +50,232 @@ jest.mock('server/lib/logger', () => ({
   extractContextForQueue: jest.fn(() => ({})),
   LogStage: {},
 }));
+
+jest.mock('server/lib/github', () => ({
+  getYamlFileContent: jest.fn(),
+}));
+
+const createDedupeAwareResolveEnqueue = (queueAdd: jest.Mock) => {
+  const queuedKeys = new Set<string>();
+
+  return jest.fn(async (payload) => {
+    const queueKey = `${payload.buildId}:${payload.githubRepositoryId ?? 'all'}`;
+    if (queuedKeys.has(queueKey)) return undefined;
+    queuedKeys.add(queueKey);
+    return queueAdd('resolve-deploy', payload);
+  });
+};
+
+describe('Github Service - handlePullRequestHook', () => {
+  let githubService: Github;
+  let mockDb: any;
+  let mockQueueManager: any;
+  const mockGetYamlFileContent = githubLib.getYamlFileContent as jest.Mock;
+
+  const createMockPullRequestEvent = ({ labels = [] as { name: string }[], branchSha = 'abc123' } = {}) =>
+    ({
+      action: 'opened',
+      number: 42,
+      repository: {
+        id: 12345,
+        owner: { id: 777, html_url: TEST_OWNER_URL },
+        name: 'repo',
+        full_name: TEST_REPOSITORY_FULL_NAME,
+      },
+      installation: { id: 999 },
+      pull_request: {
+        id: 1001,
+        head: { ref: 'feature-branch', sha: branchSha },
+        title: 'Test PR',
+        user: { login: 'test-user' },
+        state: 'open',
+        labels,
+      },
+    } as any);
+
+  const createMockPullRequest = (overrides: any = {}) => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+
+    return {
+      id: 1,
+      deployOnUpdate: false,
+      latestCommit: null,
+      githubLogin: 'test-user',
+      fullName: TEST_REPOSITORY_FULL_NAME,
+      branchName: 'feature-branch',
+      build: { id: 10, uuid: 'build-uuid' },
+      repository: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      $query: jest.fn().mockReturnValue({
+        patch,
+      }),
+      __patch: patch,
+      ...overrides,
+    };
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    const mockEnqueueResolveAndDeployBuild = createDedupeAwareResolveEnqueue(mockResolveQueueAdd);
+
+    mockDb = {
+      models: {
+        Build: {
+          findOne: jest.fn().mockResolvedValue({ id: 10 }),
+        },
+        PullRequest: {
+          findOne: jest.fn().mockResolvedValue(null),
+        },
+      },
+      services: {
+        Repository: {
+          findRepository: jest.fn().mockResolvedValue({
+            id: 5,
+            defaultEnvId: 15,
+            githubInstallationId: 999,
+          }),
+        },
+        PullRequest: {
+          findOrCreatePullRequest: jest.fn().mockResolvedValue(createMockPullRequest()),
+        },
+        BuildService: {
+          createBuildAndDeploys: jest.fn().mockResolvedValue(undefined),
+          enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
+          resolveAndDeployBuildQueue: {
+            add: mockResolveQueueAdd,
+          },
+        },
+        LabelService: {
+          labelQueue: {
+            add: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        BotUser: {
+          isBotUser: jest.fn().mockResolvedValue(false),
+        },
+      },
+    };
+
+    mockQueueManager = {
+      registerQueue: jest.fn().mockReturnValue({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      }),
+    };
+
+    githubService = new Github(mockDb, {}, {}, mockQueueManager);
+  });
+
+  test('queues initial build when a non-autoDeploy PR is opened with the deploy label', async () => {
+    mockGetYamlFileContent.mockResolvedValue({ environment: { autoDeploy: false } });
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPullRequest = createMockPullRequest();
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        labels: [{ name: 'lifecycle-deploy!' }],
+      })
+    );
+
+    expect(mockDb.services.BuildService.createBuildAndDeploys).toHaveBeenCalled();
+    expect(mockDb.models.Build.findOne).toHaveBeenCalledWith({ pullRequestId: 1 });
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+      buildId: 10,
+    });
+    expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
+    expect(mockPullRequest.__patch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deployOnUpdate: true,
+        labels: JSON.stringify(['lifecycle-deploy!']),
+      })
+    );
+  });
+
+  test('queues initial build and skips label sync when an autoDeploy PR is opened with the deploy label', async () => {
+    mockGetYamlFileContent.mockResolvedValue({ environment: { autoDeploy: true } });
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        labels: [{ name: 'lifecycle-deploy!' }],
+      })
+    );
+
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+      buildId: 10,
+    });
+    expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
+  });
+
+  test('keeps the existing label sync flow for unlabeled autoDeploy PRs', async () => {
+    mockGetYamlFileContent.mockResolvedValue({ environment: { autoDeploy: true } });
+    mockHasDeployLabel.mockResolvedValue(false);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        labels: [],
+      })
+    );
+
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
+    expect(mockDb.services.LabelService.labelQueue.add).toHaveBeenCalledWith(
+      'label',
+      expect.objectContaining({
+        pullRequestId: 1,
+        action: 'enable',
+        waitForComment: true,
+        labels: [],
+      })
+    );
+  });
+
+  test('queues one effective build across labeled -> opened -> labeled for a pre-labeled autoDeploy PR', async () => {
+    mockGetYamlFileContent.mockResolvedValue({ environment: { autoDeploy: true } });
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(false);
+    mockIsLifecycleLabel.mockImplementation(async (label: string) => label.startsWith('lifecycle-'));
+
+    const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+    mockDb.models.PullRequest.findOne.mockResolvedValue(mockPullRequest);
+
+    const openEvent = createMockPullRequestEvent({
+      labels: [{ name: 'question' }, { name: 'lifecycle-deploy!' }],
+    });
+    const createLabelEvent = (changedLabel: string) => ({
+      action: 'labeled',
+      label: { name: changedLabel },
+      pull_request: {
+        id: 1001,
+        labels: [{ name: 'question' }, { name: 'lifecycle-deploy!' }],
+        state: 'open',
+      },
+    });
+
+    await githubService.handleLabelWebhook(createLabelEvent('question'));
+    await githubService.handlePullRequestHook(openEvent);
+    await githubService.handleLabelWebhook(createLabelEvent('lifecycle-deploy!'));
+
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledTimes(1);
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+      buildId: 10,
+    });
+    expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
+  });
+});
 
 describe('Github Service - handlePushWebhook', () => {
   let githubService: Github;
@@ -98,6 +328,8 @@ describe('Github Service - handlePushWebhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    const mockEnqueueResolveAndDeployBuild = createDedupeAwareResolveEnqueue(mockResolveQueueAdd);
 
     mockDb = {
       models: {
@@ -110,8 +342,9 @@ describe('Github Service - handlePushWebhook', () => {
       },
       services: {
         BuildService: {
+          enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
-            add: jest.fn().mockResolvedValue(undefined),
+            add: mockResolveQueueAdd,
           },
         },
       },
@@ -352,7 +585,7 @@ describe('Github Service - handleLabelWebhook', () => {
     id: 1,
     deployOnUpdate: false,
     githubLogin: 'test-user',
-    fullName: 'org/repo',
+    fullName: TEST_REPOSITORY_FULL_NAME,
     branchName: 'feature-branch',
     build: { id: 10, uuid: 'build-uuid' },
     repository: { id: 5 },
@@ -366,6 +599,8 @@ describe('Github Service - handleLabelWebhook', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    const mockEnqueueResolveAndDeployBuild = jest.fn((payload) => mockResolveQueueAdd('resolve-deploy', payload));
 
     mockDb = {
       models: {
@@ -376,8 +611,9 @@ describe('Github Service - handleLabelWebhook', () => {
       services: {
         BuildService: {
           deleteBuild: jest.fn().mockResolvedValue(undefined),
+          enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
-            add: jest.fn().mockResolvedValue(undefined),
+            add: mockResolveQueueAdd,
           },
         },
         BotUser: {
