@@ -251,7 +251,7 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "name": {
             "type": "string"

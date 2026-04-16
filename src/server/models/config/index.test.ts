@@ -453,4 +453,36 @@ describe('Yaml Service', () => {
       expect(YamlService.getDetatchAfterBuildPipeline(service)).toEqual(false);
     });
   });
+
+  describe('schema compatibility', () => {
+    test('accepts deprecated kedaScaleToZero config as a no-op', () => {
+      const deprecatedKedaConfig = `---
+      version: '1.0.0'
+
+      services:
+        - name: 'legacy-service'
+          kedaScaleToZero:
+            enabled: true
+            minReplicaCount: 0
+            maxReplicaCount: 5
+            cooldownPeriod: 300
+            pollingInterval: 30
+          helm:
+            repository: 'example/legacy-service'
+            branchName: 'main'
+            deploymentMethod: 'native'
+            chart:
+              name: 'example-chart'
+            docker:
+              defaultTag: 'main'
+              app:
+                dockerfilePath: 'Dockerfile'
+      `;
+
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(deprecatedKedaConfig);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
+  });
 });

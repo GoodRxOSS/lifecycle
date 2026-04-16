@@ -133,7 +133,8 @@ const schema_1_0_0 = {
       minItems: 1,
       items: {
         type: 'object',
-        additionalProperties: false,
+        // Backward compatibility: ignore deprecated or repo-specific service keys at validation time.
+        additionalProperties: true,
         properties: {
           name: { type: 'string' },
           appShort: { type: 'string' },
