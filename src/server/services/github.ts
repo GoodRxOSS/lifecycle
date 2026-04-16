@@ -35,6 +35,11 @@ import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } 
 import { enableKillSwitch, isStaging, hasDeployLabel, isLifecycleLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 
+interface PullRequestPatchState {
+  deployLabelPresent: boolean;
+  deployOnUpdate: boolean;
+}
+
 export default class GithubService extends Service {
   // Handle the pull request webhook mapping the entrance with webhook body
   async handlePullRequestHook({
@@ -56,7 +61,6 @@ export default class GithubService extends Service {
       labels,
     },
   }: PullRequestEvent) {
-    getLogger({}).info(`PR: ${action} repo=${fullName} branch=${branch}`);
     const isOpened = [GithubPullRequestActions.OPENED, GithubPullRequestActions.REOPENED].includes(
       action as GithubPullRequestActions
     );
@@ -108,13 +112,20 @@ export default class GithubService extends Service {
         branch,
       });
 
-      await this.patchPullRequest({
+      const pullRequestState = await this.patchPullRequest({
         pullRequest,
         labels,
         action,
         status,
         autoDeploy,
       });
+      getLogger({}).info(
+        `PR state: action=${action} repo=${fullName} branch=${branch} labels=[${labels
+          .map((label) => label.name)
+          .join(',')}] deployLabelPresent=${pullRequestState?.deployLabelPresent} deployOnUpdate=${
+          pullRequestState?.deployOnUpdate
+        }`
+      );
 
       const pullRequestId = pullRequest?.id;
       const latestCommit = pullRequest?.latestCommit;
@@ -122,8 +133,6 @@ export default class GithubService extends Service {
       if (isOpened) {
         if (!latestCommit) await pullRequest.$query().patch({ latestCommit: branchSha });
         const environmentId = repository?.defaultEnvId;
-        await pullRequest.$query().first();
-        const isDeploy = pullRequest?.deployOnUpdate;
         // only create build and deploys. do not build or deploy here
         await this.db.services.BuildService.createBuildAndDeploys({
           repositoryId,
@@ -134,8 +143,30 @@ export default class GithubService extends Service {
           lifecycleConfig,
         });
 
-        // if auto deploy, add deploy label via queue
-        if (isDeploy) {
+        const shouldQueueBuildFromOpen =
+          pullRequestState?.deployOnUpdate === true && pullRequestState?.deployLabelPresent === true;
+        const deployDecision = shouldQueueBuildFromOpen
+          ? 'queue-build'
+          : pullRequestState?.deployOnUpdate
+          ? 'sync-deploy-label'
+          : 'no-deploy';
+        getLogger({}).info(
+          `PR open decision: repo=${fullName} branch=${branch} pullRequestId=${pullRequestId} decision=${deployDecision}`
+        );
+
+        if (shouldQueueBuildFromOpen) {
+          build = await this.db.models.Build.findOne({
+            pullRequestId,
+          });
+          if (!build) {
+            getLogger({}).warn(`Build: not found for opened PR repo=${fullName}/${branch}`);
+          } else {
+            await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+              buildId: build.id,
+              ...extractContextForQueue(),
+            });
+          }
+        } else if (pullRequestState?.deployOnUpdate) {
           // If autoDeploy is enabled but the label was not on the opened PR payload,
           // add it asynchronously and let the follow-up label webhook advance the build.
           await this.db.services.LabelService.labelQueue.add('label', {
@@ -206,7 +237,7 @@ export default class GithubService extends Service {
       const changedLabelName = changedLabel?.name?.toLowerCase();
       const isLifecycle = await isLifecycleLabel(changedLabelName);
       if (!isLifecycle) {
-        getLogger().info(`Label: skipping non-lifecycle label=${changedLabelName} action=${action}`);
+        getLogger().debug(`PR label: skipping label=${changedLabelName} action=${action}`);
         return;
       }
 
@@ -233,11 +264,18 @@ export default class GithubService extends Service {
         status,
         autoDeploy: false,
       });
-      getLogger().info(`Label: ${action} labels=[${labels.map(({ name }) => name).join(',')}]`);
+      getLogger().info(
+        `PR label state: action=${action} changedLabel=${changedLabelName} pullRequestId=${
+          pullRequest.id
+        } labels=[${labels.map(({ name }) => name).join(',')}] deployOnUpdate=${pullRequest.deployOnUpdate}`
+      );
 
       if (pullRequest.deployOnUpdate === false) {
         // when pullRequest.deployOnUpdate is false, it means that there is no `lifecycle-deploy!` label
         // or there is `lifecycle-disabled!` label in the PR
+        getLogger().info(
+          `PR label decision: action=${action} changedLabel=${changedLabelName} pullRequestId=${pullRequest.id} decision=delete-build`
+        );
         return this.db.services.BuildService.deleteBuild(build);
       }
 
@@ -505,7 +543,13 @@ export default class GithubService extends Service {
     });
   };
 
-  private patchPullRequest = async ({ pullRequest, labels, action, status, autoDeploy = false }) => {
+  private patchPullRequest = async ({
+    pullRequest,
+    labels,
+    action,
+    status,
+    autoDeploy = false,
+  }): Promise<PullRequestPatchState | undefined> => {
     const labelNames = labels.map(({ name }) => name.toLowerCase()) || [];
     const user = pullRequest?.githubLogin;
     const fullName = pullRequest?.fullName;
@@ -527,6 +571,10 @@ export default class GithubService extends Service {
         deployOnUpdate: isDeployOnUpdate,
         labels: JSON.stringify(labelNames),
       });
+      return {
+        deployLabelPresent,
+        deployOnUpdate: isDeployOnUpdate,
+      };
     } catch (error) {
       getLogger().error({ error }, `PR: patch failed repo=${pullRequest?.fullName}/${branch}`);
     }

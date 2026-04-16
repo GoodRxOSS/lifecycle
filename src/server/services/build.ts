@@ -166,6 +166,10 @@ export default class BuildService extends BaseService {
     [key: string]: any;
   }) {
     const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
+    const dedupeId = `resolve:${buildId}:${fingerprint}`;
+    getLogger({ stage: LogStage.BUILD_QUEUED }).info(
+      `Build queue: name=resolve-deploy buildId=${buildId} scope=${githubRepositoryId || 'all'} dedupeKey=${dedupeId}`
+    );
     return this.resolveAndDeployBuildQueue.add(
       'resolve-deploy',
       {
@@ -175,7 +179,7 @@ export default class BuildService extends BaseService {
       },
       {
         deduplication: {
-          id: `resolve:${buildId}:${fingerprint}`,
+          id: dedupeId,
           ttl: RESOLVE_QUEUE_DEDUP_TTL_MS,
         },
       }
@@ -192,6 +196,10 @@ export default class BuildService extends BaseService {
     [key: string]: any;
   }) {
     const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
+    const jobId = `build:${buildId}:${fingerprint}`;
+    getLogger({ stage: LogStage.BUILD_QUEUED }).info(
+      `Build queue: name=build buildId=${buildId} scope=${githubRepositoryId || 'all'} jobId=${jobId}`
+    );
     return this.buildQueue.add(
       'build',
       {
@@ -200,7 +208,7 @@ export default class BuildService extends BaseService {
         ...jobData,
       },
       {
-        jobId: `build:${buildId}:${fingerprint}`,
+        jobId,
       }
     );
   }
