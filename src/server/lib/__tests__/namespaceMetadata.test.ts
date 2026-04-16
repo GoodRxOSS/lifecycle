@@ -74,6 +74,10 @@ import { createOrUpdateNamespace } from '../kubernetes';
 describe('createOrUpdateNamespace metadata', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockReadNamespace.mockReset();
+    mockCreateNamespace.mockReset();
+    mockPatchNamespace.mockReset();
+    mockGetAllConfigs.mockReset();
     jest.useFakeTimers().setSystemTime(new Date('2026-04-16T12:00:00.000Z'));
     mockGetAllConfigs.mockResolvedValue({
       ttl_cleanup: {
@@ -163,6 +167,56 @@ describe('createOrUpdateNamespace metadata', () => {
       {
         headers: { 'Content-Type': 'application/json-patch+json' },
       }
+    );
+  });
+
+  it('sanitizes bot authors before writing lfc/author', async () => {
+    mockReadNamespace.mockRejectedValueOnce({ response: { statusCode: 404 } });
+    mockCreateNamespace.mockResolvedValue({});
+
+    await createOrUpdateNamespace({
+      name: 'env-bot123',
+      buildUUID: 'bot123',
+      staticEnv: false,
+      repo: 'example-org/example-repo',
+      pullRequestNumber: 77,
+      author: 'automation[bot]',
+    });
+
+    expect(mockCreateNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          labels: expect.objectContaining({
+            'lfc/author': 'automation-bot',
+          }),
+        }),
+      })
+    );
+  });
+
+  it('truncates long repository names to a Kubernetes-safe lfc/repo label', async () => {
+    mockReadNamespace.mockRejectedValueOnce({ response: { statusCode: 404 } });
+    mockCreateNamespace.mockResolvedValue({});
+
+    const longRepoName = 'example-repository-name-that-exceeds-the-kubernetes-label-limit-by-a-lot';
+
+    await createOrUpdateNamespace({
+      name: 'env-longrepo',
+      buildUUID: 'longrepo',
+      staticEnv: false,
+      repo: `example-org/${longRepoName}`,
+      pullRequestNumber: 91,
+      author: 'example-author',
+    });
+
+    expect(mockCreateNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          labels: expect.objectContaining({
+            'lfc/repo': 'example-repository-name-that-exceeds-the-kubernetes-label-limit',
+          }),
+        }),
+      })
     );
   });
 });

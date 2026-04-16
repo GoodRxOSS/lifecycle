@@ -33,6 +33,7 @@ import { staticEnvTolerations } from './helm/constants';
 import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
 import { generateSecretName } from './kubernetes/externalSecret';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 
 interface VOLUME {
   name: string;
@@ -95,10 +96,10 @@ function buildNamespacePrMetadata({
   if (repo) {
     const [org, repoName] = repo.split('/');
     if (org) {
-      labels['lfc/org'] = org;
+      labels['lfc/org'] = normalizeKubernetesLabelValue(org);
     }
     if (repoName) {
-      labels['lfc/repo'] = repoName;
+      labels['lfc/repo'] = normalizeKubernetesLabelValue(repoName);
     }
   }
 
@@ -107,7 +108,7 @@ function buildNamespacePrMetadata({
   }
 
   if (author) {
-    labels['lfc/author'] = author;
+    labels['lfc/author'] = normalizeKubernetesLabelValue(author);
   }
 
   return { labels };
