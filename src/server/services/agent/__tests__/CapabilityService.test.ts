@@ -147,6 +147,8 @@ describe('AgentCapabilityService.buildToolSet', () => {
       repoFullName: 'example-org/example-repo',
       userIdentity,
       approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
     });
 
     expect(mockConnect).toHaveBeenCalledWith(
@@ -154,8 +156,9 @@ describe('AgentCapabilityService.buildToolSet', () => {
         type: 'http',
         url: 'http://agent-123.env-sample.svc.cluster.local:13338/mcp',
       },
-      3000
+      4500
     );
+    expect(mockListTools).toHaveBeenCalledWith(4500);
 
     const tool = tools.mcp__figma__get_design_context as {
       execute: (input: Record<string, unknown>) => Promise<unknown>;
@@ -172,6 +175,33 @@ describe('AgentCapabilityService.buildToolSet', () => {
       30000
     );
     expect(mockCallTool).toHaveBeenCalledWith('get_design_context', {}, 30000);
+  });
+
+  it('uses the configured workspace execution timeout for sandbox tools', async () => {
+    const tools = await AgentCapabilityService.buildToolSet({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    const tool = tools.mcp__sandbox__workspace_read_file as {
+      execute: (input: Record<string, unknown>) => Promise<unknown>;
+    };
+    expect(tool).toBeDefined();
+
+    await tool.execute({});
+
+    expect(mockConnect).toHaveBeenLastCalledWith(
+      {
+        type: 'http',
+        url: 'http://agent-123.env-sample.svc.cluster.local:13338/mcp',
+      },
+      22000
+    );
+    expect(mockCallTool).toHaveBeenCalledWith('workspace.read_file', {}, 22000);
   });
 
   it('omits session-pod stdio connectors when the sandbox gateway is unavailable', async () => {
@@ -191,6 +221,8 @@ describe('AgentCapabilityService.buildToolSet', () => {
       repoFullName: 'example-org/example-repo',
       userIdentity,
       approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
     });
 
     expect(tools.mcp__figma__get_design_context).toBeUndefined();

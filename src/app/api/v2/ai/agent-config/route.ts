@@ -110,7 +110,9 @@ const getHandler = async (req: NextRequest) => {
  *     description: >
  *       Updates one patchable global AI agent configuration section without replacing
  *       the rest of the configuration. Supported patch targets are additive rules and
- *       approval policy. This avoids revalidating unrelated provider/model settings.
+ *       approval policy. Approval policy updates replace that section with the provided
+ *       value, so omitting defaultMode or rules clears them. This avoids revalidating
+ *       unrelated provider/model settings.
  *     tags:
  *       - AI Agent Config
  *     operationId: patchGlobalAIAgentConfig

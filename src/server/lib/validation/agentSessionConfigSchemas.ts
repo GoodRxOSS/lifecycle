@@ -24,14 +24,82 @@ const toolRuleSchema = {
   additionalProperties: false,
 };
 
+const positiveIntegerSchema = {
+  type: 'integer',
+  minimum: 1,
+};
+
+const nonNegativeIntegerSchema = {
+  type: 'integer',
+  minimum: 0,
+};
+
+const stringRecordSchema = {
+  type: 'object',
+  propertyNames: {
+    minLength: 1,
+  },
+  additionalProperties: {
+    type: 'string',
+    minLength: 1,
+  },
+};
+
+const resourceRequirementsSchema = {
+  type: 'object',
+  properties: {
+    requests: stringRecordSchema,
+    limits: stringRecordSchema,
+  },
+  additionalProperties: false,
+};
+
 export const agentSessionControlPlaneConfigSchema = {
   type: 'object',
   properties: {
     systemPrompt: { type: 'string', maxLength: 50000 },
     appendSystemPrompt: { type: 'string', maxLength: 50000 },
+    maxIterations: positiveIntegerSchema,
+    workspaceToolDiscoveryTimeoutMs: positiveIntegerSchema,
+    workspaceToolExecutionTimeoutMs: positiveIntegerSchema,
     toolRules: {
       type: 'array',
       items: toolRuleSchema,
+    },
+  },
+  additionalProperties: false,
+};
+
+export const agentSessionRuntimeSettingsSchema = {
+  type: 'object',
+  properties: {
+    workspaceImage: { type: 'string', minLength: 1, maxLength: 2048 },
+    workspaceEditorImage: { type: 'string', minLength: 1, maxLength: 2048 },
+    workspaceGatewayImage: { type: 'string', minLength: 1, maxLength: 2048 },
+    scheduling: {
+      type: 'object',
+      properties: {
+        nodeSelector: stringRecordSchema,
+        keepAttachedServicesOnSessionNode: { type: 'boolean' },
+      },
+      additionalProperties: false,
+    },
+    readiness: {
+      type: 'object',
+      properties: {
+        timeoutMs: nonNegativeIntegerSchema,
+        pollMs: nonNegativeIntegerSchema,
+      },
+      additionalProperties: false,
+    },
+    resources: {
+      type: 'object',
+      properties: {
+        workspace: resourceRequirementsSchema,
+        editor: resourceRequirementsSchema,
+        workspaceGateway: resourceRequirementsSchema,
+      },
+      additionalProperties: false,
     },
   },
   additionalProperties: false,

@@ -65,6 +65,7 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       client_name: this.options.authConfig.clientName || `${this.options.slug} MCP`,
+      client_uri: new URL(this.redirectUrl).origin,
       scope: this.options.authConfig.scope,
     };
   }

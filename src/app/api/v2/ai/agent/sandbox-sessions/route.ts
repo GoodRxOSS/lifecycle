@@ -389,6 +389,7 @@ const postHandler = async (req: NextRequest) => {
         workspaceEditorImage: runtimeConfig.workspaceEditorImage,
         workspaceGatewayImage: runtimeConfig.workspaceGatewayImage,
         nodeSelector: runtimeConfig.nodeSelector,
+        keepAttachedServicesOnSessionNode: runtimeConfig.keepAttachedServicesOnSessionNode,
         readiness: runtimeConfig.readiness,
         resources: runtimeConfig.resources,
       } as SandboxSessionLaunchJob,

@@ -1517,9 +1517,98 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             systemPrompt: { type: 'string', maxLength: 50000 },
             appendSystemPrompt: { type: 'string', maxLength: 50000 },
+            maxIterations: { type: 'integer', minimum: 1 },
+            workspaceToolDiscoveryTimeoutMs: { type: 'integer', minimum: 1 },
+            workspaceToolExecutionTimeoutMs: { type: 'integer', minimum: 1 },
             toolRules: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentSessionToolRule' },
+            },
+          },
+          additionalProperties: false,
+        },
+
+        EffectiveAgentSessionControlPlaneConfig: {
+          type: 'object',
+          properties: {
+            systemPrompt: { type: 'string', minLength: 1, maxLength: 50000 },
+            appendSystemPrompt: { type: 'string', maxLength: 50000 },
+            maxIterations: { type: 'integer', minimum: 1 },
+            workspaceToolDiscoveryTimeoutMs: { type: 'integer', minimum: 1 },
+            workspaceToolExecutionTimeoutMs: { type: 'integer', minimum: 1 },
+            toolRules: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentSessionToolRule' },
+            },
+          },
+          required: [
+            'systemPrompt',
+            'maxIterations',
+            'workspaceToolDiscoveryTimeoutMs',
+            'workspaceToolExecutionTimeoutMs',
+            'toolRules',
+          ],
+          additionalProperties: false,
+        },
+
+        AgentSessionStringRecord: {
+          type: 'object',
+          propertyNames: {
+            minLength: 1,
+          },
+          additionalProperties: {
+            type: 'string',
+            minLength: 1,
+          },
+        },
+
+        AgentSessionResourceRequirements: {
+          type: 'object',
+          properties: {
+            requests: { $ref: '#/components/schemas/AgentSessionStringRecord' },
+            limits: { $ref: '#/components/schemas/AgentSessionStringRecord' },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionRuntimeSettings: {
+          type: 'object',
+          properties: {
+            workspaceImage: { type: 'string', minLength: 1, maxLength: 2048 },
+            workspaceEditorImage: { type: 'string', minLength: 1, maxLength: 2048 },
+            workspaceGatewayImage: { type: 'string', minLength: 1, maxLength: 2048 },
+            scheduling: {
+              type: 'object',
+              properties: {
+                nodeSelector: {
+                  $ref: '#/components/schemas/AgentSessionStringRecord',
+                },
+                keepAttachedServicesOnSessionNode: { type: 'boolean' },
+              },
+              additionalProperties: false,
+            },
+            readiness: {
+              type: 'object',
+              properties: {
+                timeoutMs: { type: 'integer', minimum: 0 },
+                pollMs: { type: 'integer', minimum: 0 },
+              },
+              additionalProperties: false,
+            },
+            resources: {
+              type: 'object',
+              properties: {
+                workspace: {
+                  $ref: '#/components/schemas/AgentSessionResourceRequirements',
+                },
+                editor: {
+                  $ref: '#/components/schemas/AgentSessionResourceRequirements',
+                },
+                workspaceGateway: {
+                  $ref: '#/components/schemas/AgentSessionResourceRequirements',
+                },
+              },
+              additionalProperties: false,
             },
           },
           additionalProperties: false,
@@ -1575,6 +1664,32 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/AgentSessionControlPlaneConfig' },
+              },
+            },
+          ],
+        },
+
+        GetEffectiveGlobalAgentSessionConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  $ref: '#/components/schemas/EffectiveAgentSessionControlPlaneConfig',
+                },
+              },
+            },
+          ],
+        },
+
+        GetGlobalAgentSessionRuntimeConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentSessionRuntimeSettings' },
               },
             },
           ],

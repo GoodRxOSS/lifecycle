@@ -192,11 +192,7 @@ export default class AIAgentConfigService extends BaseService {
     validateAIAgentRepoOverride({ approvalPolicy });
 
     const currentConfig = await this.getGlobalConfig();
-    const nextApprovalPolicy = this.normalizeApprovalPolicy({
-      ...currentConfig.approvalPolicy,
-      ...approvalPolicy,
-      rules: approvalPolicy.rules ?? currentConfig.approvalPolicy?.rules,
-    });
+    const nextApprovalPolicy = this.normalizeApprovalPolicy(approvalPolicy);
     const nextConfig: AIAgentConfig = {
       ...currentConfig,
     };

@@ -27,6 +27,10 @@ jest.mock('server/services/globalConfig', () => ({
 
 import {
   AgentSessionRuntimeConfigError,
+  DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE,
+  DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
+  DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
+  DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
   mergeAgentSessionReadiness,
   mergeAgentSessionReadinessForServices,
   mergeAgentSessionResources,
@@ -77,6 +81,7 @@ const DEFAULT_RESOURCES = {
 
 function buildExpectedRuntimeConfig(overrides?: {
   nodeSelector?: Record<string, string>;
+  keepAttachedServicesOnSessionNode?: boolean;
   readiness?: typeof DEFAULT_READINESS;
   resources?: typeof DEFAULT_RESOURCES;
 }) {
@@ -85,6 +90,7 @@ function buildExpectedRuntimeConfig(overrides?: {
     workspaceEditorImage: 'codercom/code-server:4.98.2',
     workspaceGatewayImage: 'lifecycle-workspace:sha-123',
     nodeSelector: undefined,
+    keepAttachedServicesOnSessionNode: DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE,
     readiness: DEFAULT_READINESS,
     resources: DEFAULT_RESOURCES,
     ...overrides,
@@ -113,6 +119,7 @@ describe('runtimeConfig', () => {
         workspaceImage: 'lifecycle-workspace:sha-123',
         workspaceEditorImage: 'codercom/code-server:4.98.2',
         scheduling: {
+          keepAttachedServicesOnSessionNode: false,
           nodeSelector: {
             'app-long': 'deployments-m7i',
             pool: 'agents',
@@ -127,6 +134,7 @@ describe('runtimeConfig', () => {
           'app-long': 'deployments-m7i',
           pool: 'agents',
         },
+        keepAttachedServicesOnSessionNode: false,
       })
     );
   });
@@ -231,6 +239,9 @@ describe('runtimeConfig', () => {
         controlPlane: {
           systemPrompt: 'You are Lifecycle Agent Session.',
           appendSystemPrompt: 'Use concise responses.',
+          maxIterations: 14,
+          workspaceToolDiscoveryTimeoutMs: 4500,
+          workspaceToolExecutionTimeoutMs: 22000,
         },
       },
     });
@@ -238,6 +249,9 @@ describe('runtimeConfig', () => {
     await expect(resolveAgentSessionControlPlaneConfig()).resolves.toEqual({
       systemPrompt: 'You are Lifecycle Agent Session.',
       appendSystemPrompt: 'Use concise responses.',
+      maxIterations: 14,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
     });
   });
 
@@ -251,6 +265,9 @@ describe('runtimeConfig', () => {
         'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
       appendSystemPrompt:
         'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.',
+      maxIterations: DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
+      workspaceToolDiscoveryTimeoutMs: DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
+      workspaceToolExecutionTimeoutMs: DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
     });
   });
 
