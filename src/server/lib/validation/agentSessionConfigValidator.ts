@@ -40,7 +40,7 @@ function validatePositiveIntegerField(value: unknown, fieldName: string): void {
     return;
   }
 
-  if (!Number.isInteger(value) || value <= 0) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new AgentSessionConfigValidationError(`${fieldName} must be a positive integer.`);
   }
 }
@@ -50,7 +50,7 @@ function validateNonNegativeIntegerField(value: unknown, fieldName: string): voi
     return;
   }
 
-  if (!Number.isInteger(value) || value < 0) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new AgentSessionConfigValidationError(`${fieldName} must be a non-negative integer.`);
   }
 }
