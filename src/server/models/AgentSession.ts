@@ -32,6 +32,7 @@ export default class AgentSession extends Model {
   pvcName!: string;
   model!: string;
   status!: 'starting' | 'active' | 'ended' | 'error';
+  keepAttachedServicesOnSessionNode!: boolean | null;
   lastActivity!: string;
   endedAt!: string | null;
   devModeSnapshots!: Record<string, DevModeResourceSnapshot>;
@@ -62,6 +63,7 @@ export default class AgentSession extends Model {
       pvcName: { type: 'string' },
       model: { type: 'string' },
       status: { type: 'string', enum: ['starting', 'active', 'ended', 'error'], default: 'starting' },
+      keepAttachedServicesOnSessionNode: { type: ['boolean', 'null'] },
       lastActivity: { type: 'string' },
       endedAt: { type: ['string', 'null'] },
       devModeSnapshots: { type: 'object', default: {} },

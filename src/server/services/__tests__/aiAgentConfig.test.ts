@@ -115,7 +115,7 @@ describe('AIAgentConfigService', () => {
     expect(result.providers).toEqual(currentConfig.providers);
   });
 
-  it('updates global approval policy without revalidating unrelated provider defaults', async () => {
+  it('replaces global approval policy without revalidating unrelated provider defaults', async () => {
     const { service } = makeService();
     const currentConfig: AIAgentConfig = {
       enabled: true,
@@ -156,6 +156,7 @@ describe('AIAgentConfigService', () => {
     });
 
     const result = await service.updateGlobalApprovalPolicy({
+      defaultMode: 'require_approval',
       rules: {
         shell_exec: 'deny',
       },
@@ -179,6 +180,55 @@ describe('AIAgentConfigService', () => {
         shell_exec: 'deny',
       },
     });
+    expect(result.providers).toEqual(currentConfig.providers);
+  });
+
+  it('clears the global approval policy when given an empty replacement', async () => {
+    const { service } = makeService();
+    const currentConfig: AIAgentConfig = {
+      enabled: true,
+      providers: [
+        {
+          name: 'openai',
+          enabled: true,
+          apiKeyEnvVar: 'OPENAI_API_KEY',
+          models: [
+            {
+              id: 'gpt-5',
+              displayName: 'GPT-5',
+              enabled: true,
+              default: true,
+              maxTokens: 8192,
+            },
+          ],
+        },
+      ],
+      maxMessagesPerSession: 50,
+      sessionTTL: 3600,
+      approvalPolicy: {
+        defaultMode: 'deny',
+        rules: {
+          shell_exec: 'deny',
+        },
+      },
+    };
+
+    const setConfig = jest.fn().mockResolvedValue(undefined);
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getConfig: jest.fn().mockResolvedValue(currentConfig),
+      setConfig,
+    });
+
+    const result = await service.updateGlobalApprovalPolicy({});
+
+    expect(setConfig).toHaveBeenCalledWith(
+      'aiAgent',
+      expect.objectContaining({
+        providers: currentConfig.providers,
+      })
+    );
+    expect(setConfig.mock.calls[0]?.[1]).not.toHaveProperty('approvalPolicy');
+    expect(result.approvalPolicy).toBeUndefined();
     expect(result.providers).toEqual(currentConfig.providers);
   });
 

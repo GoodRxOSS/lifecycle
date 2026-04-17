@@ -20,6 +20,19 @@ jest.mock('server/services/ai/mcp/config', () => ({
   })),
 }));
 
+const mockGlobalConfigGetConfig = jest.fn();
+const mockGlobalConfigSetConfig = jest.fn();
+
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getConfig: (...args: unknown[]) => mockGlobalConfigGetConfig(...args),
+      setConfig: (...args: unknown[]) => mockGlobalConfigSetConfig(...args),
+    })),
+  },
+}));
+
 import AgentSessionConfigService from 'server/services/agentSessionConfig';
 import AgentPolicyService from 'server/services/agent/PolicyService';
 import { DEFAULT_AGENT_APPROVAL_POLICY } from 'server/services/agent/types';
@@ -37,6 +50,8 @@ function makeService() {
 describe('AgentSessionConfigService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGlobalConfigGetConfig.mockResolvedValue(undefined);
+    mockGlobalConfigSetConfig.mockResolvedValue(undefined);
   });
 
   it('lists only admin-visible sandbox tools in tool inventory', async () => {
@@ -68,5 +83,136 @@ describe('AgentSessionConfigService', () => {
     ]);
     expect(entries.find((entry) => entry.toolName === 'skills.list')).toBeUndefined();
     expect(entries.find((entry) => entry.toolName === 'session.get_workspace_state')).toBeUndefined();
+  });
+
+  it('merges repo control-plane numeric overrides over global defaults', async () => {
+    const service = makeService();
+
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({
+      systemPrompt: 'global prompt',
+      appendSystemPrompt: 'global append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      toolRules: [],
+    });
+    jest.spyOn(service, 'getRepoConfig').mockResolvedValue({
+      maxIterations: 12,
+      workspaceToolExecutionTimeoutMs: 45000,
+    });
+
+    await expect(service.getEffectiveConfig('example-org/example-repo')).resolves.toEqual({
+      systemPrompt: 'global prompt',
+      appendSystemPrompt: 'global append',
+      maxIterations: 12,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 45000,
+      toolRules: [],
+    });
+  });
+
+  it('updates runtime settings without overwriting control-plane settings', async () => {
+    const service = makeService();
+
+    mockGlobalConfigGetConfig.mockResolvedValue({
+      controlPlane: {
+        systemPrompt: 'global prompt',
+      },
+      workspaceImage: 'old-workspace-image',
+    });
+
+    await expect(
+      service.setGlobalRuntimeConfig({
+        workspaceImage: 'workspace-image:v2',
+        workspaceEditorImage: 'editor-image:v2',
+        workspaceGatewayImage: 'gateway-image:v2',
+        scheduling: {
+          keepAttachedServicesOnSessionNode: false,
+          nodeSelector: {
+            pool: 'agents',
+          },
+        },
+        readiness: {
+          timeoutMs: 90000,
+          pollMs: 1500,
+        },
+        resources: {
+          workspace: {
+            requests: {
+              cpu: '1',
+            },
+          },
+        },
+      })
+    ).resolves.toEqual({
+      workspaceImage: 'workspace-image:v2',
+      workspaceEditorImage: 'editor-image:v2',
+      workspaceGatewayImage: 'gateway-image:v2',
+      scheduling: {
+        keepAttachedServicesOnSessionNode: false,
+        nodeSelector: {
+          pool: 'agents',
+        },
+      },
+      readiness: {
+        timeoutMs: 90000,
+        pollMs: 1500,
+      },
+      resources: {
+        workspace: {
+          requests: {
+            cpu: '1',
+          },
+        },
+      },
+    });
+
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith('agentSessionDefaults', {
+      controlPlane: {
+        systemPrompt: 'global prompt',
+      },
+      workspaceImage: 'workspace-image:v2',
+      workspaceEditorImage: 'editor-image:v2',
+      workspaceGatewayImage: 'gateway-image:v2',
+      scheduling: {
+        keepAttachedServicesOnSessionNode: false,
+        nodeSelector: {
+          pool: 'agents',
+        },
+      },
+      readiness: {
+        timeoutMs: 90000,
+        pollMs: 1500,
+      },
+      resources: {
+        workspace: {
+          requests: {
+            cpu: '1',
+          },
+        },
+      },
+    });
+  });
+
+  it('rejects runtime updates that remove the required workspace images', async () => {
+    const service = makeService();
+
+    mockGlobalConfigGetConfig.mockResolvedValue({
+      controlPlane: {
+        systemPrompt: 'global prompt',
+      },
+      workspaceImage: 'old-workspace-image',
+      workspaceEditorImage: 'old-editor-image',
+    });
+
+    await expect(
+      service.setGlobalRuntimeConfig({
+        readiness: {
+          timeoutMs: 90000,
+        },
+      })
+    ).rejects.toThrow('Missing required runtime fields: workspaceImage, workspaceEditorImage.');
+
+    expect(mockGlobalConfigSetConfig).not.toHaveBeenCalled();
   });
 });

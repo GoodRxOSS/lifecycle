@@ -55,11 +55,15 @@ export type AppSetup = {
 export type AgentSessionControlPlaneConfig = {
   systemPrompt?: string;
   appendSystemPrompt?: string;
+  maxIterations?: number;
+  workspaceToolDiscoveryTimeoutMs?: number;
+  workspaceToolExecutionTimeoutMs?: number;
   toolRules?: import('./agentSessionConfig').AgentSessionToolRule[];
 };
 
 export type AgentSessionSchedulingConfig = {
   nodeSelector?: Record<string, string> | null;
+  keepAttachedServicesOnSessionNode?: boolean | null;
 };
 
 export type AgentSessionReadinessConfig = {

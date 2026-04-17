@@ -56,6 +56,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     workspaceEditorImage,
     workspaceGatewayImage,
     nodeSelector,
+    keepAttachedServicesOnSessionNode,
     readiness,
     resources,
   } = job.data;
@@ -83,6 +84,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       workspaceEditorImage,
       workspaceGatewayImage,
       nodeSelector,
+      keepAttachedServicesOnSessionNode,
       readiness,
       resources,
       onProgress: reportProgress,

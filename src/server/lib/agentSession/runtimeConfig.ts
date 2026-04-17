@@ -29,6 +29,7 @@ export interface AgentSessionRuntimeConfig {
   workspaceEditorImage: string;
   workspaceGatewayImage: string;
   nodeSelector?: Record<string, string>;
+  keepAttachedServicesOnSessionNode: boolean;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
 }
@@ -52,6 +53,9 @@ export interface ResolvedAgentSessionResources {
 export interface ResolvedAgentSessionControlPlaneConfig {
   systemPrompt?: string;
   appendSystemPrompt?: string;
+  maxIterations: number;
+  workspaceToolDiscoveryTimeoutMs: number;
+  workspaceToolExecutionTimeoutMs: number;
 }
 
 export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
@@ -64,6 +68,10 @@ export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
 
 export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT =
   'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.';
+export const DEFAULT_AGENT_SESSION_MAX_ITERATIONS = 8;
+export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS = 3000;
+export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS = 15000;
+export const DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE = true;
 
 const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
 const DEFAULT_AGENT_READY_POLL_MS = 2000;
@@ -117,6 +125,34 @@ function normalizeNonNegativeInteger(value: unknown): number | undefined {
   return undefined;
 }
 
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const normalized = normalizeNonNegativeInteger(value);
+
+  if (normalized === undefined || normalized <= 0) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
   if (!values || typeof values !== 'object' || Array.isArray(values)) {
     return {};
@@ -159,6 +195,13 @@ function normalizeNodeSelector(scheduling?: AgentSessionSchedulingConfig | null)
   );
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+export function resolveKeepAttachedServicesOnSessionNode(scheduling?: AgentSessionSchedulingConfig | null): boolean {
+  return (
+    normalizeBoolean(scheduling?.keepAttachedServicesOnSessionNode) ??
+    DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE
+  );
 }
 
 function getDefaultReadinessConfig(): ResolvedAgentSessionReadinessConfig {
@@ -242,10 +285,21 @@ export function resolveAgentSessionControlPlaneConfigFromDefaults(
   const appendSystemPrompt =
     normalizeOptionalString(controlPlaneDefaults?.appendSystemPrompt) ||
     DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT;
+  const maxIterations =
+    normalizePositiveInteger(controlPlaneDefaults?.maxIterations) || DEFAULT_AGENT_SESSION_MAX_ITERATIONS;
+  const workspaceToolDiscoveryTimeoutMs =
+    normalizePositiveInteger(controlPlaneDefaults?.workspaceToolDiscoveryTimeoutMs) ||
+    DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS;
+  const workspaceToolExecutionTimeoutMs =
+    normalizePositiveInteger(controlPlaneDefaults?.workspaceToolExecutionTimeoutMs) ||
+    DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS;
 
   return {
     systemPrompt,
     appendSystemPrompt,
+    maxIterations,
+    workspaceToolDiscoveryTimeoutMs,
+    workspaceToolExecutionTimeoutMs,
   };
 }
 
@@ -288,6 +342,7 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
     workspaceEditorImage,
     workspaceGatewayImage,
     nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
+    keepAttachedServicesOnSessionNode: resolveKeepAttachedServicesOnSessionNode(agentSessionDefaults?.scheduling),
     readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),
     resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
   };

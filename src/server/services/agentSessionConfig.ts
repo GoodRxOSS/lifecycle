@@ -19,9 +19,14 @@ import McpServerConfig from 'server/models/McpServerConfig';
 import UserMcpConnection from 'server/models/UserMcpConnection';
 import GlobalConfigService from './globalConfig';
 import { normalizeRepoFullName } from 'server/lib/normalizeRepoFullName';
-import { validateAgentSessionControlPlaneConfig } from 'server/lib/validation/agentSessionConfigValidator';
+import {
+  AgentSessionConfigValidationError,
+  validateAgentSessionControlPlaneConfig,
+  validateAgentSessionRuntimeSettings,
+} from 'server/lib/validation/agentSessionConfigValidator';
 import type {
   AgentSessionControlPlaneConfigValue,
+  AgentSessionRuntimeSettingsValue,
   AgentSessionToolInventoryEntry,
   AgentSessionToolRule,
   AgentSessionToolRuleSelection,
@@ -31,6 +36,9 @@ import type { GlobalConfig, AgentSessionDefaults } from './types/globalConfig';
 import {
   DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT,
   DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT,
+  DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
+  DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
+  DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
 } from 'server/lib/agentSession/runtimeConfig';
 import { McpConfigService } from 'server/services/ai/mcp/config';
 import { normalizeAuthConfig, requiresUserConnection } from 'server/services/ai/mcp/connectionConfig';
@@ -44,6 +52,105 @@ import {
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        ([key, entryValue]) =>
+          typeof key === 'string' && key.trim() && typeof entryValue === 'string' && entryValue.trim()
+      )
+      .map(([key, entryValue]) => [key.trim(), entryValue.trim()])
+  );
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeResourceRequirements(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const requests = normalizeStringRecord((value as { requests?: unknown }).requests);
+  const limits = normalizeStringRecord((value as { limits?: unknown }).limits);
+
+  if (!requests && !limits) {
+    return undefined;
+  }
+
+  return {
+    ...(requests ? { requests } : {}),
+    ...(limits ? { limits } : {}),
+  };
+}
+
+function validateRequiredRuntimeImages(config: Partial<GlobalConfig['agentSessionDefaults']>): void {
+  const missingFields: string[] = [];
+
+  if (!normalizeOptionalString(config.workspaceImage)) {
+    missingFields.push('workspaceImage');
+  }
+
+  if (!normalizeOptionalString(config.workspaceEditorImage)) {
+    missingFields.push('workspaceEditorImage');
+  }
+
+  if (missingFields.length > 0) {
+    throw new AgentSessionConfigValidationError(`Missing required runtime fields: ${missingFields.join(', ')}.`);
+  }
 }
 
 function normalizeToolRules(value: unknown): AgentSessionToolRule[] {
@@ -76,7 +183,81 @@ function normalizeControlPlaneConfig(value: unknown): AgentSessionControlPlaneCo
   return {
     systemPrompt: normalizeOptionalString((value as { systemPrompt?: unknown }).systemPrompt),
     appendSystemPrompt: normalizeOptionalString((value as { appendSystemPrompt?: unknown }).appendSystemPrompt),
+    maxIterations: normalizePositiveInteger((value as { maxIterations?: unknown }).maxIterations),
+    workspaceToolDiscoveryTimeoutMs: normalizePositiveInteger(
+      (value as { workspaceToolDiscoveryTimeoutMs?: unknown }).workspaceToolDiscoveryTimeoutMs
+    ),
+    workspaceToolExecutionTimeoutMs: normalizePositiveInteger(
+      (value as { workspaceToolExecutionTimeoutMs?: unknown }).workspaceToolExecutionTimeoutMs
+    ),
     toolRules: normalizeToolRules((value as { toolRules?: unknown }).toolRules),
+  };
+}
+
+function normalizeRuntimeSettings(value: unknown): AgentSessionRuntimeSettingsValue {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const workspaceImage = normalizeOptionalString((value as { workspaceImage?: unknown }).workspaceImage);
+  const workspaceEditorImage = normalizeOptionalString(
+    (value as { workspaceEditorImage?: unknown }).workspaceEditorImage
+  );
+  const workspaceGatewayImage = normalizeOptionalString(
+    (value as { workspaceGatewayImage?: unknown }).workspaceGatewayImage
+  );
+  const nodeSelector = normalizeStringRecord(
+    (value as { scheduling?: { nodeSelector?: unknown } }).scheduling?.nodeSelector
+  );
+  const keepAttachedServicesOnSessionNode = normalizeBoolean(
+    (value as { scheduling?: { keepAttachedServicesOnSessionNode?: unknown } }).scheduling
+      ?.keepAttachedServicesOnSessionNode
+  );
+  const readinessTimeoutMs = normalizeNonNegativeInteger(
+    (value as { readiness?: { timeoutMs?: unknown } }).readiness?.timeoutMs
+  );
+  const readinessPollMs = normalizeNonNegativeInteger(
+    (value as { readiness?: { pollMs?: unknown } }).readiness?.pollMs
+  );
+  const workspaceResources = normalizeResourceRequirements(
+    (value as { resources?: { workspace?: unknown } }).resources?.workspace
+  );
+  const editorResources = normalizeResourceRequirements(
+    (value as { resources?: { editor?: unknown } }).resources?.editor
+  );
+  const workspaceGatewayResources = normalizeResourceRequirements(
+    (value as { resources?: { workspaceGateway?: unknown } }).resources?.workspaceGateway
+  );
+
+  return {
+    ...(workspaceImage ? { workspaceImage } : {}),
+    ...(workspaceEditorImage ? { workspaceEditorImage } : {}),
+    ...(workspaceGatewayImage ? { workspaceGatewayImage } : {}),
+    ...(nodeSelector || keepAttachedServicesOnSessionNode !== undefined
+      ? {
+          scheduling: {
+            ...(nodeSelector ? { nodeSelector } : {}),
+            ...(keepAttachedServicesOnSessionNode !== undefined ? { keepAttachedServicesOnSessionNode } : {}),
+          },
+        }
+      : {}),
+    ...(readinessTimeoutMs !== undefined || readinessPollMs !== undefined
+      ? {
+          readiness: {
+            ...(readinessTimeoutMs !== undefined ? { timeoutMs: readinessTimeoutMs } : {}),
+            ...(readinessPollMs !== undefined ? { pollMs: readinessPollMs } : {}),
+          },
+        }
+      : {}),
+    ...(workspaceResources || editorResources || workspaceGatewayResources
+      ? {
+          resources: {
+            ...(workspaceResources ? { workspace: workspaceResources } : {}),
+            ...(editorResources ? { editor: editorResources } : {}),
+            ...(workspaceGatewayResources ? { workspaceGateway: workspaceGatewayResources } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -103,6 +284,9 @@ function hasConfigValues(config: Partial<AgentSessionControlPlaneConfigValue>): 
   return Boolean(
     normalizeOptionalString(config.systemPrompt) ||
       normalizeOptionalString(config.appendSystemPrompt) ||
+      normalizePositiveInteger(config.maxIterations) ||
+      normalizePositiveInteger(config.workspaceToolDiscoveryTimeoutMs) ||
+      normalizePositiveInteger(config.workspaceToolExecutionTimeoutMs) ||
       (config.toolRules && config.toolRules.length > 0)
   );
 }
@@ -136,6 +320,14 @@ export default class AgentSessionConfigService extends BaseService {
     return normalizeControlPlaneConfig(defaults?.controlPlane);
   }
 
+  async getGlobalRuntimeConfig(): Promise<AgentSessionRuntimeSettingsValue> {
+    const defaults = (await GlobalConfigService.getInstance().getConfig('agentSessionDefaults')) as
+      | AgentSessionDefaults
+      | undefined;
+
+    return normalizeRuntimeSettings(defaults);
+  }
+
   async setGlobalConfig(config: AgentSessionControlPlaneConfigValue): Promise<AgentSessionControlPlaneConfigValue> {
     const normalized = normalizeControlPlaneConfig(config);
     validateAgentSessionControlPlaneConfig(normalized);
@@ -146,6 +338,48 @@ export default class AgentSessionConfigService extends BaseService {
       ...currentDefaults,
       controlPlane: normalized,
     };
+
+    await GlobalConfigService.getInstance().setConfig('agentSessionDefaults', nextDefaults);
+    return normalized;
+  }
+
+  async setGlobalRuntimeConfig(config: AgentSessionRuntimeSettingsValue): Promise<AgentSessionRuntimeSettingsValue> {
+    const normalized = normalizeRuntimeSettings(config);
+    validateAgentSessionRuntimeSettings(normalized);
+
+    const currentDefaults = ((await GlobalConfigService.getInstance().getConfig('agentSessionDefaults')) ||
+      {}) as Partial<GlobalConfig['agentSessionDefaults']>;
+    const nextDefaults: Partial<GlobalConfig['agentSessionDefaults']> = {
+      ...currentDefaults,
+    };
+
+    delete nextDefaults.workspaceImage;
+    delete nextDefaults.workspaceEditorImage;
+    delete nextDefaults.workspaceGatewayImage;
+    delete nextDefaults.scheduling;
+    delete nextDefaults.readiness;
+    delete nextDefaults.resources;
+
+    if (normalized.workspaceImage) {
+      nextDefaults.workspaceImage = normalized.workspaceImage;
+    }
+    if (normalized.workspaceEditorImage) {
+      nextDefaults.workspaceEditorImage = normalized.workspaceEditorImage;
+    }
+    if (normalized.workspaceGatewayImage) {
+      nextDefaults.workspaceGatewayImage = normalized.workspaceGatewayImage;
+    }
+    if (normalized.scheduling) {
+      nextDefaults.scheduling = normalized.scheduling;
+    }
+    if (normalized.readiness) {
+      nextDefaults.readiness = normalized.readiness;
+    }
+    if (normalized.resources) {
+      nextDefaults.resources = normalized.resources;
+    }
+
+    validateRequiredRuntimeImages(nextDefaults);
 
     await GlobalConfigService.getInstance().setConfig('agentSessionDefaults', nextDefaults);
     return normalized;
@@ -218,6 +452,18 @@ export default class AgentSessionConfigService extends BaseService {
         normalizeOptionalString(repoConfig?.appendSystemPrompt) ||
         normalizeOptionalString(globalConfig.appendSystemPrompt) ||
         DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT,
+      maxIterations:
+        normalizePositiveInteger(repoConfig?.maxIterations) ||
+        normalizePositiveInteger(globalConfig.maxIterations) ||
+        DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
+      workspaceToolDiscoveryTimeoutMs:
+        normalizePositiveInteger(repoConfig?.workspaceToolDiscoveryTimeoutMs) ||
+        normalizePositiveInteger(globalConfig.workspaceToolDiscoveryTimeoutMs) ||
+        DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
+      workspaceToolExecutionTimeoutMs:
+        normalizePositiveInteger(repoConfig?.workspaceToolExecutionTimeoutMs) ||
+        normalizePositiveInteger(globalConfig.workspaceToolExecutionTimeoutMs) ||
+        DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
       toolRules: mergeToolRules(globalConfig.toolRules || [], repoConfig?.toolRules || []),
     };
   }

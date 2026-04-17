@@ -138,6 +138,7 @@ export interface LaunchSandboxSessionOptions {
   workspaceEditorImage?: string;
   workspaceGatewayImage?: string;
   nodeSelector?: Record<string, string>;
+  keepAttachedServicesOnSessionNode?: boolean;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
   onProgress?: (stage: SandboxLaunchStage, message: string) => Promise<void> | void;
@@ -268,6 +269,7 @@ export default class AgentSandboxSessionService extends BaseService {
         workspaceEditorImage: opts.workspaceEditorImage,
         workspaceGatewayImage: opts.workspaceGatewayImage,
         nodeSelector: opts.nodeSelector,
+        keepAttachedServicesOnSessionNode: opts.keepAttachedServicesOnSessionNode,
         readiness: mergeAgentSessionReadinessForServices(
           opts.readiness,
           selectedServices.map((service) => service.devConfig.agentSession?.readiness)

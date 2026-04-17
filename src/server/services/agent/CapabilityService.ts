@@ -43,6 +43,11 @@ type ToolExecutionHooks = {
   onFileChange?: (change: AgentFileChangeData) => Promise<void>;
 };
 
+type SessionWorkspaceGatewayTimeouts = {
+  discoveryTimeoutMs: number;
+  executionTimeoutMs: number;
+};
+
 function resolvePrimaryRepo(session: AgentSession): string | undefined {
   const primaryRepo = (session.workspaceRepos || []).find((repo) => repo.primary)?.repo;
   if (primaryRepo) {
@@ -65,7 +70,10 @@ function resolveSessionWorkspaceGatewayBaseUrl(session: AgentSession): string | 
   return `http://${session.podName}.${session.namespace}.svc.cluster.local:${SESSION_WORKSPACE_GATEWAY_PORT}`;
 }
 
-async function resolveSessionWorkspaceGatewayServer(session: AgentSession): Promise<ResolvedMcpServer | null> {
+async function resolveSessionWorkspaceGatewayServer(
+  session: AgentSession,
+  timeouts: SessionWorkspaceGatewayTimeouts
+): Promise<ResolvedMcpServer | null> {
   const baseUrl = resolveSessionWorkspaceGatewayBaseUrl(session);
   if (!baseUrl) {
     return null;
@@ -75,14 +83,14 @@ async function resolveSessionWorkspaceGatewayServer(session: AgentSession): Prom
   const client = new McpClientManager();
 
   try {
-    await client.connect({ type: 'http', url }, 3000);
-    const discoveredTools = await client.listTools();
+    await client.connect({ type: 'http', url }, timeouts.discoveryTimeoutMs);
+    const discoveredTools = await client.listTools(timeouts.discoveryTimeoutMs);
 
     return {
       slug: 'sandbox',
       name: 'Session Workspace',
       transport: { type: 'http', url },
-      timeout: 15000,
+      timeout: timeouts.executionTimeoutMs,
       defaultArgs: {},
       env: {},
       discoveredTools,
@@ -275,6 +283,8 @@ export default class AgentCapabilityService {
     repoFullName,
     userIdentity,
     approvalPolicy,
+    workspaceToolDiscoveryTimeoutMs,
+    workspaceToolExecutionTimeoutMs,
     hooks,
     toolRules,
   }: {
@@ -282,6 +292,8 @@ export default class AgentCapabilityService {
     repoFullName?: string;
     userIdentity: RequestUserIdentity;
     approvalPolicy: AgentApprovalPolicy;
+    workspaceToolDiscoveryTimeoutMs: number;
+    workspaceToolExecutionTimeoutMs: number;
     hooks?: ToolExecutionHooks;
     toolRules?: AgentSessionToolRule[];
   }): Promise<ToolSet> {
@@ -293,7 +305,10 @@ export default class AgentCapabilityService {
     const mcpConfigService = new McpConfigService();
     const [repoServers, workspaceGatewayServer] = await Promise.all([
       mcpConfigService.resolveServersForRepo(repoFullName, undefined, userIdentity),
-      resolveSessionWorkspaceGatewayServer(session),
+      resolveSessionWorkspaceGatewayServer(session, {
+        discoveryTimeoutMs: workspaceToolDiscoveryTimeoutMs,
+        executionTimeoutMs: workspaceToolExecutionTimeoutMs,
+      }),
     ]);
     const resolvedRepoServers = repoServers.flatMap((server) => {
       if (!usesSessionWorkspaceGatewayExecution(server.transport)) {

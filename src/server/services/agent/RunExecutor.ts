@@ -168,6 +168,8 @@ export default class AgentRunExecutor {
       repoFullName,
       userIdentity,
       approvalPolicy,
+      workspaceToolDiscoveryTimeoutMs: effectiveSessionConfig.workspaceToolDiscoveryTimeoutMs,
+      workspaceToolExecutionTimeoutMs: effectiveSessionConfig.workspaceToolExecutionTimeoutMs,
       toolRules: effectiveSessionConfig.toolRules,
       hooks: {
         onToolStarted: async (audit) => {
@@ -238,7 +240,7 @@ export default class AgentRunExecutor {
       model,
       instructions: buildSystemPrompt([effectiveSessionConfig.systemPrompt, sessionPrompt]),
       tools,
-      stopWhen: stepCountIs(8),
+      stopWhen: stepCountIs(effectiveSessionConfig.maxIterations),
       onStepFinish: async (step) => {
         try {
           const usageSummary = observabilityTracker.updateFromStep({

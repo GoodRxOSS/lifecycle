@@ -15,11 +15,12 @@
  */
 
 var mockToolLoopAgent: jest.Mock;
+var mockStepCountIs: jest.Mock;
 
 jest.mock('ai', () => ({
   __esModule: true,
   ToolLoopAgent: (mockToolLoopAgent = jest.fn().mockImplementation((config) => ({ config }))),
-  stepCountIs: jest.fn(() => 'stop-condition'),
+  stepCountIs: (mockStepCountIs = jest.fn(() => 'stop-condition')),
 }));
 
 const mockResolveSelection = jest.fn().mockResolvedValue({ provider: 'openai', modelId: 'gpt-5.4' });
@@ -70,6 +71,9 @@ const mockTouchActivity = jest.fn().mockResolvedValue(undefined);
 const mockGetEffectiveSessionConfig = jest.fn().mockResolvedValue({
   systemPrompt: 'DB prompt as stored',
   appendSystemPrompt: undefined,
+  maxIterations: 8,
+  workspaceToolDiscoveryTimeoutMs: 3000,
+  workspaceToolExecutionTimeoutMs: 15000,
   toolRules: [],
 });
 
@@ -163,6 +167,9 @@ describe('AgentRunExecutor', () => {
     mockGetEffectiveSessionConfig.mockResolvedValue({
       systemPrompt: 'DB prompt as stored',
       appendSystemPrompt: undefined,
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
       toolRules: [],
     });
     mockPendingActionFirst.mockResolvedValue(null);
@@ -182,6 +189,7 @@ describe('AgentRunExecutor', () => {
         instructions: 'DB prompt as stored\n\nAppend prompt',
       })
     );
+    expect(mockStepCountIs).toHaveBeenCalledWith(8);
   });
 
   it('correlates tool execution audit rows by toolCallId and touches session activity on step progress', async () => {
@@ -194,6 +202,12 @@ describe('AgentRunExecutor', () => {
 
     const toolSetArgs = mockBuildToolSet.mock.calls[0]?.[0];
     expect(toolSetArgs?.hooks).toBeDefined();
+    expect(toolSetArgs).toEqual(
+      expect.objectContaining({
+        workspaceToolDiscoveryTimeoutMs: 3000,
+        workspaceToolExecutionTimeoutMs: 15000,
+      })
+    );
 
     mockPendingActionFirst.mockResolvedValue({
       id: 55,
@@ -249,5 +263,31 @@ describe('AgentRunExecutor', () => {
     });
 
     expect(mockTouchActivity).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('uses configured max iterations and workspace tool timeouts', async () => {
+    mockGetEffectiveSessionConfig.mockResolvedValue({
+      systemPrompt: 'DB prompt as stored',
+      appendSystemPrompt: undefined,
+      maxIterations: 14,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      toolRules: [],
+    });
+
+    await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+    });
+
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceToolDiscoveryTimeoutMs: 4500,
+        workspaceToolExecutionTimeoutMs: 22000,
+      })
+    );
   });
 });

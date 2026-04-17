@@ -27,13 +27,45 @@ export interface AgentSessionToolRule {
 export interface AgentSessionControlPlaneConfigValue {
   systemPrompt?: string;
   appendSystemPrompt?: string;
+  maxIterations?: number;
+  workspaceToolDiscoveryTimeoutMs?: number;
+  workspaceToolExecutionTimeoutMs?: number;
   toolRules?: AgentSessionToolRule[];
 }
 
 export interface EffectiveAgentSessionControlPlaneConfig {
   systemPrompt: string;
   appendSystemPrompt?: string;
+  maxIterations: number;
+  workspaceToolDiscoveryTimeoutMs: number;
+  workspaceToolExecutionTimeoutMs: number;
   toolRules: AgentSessionToolRule[];
+}
+
+export interface AgentSessionReadinessSettingsValue {
+  timeoutMs?: number;
+  pollMs?: number;
+}
+
+export interface AgentSessionResourceRequirementsValue {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+}
+
+export interface AgentSessionRuntimeSettingsValue {
+  workspaceImage?: string;
+  workspaceEditorImage?: string;
+  workspaceGatewayImage?: string;
+  scheduling?: {
+    nodeSelector?: Record<string, string>;
+    keepAttachedServicesOnSessionNode?: boolean;
+  };
+  readiness?: AgentSessionReadinessSettingsValue;
+  resources?: {
+    workspace?: AgentSessionResourceRequirementsValue;
+    editor?: AgentSessionResourceRequirementsValue;
+    workspaceGateway?: AgentSessionResourceRequirementsValue;
+  };
 }
 
 export interface AgentSessionToolInventoryEntry {

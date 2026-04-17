@@ -789,6 +789,11 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          keepAttachedServicesOnSessionNode: true,
+        })
+      );
       expect(mockEnableDevMode).toHaveBeenCalledTimes(2);
       expect(mockEnableDevMode).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -812,6 +817,35 @@ describe('AgentSessionService', () => {
             '1': expect.any(Object),
             '2': expect.any(Object),
           }),
+        })
+      );
+    });
+
+    it('does not pin services to the session node when same-node placement is disabled', async () => {
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        keepAttachedServicesOnSessionNode: false,
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+        ],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          keepAttachedServicesOnSessionNode: false,
+        })
+      );
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: undefined,
         })
       );
     });
@@ -1235,6 +1269,197 @@ describe('AgentSessionService', () => {
           devModeSnapshots: expect.objectContaining({
             '11': expect.any(Object),
           }),
+        })
+      );
+    });
+
+    it('honors the session stored same-node policy when attaching services', async () => {
+      const globalConfigService = jest.requireMock('server/services/globalConfig').default;
+      globalConfigService.getInstance.mockReturnValueOnce({
+        getConfig: jest.fn().mockImplementation(async (key: string) => {
+          if (key === 'agentSessionDefaults') {
+            return {
+              scheduling: {
+                keepAttachedServicesOnSessionNode: false,
+              },
+            };
+          }
+
+          return null;
+        }),
+      });
+
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        keepAttachedServicesOnSessionNode: true,
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+      ]);
+
+      await AgentSessionService.attachServices('sess-1', ['web']);
+
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: 'agent-node-a',
+        })
+      );
+    });
+
+    it('honors a stored disabled same-node policy when attaching services', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        keepAttachedServicesOnSessionNode: false,
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+      ]);
+
+      await AgentSessionService.attachServices('sess-1', ['web']);
+
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: undefined,
+        })
+      );
+    });
+
+    it('falls back to the current global placement policy for legacy sessions', async () => {
+      const globalConfigService = jest.requireMock('server/services/globalConfig').default;
+      globalConfigService.getInstance.mockReturnValueOnce({
+        getConfig: jest.fn().mockImplementation(async (key: string) => {
+          if (key === 'agentSessionDefaults') {
+            return {
+              scheduling: {
+                keepAttachedServicesOnSessionNode: false,
+              },
+            };
+          }
+
+          return null;
+        }),
+      });
+
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+      ]);
+
+      await AgentSessionService.attachServices('sess-1', ['web']);
+
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: undefined,
         })
       );
     });

@@ -45,6 +45,7 @@ import { extractContextForQueue, getLogger } from 'server/lib/logger';
 import { BuildKind, FeatureFlags } from 'shared/constants';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import {
+  resolveKeepAttachedServicesOnSessionNode,
   type ResolvedAgentSessionReadinessConfig,
   type ResolvedAgentSessionResources,
 } from 'server/lib/agentSession/runtimeConfig';
@@ -78,6 +79,7 @@ import {
 } from 'server/lib/agentSession/startupFailureState';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { McpConfigService } from 'server/services/ai/mcp/config';
+import GlobalConfigService from './globalConfig';
 import {
   SESSION_POD_MCP_CONFIG_SECRET_KEY,
   serializeSessionWorkspaceGatewayServers,
@@ -220,6 +222,20 @@ async function resolveAgentPodNodeName(namespace: string, podName: string): Prom
   const response = await coreApi.readNamespacedPod(podName, namespace);
 
   return response.body.spec?.nodeName || null;
+}
+
+async function resolveSessionAttachmentPlacementPolicy(
+  session: Pick<AgentSession, 'keepAttachedServicesOnSessionNode'>
+): Promise<boolean> {
+  if (typeof session.keepAttachedServicesOnSessionNode === 'boolean') {
+    return session.keepAttachedServicesOnSessionNode;
+  }
+
+  const agentSessionDefaults = (await GlobalConfigService.getInstance().getConfig('agentSessionDefaults')) as
+    | { scheduling?: { keepAttachedServicesOnSessionNode?: boolean | null } }
+    | undefined;
+
+  return resolveKeepAttachedServicesOnSessionNode(agentSessionDefaults?.scheduling);
 }
 
 function getExecExitCode(status: any): number | null {
@@ -517,6 +533,7 @@ export interface CreateSessionOptions {
   workspaceEditorImage?: string;
   workspaceGatewayImage?: string;
   nodeSelector?: Record<string, string>;
+  keepAttachedServicesOnSessionNode?: boolean;
   readiness?: ResolvedAgentSessionReadinessConfig;
   resources?: ResolvedAgentSessionResources;
 }
@@ -789,6 +806,8 @@ export default class AgentSessionService {
     );
 
     try {
+      const keepAttachedServicesOnSessionNode = opts.keepAttachedServicesOnSessionNode !== false;
+
       session = await AgentSession.query().insertAndFetch({
         uuid: sessionUuid,
         buildUuid: opts.buildUuid || null,
@@ -800,6 +819,7 @@ export default class AgentSessionService {
         pvcName,
         model: resolvedModelId,
         status: 'starting',
+        keepAttachedServicesOnSessionNode,
         devModeSnapshots,
         forwardedAgentSecretProviders: forwardedAgentEnv.secretProviders,
         workspaceRepos,
@@ -858,7 +878,7 @@ export default class AgentSessionService {
       });
       const agentNodeName = workspacePod.spec?.nodeName || null;
 
-      if ((resolvedServices || []).length > 0 && !agentNodeName) {
+      if ((resolvedServices || []).length > 0 && keepAttachedServicesOnSessionNode && !agentNodeName) {
         throw new Error(`Session workspace pod ${podName} did not report a scheduled node`);
       }
 
@@ -871,7 +891,7 @@ export default class AgentSessionService {
           serviceName: resourceName,
           pvcName,
           devConfig: svc.devConfig,
-          requiredNodeName: agentNodeName || undefined,
+          requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined,
         });
         mutatedDeploys.push(svc.deployId);
         devModeSnapshots[String(svc.deployId)] = snapshot;
@@ -1225,9 +1245,12 @@ export default class AgentSessionService {
       );
     }
 
-    const agentNodeName = await resolveAgentPodNodeName(session.namespace, session.podName);
+    const keepAttachedServicesOnSessionNode = await resolveSessionAttachmentPlacementPolicy(session);
+    const agentNodeName = keepAttachedServicesOnSessionNode
+      ? await resolveAgentPodNodeName(session.namespace, session.podName)
+      : null;
 
-    if (!agentNodeName) {
+    if (keepAttachedServicesOnSessionNode && !agentNodeName) {
       throw new Error(`Session workspace pod ${session.podName} did not report a scheduled node`);
     }
 
@@ -1244,7 +1267,7 @@ export default class AgentSessionService {
           serviceName: resourceName,
           pvcName: session.pvcName,
           devConfig: service.devConfig,
-          requiredNodeName: agentNodeName,
+          requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName : undefined,
         });
 
         mutatedDeploys.push(service.deployId);
