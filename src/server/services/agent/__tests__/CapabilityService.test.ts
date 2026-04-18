@@ -22,6 +22,7 @@ const mockListTools = jest.fn();
 const mockCallTool = jest.fn();
 const mockClose = jest.fn();
 const mockLoggerWarn = jest.fn();
+const mockModeForCapability = jest.fn(() => 'allow');
 
 let currentTransport: Record<string, unknown> | null = null;
 
@@ -57,7 +58,7 @@ jest.mock('../PolicyService', () => ({
   __esModule: true,
   default: {
     capabilityForMcpTool: jest.fn(() => 'external_mcp_read'),
-    modeForCapability: jest.fn(() => 'allow'),
+    modeForCapability: (...args: unknown[]) => mockModeForCapability(...args),
   },
 }));
 
@@ -107,6 +108,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockModeForCapability.mockReturnValue('allow');
     currentTransport = null;
     mockResolveServersForRepo.mockResolvedValue([stdioServer]);
     mockConnect.mockImplementation(async (transport) => {
@@ -227,5 +229,30 @@ describe('AgentCapabilityService.buildToolSet', () => {
 
     expect(tools.mcp__figma__get_design_context).toBeUndefined();
     expect(mockLoggerWarn).toHaveBeenCalled();
+  });
+
+  it('lets session tool rules override the family approval mode for sandbox tools', async () => {
+    mockModeForCapability.mockReturnValue('deny');
+
+    const tools = await AgentCapabilityService.buildToolSet({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      toolRules: [
+        {
+          toolKey: 'mcp__sandbox__workspace_read_file',
+          mode: 'allow',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__sandbox__workspace_read_file).toEqual(
+      expect.objectContaining({
+        needsApproval: false,
+      })
+    );
   });
 });

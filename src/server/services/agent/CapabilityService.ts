@@ -57,9 +57,17 @@ function resolvePrimaryRepo(session: AgentSession): string | undefined {
   return session.selectedServices?.[0]?.repo || undefined;
 }
 
-function isToolAllowed(toolRules: AgentSessionToolRule[] | undefined, toolKey: string): boolean {
+function resolveToolApprovalMode({
+  toolRules,
+  toolKey,
+  capabilityMode,
+}: {
+  toolRules: AgentSessionToolRule[] | undefined;
+  toolKey: string;
+  capabilityMode: AgentApprovalMode;
+}): AgentApprovalMode {
   const rule = toolRules?.find((item) => item.toolKey === toolKey);
-  return rule?.mode !== 'deny';
+  return rule?.mode || capabilityMode;
 }
 
 function resolveSessionWorkspaceGatewayBaseUrl(session: AgentSession): string | null {
@@ -344,9 +352,13 @@ export default class AgentCapabilityService {
               entry.toolName,
               entry.annotations || discoveredTool.annotations
             );
-            const mode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
+            const mode = resolveToolApprovalMode({
+              toolRules,
+              toolKey: entry.toolKey,
+              capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
+            });
 
-            if (mode === 'deny' || !isToolAllowed(toolRules, entry.toolKey)) {
+            if (mode === 'deny') {
               continue;
             }
 
@@ -485,10 +497,14 @@ export default class AgentCapabilityService {
         }
 
         const capabilityKey = AgentPolicyService.capabilityForMcpTool(discoveredTool.name, discoveredTool.annotations);
-        const mode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
         const toolName = buildAgentToolKey(server.slug, discoveredTool.name);
+        const mode = resolveToolApprovalMode({
+          toolRules,
+          toolKey: toolName,
+          capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
+        });
 
-        if (mode === 'deny' || !isToolAllowed(toolRules, toolName)) {
+        if (mode === 'deny') {
           continue;
         }
 

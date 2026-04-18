@@ -1506,7 +1506,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             toolKey: { type: 'string' },
             mode: {
               type: 'string',
-              enum: ['allow', 'deny'],
+              enum: ['allow', 'require_approval', 'deny'],
             },
           },
           required: ['toolKey', 'mode'],
@@ -1631,11 +1631,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             approvalMode: { $ref: '#/components/schemas/AgentApprovalMode' },
             scopeRuleMode: {
               type: 'string',
-              enum: ['inherit', 'allow', 'deny'],
+              enum: ['inherit', 'allow', 'require_approval', 'deny'],
             },
             effectiveRuleMode: {
               type: 'string',
-              enum: ['inherit', 'allow', 'deny'],
+              enum: ['inherit', 'allow', 'require_approval', 'deny'],
             },
             availability: {
               type: 'string',

@@ -18,7 +18,7 @@ const toolRuleSchema = {
   type: 'object',
   properties: {
     toolKey: { type: 'string', minLength: 1, maxLength: 255 },
-    mode: { type: 'string', enum: ['allow', 'deny'] },
+    mode: { type: 'string', enum: ['allow', 'require_approval', 'deny'] },
   },
   required: ['toolKey', 'mode'],
   additionalProperties: false,
