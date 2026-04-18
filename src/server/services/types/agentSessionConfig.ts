@@ -16,7 +16,7 @@
 
 import type { AgentApprovalMode, AgentCapabilityKey } from 'server/services/agent/types';
 
-export type AgentSessionToolRuleMode = 'allow' | 'deny';
+export type AgentSessionToolRuleMode = AgentApprovalMode;
 export type AgentSessionToolRuleSelection = AgentSessionToolRuleMode | 'inherit';
 
 export interface AgentSessionToolRule {

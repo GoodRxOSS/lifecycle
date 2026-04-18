@@ -111,6 +111,81 @@ describe('AgentSessionConfigService', () => {
     });
   });
 
+  it('persists require-approval tool overrides in control-plane config', async () => {
+    const service = makeService();
+
+    await expect(
+      service.setGlobalConfig({
+        toolRules: [
+          {
+            toolKey: 'mcp__sandbox__workspace_read_file',
+            mode: 'require_approval',
+          },
+        ],
+      })
+    ).resolves.toEqual({
+      toolRules: [
+        {
+          toolKey: 'mcp__sandbox__workspace_read_file',
+          mode: 'require_approval',
+        },
+      ],
+    });
+
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith('agentSessionDefaults', {
+      controlPlane: {
+        toolRules: [
+          {
+            toolKey: 'mcp__sandbox__workspace_read_file',
+            mode: 'require_approval',
+          },
+        ],
+      },
+    });
+  });
+
+  it('treats explicit tool rules as effective overrides in the inventory', async () => {
+    const service = makeService();
+
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({
+      toolRules: [
+        {
+          toolKey: 'mcp__sandbox__workspace_read_file',
+          mode: 'allow',
+        },
+      ],
+    });
+    jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
+      systemPrompt: 'base',
+      appendSystemPrompt: 'append',
+      toolRules: [
+        {
+          toolKey: 'mcp__sandbox__workspace_read_file',
+          mode: 'allow',
+        },
+      ],
+    });
+    jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue({
+      ...DEFAULT_AGENT_APPROVAL_POLICY,
+      rules: {
+        ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+        read: 'deny',
+      },
+    });
+
+    const entries = await service.listToolInventory('global');
+    const readFileEntry = entries.find((entry) => entry.toolName === 'workspace.read_file');
+
+    expect(readFileEntry).toEqual(
+      expect.objectContaining({
+        approvalMode: 'deny',
+        scopeRuleMode: 'allow',
+        effectiveRuleMode: 'allow',
+        availability: 'available',
+      })
+    );
+  });
+
   it('updates runtime settings without overwriting control-plane settings', async () => {
     const service = makeService();
 

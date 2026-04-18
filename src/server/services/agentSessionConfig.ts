@@ -166,7 +166,7 @@ function normalizeToolRules(value: unknown): AgentSessionToolRule[] {
     const toolKey =
       typeof (entry as { toolKey?: unknown }).toolKey === 'string' ? (entry as { toolKey: string }).toolKey : '';
     const mode = (entry as { mode?: unknown }).mode;
-    if (!toolKey || (mode !== 'allow' && mode !== 'deny')) {
+    if (!toolKey || (mode !== 'allow' && mode !== 'require_approval' && mode !== 'deny')) {
       continue;
     }
     deduped.set(toolKey, { toolKey, mode });
@@ -502,11 +502,12 @@ export default class AgentSessionConfigService extends BaseService {
       const approvalMode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
       const scopeRuleMode = toRuleSelection(activeScopeConfig.toolRules || [], toolKey);
       const effectiveRuleMode = toRuleSelection(effectiveConfig.toolRules, toolKey);
+      const resolvedApprovalMode = effectiveRuleMode === 'inherit' ? approvalMode : effectiveRuleMode;
       const availability =
-        approvalMode === 'deny'
-          ? 'blocked_by_policy'
-          : effectiveRuleMode === 'deny'
-          ? 'blocked_by_tool_rule'
+        resolvedApprovalMode === 'deny'
+          ? effectiveRuleMode === 'deny'
+            ? 'blocked_by_tool_rule'
+            : 'blocked_by_policy'
           : 'available';
 
       entries.push({

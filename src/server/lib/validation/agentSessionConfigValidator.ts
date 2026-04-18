@@ -103,7 +103,7 @@ export function validateAgentSessionControlPlaneConfig(config: Partial<AgentSess
     if (rule.toolKey.length > 255) {
       throw new AgentSessionConfigValidationError(`toolRules entry "${rule.toolKey}" exceeds maximum toolKey length.`);
     }
-    if (rule.mode !== 'allow' && rule.mode !== 'deny') {
+    if (rule.mode !== 'allow' && rule.mode !== 'require_approval' && rule.mode !== 'deny') {
       throw new AgentSessionConfigValidationError(
         `toolRules entry "${rule.toolKey}" has unsupported mode "${rule.mode}".`
       );

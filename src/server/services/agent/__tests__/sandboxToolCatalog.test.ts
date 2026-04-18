@@ -107,4 +107,26 @@ describe('sandboxToolCatalog', () => {
       '- do not claim a tool is unavailable unless it is not equipped here or a real tool call fails',
     ]);
   });
+
+  it('keeps explicitly allowed tools in the prompt summary even when the family is denied', () => {
+    const lines = buildSessionWorkspacePromptLines({
+      approvalPolicy: {
+        ...DEFAULT_AGENT_APPROVAL_POLICY,
+        rules: {
+          ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+          read: 'deny',
+        },
+      },
+      toolRules: [
+        {
+          toolKey: 'mcp__sandbox__workspace_read_file',
+          mode: 'allow',
+        },
+      ],
+      includeSkills: false,
+    });
+
+    expect(lines.join('\n')).toContain('workspace.read_file');
+    expect(lines.join('\n')).not.toContain('workspace.glob');
+  });
 });
