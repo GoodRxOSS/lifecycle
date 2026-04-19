@@ -15,10 +15,41 @@
  */
 
 import { buildCombinedInstallCommand, resolveAgentSessionServicePlan } from '../servicePlan';
-import { SESSION_WORKSPACE_ROOT } from '../workspace';
+import { SESSION_WORKSPACE_REPOS_ROOT, SESSION_WORKSPACE_ROOT } from '../workspace';
 
 describe('servicePlan', () => {
-  it('rewrites secondary repo service config against the mounted workspace path', () => {
+  it('keeps the primary repo at the workspace root for single-repo sessions', () => {
+    const plan = resolveAgentSessionServicePlan(
+      {
+        repoUrl: 'https://github.com/example-org/api.git',
+        branch: 'feature/api',
+      },
+      [
+        {
+          name: 'api',
+          deployId: 1,
+          repo: 'example-org/api',
+          branch: 'feature/api',
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'pnpm install',
+          },
+        },
+      ]
+    );
+
+    expect(plan.workspaceRepos).toEqual([
+      expect.objectContaining({
+        repo: 'example-org/api',
+        mountPath: SESSION_WORKSPACE_ROOT,
+        primary: true,
+      }),
+    ]);
+    expect(buildCombinedInstallCommand(plan.services)).toBe('pnpm install');
+  });
+
+  it('rewrites multi-repo service config against sibling mounted workspace paths', () => {
     const plan = resolveAgentSessionServicePlan({}, [
       {
         name: 'api',
@@ -51,12 +82,12 @@ describe('servicePlan', () => {
     expect(plan.workspaceRepos).toEqual([
       expect.objectContaining({
         repo: 'example-org/api',
-        mountPath: SESSION_WORKSPACE_ROOT,
+        mountPath: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/api`,
         primary: true,
       }),
       expect.objectContaining({
         repo: 'example-org/web',
-        mountPath: '/workspace/repos/example-org/web',
+        mountPath: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web`,
         primary: false,
       }),
     ]);
@@ -65,14 +96,14 @@ describe('servicePlan', () => {
       expect.arrayContaining([
         expect.objectContaining({
           name: 'web',
-          workspacePath: '/workspace/repos/example-org/web',
-          workDir: '/workspace/repos/example-org/web/apps/web',
+          workspacePath: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web`,
+          workDir: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web/apps/web`,
           devConfig: expect.objectContaining({
-            workDir: '/workspace/repos/example-org/web/apps/web',
-            command: 'pnpm --dir /workspace/repos/example-org/web/apps/web dev',
+            workDir: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web/apps/web`,
+            command: `pnpm --dir ${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web/apps/web dev`,
             installCommand: 'pnpm install',
             env: {
-              CONFIG_PATH: '/workspace/repos/example-org/web/config',
+              CONFIG_PATH: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web/config`,
             },
           }),
         }),
@@ -85,14 +116,14 @@ describe('servicePlan', () => {
           name: 'web',
           repo: 'example-org/web',
           branch: 'feature/web',
-          workspacePath: '/workspace/repos/example-org/web',
-          workDir: '/workspace/repos/example-org/web/apps/web',
+          workspacePath: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web`,
+          workDir: `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web/apps/web`,
         }),
       ])
     );
   });
 
-  it('builds repo-aware install commands without duplicating primary repo cd steps', () => {
+  it('builds repo-aware install commands for every repo in multi-repo sessions', () => {
     const plan = resolveAgentSessionServicePlan({}, [
       {
         name: 'api',
@@ -119,7 +150,7 @@ describe('servicePlan', () => {
     ]);
 
     expect(buildCombinedInstallCommand(plan.services)).toBe(
-      'pnpm install\n\ncd "/workspace/repos/example-org/web"\npnpm install'
+      `cd "${SESSION_WORKSPACE_REPOS_ROOT}/example-org/api"\npnpm install\n\ncd "${SESSION_WORKSPACE_REPOS_ROOT}/example-org/web"\npnpm install`
     );
   });
 

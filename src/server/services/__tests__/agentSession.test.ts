@@ -1001,7 +1001,7 @@ describe('AgentSessionService', () => {
             expect.objectContaining({
               repo: 'example-org/ui-service',
               branch: 'feature/ui-service',
-              mountPath: '/workspace',
+              mountPath: '/workspace/repos/example-org/ui-service',
               primary: true,
             }),
             expect.objectContaining({
@@ -1011,14 +1011,15 @@ describe('AgentSessionService', () => {
               primary: false,
             }),
           ],
-          installCommand: 'pnpm install\n\ncd "/workspace/repos/example-org/api-service"\npnpm install',
+          installCommand:
+            'cd "/workspace/repos/example-org/ui-service"\npnpm install\n\ncd "/workspace/repos/example-org/api-service"\npnpm install',
         })
       );
       expect(mockEnableDevMode).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({
           devConfig: expect.objectContaining({
-            workDir: '/workspace/apps/web',
+            workDir: '/workspace/repos/example-org/ui-service/apps/web',
           }),
         })
       );
@@ -1041,8 +1042,8 @@ describe('AgentSessionService', () => {
               name: 'web',
               repo: 'example-org/ui-service',
               branch: 'feature/ui-service',
-              workspacePath: '/workspace',
-              workDir: '/workspace/apps/web',
+              workspacePath: '/workspace/repos/example-org/ui-service',
+              workDir: '/workspace/repos/example-org/ui-service/apps/web',
             }),
             expect.objectContaining({
               name: 'api',

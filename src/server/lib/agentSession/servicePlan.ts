@@ -178,10 +178,13 @@ export function resolveAgentSessionWorkspaceRepos(
   }
 
   const resolvedPrimaryKey = primaryKey || orderedKeys[0];
+  const useWorkspaceRootForPrimary = orderedKeys.length === 1;
 
   return orderedKeys.map((key) => {
     const repo = reposByKey.get(key)!;
-    return normalizeSessionWorkspaceRepo(repo, key === resolvedPrimaryKey);
+    return normalizeSessionWorkspaceRepo(repo, key === resolvedPrimaryKey, {
+      useWorkspaceRootForPrimary,
+    });
   });
 }
 
