@@ -187,6 +187,12 @@ async function attachStartupFailures<T extends { uuid: string; status: AgentSess
 type SessionSnapshotMap = Record<string, DevModeResourceSnapshot>;
 type SessionService = NonNullable<CreateSessionOptions['services']>[number];
 type RequestedSessionService = string | RequestedAgentSessionServiceRef;
+type DevModeEnabledService = {
+  deployId: number;
+  deploymentName: string;
+  serviceName: string;
+  snapshot: DevModeResourceSnapshot;
+};
 
 function getSessionSnapshot(
   snapshots: SessionSnapshotMap | null | undefined,
@@ -213,6 +219,77 @@ function mergeSelectedServices(
   }
 
   return mergedServices;
+}
+
+class DevModeBatchEnableError extends Error {
+  successfulServices: DevModeEnabledService[];
+  failures: Array<{ deployId: number; error: unknown }>;
+
+  constructor(successfulServices: DevModeEnabledService[], failures: Array<{ deployId: number; error: unknown }>) {
+    const primaryError = failures[0]?.error;
+    super(primaryError instanceof Error ? primaryError.message : String(primaryError ?? 'Failed to enable dev mode'));
+    this.name = 'DevModeBatchEnableError';
+    this.successfulServices = successfulServices;
+    this.failures = failures;
+  }
+}
+
+function buildSnapshotMapFromEnabledServices(enabledServices: DevModeEnabledService[]): SessionSnapshotMap {
+  return Object.fromEntries(enabledServices.map((service) => [String(service.deployId), service.snapshot]));
+}
+
+async function enableServicesInDevModeParallel(opts: {
+  namespace: string;
+  pvcName: string;
+  services: Array<Pick<SessionService, 'name' | 'deployId' | 'resourceName' | 'devConfig'>>;
+  requiredNodeName?: string;
+}): Promise<DevModeEnabledService[]> {
+  if (opts.services.length === 0) {
+    return [];
+  }
+
+  const results = await Promise.allSettled(
+    opts.services.map(async (service): Promise<DevModeEnabledService> => {
+      const deploymentName = service.resourceName || service.name;
+      const snapshot = await new DevModeManager().enableDevMode({
+        namespace: opts.namespace,
+        deploymentName,
+        serviceName: deploymentName,
+        pvcName: opts.pvcName,
+        devConfig: service.devConfig,
+        requiredNodeName: opts.requiredNodeName,
+      });
+
+      return {
+        deployId: service.deployId,
+        deploymentName,
+        serviceName: deploymentName,
+        snapshot,
+      };
+    })
+  );
+
+  const successfulServices: DevModeEnabledService[] = [];
+  const failures: Array<{ deployId: number; error: unknown }> = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      successfulServices.push(result.value);
+      return;
+    }
+
+    const deployId = opts.services[index]?.deployId;
+    failures.push({
+      deployId: typeof deployId === 'number' ? deployId : -1,
+      error: result.reason,
+    });
+  });
+
+  if (failures.length > 0) {
+    throw new DevModeBatchEnableError(successfulServices, failures);
+  }
+
+  return successfulServices;
 }
 
 async function resolveAgentPodNodeName(namespace: string, podName: string): Promise<string | null> {
@@ -719,8 +796,9 @@ export default class AgentSessionService {
     const podName = buildAgentSessionPodName(sessionUuid, opts.buildUuid);
     const apiKeySecretName = `agent-secret-${sessionUuid.slice(0, 8)}`;
     const requestedModelId = opts.model?.trim() || undefined;
-    const mutatedDeploys: number[] = [];
     const devModeSnapshots: SessionSnapshotMap = {};
+    const enabledDevModeDeployIds: number[] = [];
+    const persistedDevModeDeployIds: number[] = [];
     let failureStage: AgentSessionStartupFailureStage = 'create_session';
     let sessionPersisted = false;
     let session: AgentSession | null = null;
@@ -882,28 +960,37 @@ export default class AgentSessionService {
         throw new Error(`Session workspace pod ${podName} did not report a scheduled node`);
       }
 
-      const devModeManager = new DevModeManager();
-      for (const svc of resolvedServices || []) {
-        const resourceName = svc.resourceName || svc.name;
-        const snapshot = await devModeManager.enableDevMode({
-          namespace: opts.namespace,
-          deploymentName: resourceName,
-          serviceName: resourceName,
-          pvcName,
-          devConfig: svc.devConfig,
-          requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined,
-        });
-        mutatedDeploys.push(svc.deployId);
-        devModeSnapshots[String(svc.deployId)] = snapshot;
+      const enabledServices = await enableServicesInDevModeParallel({
+        namespace: opts.namespace,
+        pvcName,
+        services: resolvedServices || [],
+        requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined,
+      }).catch((error) => {
+        if (error instanceof DevModeBatchEnableError) {
+          enabledDevModeDeployIds.push(...error.successfulServices.map((service) => service.deployId));
+          Object.assign(devModeSnapshots, buildSnapshotMapFromEnabledServices(error.successfulServices));
+        }
+
+        throw error;
+      });
+
+      enabledDevModeDeployIds.push(...enabledServices.map((service) => service.deployId));
+      Object.assign(devModeSnapshots, buildSnapshotMapFromEnabledServices(enabledServices));
+
+      if (enabledServices.length > 0) {
         await AgentSession.query()
           .findById(session.id)
           .patch({
             devModeSnapshots,
           } as unknown as Partial<AgentSession>);
-        await Deploy.query().findById(svc.deployId).patch({
+      }
+
+      for (const service of enabledServices) {
+        await Deploy.query().findById(service.deployId).patch({
           devMode: true,
           devModeSessionId: session.id,
         });
+        persistedDevModeDeployIds.push(service.deployId);
       }
 
       await createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid);
@@ -1007,13 +1094,13 @@ export default class AgentSessionService {
       }
 
       const revertPromise =
-        mutatedDeploys.length > 0
+        enabledDevModeDeployIds.length > 0
           ? (async () => {
               const deploysToRevert = await Deploy.query()
-                .whereIn('id', mutatedDeploys)
+                .whereIn('id', enabledDevModeDeployIds)
                 .withGraphFetched(DEV_MODE_REDEPLOY_GRAPH)
                 .catch(() => [] as Deploy[]);
-              for (const deployId of mutatedDeploys) {
+              for (const deployId of persistedDevModeDeployIds) {
                 await Deploy.query()
                   .findById(deployId)
                   .patch({ devMode: false, devModeSessionId: null })
@@ -1254,29 +1341,34 @@ export default class AgentSessionService {
       throw new Error(`Session workspace pod ${session.podName} did not report a scheduled node`);
     }
 
-    const devModeManager = new DevModeManager();
-    const mutatedDeploys: number[] = [];
+    const enabledDevModeDeployIds: number[] = [];
+    const persistedDevModeDeployIds: number[] = [];
     const addedSnapshots: SessionSnapshotMap = {};
 
     try {
-      for (const service of resolvedServices || []) {
-        const resourceName = service.resourceName || service.name;
-        const snapshot = await devModeManager.enableDevMode({
-          namespace: session.namespace,
-          deploymentName: resourceName,
-          serviceName: resourceName,
-          pvcName: session.pvcName,
-          devConfig: service.devConfig,
-          requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName : undefined,
-        });
+      const enabledServices = await enableServicesInDevModeParallel({
+        namespace: session.namespace,
+        pvcName: session.pvcName,
+        services: resolvedServices || [],
+        requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined,
+      }).catch((error) => {
+        if (error instanceof DevModeBatchEnableError) {
+          enabledDevModeDeployIds.push(...error.successfulServices.map((service) => service.deployId));
+          Object.assign(addedSnapshots, buildSnapshotMapFromEnabledServices(error.successfulServices));
+        }
 
-        mutatedDeploys.push(service.deployId);
-        addedSnapshots[String(service.deployId)] = snapshot;
+        throw error;
+      });
 
+      enabledDevModeDeployIds.push(...enabledServices.map((service) => service.deployId));
+      Object.assign(addedSnapshots, buildSnapshotMapFromEnabledServices(enabledServices));
+
+      for (const service of enabledServices) {
         await Deploy.query().findById(service.deployId).patch({
           devMode: true,
           devModeSessionId: session.id,
         });
+        persistedDevModeDeployIds.push(service.deployId);
       }
 
       await AgentSession.query()
@@ -1303,13 +1395,13 @@ export default class AgentSessionService {
         }`
       );
     } catch (error) {
-      if (mutatedDeploys.length > 0) {
+      if (enabledDevModeDeployIds.length > 0) {
         const deploysToRevert = await Deploy.query()
-          .whereIn('id', mutatedDeploys)
+          .whereIn('id', enabledDevModeDeployIds)
           .withGraphFetched(DEV_MODE_REDEPLOY_GRAPH)
           .catch(() => [] as Deploy[]);
 
-        for (const deployId of mutatedDeploys) {
+        for (const deployId of persistedDevModeDeployIds) {
           await Deploy.query()
             .findById(deployId)
             .patch({ devMode: false, devModeSessionId: null })

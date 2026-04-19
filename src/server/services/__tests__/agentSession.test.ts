@@ -225,6 +225,39 @@ const mockRedis = {
   del: jest.fn().mockResolvedValue(1),
 };
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject,
+  };
+}
+
+function buildDevModeSnapshot(deploymentName = 'service') {
+  return {
+    deployment: {
+      deploymentName,
+      containerName: deploymentName,
+      replicas: null,
+      image: 'node:20',
+      command: null,
+      workingDir: null,
+      env: null,
+      volumeMounts: null,
+      volumes: null,
+      nodeSelector: null,
+    },
+    service: null,
+  };
+}
+
 const mockedBuildServiceModule = jest.requireMock('server/services/build').__mocked as {
   deleteQueueAdd: jest.Mock;
   deleteBuild: jest.Mock;
@@ -237,21 +270,7 @@ jest.spyOn(RedisClient, 'getInstance').mockReturnValue({
   close: jest.fn(),
 } as any);
 
-const mockEnableDevMode = jest.fn().mockResolvedValue({
-  deployment: {
-    deploymentName: 'service',
-    containerName: 'service',
-    replicas: null,
-    image: 'node:20',
-    command: null,
-    workingDir: null,
-    env: null,
-    volumeMounts: null,
-    volumes: null,
-    nodeSelector: null,
-  },
-  service: null,
-});
+const mockEnableDevMode = jest.fn().mockResolvedValue(buildDevModeSnapshot());
 const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
 (DevModeManager as jest.Mock).mockImplementation(() => ({
   enableDevMode: mockEnableDevMode,
@@ -369,21 +388,7 @@ describe('AgentSessionService', () => {
     mockRedis.setex.mockResolvedValue('OK');
     mockRedis.get.mockResolvedValue(null);
     mockRedis.del.mockResolvedValue(1);
-    mockEnableDevMode.mockResolvedValue({
-      deployment: {
-        deploymentName: 'service',
-        containerName: 'service',
-        replicas: null,
-        image: 'node:20',
-        command: null,
-        workingDir: null,
-        env: null,
-        volumeMounts: null,
-        volumes: null,
-        nodeSelector: null,
-      },
-      service: null,
-    });
+    mockEnableDevMode.mockResolvedValue(buildDevModeSnapshot());
     mockDisableDevMode.mockResolvedValue(undefined);
     (isGvisorAvailable as jest.Mock).mockResolvedValue(false);
     (createAgentPvc as jest.Mock).mockResolvedValue({});
@@ -821,6 +826,41 @@ describe('AgentSessionService', () => {
       );
     });
 
+    it('starts dev mode for multiple services in parallel during session creation', async () => {
+      const webEnable = createDeferred<ReturnType<typeof buildDevModeSnapshot>>();
+      const apiEnable = createDeferred<ReturnType<typeof buildDevModeSnapshot>>();
+      mockEnableDevMode.mockImplementationOnce(() => webEnable.promise).mockImplementationOnce(() => apiEnable.promise);
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+          {
+            name: 'api',
+            deployId: 2,
+            resourceName: 'api-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm start' },
+          },
+        ],
+      };
+
+      const createPromise = AgentSessionService.createSession(optsWithServices);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(mockEnableDevMode).toHaveBeenCalledTimes(2);
+      expect(mockSessionQuery.patch).not.toHaveBeenCalled();
+
+      webEnable.resolve(buildDevModeSnapshot('web-build-uuid'));
+      apiEnable.resolve(buildDevModeSnapshot('api-build-uuid'));
+
+      await expect(createPromise).resolves.toEqual(expect.objectContaining({ status: 'active' }));
+    });
+
     it('does not pin services to the session node when same-node placement is disabled', async () => {
       const optsWithServices: CreateSessionOptions = {
         ...baseOpts,
@@ -847,6 +887,65 @@ describe('AgentSessionService', () => {
           deploymentName: 'web-build-uuid',
           requiredNodeName: undefined,
         })
+      );
+    });
+
+    it('restores successful sibling services when one parallel dev-mode enable fails', async () => {
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+          {
+            name: 'api',
+            deployId: 2,
+            resourceName: 'api-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm start' },
+          },
+        ],
+      };
+
+      mockEnableDevMode
+        .mockResolvedValueOnce(buildDevModeSnapshot('web-build-uuid'))
+        .mockRejectedValueOnce(new Error('api dev mode failed'));
+
+      const deployManagerDeploy = jest.fn().mockResolvedValue(undefined);
+      (DeploymentManager as jest.Mock).mockImplementation(() => ({
+        deploy: deployManagerDeploy,
+      }));
+
+      const revertDeploys = [
+        {
+          id: 1,
+          uuid: 'deploy-1',
+          build: { namespace: 'test-ns' },
+          deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
+        },
+      ];
+      mockDeployQuery.withGraphFetched.mockResolvedValue(revertDeploys);
+
+      await expect(AgentSessionService.createSession(optsWithServices)).rejects.toThrow('api dev mode failed');
+
+      expect(DeploymentManager).toHaveBeenCalledWith(revertDeploys);
+      expect(deployManagerDeploy).toHaveBeenCalled();
+      expect(mockDisableDevMode).toHaveBeenCalledTimes(2);
+      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
+        1,
+        'test-ns',
+        'deploy-1',
+        'deploy-1',
+        buildDevModeSnapshot('web-build-uuid')
+      );
+      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
+        2,
+        'test-ns',
+        'deploy-1',
+        'deploy-1',
+        buildDevModeSnapshot('web-build-uuid')
       );
     });
 
@@ -1271,6 +1370,188 @@ describe('AgentSessionService', () => {
             '11': expect.any(Object),
           }),
         })
+      );
+    });
+
+    it('starts dev mode for multiple attached services in parallel', async () => {
+      const webEnable = createDeferred<ReturnType<typeof buildDevModeSnapshot>>();
+      const apiEnable = createDeferred<ReturnType<typeof buildDevModeSnapshot>>();
+      mockEnableDevMode.mockImplementationOnce(() => webEnable.promise).mockImplementationOnce(() => apiEnable.promise);
+
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+        {
+          name: 'api',
+          type: 'github',
+          deployId: 22,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm start',
+            installCommand: 'cd /workspace/apps/api && pnpm install',
+            workDir: '/workspace/apps/api',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: 'fedcba98765432100123456789abcdef01234567',
+          baseDeploy: {
+            id: 22,
+            uuid: 'api-build-uuid',
+          },
+        },
+      ]);
+
+      const attachPromise = AgentSessionService.attachServices('sess-1', ['web', 'api']);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(mockEnableDevMode).toHaveBeenCalledTimes(2);
+      expect(mockSessionQuery.patch).not.toHaveBeenCalled();
+
+      webEnable.resolve(buildDevModeSnapshot('web-build-uuid'));
+      apiEnable.resolve(buildDevModeSnapshot('api-build-uuid'));
+
+      await expect(attachPromise).resolves.toBeUndefined();
+    });
+
+    it('restores successful attached services when one parallel dev-mode enable fails', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 321,
+        uuid: 'sess-1',
+        status: 'active',
+        buildUuid: 'build-123',
+        buildKind: 'environment',
+        namespace: 'test-ns',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/current',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [],
+        devModeSnapshots: {},
+      });
+      (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([
+        {
+          name: 'web',
+          type: 'github',
+          deployId: 11,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            installCommand: 'cd /workspace/apps/web && pnpm install',
+            workDir: '/workspace/apps/web',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: '0123456789abcdef0123456789abcdef01234567',
+          baseDeploy: {
+            id: 11,
+            uuid: 'web-build-uuid',
+          },
+        },
+        {
+          name: 'api',
+          type: 'github',
+          deployId: 22,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm start',
+            installCommand: 'cd /workspace/apps/api && pnpm install',
+            workDir: '/workspace/apps/api',
+          },
+          repo: 'example-org/example-repo',
+          branch: 'feature/current',
+          revision: 'fedcba98765432100123456789abcdef01234567',
+          baseDeploy: {
+            id: 22,
+            uuid: 'api-build-uuid',
+          },
+        },
+      ]);
+      mockEnableDevMode
+        .mockResolvedValueOnce(buildDevModeSnapshot('web-build-uuid'))
+        .mockRejectedValueOnce(new Error('api dev mode failed'));
+
+      const deployManagerDeploy = jest.fn().mockResolvedValue(undefined);
+      (DeploymentManager as jest.Mock).mockImplementation(() => ({
+        deploy: deployManagerDeploy,
+      }));
+
+      const revertDeploys = [
+        {
+          id: 11,
+          uuid: 'deploy-11',
+          build: { namespace: 'test-ns' },
+          deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
+        },
+      ];
+      mockDeployQuery.withGraphFetched.mockResolvedValue(revertDeploys);
+
+      await expect(AgentSessionService.attachServices('sess-1', ['web', 'api'])).rejects.toThrow('api dev mode failed');
+
+      expect(mockSessionQuery.patch).not.toHaveBeenCalled();
+      expect(mockDeployQuery.patch).not.toHaveBeenCalled();
+      expect(DeploymentManager).toHaveBeenCalledWith(revertDeploys);
+      expect(deployManagerDeploy).toHaveBeenCalled();
+      expect(mockDisableDevMode).toHaveBeenCalledTimes(2);
+      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
+        1,
+        'test-ns',
+        'deploy-11',
+        'deploy-11',
+        buildDevModeSnapshot('web-build-uuid')
+      );
+      expect(mockDisableDevMode).toHaveBeenNthCalledWith(
+        2,
+        'test-ns',
+        'deploy-11',
+        'deploy-11',
+        buildDevModeSnapshot('web-build-uuid')
+      );
+      expect(mockDisableDevMode.mock.invocationCallOrder[0]).toBeLessThan(
+        deployManagerDeploy.mock.invocationCallOrder[0]
       );
     });
 
