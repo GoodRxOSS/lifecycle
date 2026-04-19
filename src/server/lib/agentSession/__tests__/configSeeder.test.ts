@@ -163,6 +163,36 @@ describe('configSeeder', () => {
       expect(script).toContain('"/workspace/repos/org/api"');
     });
 
+    it('clones multiple repositories in parallel before continuing to installs', () => {
+      const script = generateInitScript({
+        workspaceRepos: [
+          {
+            repo: 'org/ui',
+            repoUrl: 'https://github.com/org/ui.git',
+            branch: 'feature/ui',
+            revision: null,
+            mountPath: '/workspace/repos/org/ui',
+            primary: true,
+          },
+          {
+            repo: 'org/api',
+            repoUrl: 'https://github.com/org/api.git',
+            branch: 'feature/api',
+            revision: null,
+            mountPath: '/workspace/repos/org/api',
+            primary: false,
+          },
+        ],
+        installCommand: 'pnpm install',
+      });
+
+      expect(script).toContain('clone_pids=""');
+      expect(script).toContain('clone_pids="$clone_pids $!"');
+      expect(script).toContain('for clone_pid in $clone_pids; do');
+      expect(script).toContain('  wait "$clone_pid"');
+      expect(script.indexOf('for clone_pid in $clone_pids; do')).toBeLessThan(script.indexOf('pnpm install'));
+    });
+
     it('starts with shebang', () => {
       const script = generateInitScript(baseOpts);
       expect(script.startsWith('#!/bin/sh')).toBe(true);

@@ -52,7 +52,7 @@ async function runGit(args, cwd) {
 }
 
 async function ensureRepoAtBranch(repo) {
-  const repoKey = buildSkillSourceRepoKey(repo.repo);
+  const repoKey = buildSkillSourceRepoKey(repo.repo, repo.branch);
   const sourceRoot = resolve(SKILL_SOURCES_ROOT, repoKey);
   const gitDir = resolve(sourceRoot, '.git');
 
@@ -94,53 +94,72 @@ async function ensureRepoAtBranch(repo) {
 async function main() {
   const skillPlan = parseSkillPlanArg();
   const repos = new Map();
-  const skills = [];
 
   await mkdir(SKILLS_ROOT, { recursive: true });
 
   for (const skill of skillPlan.skills) {
     const repoKey = `${skill.repo}::${skill.branch}`;
-    if (!repos.has(repoKey)) {
-      repos.set(
+    if (repos.has(repoKey)) {
+      continue;
+    }
+
+    repos.set(repoKey, null);
+  }
+
+  const preparedRepos = await Promise.all(
+    Array.from(repos.keys()).map(async (repoKey) => {
+      const [repo, branch] = repoKey.split('::');
+      const skill = skillPlan.skills.find((entry) => entry.repo === repo && entry.branch === branch);
+      if (!skill) {
+        throw new Error(`Missing skill metadata for ${repoKey}`);
+      }
+
+      return [
         repoKey,
         await ensureRepoAtBranch({
           repo: skill.repo,
           repoUrl: skill.repoUrl,
           branch: skill.branch,
-        })
-      );
-    }
+        }),
+      ];
+    })
+  );
+
+  for (const [repoKey, preparedRepo] of preparedRepos) {
+    repos.set(repoKey, preparedRepo);
   }
 
-  for (const skill of skillPlan.skills) {
-    const sourceRepo = repos.get(`${skill.repo}::${skill.branch}`);
-    if (!sourceRepo) {
-      throw new Error(`Skill repo was not prepared for ${skill.repo}@${skill.branch}`);
-    }
+  const skills = await Promise.all(
+    skillPlan.skills.map(async (skill) => {
+      const sourceRepo = repos.get(`${skill.repo}::${skill.branch}`);
+      if (!sourceRepo) {
+        throw new Error(`Skill repo was not prepared for ${skill.repo}@${skill.branch}`);
+      }
 
-    const normalizedPath = normalizeRelativeSkillPath(skill.path);
-    const skillDir = resolve(sourceRepo.sourceRoot, normalizedPath);
-    if (!isWithinRoot(skillDir, sourceRepo.sourceRoot)) {
-      throw new Error(`Skill path must stay within source repo: ${skill.path}`);
-    }
+      const normalizedPath = normalizeRelativeSkillPath(skill.path);
+      const skillDir = resolve(sourceRepo.sourceRoot, normalizedPath);
+      if (!isWithinRoot(skillDir, sourceRepo.sourceRoot)) {
+        throw new Error(`Skill path must stay within source repo: ${skill.path}`);
+      }
 
-    const skillFile = resolve(skillDir, 'SKILL.md');
-    const skillFileStat = await stat(skillFile).catch(() => null);
-    if (!skillFileStat?.isFile()) {
-      throw new Error(`Missing SKILL.md for ${skill.repo}@${skill.branch}:${normalizedPath}`);
-    }
+      const skillFile = resolve(skillDir, 'SKILL.md');
+      const skillFileStat = await stat(skillFile).catch(() => null);
+      if (!skillFileStat?.isFile()) {
+        throw new Error(`Missing SKILL.md for ${skill.repo}@${skill.branch}:${normalizedPath}`);
+      }
 
-    const metadata = await readSkillMetadata(skillFile, normalizedPath.split('/').pop() || normalizedPath);
+      const metadata = await readSkillMetadata(skillFile, normalizedPath.split('/').pop() || normalizedPath);
 
-    skills.push({
-      ...skill,
-      path: normalizedPath,
-      sourceRoot: toSessionRelativePath(sourceRepo.sourceRoot),
-      shortName: metadata.shortName,
-      title: metadata.title,
-      description: metadata.description,
-    });
-  }
+      return {
+        ...skill,
+        path: normalizedPath,
+        sourceRoot: toSessionRelativePath(sourceRepo.sourceRoot),
+        shortName: metadata.shortName,
+        title: metadata.title,
+        description: metadata.description,
+      };
+    })
+  );
 
   await writeFile(
     SKILLS_INDEX_PATH,

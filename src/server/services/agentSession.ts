@@ -103,6 +103,7 @@ const SESSION_REDIS_TTL = 7200;
 const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environment_build_unique';
 const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, service, build.[pullRequest.[repository]]]';
 const SESSION_DEPLOY_GRAPH = '[deployable, repository, service]';
+const agentNetworkPolicySetupByNamespace = new Map<string, Promise<void>>();
 
 type AgentSessionSummaryRecordBase = AgentSession & {
   id: string;
@@ -142,6 +143,38 @@ export class ActiveEnvironmentSessionError extends Error {
     );
     this.name = 'ActiveEnvironmentSessionError';
     this.activeSession = activeSession;
+  }
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(Date.now() - startedAt, 0);
+}
+
+async function ensureAgentNetworkPolicy(namespace: string): Promise<void> {
+  let setupPromise = agentNetworkPolicySetupByNamespace.get(namespace);
+  if (!setupPromise) {
+    setupPromise = (async () => {
+      const kc = new k8s.KubeConfig();
+      kc.loadFromDefault();
+      const netApi = kc.makeApiClient(k8s.NetworkingV1Api);
+      const policy = buildAgentNetworkPolicy(namespace);
+      await netApi.createNamespacedNetworkPolicy(namespace, policy).catch((err: any) => {
+        if (err?.statusCode !== 409) {
+          throw err;
+        }
+      });
+    })();
+    agentNetworkPolicySetupByNamespace.set(namespace, setupPromise);
+  }
+
+  try {
+    await setupPromise;
+  } catch (error) {
+    if (agentNetworkPolicySetupByNamespace.get(namespace) === setupPromise) {
+      agentNetworkPolicySetupByNamespace.delete(namespace);
+    }
+
+    throw error;
   }
 }
 
@@ -791,6 +824,7 @@ export default class AgentSessionService {
   }
 
   static async createSession(opts: CreateSessionOptions) {
+    const sessionStartedAt = Date.now();
     const sessionUuid = uuid();
     const buildKind = opts.buildKind || BuildKind.ENVIRONMENT;
     const podName = buildAgentSessionPodName(sessionUuid, opts.buildUuid);
@@ -823,64 +857,61 @@ export default class AgentSessionService {
       services: resolvedServices || [],
     });
     const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+    const providerUserIdentity = {
+      userId: opts.userId,
+      githubUsername: opts.userIdentity?.githubUsername || null,
+    };
+    const preflightStartedAt = Date.now();
     const selection = await AgentProviderRegistry.resolveSelection({
       repoFullName: primaryWorkspaceRepo?.repo,
       requestedModelId,
     });
     resolvedModelId = selection.modelId;
-    await AgentProviderRegistry.getRequiredStoredApiKey({
-      provider: selection.provider,
-      userIdentity: {
-        userId: opts.userId,
-        githubUsername: opts.userIdentity?.githubUsername || null,
-      },
-      requestApiKey: opts.requestApiKey,
-      requestApiKeyProvider: opts.requestApiKeyProvider,
-    });
-    const providerApiKeys = await AgentProviderRegistry.resolveCredentialEnvMap({
-      repoFullName: primaryWorkspaceRepo?.repo,
-      userIdentity: {
-        userId: opts.userId,
-        githubUsername: opts.userIdentity?.githubUsername || null,
-      },
-      requestApiKey: opts.requestApiKey,
-      requestApiKeyProvider: opts.requestApiKeyProvider,
-    });
-    const sessionPodMcpConfigJson = primaryWorkspaceRepo?.repo
-      ? serializeSessionWorkspaceGatewayServers(
-          await new McpConfigService().resolveSessionPodServersForRepo(
+    const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
+    const [, providerApiKeys, sessionPodServers, compatiblePrewarm, forwardedAgentEnv] = await Promise.all([
+      AgentProviderRegistry.getRequiredStoredApiKey({
+        provider: selection.provider,
+        userIdentity: providerUserIdentity,
+        requestApiKey: opts.requestApiKey,
+        requestApiKeyProvider: opts.requestApiKeyProvider,
+      }),
+      AgentProviderRegistry.resolveCredentialEnvMap({
+        repoFullName: primaryWorkspaceRepo?.repo,
+        userIdentity: providerUserIdentity,
+        requestApiKey: opts.requestApiKey,
+        requestApiKeyProvider: opts.requestApiKeyProvider,
+      }),
+      primaryWorkspaceRepo?.repo
+        ? new McpConfigService().resolveSessionPodServersForRepo(
             primaryWorkspaceRepo.repo,
             undefined,
             opts.userIdentity || null
           )
-        )
-      : '[]';
-    const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
-    const compatiblePrewarm =
+        : Promise.resolve([]),
       workspaceRepos.length === 1
-        ? await resolveCompatiblePrewarm(
+        ? resolveCompatiblePrewarm(
             opts.buildUuid,
             resolvedServiceNames,
             primaryWorkspaceRepo?.revision || opts.revision
           )
-        : null;
+        : Promise.resolve(null),
+      resolveForwardedAgentEnv(resolvedServices, opts.namespace, sessionUuid, opts.buildUuid),
+    ]);
+    const sessionPodMcpConfigJson = serializeSessionWorkspaceGatewayServers(sessionPodServers);
     const pvcName = compatiblePrewarm?.pvcName || `agent-pvc-${sessionUuid.slice(0, 8)}`;
-    const forwardedAgentEnv = await resolveForwardedAgentEnv(
-      resolvedServices,
-      opts.namespace,
-      sessionUuid,
-      opts.buildUuid
-    );
     const forwardedPlainAgentEnv = Object.fromEntries(
       Object.entries(forwardedAgentEnv.env).filter(
         ([envKey]) => !forwardedAgentEnv.secretRefs.some((secretRef) => secretRef.envKey === envKey)
       )
     );
+    const preflightMs = elapsedMs(preflightStartedAt);
 
     logger().info(
       `Session: starting sessionId=${sessionUuid} buildKind=${buildKind} namespace=${opts.namespace} buildUuid=${
         opts.buildUuid || 'none'
-      } services=${resolvedServiceNames.join(',') || 'none'} prewarm=${compatiblePrewarm ? 'reused' : 'new'}`
+      } services=${resolvedServiceNames.join(',') || 'none'} prewarm=${
+        compatiblePrewarm ? 'reused' : 'new'
+      } preflightMs=${preflightMs}`
     );
 
     try {
@@ -906,7 +937,9 @@ export default class AgentSessionService {
       } as unknown as Partial<AgentSession>);
       sessionPersisted = true;
 
-      const [, , agentServiceAccountName] = await Promise.all([
+      const combinedInstallCommand = buildCombinedInstallCommand(resolvedServices);
+      const infraSetupStartedAt = Date.now();
+      const [, , agentServiceAccountName, useGvisor] = await Promise.all([
         compatiblePrewarm ? Promise.resolve(null) : createAgentPvc(opts.namespace, pvcName, '10Gi', opts.buildUuid),
         createAgentApiKeySecret(
           opts.namespace,
@@ -920,12 +953,12 @@ export default class AgentSessionService {
           }
         ),
         ensureAgentSessionServiceAccount(opts.namespace),
+        isGvisorAvailable(),
       ]);
-
-      const useGvisor = await isGvisorAvailable();
-      const combinedInstallCommand = buildCombinedInstallCommand(resolvedServices);
+      const infraSetupMs = elapsedMs(infraSetupStartedAt);
 
       failureStage = 'connect_runtime';
+      const podStartupStartedAt = Date.now();
       const workspacePod = await createSessionWorkspacePod({
         podName,
         namespace: opts.namespace,
@@ -954,6 +987,7 @@ export default class AgentSessionService {
         serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
       });
+      const podStartupMs = elapsedMs(podStartupStartedAt);
       const agentNodeName = workspacePod.spec?.nodeName || null;
 
       if ((resolvedServices || []).length > 0 && keepAttachedServicesOnSessionNode && !agentNodeName) {
@@ -985,34 +1019,34 @@ export default class AgentSessionService {
           } as unknown as Partial<AgentSession>);
       }
 
-      for (const service of enabledServices) {
-        await Deploy.query().findById(service.deployId).patch({
-          devMode: true,
-          devModeSessionId: session.id,
-        });
-        persistedDevModeDeployIds.push(service.deployId);
-      }
-
-      await createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid);
-
-      const kc = new k8s.KubeConfig();
-      kc.loadFromDefault();
-      const netApi = kc.makeApiClient(k8s.NetworkingV1Api);
-      const policy = buildAgentNetworkPolicy(opts.namespace);
-      await netApi.createNamespacedNetworkPolicy(opts.namespace, policy).catch((err: any) => {
-        if (err?.statusCode !== 409) throw err;
-      });
-      await redis.setex(
-        `${SESSION_REDIS_PREFIX}${sessionUuid}`,
-        SESSION_REDIS_TTL,
-        JSON.stringify({ podName, namespace: opts.namespace, status: 'active' })
+      await Promise.all(
+        enabledServices.map((service) =>
+          Deploy.query().findById(service.deployId).patch({
+            devMode: true,
+            devModeSessionId: session.id,
+          })
+        )
       );
+      persistedDevModeDeployIds.push(...enabledServices.map((service) => service.deployId));
 
-      await AgentSession.query()
-        .findById(session.id)
-        .patch({
-          status: 'active',
-        } as unknown as Partial<AgentSession>);
+      const finalizeStartedAt = Date.now();
+      await Promise.all([
+        createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid),
+        ensureAgentNetworkPolicy(opts.namespace),
+      ]);
+      await Promise.all([
+        redis.setex(
+          `${SESSION_REDIS_PREFIX}${sessionUuid}`,
+          SESSION_REDIS_TTL,
+          JSON.stringify({ podName, namespace: opts.namespace, status: 'active' })
+        ),
+        AgentSession.query()
+          .findById(session.id)
+          .patch({
+            status: 'active',
+          } as unknown as Partial<AgentSession>),
+      ]);
+      const finalizeMs = elapsedMs(finalizeStartedAt);
 
       session = {
         ...session,
@@ -1024,12 +1058,19 @@ export default class AgentSessionService {
       logger().info(
         `Session: ready sessionId=${sessionUuid} namespace=${opts.namespace} podName=${podName} services=${
           resolvedServiceNames.join(',') || 'none'
-        } prewarm=${compatiblePrewarm ? 'reused' : 'new'}`
+        } prewarm=${compatiblePrewarm ? 'reused' : 'new'} durationMs=${elapsedMs(
+          sessionStartedAt
+        )} preflightMs=${preflightMs} infraMs=${infraSetupMs} podMs=${podStartupMs} finalizeMs=${finalizeMs}`
       );
 
-      const AgentThreadService = (await import('server/services/agent/ThreadService')).default;
       const readySession = session;
-      await AgentThreadService.getDefaultThreadForSession(readySession.uuid, opts.userId).catch((error: unknown) => {
+      // Default-thread creation stays best-effort here so chat readiness does not
+      // depend on secondary DB work; ThreadService.listThreadsForSession() will
+      // create or retry the default thread on first access if this async warm-up fails.
+      void (async () => {
+        const AgentThreadService = (await import('server/services/agent/ThreadService')).default;
+        await AgentThreadService.getDefaultThreadForSession(readySession.uuid, opts.userId);
+      })().catch((error: unknown) => {
         logger().warn(
           { error, sessionId: readySession.uuid },
           `Session: default thread creation skipped sessionId=${readySession.uuid}`

@@ -22,6 +22,7 @@ const mockGetCompatibleReadyPrewarm = jest.fn();
 const mockGetReadyPrewarmByPvc = jest.fn();
 const mockExecInPod = jest.fn();
 const mockResolveSessionPodServersForRepo = jest.fn().mockResolvedValue([]);
+const mockGetDefaultThreadForSession = jest.fn().mockResolvedValue({ uuid: 'default-thread-1' });
 
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/Build');
@@ -85,6 +86,12 @@ jest.mock('server/services/agentPrewarm', () => ({
     getCompatibleReadyPrewarm: mockGetCompatibleReadyPrewarm,
     getReadyPrewarmByPvc: mockGetReadyPrewarmByPvc,
   })),
+}));
+jest.mock('server/services/agent/ThreadService', () => ({
+  __esModule: true,
+  default: {
+    getDefaultThreadForSession: mockGetDefaultThreadForSession,
+  },
 }));
 jest.mock('server/lib/nativeHelm/helm', () => ({
   deployHelm: jest.fn().mockResolvedValue(undefined),
@@ -408,6 +415,7 @@ describe('AgentSessionService', () => {
     mockedBuildServiceModule.deleteBuild.mockResolvedValue(undefined);
     mockGetCompatibleReadyPrewarm.mockResolvedValue(null);
     mockGetReadyPrewarmByPvc.mockResolvedValue(null);
+    mockGetDefaultThreadForSession.mockResolvedValue({ uuid: 'default-thread-1' });
     mockExecInPod.mockImplementation(
       async (
         _namespace: string,
@@ -547,6 +555,23 @@ describe('AgentSessionService', () => {
         expect.any(String)
       );
       expect(session.status).toBe('active');
+    });
+
+    it('does not block session readiness on default thread creation', async () => {
+      const defaultThread = createDeferred<{ uuid: string }>();
+      mockGetDefaultThreadForSession.mockImplementationOnce(() => defaultThread.promise);
+
+      const sessionPromise = AgentSessionService.createSession(baseOpts);
+      const result = await Promise.race([
+        sessionPromise.then(() => 'resolved'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 20)),
+      ]);
+
+      expect(result).toBe('resolved');
+      expect(mockGetDefaultThreadForSession).toHaveBeenCalledWith('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'user-123');
+
+      defaultThread.resolve({ uuid: 'default-thread-1' });
+      await sessionPromise;
     });
 
     it('reuses a compatible ready prewarm PVC and skips workspace bootstrap', async () => {
