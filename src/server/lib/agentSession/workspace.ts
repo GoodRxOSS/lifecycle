@@ -19,7 +19,7 @@ import { posix as pathPosix } from 'path';
 export const SESSION_WORKSPACE_ROOT = '/workspace';
 export const SESSION_WORKSPACE_SUBPATH = 'repo';
 export const SESSION_WORKSPACE_EDITOR_PROJECT_FILE = '/tmp/agent-session.code-workspace';
-const SESSION_WORKSPACE_ADDITIONAL_REPOS_ROOT = `${SESSION_WORKSPACE_ROOT}/repos`;
+export const SESSION_WORKSPACE_REPOS_ROOT = `${SESSION_WORKSPACE_ROOT}/repos`;
 
 export interface AgentSessionWorkspaceRepo {
   repo: string;
@@ -59,25 +59,30 @@ export function repoNameFromRepoUrl(repoUrl?: string | null): string | null {
   return normalized || null;
 }
 
-export function buildSessionWorkspaceRepoMountPath(repo: string, primary = false): string {
-  if (primary) {
+export function buildSessionWorkspaceRepoMountPath(
+  repo: string,
+  primary = false,
+  opts?: { useWorkspaceRootForPrimary?: boolean }
+): string {
+  if (primary && opts?.useWorkspaceRootForPrimary !== false) {
     return SESSION_WORKSPACE_ROOT;
   }
 
   const { owner, name } = splitRepoFullName(repo);
-  return pathPosix.join(SESSION_WORKSPACE_ADDITIONAL_REPOS_ROOT, owner, name);
+  return pathPosix.join(SESSION_WORKSPACE_REPOS_ROOT, owner, name);
 }
 
 export function normalizeSessionWorkspaceRepo(
   repo: Pick<AgentSessionWorkspaceRepo, 'repo' | 'repoUrl' | 'branch' | 'revision'>,
-  primary = false
+  primary = false,
+  opts?: { useWorkspaceRootForPrimary?: boolean }
 ): AgentSessionWorkspaceRepo {
   return {
     repo: repo.repo,
     repoUrl: repo.repoUrl,
     branch: repo.branch,
     revision: repo.revision || null,
-    mountPath: buildSessionWorkspaceRepoMountPath(repo.repo, primary),
+    mountPath: buildSessionWorkspaceRepoMountPath(repo.repo, primary, opts),
     primary,
   };
 }

@@ -45,6 +45,8 @@ export const SESSION_WORKSPACE_GATEWAY_PORT_NAME = 'ws-gateway';
 export const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
 export const SESSION_WORKSPACE_GATEWAY_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT || '13338', 10);
 const SESSION_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
+const SESSION_WORKSPACE_EDITOR_SHARED_SESSION_HOME_DIR = '/home/coder/.lifecycle-session';
+const SESSION_WORKSPACE_EDITOR_GIT_CONFIG_PATH = `${SESSION_WORKSPACE_EDITOR_SHARED_SESSION_HOME_DIR}/.gitconfig`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -406,6 +408,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
     opts.forwardedAgentSecretServiceName || podName,
     apiKeySecretName
   );
+  const primaryWorkspaceRepo = editorWorkspaceRepos.find((repo) => repo.primary) || editorWorkspaceRepos[0];
   const sessionPodMcpConfigEnv: k8s.V1EnvVar = {
     name: SESSION_POD_MCP_CONFIG_ENV,
     valueFrom: {
@@ -617,9 +620,12 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
           securityContext,
           env: [
             { name: 'HOME', value: '/home/coder' },
+            { name: 'GIT_CONFIG_GLOBAL', value: SESSION_WORKSPACE_EDITOR_GIT_CONFIG_PATH },
             { name: 'TMPDIR', value: '/tmp' },
             { name: 'TMP', value: '/tmp' },
             { name: 'TEMP', value: '/tmp' },
+            ...githubTokenEnv,
+            ...userEnv,
           ],
           readinessProbe: {
             httpGet: {
@@ -634,6 +640,10 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
             {
               name: 'editor-home',
               mountPath: '/home/coder',
+            },
+            {
+              name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+              mountPath: SESSION_WORKSPACE_EDITOR_SHARED_SESSION_HOME_DIR,
             },
             {
               name: 'tmp',
@@ -652,6 +662,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
           env: [
             { name: 'LIFECYCLE_SESSION_WORKSPACE', value: workspacePath },
             { name: 'LIFECYCLE_SESSION_HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+            { name: 'LIFECYCLE_SESSION_PRIMARY_REPO_PATH', value: primaryWorkspaceRepo?.mountPath || workspacePath },
             { name: 'MCP_PORT', value: String(SESSION_WORKSPACE_GATEWAY_PORT) },
             { name: 'HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
             { name: 'TMPDIR', value: '/tmp' },

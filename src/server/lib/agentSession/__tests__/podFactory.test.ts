@@ -688,6 +688,7 @@ describe('podFactory', () => {
           { name: 'GIT_AUTHOR_EMAIL', value: 'sample-user@example.com' },
           { name: 'GIT_COMMITTER_NAME', value: 'Sample User' },
           { name: 'GIT_COMMITTER_EMAIL', value: 'sample-user@example.com' },
+          { name: 'LIFECYCLE_SESSION_PRIMARY_REPO_PATH', value: '/workspace' },
         ])
       );
 
@@ -696,6 +697,51 @@ describe('podFactory', () => {
           {
             name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
             mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR,
+          },
+        ])
+      );
+    });
+
+    it('mounts shared git config into the editor without changing its home directory', () => {
+      const pod = buildSessionWorkspacePodSpec(baseOpts);
+      const editor = getContainer(pod, 'editor');
+
+      expect(editor.env).toEqual(
+        expect.arrayContaining([
+          { name: 'HOME', value: '/home/coder' },
+          { name: 'GIT_CONFIG_GLOBAL', value: '/home/coder/.lifecycle-session/.gitconfig' },
+          {
+            name: 'GITHUB_TOKEN',
+            valueFrom: {
+              secretKeyRef: {
+                key: 'GITHUB_TOKEN',
+                name: 'agent-secret-abc123',
+              },
+            },
+          },
+          {
+            name: 'GH_TOKEN',
+            valueFrom: {
+              secretKeyRef: {
+                key: 'GITHUB_TOKEN',
+                name: 'agent-secret-abc123',
+              },
+            },
+          },
+          { name: 'GIT_AUTHOR_NAME', value: 'Sample User' },
+          { name: 'GIT_AUTHOR_EMAIL', value: 'sample-user@example.com' },
+        ])
+      );
+
+      expect(editor.volumeMounts).toEqual(
+        expect.arrayContaining([
+          {
+            name: 'editor-home',
+            mountPath: '/home/coder',
+          },
+          {
+            name: SESSION_WORKSPACE_HOME_VOLUME_NAME,
+            mountPath: '/home/coder/.lifecycle-session',
           },
         ])
       );
@@ -759,7 +805,7 @@ describe('podFactory', () => {
             repoUrl: 'https://github.com/org/repo.git',
             branch: 'feature/test',
             revision: null,
-            mountPath: '/workspace',
+            mountPath: '/workspace/repos/org/repo',
             primary: true,
           },
           {
@@ -785,7 +831,13 @@ describe('podFactory', () => {
       );
       expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain('"name": "org/repo"');
       expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain(
+        '"path": "/workspace/repos/org/repo"'
+      );
+      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain(
         '"path": "/workspace/repos/org/api"'
+      );
+      expect(getContainer(pod, 'workspace-gateway').env).toEqual(
+        expect.arrayContaining([{ name: 'LIFECYCLE_SESSION_PRIMARY_REPO_PATH', value: '/workspace/repos/org/repo' }])
       );
     });
 

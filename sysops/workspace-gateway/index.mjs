@@ -17,6 +17,9 @@ const execFile = promisify(execFileCallback);
 const WORKSPACE_ROOT = resolve(
   process.env.LIFECYCLE_SESSION_WORKSPACE || '/workspace'
 );
+const PRIMARY_GIT_ROOT = resolve(
+  process.env.LIFECYCLE_SESSION_PRIMARY_REPO_PATH || WORKSPACE_ROOT
+);
 const HOST = process.env.MCP_HOST || '0.0.0.0';
 const PORT = Number.parseInt(process.env.MCP_PORT || process.env.PORT || '3000', 10);
 const MAX_READ_CHARS = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_READ_CHARS, 24_000);
@@ -318,6 +321,11 @@ function isWithinWorkspace(candidate) {
   return normalized === WORKSPACE_ROOT || normalized.startsWith(`${WORKSPACE_ROOT}${sep}`);
 }
 
+function isWithinPrimaryGitRoot(candidate) {
+  const normalized = resolve(candidate);
+  return normalized === PRIMARY_GIT_ROOT || normalized.startsWith(`${PRIMARY_GIT_ROOT}${sep}`);
+}
+
 function resolveWorkspacePath(inputPath) {
   const resolved = inputPath.startsWith('/') ? resolve(inputPath) : resolve(WORKSPACE_ROOT, inputPath);
   if (!isWithinWorkspace(resolved)) {
@@ -333,6 +341,20 @@ function toWorkspaceRelativePath(absolutePath) {
 
 function toPosixPath(inputPath) {
   return inputPath.split(sep).join('/');
+}
+
+function normalizeGitPathArg(inputPath) {
+  if (!inputPath || !inputPath.trim()) {
+    return '';
+  }
+
+  const resolved = resolveWorkspacePath(inputPath);
+  if (!isWithinPrimaryGitRoot(resolved)) {
+    throw new Error(`Path must stay within ${toWorkspaceRelativePath(PRIMARY_GIT_ROOT)}`);
+  }
+
+  const rel = relative(PRIMARY_GIT_ROOT, resolved);
+  return rel ? toPosixPath(rel) : '.';
 }
 
 function isReservedWorkspacePath(filePath) {
@@ -638,7 +660,7 @@ async function grepWorkspace({ pattern, path = '.', caseSensitive = true, maxRes
 }
 
 async function summarizeGitState() {
-  const gitDir = resolve(WORKSPACE_ROOT, '.git');
+  const gitDir = resolve(PRIMARY_GIT_ROOT, '.git');
   if (!(await fileExists(gitDir))) {
     return { present: false };
   }
@@ -667,6 +689,14 @@ async function summarizeGitState() {
   } catch {
     return { present: true };
   }
+}
+
+async function runPrimaryGitCommand({ command, timeoutMs = 30000 }) {
+  return runWorkspaceCommand({
+    command,
+    cwd: PRIMARY_GIT_ROOT,
+    timeoutMs,
+  });
 }
 
 async function readOptionalText(filePath) {
@@ -1151,7 +1181,7 @@ function buildServer() {
       try {
         return textResult({
           ok: true,
-          ...(await runWorkspaceCommand({ command: 'git status --short --branch' })),
+          ...(await runPrimaryGitCommand({ command: 'git status --short --branch' })),
         });
       } catch (error) {
         return errorText('Unable to read git status', error instanceof Error ? error.message : String(error));
@@ -1172,12 +1202,13 @@ function buildServer() {
     },
     async ({ staged, path }) => {
       try {
+        const normalizedPath = normalizeGitPathArg(path || '');
         const command = staged
-          ? `git diff --cached -- ${path || ''}`.trim()
-          : `git diff -- ${path || ''}`.trim();
+          ? `git diff --cached -- ${normalizedPath}`.trim()
+          : `git diff -- ${normalizedPath}`.trim();
         return textResult({
           ok: true,
-          ...(await runWorkspaceCommand({ command })),
+          ...(await runPrimaryGitCommand({ command })),
         });
       } catch (error) {
         return errorText('Unable to read git diff', error instanceof Error ? error.message : String(error));
@@ -1197,10 +1228,10 @@ function buildServer() {
     },
     async ({ paths }) => {
       try {
-        const command = `git add -- ${paths.map(quoteShellSingle).join(' ')}`;
+        const command = `git add -- ${paths.map((path) => quoteShellSingle(normalizeGitPathArg(path))).join(' ')}`;
         return textResult({
           ok: true,
-          ...(await runWorkspaceCommand({ command })),
+          ...(await runPrimaryGitCommand({ command })),
         });
       } catch (error) {
         return errorText('Unable to stage paths', error instanceof Error ? error.message : String(error));
@@ -1222,7 +1253,7 @@ function buildServer() {
       try {
         return textResult({
           ok: true,
-          ...(await runWorkspaceCommand({ command: `git commit -m ${quoteShellSingle(message)}` })),
+          ...(await runPrimaryGitCommand({ command: `git commit -m ${quoteShellSingle(message)}` })),
         });
       } catch (error) {
         return errorText('Unable to create commit', error instanceof Error ? error.message : String(error));
@@ -1247,7 +1278,7 @@ function buildServer() {
         if (!name) {
           return textResult({
             ok: true,
-            ...(await runWorkspaceCommand({ command: 'git branch --list' })),
+            ...(await runPrimaryGitCommand({ command: 'git branch --list' })),
           });
         }
 
@@ -1261,7 +1292,7 @@ function buildServer() {
 
         return textResult({
           ok: true,
-          ...(await runWorkspaceCommand({ command })),
+          ...(await runPrimaryGitCommand({ command })),
         });
       } catch (error) {
         return errorText('Unable to manage git branch', error instanceof Error ? error.message : String(error));

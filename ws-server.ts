@@ -28,11 +28,16 @@ moduleAlias.addAliases({
 });
 
 import { createServer, IncomingMessage, ServerResponse, request as httpRequest } from 'http';
+import type { Socket } from 'net';
 import { parse, URL } from 'url';
 import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
+import {
+  buildWorkspaceEditorProxyHeaders,
+  serializeSocketHttpResponse,
+} from './src/server/lib/agentSession/workspaceEditorProxy';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -46,10 +51,6 @@ const LOG_STREAM_PATH = '/api/logs/stream'; // Path for WebSocket connections
 const SESSION_WORKSPACE_EDITOR_PATH_PREFIX = '/api/agent-session/workspace-editor/';
 const SESSION_WORKSPACE_EDITOR_COOKIE_NAME = 'lfc_session_workspace_editor_auth';
 const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
-const SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS = parseInt(
-  process.env.AGENT_SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS || '15000',
-  10
-);
 const logger = rootLogger.child({ filename: __filename });
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -61,7 +62,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ]);
-
 function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<string, string> {
   if (!cookieHeader) {
     return {};
@@ -182,36 +182,189 @@ function buildSessionWorkspaceEditorServiceUrl(
 }
 
 function buildProxyHeaders(request: IncomingMessage, target: URL, forwardedPrefix: string): Record<string, string> {
-  const headers: Record<string, string> = {};
+  return buildWorkspaceEditorProxyHeaders({
+    requestHeaders: request.headers,
+    targetHost: target.host,
+    forwardedHost: request.headers.host || target.host,
+    forwardedProto:
+      (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
+      ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http'),
+    forwardedPrefix,
+    remoteAddress: request.socket.remoteAddress,
+  });
+}
 
-  for (const [key, value] of Object.entries(request.headers)) {
-    if (value == null) {
-      continue;
-    }
+function resolveSessionWorkspaceEditorErrorStatus(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
 
-    const normalizedKey = key.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(normalizedKey) || normalizedKey === 'host' || normalizedKey === 'content-length') {
-      continue;
-    }
-
-    headers[key] = Array.isArray(value) ? value.join(', ') : value;
+  if (message === 'Authentication token is required') {
+    return 401;
   }
 
-  headers.host = target.host;
-  headers['x-forwarded-host'] = request.headers.host || target.host;
-  headers['x-forwarded-proto'] =
-    (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
-    ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http');
-  headers['x-forwarded-prefix'] = forwardedPrefix;
-
-  const remoteAddress = request.socket.remoteAddress;
-  if (remoteAddress) {
-    headers['x-forwarded-for'] = request.headers['x-forwarded-for']
-      ? `${request.headers['x-forwarded-for']}, ${remoteAddress}`
-      : remoteAddress;
+  if (message === 'Forbidden: you do not own this session') {
+    return 403;
   }
 
-  return headers;
+  if (message === 'Session not found or not active') {
+    return 404;
+  }
+
+  return 502;
+}
+
+async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
+  const parsedUrl = parse(request.url || '', true);
+  const match = parseSessionWorkspaceEditorPath(parsedUrl.pathname);
+  const editorLogCtx: Record<string, unknown> = {
+    remoteAddress: request.socket.remoteAddress,
+    path: parsedUrl.pathname,
+  };
+
+  if (!match) {
+    socket.end(
+      serializeSocketHttpResponse({ statusCode: 400, statusMessage: 'Bad Request', body: 'Invalid editor path' })
+    );
+    return;
+  }
+
+  let upstreamSocket: Socket | null = null;
+  let proxyReq: ReturnType<typeof httpRequest> | null = null;
+
+  try {
+    const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
+    const session = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
+    const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
+    const targetUrl = buildSessionWorkspaceEditorServiceUrl(
+      session,
+      match.forwardPath,
+      parsedUrl.query as Record<string, string | string[] | undefined>
+    );
+    const proxyHeaders = buildWorkspaceEditorProxyHeaders({
+      requestHeaders: request.headers,
+      targetHost: targetUrl.host,
+      forwardedHost: request.headers.host || targetUrl.host,
+      forwardedProto:
+        (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
+        ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http'),
+      forwardedPrefix,
+      remoteAddress: request.socket.remoteAddress,
+      includeUpgradeHeaders: true,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      proxyReq = httpRequest(targetUrl, {
+        method: request.method || 'GET',
+        headers: proxyHeaders,
+      });
+
+      proxyReq.on('upgrade', (upstreamRes, proxiedSocket, upstreamHead) => {
+        upstreamSocket = proxiedSocket as Socket;
+
+        socket.write(
+          serializeSocketHttpResponse({
+            statusCode: upstreamRes.statusCode || 101,
+            statusMessage: upstreamRes.statusMessage,
+            headers: upstreamRes.headers,
+          })
+        );
+
+        if (upstreamHead.length > 0) {
+          socket.write(upstreamHead);
+        }
+
+        if (head.length > 0) {
+          upstreamSocket.write(head);
+        }
+
+        socket.on('error', (error) => {
+          logger.warn(
+            { ...editorLogCtx, error },
+            `SessionEditor: socket error source=client sessionId=${match.sessionId}`
+          );
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.destroy(error as Error);
+          }
+        });
+
+        upstreamSocket.on('error', (error) => {
+          logger.warn(
+            { ...editorLogCtx, error },
+            `SessionEditor: socket error source=upstream sessionId=${match.sessionId}`
+          );
+          if (!socket.destroyed) {
+            socket.destroy(error as Error);
+          }
+        });
+
+        socket.on('close', () => {
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.end();
+          }
+        });
+
+        upstreamSocket.on('close', () => {
+          if (!socket.destroyed) {
+            socket.end();
+          }
+        });
+
+        socket.pipe(upstreamSocket);
+        upstreamSocket.pipe(socket);
+        socket.resume();
+        upstreamSocket.resume();
+        resolve();
+      });
+
+      proxyReq.on('response', (upstreamRes) => {
+        const chunks: Buffer[] = [];
+
+        upstreamRes.on('data', (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+
+        upstreamRes.on('end', () => {
+          if (!socket.destroyed) {
+            socket.end(
+              serializeSocketHttpResponse({
+                statusCode: upstreamRes.statusCode || 502,
+                statusMessage: upstreamRes.statusMessage,
+                headers: upstreamRes.headers,
+                body: Buffer.concat(chunks),
+              })
+            );
+          }
+
+          reject(new Error(`Editor upgrade rejected with status ${upstreamRes.statusCode || 502}`));
+        });
+      });
+
+      proxyReq.on('error', reject);
+      proxyReq.end();
+    });
+  } catch (error: any) {
+    logger.error(
+      { ...editorLogCtx, error, sessionId: match.sessionId },
+      `SessionEditor: websocket setup failed sessionId=${match.sessionId}`
+    );
+
+    if (proxyReq) {
+      proxyReq.destroy();
+    }
+
+    if (upstreamSocket && !upstreamSocket.destroyed) {
+      upstreamSocket.destroy();
+    }
+
+    if (!socket.destroyed) {
+      socket.end(
+        serializeSocketHttpResponse({
+          statusCode: resolveSessionWorkspaceEditorErrorStatus(error),
+          statusMessage: 'Bad Gateway',
+          body: error instanceof Error ? error.message : String(error),
+        })
+      );
+    }
+  }
 }
 
 async function resolveOwnedAgentSession(
@@ -256,16 +409,6 @@ function closeSocket(ws: WebSocket, code: number, reason: string) {
   }
 
   ws.close(1000, safeReason);
-}
-
-function normalizeWebSocketCloseReason(reason?: Buffer | string): string | undefined {
-  if (!reason) {
-    return undefined;
-  }
-
-  const value = typeof reason === 'string' ? reason : reason.toString();
-  const trimmed = value.trim();
-  return trimmed || undefined;
 }
 
 async function handleSessionWorkspaceEditorHttp(
@@ -383,9 +526,7 @@ app.prepare().then(() => {
       });
     } else if (parseSessionWorkspaceEditorPath(pathname)) {
       logger.debug(connectionLogCtx, 'WebSocket: upgrade path=session_workspace_editor');
-      wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-        wss.emit('agent-editor', ws, request);
-      });
+      void handleSessionWorkspaceEditorUpgrade(request, socket as Socket, head);
     } else {
       socket.destroy();
     }
@@ -481,157 +622,6 @@ app.prepare().then(() => {
         ws.close(1011, 'WebSocket error');
       }
     });
-  });
-
-  wss.on('agent-editor', async (ws: WebSocket, request: IncomingMessage) => {
-    const parsedUrl = parse(request.url || '', true);
-    const match = parseSessionWorkspaceEditorPath(parsedUrl.pathname);
-    const editorLogCtx: Record<string, unknown> = {
-      remoteAddress: request.socket.remoteAddress,
-      path: parsedUrl.pathname,
-    };
-
-    if (!match) {
-      closeSocket(ws, 1008, 'Invalid editor path');
-      return;
-    }
-
-    let upstream: WebSocket | null = null;
-    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-
-    try {
-      const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
-      const session = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
-      const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
-      const targetUrl = buildSessionWorkspaceEditorServiceUrl(
-        session,
-        match.forwardPath,
-        parsedUrl.query as Record<string, string | string[] | undefined>,
-        true
-      );
-      const protocols =
-        typeof request.headers['sec-websocket-protocol'] === 'string'
-          ? request.headers['sec-websocket-protocol']
-              .split(',')
-              .map((protocol) => protocol.trim())
-              .filter(Boolean)
-          : undefined;
-
-      upstream = new WebSocket(targetUrl, protocols, {
-        headers: buildProxyHeaders(request, targetUrl, forwardedPrefix),
-      });
-
-      const closeUpstream = (code?: number, reason?: Buffer) => {
-        if (!upstream || upstream.readyState === WebSocket.CLOSING || upstream.readyState === WebSocket.CLOSED) {
-          return;
-        }
-
-        const closeReason = normalizeWebSocketCloseReason(reason);
-        if (isSendableCloseCode(code)) {
-          upstream.close(code, closeReason);
-        } else {
-          upstream.close();
-        }
-      };
-
-      const clearHeartbeat = () => {
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
-        }
-      };
-
-      const logEditorClose = (source: 'client' | 'upstream', code: number, reason?: Buffer | string) => {
-        logger.info(
-          {
-            ...editorLogCtx,
-            source,
-            sessionId: match.sessionId,
-            code,
-            reason: normalizeWebSocketCloseReason(reason),
-          },
-          `SessionEditor: websocket closed source=${source} sessionId=${match.sessionId} code=${code}`
-        );
-      };
-
-      if (SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS > 0) {
-        heartbeatInterval = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.ping();
-          }
-          if (upstream?.readyState === WebSocket.OPEN) {
-            upstream.ping();
-          }
-        }, SESSION_WORKSPACE_EDITOR_HEARTBEAT_INTERVAL_MS);
-      }
-
-      ws.on('message', (data, isBinary) => {
-        if (upstream?.readyState === WebSocket.OPEN) {
-          upstream.send(data, { binary: isBinary });
-        }
-      });
-
-      ws.on('close', (code, reason) => {
-        clearHeartbeat();
-        logEditorClose('client', code, reason);
-        closeUpstream(code, reason);
-      });
-
-      ws.on('error', (error) => {
-        clearHeartbeat();
-        logger.warn(
-          { ...editorLogCtx, error },
-          `SessionEditor: websocket error source=client sessionId=${match.sessionId}`
-        );
-        closeUpstream(1011, Buffer.from('Client WebSocket error'));
-      });
-
-      upstream.on('message', (data, isBinary) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data, { binary: isBinary });
-        }
-      });
-
-      upstream.on('close', (code, reason) => {
-        clearHeartbeat();
-        logEditorClose('upstream', code, reason);
-        closeSocket(
-          ws,
-          code === 1005 ? 1000 : code,
-          normalizeWebSocketCloseReason(reason) || 'Editor connection closed'
-        );
-      });
-
-      upstream.on('error', (error) => {
-        clearHeartbeat();
-        logger.warn(
-          { ...editorLogCtx, error },
-          `SessionEditor: websocket error source=upstream sessionId=${match.sessionId}`
-        );
-        closeSocket(ws, 1011, 'Editor upstream error');
-      });
-
-      upstream.on('unexpected-response', (_req, response) => {
-        clearHeartbeat();
-        logger.warn(
-          { ...editorLogCtx, statusCode: response.statusCode },
-          `SessionEditor: upgrade rejected sessionId=${match.sessionId} statusCode=${response.statusCode}`
-        );
-        closeSocket(ws, 1011, 'Editor upgrade rejected');
-      });
-    } catch (error: any) {
-      logger.error(
-        { ...editorLogCtx, error, sessionId: match.sessionId },
-        `SessionEditor: websocket setup failed sessionId=${match.sessionId}`
-      );
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-      }
-      closeSocket(ws, 1008, `Connection error: ${error.message}`);
-      if (upstream && upstream.readyState === WebSocket.CONNECTING) {
-        upstream.terminate();
-      }
-    }
   });
 
   httpServer.listen(port);

@@ -99,6 +99,32 @@ describe('configSeeder', () => {
       expect(script).toContain('git config --global --add safe.directory "/workspace"');
     });
 
+    it('marks every mounted repo as a safe git directory in multi-repo sessions', () => {
+      const script = generateRuntimeSeedScript({
+        workspaceRepos: [
+          {
+            repo: 'org/ui',
+            repoUrl: 'https://github.com/org/ui.git',
+            branch: 'feature/ui',
+            revision: null,
+            mountPath: '/workspace/repos/org/ui',
+            primary: true,
+          },
+          {
+            repo: 'org/api',
+            repoUrl: 'https://github.com/org/api.git',
+            branch: 'feature/api',
+            revision: null,
+            mountPath: '/workspace/repos/org/api',
+            primary: false,
+          },
+        ],
+      });
+
+      expect(script).toContain('git config --global --add safe.directory "/workspace/repos/org/ui"');
+      expect(script).toContain('git config --global --add safe.directory "/workspace/repos/org/api"');
+    });
+
     it('sets up pre-push branch protection hook', () => {
       const script = generateRuntimeSeedScript(baseOpts);
       expect(script).toContain('pre-push');
@@ -116,7 +142,7 @@ describe('configSeeder', () => {
             repoUrl: 'https://github.com/org/ui.git',
             branch: 'feature/ui',
             revision: 'abc123',
-            mountPath: '/workspace',
+            mountPath: '/workspace/repos/org/ui',
             primary: true,
           },
           {
@@ -133,6 +159,7 @@ describe('configSeeder', () => {
       expect(script).toContain('git clone --progress --depth 50 --branch "feature/ui" --single-branch');
       expect(script).toContain('git clone --progress --depth 50 --branch "feature/api" --single-branch');
       expect(script).toContain('"/workspace/repos/org"');
+      expect(script).toContain('"/workspace/repos/org/ui"');
       expect(script).toContain('"/workspace/repos/org/api"');
     });
 
