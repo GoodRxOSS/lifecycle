@@ -758,20 +758,77 @@ function summarizeLogLine(logs: string | null): string | null {
   return firstLine || null;
 }
 
-async function waitForSessionWorkspacePodReady(
+function resolveSessionWorkspacePodWaitConfig(readiness?: SessionWorkspacePodOptions['readiness']): {
+  timeoutMs: number;
+  pollMs: number;
+} {
+  return {
+    timeoutMs:
+      normalizeNonNegativeInteger(readiness?.timeoutMs) ??
+      normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_TIMEOUT_MS) ??
+      60000,
+    pollMs:
+      normalizeNonNegativeInteger(readiness?.pollMs) ??
+      normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS) ??
+      1000,
+  };
+}
+
+function getFailingPodStatusContainerName(pod: k8s.V1Pod): string | null {
+  return (
+    [...(pod.status?.initContainerStatuses || []), ...(pod.status?.containerStatuses || [])].find((status) => {
+      const waiting = status.state?.waiting;
+      if (
+        waiting?.reason &&
+        [
+          'ErrImagePull',
+          'ImagePullBackOff',
+          'CrashLoopBackOff',
+          'CreateContainerConfigError',
+          'RunContainerError',
+        ].includes(waiting.reason)
+      ) {
+        return true;
+      }
+
+      const terminated = status.state?.terminated;
+      return !!(terminated?.reason && terminated.exitCode !== 0);
+    })?.name || null
+  );
+}
+
+async function throwIfSessionWorkspacePodFailedToStart(
+  coreApi: k8s.CoreV1Api,
+  namespace: string,
+  podName: string,
+  pod: k8s.V1Pod
+): Promise<void> {
+  const failure = getPodStartupFailure(pod);
+  if (!failure) {
+    return;
+  }
+
+  const failingContainer = getFailingPodStatusContainerName(pod);
+  const containerLogs = failingContainer ? await getContainerLogs(coreApi, namespace, podName, failingContainer) : null;
+
+  if (containerLogs) {
+    getLogger().error(
+      { namespace, podName, containerName: failingContainer, logs: containerLogs },
+      `Session: startup logs captured containerName=${failingContainer} namespace=${namespace} podName=${podName}`
+    );
+  }
+
+  const logSummary = summarizeLogLine(containerLogs);
+  throw new Error(`Session workspace pod failed to start: ${failure}${logSummary ? ` - ${logSummary}` : ''}`);
+}
+
+async function waitForSessionWorkspacePodReadyInternal(
   coreApi: k8s.CoreV1Api,
   namespace: string,
   podName: string,
   readiness?: SessionWorkspacePodOptions['readiness']
 ): Promise<k8s.V1Pod> {
-  const readyTimeoutMs =
-    normalizeNonNegativeInteger(readiness?.timeoutMs) ??
-    normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_TIMEOUT_MS) ??
-    60000;
-  const readyPollMs =
-    normalizeNonNegativeInteger(readiness?.pollMs) ??
-    normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS) ??
-    1000;
+  const { timeoutMs: readyTimeoutMs, pollMs: readyPollMs } = resolveSessionWorkspacePodWaitConfig(readiness);
   const deadline = Date.now() + readyTimeoutMs;
   let lastObservedState = 'pending';
   let lastPod: k8s.V1Pod | null = null;
@@ -779,41 +836,7 @@ async function waitForSessionWorkspacePodReady(
   while (Date.now() < deadline) {
     const { body: pod } = await coreApi.readNamespacedPod(podName, namespace);
     lastPod = pod;
-    const failure = getPodStartupFailure(pod);
-    if (failure) {
-      const failingContainer =
-        [...(pod.status?.initContainerStatuses || []), ...(pod.status?.containerStatuses || [])].find((status) => {
-          const waiting = status.state?.waiting;
-          if (
-            waiting?.reason &&
-            [
-              'ErrImagePull',
-              'ImagePullBackOff',
-              'CrashLoopBackOff',
-              'CreateContainerConfigError',
-              'RunContainerError',
-            ].includes(waiting.reason)
-          ) {
-            return true;
-          }
-
-          const terminated = status.state?.terminated;
-          return !!(terminated?.reason && terminated.exitCode !== 0);
-        })?.name || null;
-
-      const containerLogs = failingContainer
-        ? await getContainerLogs(coreApi, namespace, podName, failingContainer)
-        : null;
-      if (containerLogs) {
-        getLogger().error(
-          { namespace, podName, containerName: failingContainer, logs: containerLogs },
-          `Session: startup logs captured containerName=${failingContainer} namespace=${namespace} podName=${podName}`
-        );
-      }
-
-      const logSummary = summarizeLogLine(containerLogs);
-      throw new Error(`Session workspace pod failed to start: ${failure}${logSummary ? ` - ${logSummary}` : ''}`);
-    }
+    await throwIfSessionWorkspacePodFailedToStart(coreApi, namespace, podName, pod);
 
     if (isPodReady(pod)) {
       return pod;
@@ -842,7 +865,7 @@ async function waitForSessionWorkspacePodReady(
   );
 }
 
-export async function createSessionWorkspacePod(opts: SessionWorkspacePodOptions): Promise<k8s.V1Pod> {
+export async function createSessionWorkspacePodWithoutWaiting(opts: SessionWorkspacePodOptions): Promise<void> {
   const logger = getLogger();
   const coreApi = getCoreApi();
   const pod = buildSessionWorkspacePodSpec(opts);
@@ -864,8 +887,46 @@ export async function createSessionWorkspacePod(opts: SessionWorkspacePodOptions
 
     throw error;
   }
+}
 
-  const result = await waitForSessionWorkspacePodReady(coreApi, opts.namespace, opts.podName, opts.readiness);
+export async function waitForSessionWorkspacePodScheduled(
+  namespace: string,
+  podName: string,
+  readiness?: SessionWorkspacePodOptions['readiness']
+): Promise<k8s.V1Pod> {
+  const coreApi = getCoreApi();
+  const { timeoutMs, pollMs } = resolveSessionWorkspacePodWaitConfig(readiness);
+  const deadline = Date.now() + timeoutMs;
+  let lastObservedState = 'pending';
+
+  while (Date.now() < deadline) {
+    const { body: pod } = await coreApi.readNamespacedPod(podName, namespace);
+    await throwIfSessionWorkspacePodFailedToStart(coreApi, namespace, podName, pod);
+
+    if (pod.spec?.nodeName) {
+      return pod;
+    }
+
+    lastObservedState = summarizePodState(pod);
+    await sleep(pollMs);
+  }
+
+  throw new Error(`Session workspace pod was not scheduled within ${timeoutMs}ms: ${lastObservedState}`);
+}
+
+export async function waitForSessionWorkspacePodReady(
+  namespace: string,
+  podName: string,
+  readiness?: SessionWorkspacePodOptions['readiness']
+): Promise<k8s.V1Pod> {
+  return waitForSessionWorkspacePodReadyInternal(getCoreApi(), namespace, podName, readiness);
+}
+
+export async function createSessionWorkspacePod(opts: SessionWorkspacePodOptions): Promise<k8s.V1Pod> {
+  const logger = getLogger();
+  await createSessionWorkspacePodWithoutWaiting(opts);
+
+  const result = await waitForSessionWorkspacePodReady(opts.namespace, opts.podName, opts.readiness);
   logger.info(`Session: workspace pod ready podName=${opts.podName} namespace=${opts.namespace}`);
   return result;
 }

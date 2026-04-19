@@ -20,7 +20,7 @@ const AGENT_SESSION_STARTUP_FAILURE_REDIS_PREFIX = 'lifecycle:agent:session:star
 const AGENT_SESSION_STARTUP_FAILURE_TTL_SECONDS = 60 * 60;
 const AGENT_SESSION_STARTUP_FAILURE_MESSAGE_MAX_LENGTH = 4000;
 
-export type AgentSessionStartupFailureStage = 'create_session' | 'connect_runtime';
+export type AgentSessionStartupFailureStage = 'create_session' | 'connect_runtime' | 'attach_services';
 
 export interface AgentSessionStartupFailureState {
   sessionId: string;
@@ -112,7 +112,12 @@ function classifyFailure(
   }
 
   return {
-    title: stage === 'create_session' ? 'Agent session failed to start' : 'Session workspace connection failed',
+    title:
+      stage === 'create_session'
+        ? 'Agent session failed to start'
+        : stage === 'attach_services'
+        ? 'Attached services failed to start'
+        : 'Session workspace connection failed',
     message,
   };
 }

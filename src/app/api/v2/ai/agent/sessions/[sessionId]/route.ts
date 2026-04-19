@@ -178,7 +178,7 @@ import AgentSessionService from 'server/services/agentSession';
  *                       properties:
  *                         stage:
  *                           type: string
- *                           enum: [create_session, connect_runtime]
+ *                           enum: [create_session, connect_runtime, attach_services]
  *                         title:
  *                           type: string
  *                         message:
