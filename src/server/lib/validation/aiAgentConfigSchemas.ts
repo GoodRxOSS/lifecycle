@@ -20,6 +20,7 @@ const approvalPolicyRulesSchema = {
   type: 'object',
   properties: {
     read: approvalModeSchema,
+    external_mcp_read: approvalModeSchema,
     workspace_write: approvalModeSchema,
     shell_exec: approvalModeSchema,
     git_write: approvalModeSchema,

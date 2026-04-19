@@ -57,7 +57,8 @@ jest.mock('server/lib/logger', () => ({
 jest.mock('../PolicyService', () => ({
   __esModule: true,
   default: {
-    capabilityForMcpTool: jest.fn(() => 'external_mcp_read'),
+    capabilityForSessionWorkspaceTool: jest.fn(() => 'read'),
+    capabilityForExternalMcpTool: jest.fn(() => 'external_mcp_read'),
     modeForCapability: (...args: unknown[]) => mockModeForCapability(...args),
   },
 }));

@@ -498,7 +498,10 @@ export default class AgentSessionConfigService extends BaseService {
       annotations?: McpDiscoveredTool['annotations'];
     }) => {
       const toolKey = buildAgentToolKey(serverSlug, toolName);
-      const capabilityKey = AgentPolicyService.capabilityForMcpTool(toolName, annotations);
+      const capabilityKey =
+        sourceType === 'builtin'
+          ? AgentPolicyService.capabilityForSessionWorkspaceTool(toolName, annotations)
+          : AgentPolicyService.capabilityForExternalMcpTool(toolName, annotations);
       const approvalMode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
       const scopeRuleMode = toRuleSelection(activeScopeConfig.toolRules || [], toolKey);
       const effectiveRuleMode = toRuleSelection(effectiveConfig.toolRules, toolKey);
