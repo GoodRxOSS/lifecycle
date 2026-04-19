@@ -195,6 +195,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 read: { $ref: '#/components/schemas/AgentApprovalMode' },
+                external_mcp_read: { $ref: '#/components/schemas/AgentApprovalMode' },
                 workspace_write: { $ref: '#/components/schemas/AgentApprovalMode' },
                 shell_exec: { $ref: '#/components/schemas/AgentApprovalMode' },
                 git_write: { $ref: '#/components/schemas/AgentApprovalMode' },

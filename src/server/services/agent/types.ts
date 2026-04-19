@@ -18,6 +18,7 @@ import type { UIDataTypes, UIMessage } from 'ai';
 
 export const AGENT_CAPABILITY_KEYS = [
   'read',
+  'external_mcp_read',
   'workspace_write',
   'shell_exec',
   'git_write',
@@ -159,6 +160,7 @@ export const DEFAULT_AGENT_APPROVAL_POLICY: AgentApprovalPolicy = {
   defaultMode: 'require_approval',
   rules: {
     read: 'allow',
+    external_mcp_read: 'allow',
     workspace_write: 'require_approval',
     shell_exec: 'require_approval',
     git_write: 'require_approval',

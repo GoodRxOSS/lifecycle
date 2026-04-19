@@ -284,7 +284,7 @@ function isSessionWorkspaceToolAllowed(
   toolRules: AgentSessionToolRule[] = []
 ): boolean {
   const rule = toolRules.find((item) => item.toolKey === entry.toolKey);
-  const capabilityKey = AgentPolicyService.capabilityForMcpTool(entry.toolName, entry.annotations);
+  const capabilityKey = AgentPolicyService.capabilityForSessionWorkspaceTool(entry.toolName, entry.annotations);
   const mode = rule?.mode || AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
 
   return mode !== 'deny';

@@ -348,7 +348,7 @@ export default class AgentCapabilityService {
           const catalogEntries = getSessionWorkspaceCatalogEntriesForRuntimeTool(discoveredTool.name, server.name);
 
           for (const entry of catalogEntries) {
-            const capabilityKey = AgentPolicyService.capabilityForMcpTool(
+            const capabilityKey = AgentPolicyService.capabilityForSessionWorkspaceTool(
               entry.toolName,
               entry.annotations || discoveredTool.annotations
             );
@@ -496,7 +496,10 @@ export default class AgentCapabilityService {
           continue;
         }
 
-        const capabilityKey = AgentPolicyService.capabilityForMcpTool(discoveredTool.name, discoveredTool.annotations);
+        const capabilityKey = AgentPolicyService.capabilityForExternalMcpTool(
+          discoveredTool.name,
+          discoveredTool.annotations
+        );
         const toolName = buildAgentToolKey(server.slug, discoveredTool.name);
         const mode = resolveToolApprovalMode({
           toolRules,

@@ -331,6 +331,7 @@ export interface ApprovalPolicyConfig {
   rules?: Partial<
     Record<
       | 'read'
+      | 'external_mcp_read'
       | 'workspace_write'
       | 'shell_exec'
       | 'git_write'

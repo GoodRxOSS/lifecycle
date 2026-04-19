@@ -43,7 +43,7 @@ export default class AgentPolicyService {
     };
   }
 
-  static capabilityForMcpTool(toolName: string, annotations?: McpAnnotations): AgentCapabilityKey {
+  static capabilityForSessionWorkspaceTool(toolName: string, annotations?: McpAnnotations): AgentCapabilityKey {
     if (annotations?.readOnlyHint) {
       return 'read';
     }
@@ -73,6 +73,14 @@ export default class AgentPolicyService {
 
     if (annotations?.openWorldHint) {
       return 'network_access';
+    }
+
+    return 'workspace_write';
+  }
+
+  static capabilityForExternalMcpTool(_toolName: string, annotations?: McpAnnotations): AgentCapabilityKey {
+    if (annotations?.readOnlyHint) {
+      return 'external_mcp_read';
     }
 
     return 'external_mcp_write';
