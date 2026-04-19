@@ -43,7 +43,7 @@ import {
 
 const DEFAULT_READINESS = {
   timeoutMs: 60000,
-  pollMs: 2000,
+  pollMs: 1000,
 };
 
 const DEFAULT_RESOURCES = {
@@ -321,19 +321,19 @@ describe('runtimeConfig', () => {
 
   it('merges direct readiness overrides over runtime defaults', () => {
     expect(
-      mergeAgentSessionReadiness(resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 2000 }), {
+      mergeAgentSessionReadiness(resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 1000 }), {
         timeoutMs: 120000,
       })
     ).toEqual({
       timeoutMs: 120000,
-      pollMs: 2000,
+      pollMs: 1000,
     });
   });
 
   it('merges service readiness overrides over runtime defaults', () => {
     expect(
       mergeAgentSessionReadinessForServices(
-        resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 2000 }),
+        resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 1000 }),
         [{ timeoutMs: 120000 }, { timeoutMs: 90000, pollMs: 500 }, undefined, { pollMs: 1000 }]
       )
     ).toEqual({

@@ -69,7 +69,7 @@ export async function createSessionWorkspaceService(
 
   const { body: result } = await coreApi.createNamespacedService(namespace, service);
   logger.info(
-    `Session: workspace editor ready serviceName=${serviceName} namespace=${namespace} port=${SESSION_WORKSPACE_EDITOR_PORT}`
+    `Session: workspace service created serviceName=${serviceName} namespace=${namespace} port=${SESSION_WORKSPACE_EDITOR_PORT}`
   );
   return result;
 }

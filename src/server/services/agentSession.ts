@@ -584,7 +584,13 @@ async function deleteAgentRuntimeResources(
   ]);
 }
 
-async function resolveCompatiblePrewarm(buildUuid: string | undefined, requestedServices: string[], revision?: string) {
+async function resolveCompatiblePrewarm(
+  buildUuid: string | undefined,
+  requestedServices: string[],
+  revision?: string,
+  workspaceRepos?: AgentSessionWorkspaceRepo[],
+  requestedServiceRefs?: AgentSessionSelectedService[]
+) {
   if (!buildUuid) {
     return null;
   }
@@ -593,6 +599,8 @@ async function resolveCompatiblePrewarm(buildUuid: string | undefined, requested
     buildUuid,
     requestedServices,
     revision,
+    workspaceRepos,
+    requestedServiceRefs,
   });
 }
 
@@ -888,13 +896,13 @@ export default class AgentSessionService {
             opts.userIdentity || null
           )
         : Promise.resolve([]),
-      workspaceRepos.length === 1
-        ? resolveCompatiblePrewarm(
-            opts.buildUuid,
-            resolvedServiceNames,
-            primaryWorkspaceRepo?.revision || opts.revision
-          )
-        : Promise.resolve(null),
+      resolveCompatiblePrewarm(
+        opts.buildUuid,
+        resolvedServiceNames,
+        primaryWorkspaceRepo?.revision || opts.revision,
+        workspaceRepos,
+        selectedServices
+      ),
       resolveForwardedAgentEnv(resolvedServices, opts.namespace, sessionUuid, opts.buildUuid),
     ]);
     const sessionPodMcpConfigJson = serializeSessionWorkspaceGatewayServers(sessionPodServers);
@@ -954,6 +962,8 @@ export default class AgentSessionService {
         ),
         ensureAgentSessionServiceAccount(opts.namespace),
         isGvisorAvailable(),
+        createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid),
+        ensureAgentNetworkPolicy(opts.namespace),
       ]);
       const infraSetupMs = elapsedMs(infraSetupStartedAt);
 
@@ -1030,10 +1040,6 @@ export default class AgentSessionService {
       persistedDevModeDeployIds.push(...enabledServices.map((service) => service.deployId));
 
       const finalizeStartedAt = Date.now();
-      await Promise.all([
-        createSessionWorkspaceService(opts.namespace, podName, opts.buildUuid),
-        ensureAgentNetworkPolicy(opts.namespace),
-      ]);
       await Promise.all([
         redis.setex(
           `${SESSION_REDIS_PREFIX}${sessionUuid}`,

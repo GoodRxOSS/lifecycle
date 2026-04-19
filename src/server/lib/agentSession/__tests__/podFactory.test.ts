@@ -147,13 +147,12 @@ describe('podFactory', () => {
   describe('buildSessionWorkspacePodSpec', () => {
     it('creates a pod with init and main containers', () => {
       const pod = buildSessionWorkspacePodSpec(baseOpts);
-      expect(pod.spec!.initContainers).toHaveLength(4);
+      expect(pod.spec!.initContainers).toHaveLength(3);
       expect(pod.spec!.containers).toHaveLength(2);
       expect(pod.spec!.initContainers!.map((container) => container.name)).toEqual([
         'prepare-workspace',
         'init-workspace',
         'seed-runtime-config',
-        'prepare-editor-workspace',
       ]);
       expect(pod.spec!.containers!.map((container) => container.name)).toEqual(['editor', 'workspace-gateway']);
     });
@@ -819,23 +818,21 @@ describe('podFactory', () => {
         ],
       });
 
-      expect(getInitContainer(pod, 'prepare-editor-workspace')).toEqual(
+      expect(getInitContainer(pod, 'seed-runtime-config')).toEqual(
         expect.objectContaining({
           command: [
             'sh',
             '-c',
             expect.stringContaining(`cat > '${SESSION_WORKSPACE_EDITOR_PROJECT_FILE}' << 'WORKSPACE_EOF'`),
           ],
-          volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
+          volumeMounts: expect.arrayContaining([{ name: 'tmp', mountPath: '/tmp' }]),
         })
       );
-      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain('"name": "org/repo"');
-      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain(
+      expect(getInitContainer(pod, 'seed-runtime-config').command?.[2]).toContain('"name": "org/repo"');
+      expect(getInitContainer(pod, 'seed-runtime-config').command?.[2]).toContain(
         '"path": "/workspace/repos/org/repo"'
       );
-      expect(getInitContainer(pod, 'prepare-editor-workspace').command?.[2]).toContain(
-        '"path": "/workspace/repos/org/api"'
-      );
+      expect(getInitContainer(pod, 'seed-runtime-config').command?.[2]).toContain('"path": "/workspace/repos/org/api"');
       expect(getContainer(pod, 'workspace-gateway').env).toEqual(
         expect.arrayContaining([{ name: 'LIFECYCLE_SESSION_PRIMARY_REPO_PATH', value: '/workspace/repos/org/repo' }])
       );
@@ -847,10 +844,7 @@ describe('podFactory', () => {
         skipWorkspaceBootstrap: true,
       });
 
-      expect(pod.spec!.initContainers?.map((container) => container.name)).toEqual([
-        'seed-runtime-config',
-        'prepare-editor-workspace',
-      ]);
+      expect(pod.spec!.initContainers?.map((container) => container.name)).toEqual(['seed-runtime-config']);
     });
 
     it('does not set runtimeClassName when gVisor not requested', () => {

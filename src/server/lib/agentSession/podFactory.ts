@@ -346,6 +346,13 @@ function generateEditorWorkspaceInitScript(workspaceRepos: AgentSessionWorkspace
   ].join('\n');
 }
 
+function stripShellScriptPreamble(script: string): string {
+  return script
+    .replace(/^#!\/bin\/sh\s*\n/, '')
+    .replace(/^set -e\s*\n/, '')
+    .trim();
+}
+
 export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): k8s.V1Pod {
   const {
     podName,
@@ -401,6 +408,9 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
   };
   const editorWorkspaceRepos = resolveEditorWorkspaceRepos(opts);
   const editorWorkspaceInitScript = generateEditorWorkspaceInitScript(editorWorkspaceRepos);
+  const sessionBootstrapScript = `${runtimeSeedScript.trim()}\n\n${stripShellScriptPreamble(
+    editorWorkspaceInitScript
+  )}\n`;
   const forwardedAgentEnv = opts.forwardedAgentEnv || {};
   const forwardedAgentSecretEnv = buildPodEnvWithSecrets(
     forwardedAgentEnv,
@@ -526,7 +536,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
     name: 'seed-runtime-config',
     image: workspaceImage,
     imagePullPolicy: 'IfNotPresent',
-    command: ['sh', '-c', runtimeSeedScript],
+    command: ['sh', '-c', sessionBootstrapScript],
     resources,
     securityContext: {
       ...securityContext,
@@ -548,29 +558,6 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
       ...forwardedAgentSecretEnv,
       ...githubTokenEnv,
       ...userEnv,
-    ],
-  });
-
-  initContainers.push({
-    name: 'prepare-editor-workspace',
-    image: workspaceImage,
-    imagePullPolicy: 'IfNotPresent',
-    command: ['sh', '-c', editorWorkspaceInitScript],
-    resources,
-    securityContext: {
-      ...securityContext,
-      readOnlyRootFilesystem: false,
-    },
-    volumeMounts: [
-      {
-        name: 'tmp',
-        mountPath: '/tmp',
-      },
-    ],
-    env: [
-      { name: 'TMPDIR', value: '/tmp' },
-      { name: 'TMP', value: '/tmp' },
-      { name: 'TEMP', value: '/tmp' },
     ],
   });
 
@@ -633,7 +620,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
               port: SESSION_WORKSPACE_EDITOR_PORT,
             },
             initialDelaySeconds: 1,
-            periodSeconds: 2,
+            periodSeconds: 1,
           },
           volumeMounts: [
             workspaceVolumeMount,
@@ -683,7 +670,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
               port: SESSION_WORKSPACE_GATEWAY_PORT,
             },
             initialDelaySeconds: 1,
-            periodSeconds: 2,
+            periodSeconds: 1,
           },
           volumeMounts: [
             workspaceVolumeMount,
@@ -784,7 +771,7 @@ async function waitForSessionWorkspacePodReady(
   const readyPollMs =
     normalizeNonNegativeInteger(readiness?.pollMs) ??
     normalizeNonNegativeInteger(process.env.AGENT_SESSION_WORKSPACE_READY_POLL_MS) ??
-    2000;
+    1000;
   const deadline = Date.now() + readyTimeoutMs;
   let lastObservedState = 'pending';
   let lastPod: k8s.V1Pod | null = null;
