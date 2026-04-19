@@ -23,8 +23,10 @@ export function normalizeRelativeSkillPath(inputPath) {
     .replace(/\/+$/, '');
 }
 
-export function buildSkillSourceRepoKey(repo) {
-  return repo.trim().replace(/[^a-zA-Z0-9._-]+/g, '__');
+export function buildSkillSourceRepoKey(repo, branch) {
+  const repoPart = repo.trim();
+  const branchPart = typeof branch === 'string' && branch.trim() ? `branch-${branch.trim()}` : '';
+  return [repoPart, branchPart].filter(Boolean).join('__').replace(/[^a-zA-Z0-9._-]+/g, '__');
 }
 
 export function isWithinRoot(candidatePath, rootPath) {

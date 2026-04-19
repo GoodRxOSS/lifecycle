@@ -33,6 +33,33 @@ export interface InitScriptOpts {
   useGitHubToken?: boolean;
 }
 
+function buildRepoCloneLines(repo: AgentSessionWorkspaceRepo): string[] {
+  const parentDir = pathPosix.dirname(repo.mountPath);
+  const cloneRoot = parentDir === '/' ? repo.mountPath : parentDir;
+  const lines = [
+    `mkdir -p "${escapeDoubleQuotedShell(cloneRoot)}"`,
+    `git clone --progress --depth 50 --branch "${escapeDoubleQuotedShell(
+      repo.branch
+    )}" --single-branch "${escapeDoubleQuotedShell(repo.repoUrl)}" "${escapeDoubleQuotedShell(repo.mountPath)}"`,
+    `cd "${escapeDoubleQuotedShell(repo.mountPath)}"`,
+  ];
+
+  if (!repo.revision) {
+    return lines;
+  }
+
+  lines.push(
+    `if ! git rev-parse --verify --quiet "${escapeDoubleQuotedShell(repo.revision)}^{commit}" >/dev/null; then`,
+    `  git fetch --unshallow origin "${escapeDoubleQuotedShell(
+      repo.branch
+    )}" || git fetch origin "${escapeDoubleQuotedShell(repo.branch)}"`,
+    'fi',
+    `git checkout "${escapeDoubleQuotedShell(repo.revision)}"`
+  );
+
+  return lines;
+}
+
 function escapeDoubleQuotedShell(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
 }
@@ -139,30 +166,20 @@ export function generateInitScript(opts: InitScriptOpts): string {
 
   appendGitIdentityAndAuthLines(lines, opts);
 
-  for (const repo of workspaceRepos) {
-    const parentDir = pathPosix.dirname(repo.mountPath);
-    const cloneRoot = parentDir === '/' ? repo.mountPath : parentDir;
-    lines.push(
-      '',
-      `mkdir -p "${escapeDoubleQuotedShell(cloneRoot)}"`,
-      `git clone --progress --depth 50 --branch "${escapeDoubleQuotedShell(
-        repo.branch
-      )}" --single-branch "${escapeDoubleQuotedShell(repo.repoUrl)}" "${escapeDoubleQuotedShell(repo.mountPath)}"`,
-      `cd "${escapeDoubleQuotedShell(repo.mountPath)}"`
-    );
+  if (workspaceRepos.length === 1) {
+    lines.push('', ...buildRepoCloneLines(workspaceRepos[0]));
+  } else {
+    lines.push('', 'clone_pids=""');
 
-    if (!repo.revision) {
-      continue;
+    for (const repo of workspaceRepos) {
+      lines.push('(', '  set -e');
+      for (const repoLine of buildRepoCloneLines(repo)) {
+        lines.push(`  ${repoLine}`);
+      }
+      lines.push(') &', 'clone_pids="$clone_pids $!"');
     }
 
-    lines.push(
-      `if ! git rev-parse --verify --quiet "${escapeDoubleQuotedShell(repo.revision)}^{commit}" >/dev/null; then`,
-      `  git fetch --unshallow origin "${escapeDoubleQuotedShell(
-        repo.branch
-      )}" || git fetch origin "${escapeDoubleQuotedShell(repo.branch)}"`,
-      'fi'
-    );
-    lines.push(`git checkout "${escapeDoubleQuotedShell(repo.revision)}"`);
+    lines.push('for clone_pid in $clone_pids; do', '  wait "$clone_pid"', 'done');
   }
 
   if (installCommand) {

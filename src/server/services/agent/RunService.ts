@@ -32,6 +32,47 @@ function cloneChunk<T>(chunk: T): T {
   return JSON.parse(JSON.stringify(chunk)) as T;
 }
 
+function serializeRunError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    const typedError = error as Error & {
+      code?: unknown;
+      details?: unknown;
+    };
+    const serialized: Record<string, unknown> = {
+      message: error.message,
+      stack: error.stack || null,
+    };
+
+    if (error.name) {
+      serialized.name = error.name;
+    }
+
+    if (typedError.code !== undefined) {
+      serialized.code = typedError.code;
+    }
+
+    if (typedError.details !== undefined) {
+      serialized.details = typedError.details;
+    }
+
+    return serialized;
+  }
+
+  if (error && typeof error === 'object') {
+    const record = { ...(error as Record<string, unknown>) };
+    const message = typeof record.message === 'string' ? record.message.trim() : '';
+
+    return {
+      ...record,
+      message: message || 'Agent run failed.',
+    };
+  }
+
+  return {
+    message: String(error),
+  };
+}
+
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
@@ -202,15 +243,7 @@ export default class AgentRunService {
       completedAt: new Date().toISOString(),
       usageSummary: (usageSummary || {}) as Record<string, unknown>,
       streamState: streamState || {},
-      error:
-        error instanceof Error
-          ? {
-              message: error.message,
-              stack: error.stack || null,
-            }
-          : {
-              message: String(error),
-            },
+      error: serializeRunError(error),
     });
   }
 

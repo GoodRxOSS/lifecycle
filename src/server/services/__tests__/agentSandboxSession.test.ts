@@ -59,6 +59,21 @@ import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
 import { BuildStatus, BuildKind } from 'shared/constants';
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject,
+  };
+}
+
 describe('agentSandboxSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -214,6 +229,87 @@ describe('agentSandboxSession', () => {
 
     expect(selected).toHaveLength(2);
     expect(selected.map((item: any) => item.name)).toEqual(['frontend', 'worker']);
+  });
+
+  it('resolves sandbox candidates in parallel', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const frontendSource = createDeferred<any>();
+    const workerSource = createDeferred<any>();
+
+    jest
+      .spyOn(service as any, 'resolveServiceSource')
+      .mockImplementationOnce(() => frontendSource.promise)
+      .mockImplementationOnce(() => workerSource.promise);
+
+    const resolvePromise = (service as any).resolveCandidateServices(
+      {
+        uuid: 'base-build',
+        deploys: [
+          {
+            id: 1,
+            active: true,
+            deployable: { name: 'frontend' },
+            repository: { fullName: 'example-org/frontend' },
+            branchName: 'main',
+          },
+          {
+            id: 2,
+            active: true,
+            deployable: { name: 'worker' },
+            repository: { fullName: 'example-org/worker' },
+            branchName: 'main',
+          },
+        ],
+      } as any,
+      {
+        environment: {
+          defaultServices: [{ name: 'frontend' }, { name: 'worker' }],
+          optionalServices: [],
+        },
+      } as any,
+      {
+        repo: 'example-org/environment',
+        branch: 'main',
+      }
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect((service as any).resolveServiceSource).toHaveBeenCalledTimes(2);
+
+    frontendSource.resolve({
+      repo: 'example-org/frontend',
+      branch: 'main',
+      yamlService: {
+        name: 'frontend',
+        dev: { image: 'node:20', command: 'pnpm dev' },
+        github: {
+          docker: {
+            app: {
+              dockerfilePath: 'Dockerfile',
+            },
+          },
+        },
+      },
+    });
+    workerSource.resolve({
+      repo: 'example-org/worker',
+      branch: 'main',
+      yamlService: {
+        name: 'worker',
+        dev: { image: 'node:20', command: 'pnpm start' },
+        github: {
+          docker: {
+            app: {
+              dockerfilePath: 'Dockerfile',
+            },
+          },
+        },
+      },
+    });
+
+    const candidates = await resolvePromise;
+    expect(candidates.map((candidate: any) => candidate.name)).toEqual(['frontend', 'worker']);
   });
 
   it('maps selected services to cloned sandbox deploys by base deploy id', () => {

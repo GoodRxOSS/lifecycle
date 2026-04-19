@@ -81,6 +81,10 @@ function normalizeRepoKey(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function elapsedMs(startedAt: number): number {
+  return Math.max(Date.now() - startedAt, 0);
+}
+
 export function formatRequestedSandboxServiceLabel(service?: RequestedSandboxService | null): string {
   if (!service) {
     return 'unknown service';
@@ -163,7 +167,10 @@ export default class AgentSandboxSessionService extends BaseService {
   private readonly deployService = new DeployService(this.db, this.redis, this.redlock, this.queueManager);
 
   async launch(opts: LaunchSandboxSessionOptions): Promise<LaunchSandboxSessionResult> {
+    const launchStartedAt = Date.now();
+    const resolveCandidatesStartedAt = Date.now();
     const { baseBuild, environmentSource, lifecycleConfig, candidates } = await this.loadBaseBuildAndCandidates(opts);
+    const candidateResolutionMs = elapsedMs(resolveCandidatesStartedAt);
     if (candidates.length === 0) {
       throw new Error(
         `No dev-mode sandboxable services were found in ${environmentSource.repo}:${environmentSource.branch}`
@@ -201,21 +208,24 @@ export default class AgentSandboxSessionService extends BaseService {
     getLogger().info(
       `Sandbox: starting baseBuildUuid=${opts.baseBuildUuid} services=${selectedServices
         .map((service) => `${service.name}@${service.serviceRepo}:${service.serviceBranch}`)
-        .join(',')}`
+        .join(',')} candidateResolutionMs=${candidateResolutionMs}`
     );
 
     await opts.onProgress?.('creating_sandbox_build', `Creating sandbox build for ${selectedServiceSummary}`);
+    const buildCloneStartedAt = Date.now();
     const { build: sandboxBuild, sandboxDeploysByBaseDeployId } = await this.createSandboxBuild({
       baseBuild,
       environmentSource,
       selectedServices,
     });
+    const sandboxBuildMs = elapsedMs(buildCloneStartedAt);
 
     try {
       const runUUID = nanoid();
       await sandboxBuild.$query().patch({ runUUID, status: BuildStatus.QUEUED });
       await sandboxBuild.$fetchGraph('[environment, pullRequest.[repository], deploys.[deployable, repository]]');
 
+      const deployStartedAt = Date.now();
       await opts.onProgress?.('resolving_environment', `Resolving environment variables for ${selectedServiceSummary}`);
       await new BuildEnvironmentVariables(this.db).resolve(sandboxBuild);
 
@@ -238,6 +248,7 @@ export default class AgentSandboxSessionService extends BaseService {
       if (!deployed) {
         throw new Error(`Sandbox deployment failed for ${sandboxBuild.uuid}`);
       }
+      const deployMs = elapsedMs(deployStartedAt);
 
       const selectedSandboxServices = this.resolveSelectedSandboxDeploys(
         selectedServices,
@@ -245,6 +256,7 @@ export default class AgentSandboxSessionService extends BaseService {
       );
 
       await opts.onProgress?.('opening_session', `Opening sandbox for ${selectedServiceSummary}`);
+      const openSessionStartedAt = Date.now();
       const session = await AgentSessionService.createSession({
         userId: opts.userId,
         buildUuid: sandboxBuild.uuid,
@@ -277,11 +289,14 @@ export default class AgentSandboxSessionService extends BaseService {
         resources: mergeAgentSessionResources(opts.resources, lifecycleConfig.environment?.agentSession?.resources),
         userIdentity: opts.userIdentity,
       });
+      const sessionOpenMs = elapsedMs(openSessionStartedAt);
 
       getLogger().info(
         `Sandbox: ready baseBuildUuid=${opts.baseBuildUuid} buildUuid=${sandboxBuild.uuid} sessionId=${
           session.uuid
-        } services=${selectedServices.map((service) => service.name).join(',')}`
+        } services=${selectedServices.map((service) => service.name).join(',')} durationMs=${elapsedMs(
+          launchStartedAt
+        )} candidateResolutionMs=${candidateResolutionMs} sandboxBuildMs=${sandboxBuildMs} deployMs=${deployMs} sessionOpenMs=${sessionOpenMs}`
       );
 
       return {
@@ -368,47 +383,48 @@ export default class AgentSandboxSessionService extends BaseService {
   ): Promise<ResolvedSandboxService[]> {
     const configCache = new Map<string, Promise<LifecycleConfig>>();
     const activeDeploys = this.getActiveDeploys(baseBuild);
-    const resolvedCandidates: ResolvedSandboxService[] = [];
-
-    for (const serviceRef of this.getEnvironmentServiceReferences(lifecycleConfig)) {
-      const serviceName = serviceRef.name;
-      if (!serviceName) {
-        continue;
-      }
-
-      const baseDeploy = this.findActiveDeployForReference(activeDeploys, serviceRef);
-      if (!baseDeploy) {
-        continue;
-      }
-
-      try {
-        const serviceSource = await this.resolveServiceSource({
-          serviceRef,
-          baseDeploy,
-          fallbackSource: environmentSource,
-          configCache,
-        });
-
-        if (!serviceSource.yamlService?.dev || !hasLifecycleManagedDockerBuild(serviceSource.yamlService)) {
-          continue;
+    const resolvedCandidates = await Promise.all(
+      this.getEnvironmentServiceReferences(lifecycleConfig).map(async (serviceRef) => {
+        const serviceName = serviceRef.name;
+        if (!serviceName) {
+          return null;
         }
 
-        resolvedCandidates.push({
-          name: serviceSource.yamlService.name,
-          devConfig: serviceSource.yamlService.dev,
-          baseDeploy,
-          serviceRepo: serviceSource.repo,
-          serviceBranch: serviceSource.branch,
-          yamlService: serviceSource.yamlService,
-        });
-      } catch (error) {
-        getLogger({ buildUuid: baseBuild.uuid, serviceName, error }).warn(
-          `Sandbox: candidate skipped service=${serviceName} buildUuid=${baseBuild.uuid} reason=config_error`
-        );
-      }
-    }
+        const baseDeploy = this.findActiveDeployForReference(activeDeploys, serviceRef);
+        if (!baseDeploy) {
+          return null;
+        }
 
-    return resolvedCandidates;
+        try {
+          const serviceSource = await this.resolveServiceSource({
+            serviceRef,
+            baseDeploy,
+            fallbackSource: environmentSource,
+            configCache,
+          });
+
+          if (!serviceSource.yamlService?.dev || !hasLifecycleManagedDockerBuild(serviceSource.yamlService)) {
+            return null;
+          }
+
+          return {
+            name: serviceSource.yamlService.name,
+            devConfig: serviceSource.yamlService.dev,
+            baseDeploy,
+            serviceRepo: serviceSource.repo,
+            serviceBranch: serviceSource.branch,
+            yamlService: serviceSource.yamlService,
+          };
+        } catch (error) {
+          getLogger({ buildUuid: baseBuild.uuid, serviceName, error }).warn(
+            `Sandbox: candidate skipped service=${serviceName} buildUuid=${baseBuild.uuid} reason=config_error`
+          );
+          return null;
+        }
+      })
+    );
+
+    return resolvedCandidates.filter((candidate): candidate is ResolvedSandboxService => Boolean(candidate));
   }
 
   private resolveSelectedServices(

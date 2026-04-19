@@ -632,8 +632,8 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
               path: '/healthz',
               port: SESSION_WORKSPACE_EDITOR_PORT,
             },
-            initialDelaySeconds: 2,
-            periodSeconds: 5,
+            initialDelaySeconds: 1,
+            periodSeconds: 2,
           },
           volumeMounts: [
             workspaceVolumeMount,
@@ -682,8 +682,8 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
               path: '/health',
               port: SESSION_WORKSPACE_GATEWAY_PORT,
             },
-            initialDelaySeconds: 2,
-            periodSeconds: 5,
+            initialDelaySeconds: 1,
+            periodSeconds: 2,
           },
           volumeMounts: [
             workspaceVolumeMount,

@@ -17,8 +17,25 @@
 import { setupReadOnlyServiceAccountInNamespace } from 'server/lib/kubernetes/rbac';
 
 export const AGENT_SESSION_SERVICE_ACCOUNT_NAME = 'agent-sa';
+const serviceAccountSetupByNamespace = new Map<string, Promise<string>>();
 
 export async function ensureAgentSessionServiceAccount(namespace: string): Promise<string> {
-  await setupReadOnlyServiceAccountInNamespace(namespace, AGENT_SESSION_SERVICE_ACCOUNT_NAME);
-  return AGENT_SESSION_SERVICE_ACCOUNT_NAME;
+  let setupPromise = serviceAccountSetupByNamespace.get(namespace);
+  if (!setupPromise) {
+    setupPromise = (async () => {
+      await setupReadOnlyServiceAccountInNamespace(namespace, AGENT_SESSION_SERVICE_ACCOUNT_NAME);
+      return AGENT_SESSION_SERVICE_ACCOUNT_NAME;
+    })();
+    serviceAccountSetupByNamespace.set(namespace, setupPromise);
+  }
+
+  try {
+    return await setupPromise;
+  } catch (error) {
+    if (serviceAccountSetupByNamespace.get(namespace) === setupPromise) {
+      serviceAccountSetupByNamespace.delete(namespace);
+    }
+
+    throw error;
+  }
 }

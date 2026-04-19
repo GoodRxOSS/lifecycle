@@ -64,6 +64,7 @@ jest.mock('../PolicyService', () => ({
 }));
 
 import AgentCapabilityService from '../CapabilityService';
+import { SessionWorkspaceGatewayUnavailableError } from '../errors';
 
 describe('AgentCapabilityService.buildToolSet', () => {
   const session = {
@@ -207,7 +208,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     expect(mockCallTool).toHaveBeenCalledWith('workspace.read_file', {}, 22000);
   });
 
-  it('omits session-pod stdio connectors when the sandbox gateway is unavailable', async () => {
+  it('fails the session tool setup when the sandbox gateway is unavailable', async () => {
     mockConnect.mockImplementation(async (transport) => {
       currentTransport = transport as Record<string, unknown>;
       if (
@@ -219,16 +220,17 @@ describe('AgentCapabilityService.buildToolSet', () => {
       }
     });
 
-    const tools = await AgentCapabilityService.buildToolSet({
-      session,
-      repoFullName: 'example-org/example-repo',
-      userIdentity,
-      approvalPolicy: {} as any,
-      workspaceToolDiscoveryTimeoutMs: 3000,
-      workspaceToolExecutionTimeoutMs: 15000,
-    });
+    await expect(
+      AgentCapabilityService.buildToolSet({
+        session,
+        repoFullName: 'example-org/example-repo',
+        userIdentity,
+        approvalPolicy: {} as any,
+        workspaceToolDiscoveryTimeoutMs: 3000,
+        workspaceToolExecutionTimeoutMs: 15000,
+      })
+    ).rejects.toBeInstanceOf(SessionWorkspaceGatewayUnavailableError);
 
-    expect(tools.mcp__figma__get_design_context).toBeUndefined();
     expect(mockLoggerWarn).toHaveBeenCalled();
   });
 

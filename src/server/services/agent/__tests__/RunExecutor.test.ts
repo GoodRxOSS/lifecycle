@@ -52,6 +52,10 @@ jest.mock('server/services/agent/CapabilityService', () => ({
 const mockCreateRun = jest.fn().mockResolvedValue({ id: 11, uuid: 'run-1', status: 'running' });
 const mockRegisterAbortController = jest.fn();
 const mockPatchRun = jest.fn().mockResolvedValue(undefined);
+const mockGetRunByUuid = jest.fn();
+const mockPatchStatus = jest.fn();
+const mockMarkFailed = jest.fn();
+const mockMarkCompleted = jest.fn();
 
 jest.mock('server/services/agent/RunService', () => ({
   __esModule: true,
@@ -59,10 +63,10 @@ jest.mock('server/services/agent/RunService', () => ({
     createRun: (...args: unknown[]) => mockCreateRun(...args),
     registerAbortController: (...args: unknown[]) => mockRegisterAbortController(...args),
     patchRun: (...args: unknown[]) => mockPatchRun(...args),
-    getRunByUuid: jest.fn(),
-    patchStatus: jest.fn(),
-    markFailed: jest.fn(),
-    markCompleted: jest.fn(),
+    getRunByUuid: (...args: unknown[]) => mockGetRunByUuid(...args),
+    patchStatus: (...args: unknown[]) => mockPatchStatus(...args),
+    markFailed: (...args: unknown[]) => mockMarkFailed(...args),
+    markCompleted: (...args: unknown[]) => mockMarkCompleted(...args),
   },
 }));
 
@@ -82,6 +86,7 @@ jest.mock('server/services/agentSession', () => ({
   default: {
     getSessionAppendSystemPrompt: (...args: unknown[]) => mockGetSessionAppendSystemPrompt(...args),
     touchActivity: (...args: unknown[]) => mockTouchActivity(...args),
+    markSessionRuntimeFailure: jest.fn(),
   },
 }));
 
@@ -148,6 +153,14 @@ jest.mock('server/models/AgentPendingAction', () => ({
 }));
 
 import AgentRunExecutor from 'server/services/agent/RunExecutor';
+import ApprovalService from 'server/services/agent/ApprovalService';
+import AgentMessageStore from 'server/services/agent/MessageStore';
+import AgentSessionService from 'server/services/agentSession';
+import { SessionWorkspaceGatewayUnavailableError } from 'server/services/agent/errors';
+
+const mockSyncApprovalRequests = ApprovalService.syncApprovalRequestsFromMessages as jest.Mock;
+const mockSyncMessages = AgentMessageStore.syncMessages as jest.Mock;
+const mockMarkSessionRuntimeFailure = AgentSessionService.markSessionRuntimeFailure as jest.Mock;
 
 describe('AgentRunExecutor', () => {
   beforeEach(() => {
@@ -162,8 +175,13 @@ describe('AgentRunExecutor', () => {
     mockBuildToolSet.mockResolvedValue({});
     mockCreateRun.mockResolvedValue({ id: 11, uuid: 'run-1', status: 'running' });
     mockPatchRun.mockResolvedValue(undefined);
+    mockGetRunByUuid.mockResolvedValue({ id: 11, uuid: 'run-1', status: 'running' });
+    mockPatchStatus.mockResolvedValue(undefined);
+    mockMarkFailed.mockResolvedValue(undefined);
+    mockMarkCompleted.mockResolvedValue(undefined);
     mockGetSessionAppendSystemPrompt.mockResolvedValue('Append prompt');
     mockTouchActivity.mockResolvedValue(undefined);
+    mockMarkSessionRuntimeFailure.mockResolvedValue(undefined);
     mockGetEffectiveSessionConfig.mockResolvedValue({
       systemPrompt: 'DB prompt as stored',
       appendSystemPrompt: undefined,
@@ -174,6 +192,8 @@ describe('AgentRunExecutor', () => {
     });
     mockPendingActionFirst.mockResolvedValue(null);
     mockToolExecutionFirst.mockResolvedValue(undefined);
+    mockSyncMessages.mockImplementation(async (_threadId, _userId, messages) => messages);
+    mockSyncApprovalRequests.mockResolvedValue([]);
   });
 
   it('builds agent instructions from the control-plane and session prompts', async () => {
@@ -289,5 +309,134 @@ describe('AgentRunExecutor', () => {
         workspaceToolExecutionTimeoutMs: 22000,
       })
     );
+  });
+
+  it('does not create a run when tool setup fails before execution starts', async () => {
+    mockBuildToolSet.mockRejectedValueOnce(new Error('tool setup failed'));
+
+    await expect(
+      AgentRunExecutor.execute({
+        session: { uuid: 'sess-1' } as any,
+        thread: { id: 7, uuid: 'thread-1' } as any,
+        userIdentity: { userId: 'sample-user' } as any,
+        messages: [],
+      })
+    ).rejects.toThrow('tool setup failed');
+
+    expect(mockCreateRun).not.toHaveBeenCalled();
+    expect(mockMarkFailed).not.toHaveBeenCalled();
+  });
+
+  it('records a runtime session failure when the workspace gateway is unavailable', async () => {
+    mockBuildToolSet.mockRejectedValueOnce(
+      new SessionWorkspaceGatewayUnavailableError({
+        sessionId: 'sess-1',
+        cause: new Error('sandbox unavailable'),
+      })
+    );
+
+    await expect(
+      AgentRunExecutor.execute({
+        session: { uuid: 'sess-1' } as any,
+        thread: { id: 7, uuid: 'thread-1' } as any,
+        userIdentity: { userId: 'sample-user' } as any,
+        messages: [],
+      })
+    ).rejects.toThrow('Session workspace gateway unavailable: sandbox unavailable');
+
+    expect(mockMarkSessionRuntimeFailure).toHaveBeenCalledWith(
+      'sess-1',
+      expect.any(SessionWorkspaceGatewayUnavailableError)
+    );
+    expect(mockCreateRun).not.toHaveBeenCalled();
+  });
+
+  it('marks the run failed if agent construction throws after the run is created', async () => {
+    mockToolLoopAgent.mockImplementationOnce(() => {
+      throw new Error('agent init failed');
+    });
+
+    await expect(
+      AgentRunExecutor.execute({
+        session: { uuid: 'sess-1' } as any,
+        thread: { id: 7, uuid: 'thread-1' } as any,
+        userIdentity: { userId: 'sample-user' } as any,
+        messages: [],
+      })
+    ).rejects.toThrow('agent init failed');
+
+    expect(mockCreateRun).toHaveBeenCalled();
+    expect(mockMarkFailed).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ message: 'agent init failed' }),
+      expect.any(Object)
+    );
+  });
+
+  it('marks loop-cap terminal tool-calls as a failed run with structured details', async () => {
+    const execution = await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1', id: 17 } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+    });
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Still working' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    expect(mockMarkFailed).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({
+        code: 'max_iterations_exceeded',
+        details: expect.objectContaining({
+          finishReason: 'tool-calls',
+          maxIterations: 8,
+        }),
+      }),
+      expect.any(Object),
+      {
+        finishReason: 'tool-calls',
+      }
+    );
+    expect(mockMarkCompleted).not.toHaveBeenCalled();
+  });
+
+  it('marks the run failed if stream finalization persistence throws', async () => {
+    mockSyncMessages.mockRejectedValueOnce(new Error('message sync failed'));
+
+    const execution = await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1', id: 17 } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+    });
+
+    await expect(
+      execution.onStreamFinish({
+        messages: [],
+        finishReason: 'stop',
+        isAborted: false,
+      })
+    ).rejects.toThrow('message sync failed');
+
+    expect(mockMarkFailed).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ message: 'message sync failed' }),
+      expect.any(Object),
+      {
+        finishReason: 'stop',
+      }
+    );
+    expect(mockMarkCompleted).not.toHaveBeenCalled();
   });
 });

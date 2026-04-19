@@ -36,6 +36,7 @@ import {
   SESSION_WORKSPACE_READONLY_TOOL_NAME,
 } from './toolKeys';
 import { getSessionWorkspaceCatalogEntriesForRuntimeTool } from './sandboxToolCatalog';
+import { SessionWorkspaceGatewayUnavailableError } from './errors';
 
 type ToolExecutionHooks = {
   onToolStarted?: (audit: AgentToolAuditRecord) => Promise<void>;
@@ -108,7 +109,10 @@ async function resolveSessionWorkspaceGatewayServer(
       { error },
       `AgentExec: workspace gateway unavailable sessionId=${session.uuid} namespace=${session.namespace} podName=${session.podName}`
     );
-    return null;
+    throw new SessionWorkspaceGatewayUnavailableError({
+      sessionId: session.uuid,
+      cause: error,
+    });
   } finally {
     await client.close();
   }
