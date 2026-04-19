@@ -131,6 +131,7 @@ describe('DevModeManager', () => {
           template: {
             spec: {
               nodeSelector: { 'kubernetes.io/hostname': 'agent-node-a' },
+              securityContext: { fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch' },
               volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: 'agent-pvc-abc' } }],
               containers: [
                 expect.objectContaining({
@@ -183,6 +184,43 @@ describe('DevModeManager', () => {
     expect(patchBody.spec.template.spec.nodeSelector).toEqual({
       'app-long': 'deployments-m7i',
       'kubernetes.io/hostname': 'agent-node-a',
+    });
+  });
+
+  it('preserves existing pod securityContext fields while normalizing shared workspace ownership', async () => {
+    mockReadDeployment.mockResolvedValue({
+      body: {
+        spec: {
+          template: {
+            spec: {
+              securityContext: {
+                fsGroup: 2000,
+                runAsNonRoot: false,
+                supplementalGroups: [2000],
+              },
+              containers: [{ name: 'web-app' }],
+            },
+          },
+        },
+      },
+    });
+
+    const opts: DevModeOptions = {
+      namespace: 'test-ns',
+      deploymentName: 'my-app',
+      serviceName: 'my-app',
+      pvcName: 'agent-pvc-abc',
+      devConfig: { image: 'node:20-slim', command: 'pnpm dev', workDir: '/workspace' },
+    };
+
+    await manager.enableDevMode(opts);
+
+    const patchBody = mockPatchDeployment.mock.calls[0][2];
+    expect(patchBody.spec.template.spec.securityContext).toEqual({
+      fsGroup: 1000,
+      fsGroupChangePolicy: 'OnRootMismatch',
+      runAsNonRoot: false,
+      supplementalGroups: [2000],
     });
   });
 
@@ -325,6 +363,7 @@ describe('DevModeManager', () => {
           replicas: 3,
           template: {
             spec: {
+              securityContext: { fsGroup: 2000, supplementalGroups: [2000] },
               containers: [{ name: 'web-app', image: 'registry.example/my-app:built' }],
             },
           },
@@ -343,6 +382,10 @@ describe('DevModeManager', () => {
     const snapshot = await manager.enableDevMode(opts);
 
     expect(snapshot.deployment.replicas).toBe(3);
+    expect(snapshot.deployment.securityContext).toEqual({
+      fsGroup: 2000,
+      supplementalGroups: [2000],
+    });
   });
 
   it('pins an attached HorizontalPodAutoscaler to a single replica during dev mode', async () => {
@@ -413,6 +456,7 @@ describe('DevModeManager', () => {
                         volumeMounts: [{ name: 'config-volume', mountPath: '/config' }],
                       },
                     ],
+                    securityContext: { fsGroup: 2000 },
                     volumes: [{ name: 'config-volume' }],
                   },
                 },
@@ -424,6 +468,7 @@ describe('DevModeManager', () => {
           replicas: 1,
           template: {
             spec: {
+              securityContext: { fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch' },
               containers: [
                 {
                   name: 'web-app',
@@ -458,6 +503,7 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/volumes/0' },
         { op: 'remove', path: '/spec/replicas' },
         { op: 'remove', path: '/spec/template/spec/nodeSelector' },
+        { op: 'replace', path: '/spec/template/spec/securityContext', value: { fsGroup: 2000 } },
       ],
       undefined,
       undefined,
@@ -536,6 +582,7 @@ describe('DevModeManager', () => {
               volumeMounts: [{ name: 'config-volume', mountPath: '/config' }],
               volumes: [{ name: 'config-volume', emptyDir: {} }],
               nodeSelector: { 'app-long': 'deployments-m7i' },
+              securityContext: { fsGroup: 2000 },
             }),
             'lifecycle.goodrx.com/dev-mode-hpa-snapshot': JSON.stringify({
               hpaName: 'grpc-echo-hpa',
@@ -548,6 +595,7 @@ describe('DevModeManager', () => {
           replicas: 1,
           template: {
             spec: {
+              securityContext: { fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch' },
               nodeSelector: {
                 'app-long': 'deployments-m7i',
                 'kubernetes.io/hostname': 'agent-node-a',
@@ -630,6 +678,11 @@ describe('DevModeManager', () => {
           path: '/spec/template/spec/nodeSelector',
           value: { 'app-long': 'deployments-m7i' },
         },
+        {
+          op: 'replace',
+          path: '/spec/template/spec/securityContext',
+          value: { fsGroup: 2000 },
+        },
       ],
       undefined,
       undefined,
@@ -669,6 +722,7 @@ describe('DevModeManager', () => {
           replicas: 1,
           template: {
             spec: {
+              securityContext: { fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch' },
               containers: [
                 {
                   name: 'grpc-echo',
@@ -703,6 +757,7 @@ describe('DevModeManager', () => {
         { op: 'remove', path: '/spec/template/spec/containers/0/volumeMounts/0' },
         { op: 'remove', path: '/spec/template/spec/volumes/0' },
         { op: 'remove', path: '/spec/template/spec/nodeSelector' },
+        { op: 'remove', path: '/spec/template/spec/securityContext' },
       ],
       undefined,
       undefined,
@@ -726,6 +781,7 @@ describe('DevModeManager', () => {
           replicas: 1,
           template: {
             spec: {
+              securityContext: { fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch' },
               containers: [
                 {
                   name: 'lc-apps',
@@ -777,6 +833,7 @@ describe('DevModeManager', () => {
         volumeMounts: null,
         volumes: null,
         nodeSelector: { 'app-long': 'deployments-m7i' },
+        securityContext: { fsGroup: 2000 },
       },
       service: {
         serviceName: 'grpc-echo-service',
@@ -808,6 +865,11 @@ describe('DevModeManager', () => {
           op: 'replace',
           path: '/spec/template/spec/nodeSelector',
           value: { 'app-long': 'deployments-m7i' },
+        },
+        {
+          op: 'replace',
+          path: '/spec/template/spec/securityContext',
+          value: { fsGroup: 2000 },
         },
       ],
       undefined,

@@ -16,6 +16,7 @@
 
 import 'server/lib/dependencies';
 import * as k8s from '@kubernetes/client-node';
+import { createHash } from 'crypto';
 import { v4 as uuid } from 'uuid';
 import BaseService from './_service';
 import AgentPrewarm from 'server/models/AgentPrewarm';
@@ -48,7 +49,10 @@ import type { DevConfig } from 'server/models/yaml/YamlService';
 import { BuildKind } from 'shared/constants';
 import { QUEUE_NAMES } from 'shared/config';
 import GlobalConfigService from './globalConfig';
-import { resolveAgentSessionServiceCandidates, resolveRequestedAgentSessionServices } from './agentSessionCandidates';
+import {
+  resolveAgentSessionServiceCandidatesForBuild,
+  resolveRequestedAgentSessionServices,
+} from './agentSessionCandidates';
 
 const logger = () => getLogger();
 const AGENT_PREWARM_ERROR_MESSAGE_MAX_LENGTH = 4000;
@@ -104,6 +108,142 @@ export function canReusePrewarm(prewarmServices: string[], requestedServices: st
   return requested.every((serviceName) => available.has(serviceName));
 }
 
+function normalizeWorkspaceRepoSignature(repo: AgentSessionWorkspaceRepo): string {
+  return JSON.stringify({
+    repo: repo.repo,
+    repoUrl: repo.repoUrl,
+    branch: repo.branch,
+    revision: repo.revision || null,
+    mountPath: repo.mountPath,
+    primary: Boolean(repo.primary),
+  });
+}
+
+function hasExactWorkspaceRepoMatch(
+  prewarmWorkspaceRepos: AgentSessionWorkspaceRepo[],
+  requestedWorkspaceRepos: AgentSessionWorkspaceRepo[]
+): boolean {
+  if (prewarmWorkspaceRepos.length !== requestedWorkspaceRepos.length) {
+    return false;
+  }
+
+  const requestedRepoSet = new Set(requestedWorkspaceRepos.map((repo) => normalizeWorkspaceRepoSignature(repo)));
+  return (
+    requestedRepoSet.size === prewarmWorkspaceRepos.length &&
+    prewarmWorkspaceRepos.every((repo) => requestedRepoSet.has(normalizeWorkspaceRepoSignature(repo)))
+  );
+}
+
+function hasServiceRefCoverage(
+  prewarmServiceRefs: AgentSessionSelectedService[],
+  requestedServiceRefs: AgentSessionSelectedService[]
+): boolean {
+  if (requestedServiceRefs.length === 0) {
+    return true;
+  }
+
+  const availableDeployIds = new Set(prewarmServiceRefs.map((serviceRef) => serviceRef.deployId));
+  return requestedServiceRefs.every((serviceRef) => availableDeployIds.has(serviceRef.deployId));
+}
+
+function normalizeSelectedServiceSignature(serviceRef: AgentSessionSelectedService): string {
+  return JSON.stringify({
+    name: serviceRef.name,
+    deployId: serviceRef.deployId,
+    repo: serviceRef.repo || null,
+    branch: serviceRef.branch || null,
+    revision: serviceRef.revision || null,
+    resourceName: serviceRef.resourceName || null,
+    workspacePath: serviceRef.workspacePath || null,
+    workDir: serviceRef.workDir || null,
+  });
+}
+
+function hasExactServiceRefMatch(
+  prewarmServiceRefs: AgentSessionSelectedService[],
+  requestedServiceRefs: AgentSessionSelectedService[]
+): boolean {
+  if (prewarmServiceRefs.length !== requestedServiceRefs.length) {
+    return false;
+  }
+
+  const requestedServiceRefSet = new Set(
+    requestedServiceRefs.map((serviceRef) => normalizeSelectedServiceSignature(serviceRef))
+  );
+  return (
+    requestedServiceRefSet.size === prewarmServiceRefs.length &&
+    prewarmServiceRefs.every((serviceRef) => requestedServiceRefSet.has(normalizeSelectedServiceSignature(serviceRef)))
+  );
+}
+
+type PrewarmMatchOptions = {
+  revision?: string;
+  requestedServices: string[];
+  workspaceRepos?: AgentSessionWorkspaceRepo[];
+  requestedServiceRefs?: AgentSessionSelectedService[];
+  serviceMatchMode: 'coverage' | 'exact';
+  serviceRefMatchMode?: 'coverage' | 'exact';
+};
+
+function matchesPrewarm(
+  prewarm: Pick<AgentPrewarm, 'revision' | 'services' | 'workspaceRepos' | 'serviceRefs'>,
+  opts: PrewarmMatchOptions
+): boolean {
+  const sameRevision = !opts.revision || !prewarm.revision || prewarm.revision === opts.revision;
+  if (!sameRevision) {
+    return false;
+  }
+
+  if (opts.workspaceRepos?.length && !hasExactWorkspaceRepoMatch(prewarm.workspaceRepos || [], opts.workspaceRepos)) {
+    return false;
+  }
+
+  if (opts.requestedServiceRefs?.length) {
+    const serviceRefMatches =
+      opts.serviceRefMatchMode === 'exact'
+        ? hasExactServiceRefMatch(prewarm.serviceRefs || [], opts.requestedServiceRefs)
+        : hasServiceRefCoverage(prewarm.serviceRefs || [], opts.requestedServiceRefs);
+    if (!serviceRefMatches) {
+      return false;
+    }
+  }
+
+  return opts.serviceMatchMode === 'exact'
+    ? hasExactServiceMatch(prewarm.services || [], opts.requestedServices)
+    : canReusePrewarm(prewarm.services || [], opts.requestedServices);
+}
+
+function matchesBuildPrewarmPlan(
+  prewarm: Pick<AgentPrewarm, 'revision' | 'services' | 'workspaceRepos' | 'serviceRefs'>,
+  plan: Pick<ResolvedBuildPrewarmPlan, 'revision' | 'configuredServiceNames' | 'workspaceRepos' | 'serviceRefs'>
+): boolean {
+  return matchesPrewarm(prewarm, {
+    revision: plan.revision,
+    requestedServices: plan.configuredServiceNames,
+    workspaceRepos: plan.workspaceRepos,
+    requestedServiceRefs: plan.serviceRefs,
+    serviceMatchMode: 'exact',
+    serviceRefMatchMode: 'exact',
+  });
+}
+
+function buildPrewarmIdentityToken(plan: {
+  workspaceRepos?: AgentSessionWorkspaceRepo[];
+  serviceRefs?: AgentSessionSelectedService[];
+}): string {
+  const normalizedWorkspaceRepos = (plan.workspaceRepos || [])
+    .map((repo) => normalizeWorkspaceRepoSignature(repo))
+    .sort();
+  const normalizedServiceRefs = (plan.serviceRefs || [])
+    .map((serviceRef) => normalizeSelectedServiceSignature(serviceRef))
+    .sort();
+
+  return createHash('sha1')
+    .update(JSON.stringify({ workspaceRepos: normalizedWorkspaceRepos, serviceRefs: normalizedServiceRefs }))
+    .digest('hex')
+    .slice(0, 12);
+}
+
 function truncateErrorMessage(message: string): string {
   if (message.length <= AGENT_PREWARM_ERROR_MESSAGE_MAX_LENGTH) {
     return message;
@@ -134,6 +274,8 @@ export default class AgentPrewarmService extends BaseService {
     buildUuid: string;
     requestedServices: string[];
     revision?: string;
+    workspaceRepos?: AgentSessionWorkspaceRepo[];
+    requestedServiceRefs?: AgentSessionSelectedService[];
   }): Promise<AgentPrewarm | null> {
     const prewarms = await AgentPrewarm.query()
       .where({
@@ -143,13 +285,16 @@ export default class AgentPrewarmService extends BaseService {
       .orderBy('updatedAt', 'desc');
 
     return (
-      prewarms.find((prewarm) => {
-        if (params.revision && prewarm.revision && prewarm.revision !== params.revision) {
-          return false;
-        }
-
-        return canReusePrewarm(prewarm.services || [], params.requestedServices);
-      }) || null
+      prewarms.find((prewarm) =>
+        matchesPrewarm(prewarm, {
+          revision: params.revision,
+          requestedServices: params.requestedServices,
+          workspaceRepos: params.workspaceRepos,
+          requestedServiceRefs: params.requestedServiceRefs,
+          serviceMatchMode: 'coverage',
+          serviceRefMatchMode: 'coverage',
+        })
+      ) || null
     );
   }
 
@@ -178,10 +323,7 @@ export default class AgentPrewarmService extends BaseService {
       .where({ buildUuid: plan.buildUuid })
       .whereIn('status', ['queued', 'running', 'ready'])
       .orderBy('updatedAt', 'desc');
-    const matchingPrewarm = activePrewarms.find((prewarm) => {
-      const sameRevision = !plan.revision || !prewarm.revision || prewarm.revision === plan.revision;
-      return sameRevision && hasExactServiceMatch(prewarm.services || [], plan.configuredServiceNames);
-    });
+    const matchingPrewarm = activePrewarms.find((prewarm) => matchesBuildPrewarmPlan(prewarm, plan));
 
     if (matchingPrewarm) {
       return false;
@@ -194,7 +336,9 @@ export default class AgentPrewarmService extends BaseService {
         ...extractContextForQueue(),
       },
       {
-        jobId: `agent-prewarm:${plan.buildUuid}:${plan.revision || 'head'}:${plan.configuredServiceNames.join(',')}`,
+        jobId: `agent-prewarm:${plan.buildUuid}:${plan.revision || 'head'}:${plan.configuredServiceNames.join(
+          ','
+        )}:${buildPrewarmIdentityToken(plan)}`,
       }
     );
 
@@ -217,10 +361,7 @@ export default class AgentPrewarmService extends BaseService {
       .where({ buildUuid: plan.buildUuid })
       .whereIn('status', ['running', 'ready'])
       .orderBy('updatedAt', 'desc');
-    const matchingPrewarm = existingPrewarm.find((prewarm) => {
-      const sameRevision = !plan.revision || !prewarm.revision || prewarm.revision === plan.revision;
-      return sameRevision && hasExactServiceMatch(prewarm.services || [], plan.configuredServiceNames);
-    });
+    const matchingPrewarm = existingPrewarm.find((prewarm) => matchesBuildPrewarmPlan(prewarm, plan));
     if (matchingPrewarm) {
       return matchingPrewarm;
     }
@@ -374,7 +515,7 @@ export default class AgentPrewarmService extends BaseService {
   private async resolveBuildPrewarmPlan(buildUuid: string): Promise<ResolvedBuildPrewarmPlan | null> {
     const build = await Build.query()
       .findOne({ uuid: buildUuid })
-      .withGraphFetched('[pullRequest, deploys.[deployable]]');
+      .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
     if (
       !build ||
       build.kind !== BuildKind.ENVIRONMENT ||
@@ -395,14 +536,14 @@ export default class AgentPrewarmService extends BaseService {
     );
   }
 
-  private resolvePrewarmPlanFromConfig(
+  private async resolvePrewarmPlanFromConfig(
     buildUuid: string,
     namespace: string,
     repositoryFullName: string,
     revision: string | undefined,
     lifecycleConfig: LifecycleConfig | null,
     build: Build
-  ): ResolvedBuildPrewarmPlan | null {
+  ): Promise<ResolvedBuildPrewarmPlan | null> {
     const configuredServiceNames = normalizeServiceNames(
       lifecycleConfig?.environment?.agentSession?.prewarm?.services || []
     );
@@ -410,7 +551,7 @@ export default class AgentPrewarmService extends BaseService {
       return null;
     }
 
-    const candidates = resolveAgentSessionServiceCandidates(build.deploys || [], lifecycleConfig as LifecycleConfig);
+    const candidates = await resolveAgentSessionServiceCandidatesForBuild(build);
     const services = resolveRequestedAgentSessionServices(candidates, configuredServiceNames).map((service) => ({
       name: service.name,
       deployId: service.deployId,
@@ -424,12 +565,18 @@ export default class AgentPrewarmService extends BaseService {
       workspaceRepos,
       services: resolvedServices,
       selectedServices,
-    } = resolveAgentSessionServicePlan({}, services);
-    if (workspaceRepos.length !== 1) {
+    } = resolveAgentSessionServicePlan(
+      {
+        repoUrl: `https://github.com/${repositoryFullName}.git`,
+        branch: build.pullRequest?.branchName,
+        revision,
+      },
+      services
+    );
+    const workspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+    if (!workspaceRepo) {
       return null;
     }
-
-    const [workspaceRepo] = workspaceRepos;
 
     return {
       buildUuid,

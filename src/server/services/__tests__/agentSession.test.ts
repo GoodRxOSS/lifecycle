@@ -590,11 +590,30 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
-      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith({
-        buildUuid: 'build-123',
-        requestedServices: ['web'],
-        revision: undefined,
-      });
+      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buildUuid: 'build-123',
+          requestedServices: ['web'],
+          revision: undefined,
+          workspaceRepos: [
+            expect.objectContaining({
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              mountPath: '/workspace',
+              primary: true,
+            }),
+          ],
+          requestedServiceRefs: [
+            expect.objectContaining({
+              name: 'web',
+              deployId: 1,
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              workspacePath: '/workspace',
+            }),
+          ],
+        })
+      );
       expect(createAgentPvc).not.toHaveBeenCalled();
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -618,17 +637,119 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
-      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith({
-        buildUuid: 'build-123',
-        requestedServices: ['api'],
-        revision: undefined,
-      });
+      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buildUuid: 'build-123',
+          requestedServices: ['api'],
+          revision: undefined,
+          workspaceRepos: [
+            expect.objectContaining({
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              mountPath: '/workspace',
+              primary: true,
+            }),
+          ],
+          requestedServiceRefs: [
+            expect.objectContaining({
+              name: 'api',
+              deployId: 2,
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              workspacePath: '/workspace',
+            }),
+          ],
+        })
+      );
       expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', 'build-123');
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           podName: 'agent-build-123',
           pvcName: 'agent-pvc-aaaaaaaa',
           skipWorkspaceBootstrap: false,
+        })
+      );
+    });
+
+    it('reuses a compatible multi-repo prewarm when workspace layout matches', async () => {
+      mockGetCompatibleReadyPrewarm.mockResolvedValue({
+        uuid: 'prewarm-2',
+        pvcName: 'agent-prewarm-pvc-5678',
+        services: ['api', 'web'],
+        status: 'ready',
+      });
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+          {
+            name: 'api',
+            deployId: 2,
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+            repo: 'org/api',
+            branch: 'feature/api',
+            revision: 'sha-api',
+          },
+        ],
+      };
+
+      await AgentSessionService.createSession(optsWithServices);
+
+      expect(mockGetCompatibleReadyPrewarm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buildUuid: 'build-123',
+          requestedServices: ['web', 'api'],
+          workspaceRepos: expect.arrayContaining([
+            expect.objectContaining({
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              mountPath: '/workspace/repos/example-org/example-repo',
+              primary: true,
+            }),
+            expect.objectContaining({
+              repo: 'org/api',
+              branch: 'feature/api',
+              revision: 'sha-api',
+              mountPath: '/workspace/repos/org/api',
+              primary: false,
+            }),
+          ]),
+          requestedServiceRefs: expect.arrayContaining([
+            expect.objectContaining({
+              name: 'web',
+              deployId: 1,
+              repo: 'example-org/example-repo',
+              branch: 'feature/example-session',
+              workspacePath: '/workspace/repos/example-org/example-repo',
+            }),
+            expect.objectContaining({
+              name: 'api',
+              deployId: 2,
+              repo: 'org/api',
+              branch: 'feature/api',
+              workspacePath: '/workspace/repos/org/api',
+            }),
+          ]),
+        })
+      );
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'agent-prewarm-pvc-5678',
+          skipWorkspaceBootstrap: true,
+          workspaceRepos: expect.arrayContaining([
+            expect.objectContaining({
+              repo: 'example-org/example-repo',
+              mountPath: '/workspace/repos/example-org/example-repo',
+            }),
+            expect.objectContaining({ repo: 'org/api', mountPath: '/workspace/repos/org/api' }),
+          ]),
         })
       );
     });

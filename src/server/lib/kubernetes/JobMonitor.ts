@@ -34,7 +34,7 @@ export interface MonitorOptions {
 
 export class JobMonitor {
   private static readonly DEFAULT_TIMEOUT = 1800; // 30 minutes
-  private static readonly POLL_INTERVAL = 2000; // 2 seconds
+  private static readonly POLL_INTERVAL = 1000; // 1 second
 
   // eslint-disable-next-line no-unused-vars
   constructor(private readonly jobName: string, private readonly namespace: string) {}

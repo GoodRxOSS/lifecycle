@@ -24,6 +24,9 @@ const DEV_MODE_DEPLOYMENT_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-d
 const DEV_MODE_SERVICE_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-service-snapshot';
 const DEV_MODE_HPA_SNAPSHOT_ANNOTATION = 'lifecycle.goodrx.com/dev-mode-hpa-snapshot';
 const SAME_NODE_SELECTOR_KEY = 'kubernetes.io/hostname';
+const SHARED_WORKSPACE_FS_GROUP = 1000;
+const SHARED_WORKSPACE_FS_GROUP_CHANGE_POLICY: NonNullable<k8s.V1PodSecurityContext['fsGroupChangePolicy']> =
+  'OnRootMismatch';
 
 export interface DevModeOptions {
   namespace: string;
@@ -45,6 +48,7 @@ export interface DevModeDeploymentSnapshot {
   volumeMounts: k8s.V1VolumeMount[] | null;
   volumes: k8s.V1Volume[] | null;
   nodeSelector: Record<string, string> | null;
+  securityContext: k8s.V1PodSecurityContext | null;
 }
 
 export interface DevModeServiceSnapshot {
@@ -70,6 +74,7 @@ interface AppliedDeploymentTemplate {
     template?: {
       spec?: {
         nodeSelector?: Record<string, string>;
+        securityContext?: k8s.V1PodSecurityContext;
         containers?: Array<{
           name?: string;
           command?: string[];
@@ -104,6 +109,23 @@ function selectorMatches(
   }
 
   return Object.entries(expected).every(([key, value]) => selector[key] === value);
+}
+
+function buildSharedWorkspacePodSecurityContext(
+  securityContext?: k8s.V1PodSecurityContext | null
+): k8s.V1PodSecurityContext {
+  return {
+    ...(securityContext || {}),
+    fsGroup: SHARED_WORKSPACE_FS_GROUP,
+    fsGroupChangePolicy: SHARED_WORKSPACE_FS_GROUP_CHANGE_POLICY,
+  };
+}
+
+function hasSharedWorkspacePodSecurityContext(securityContext?: k8s.V1PodSecurityContext | null): boolean {
+  return (
+    securityContext?.fsGroup === SHARED_WORKSPACE_FS_GROUP &&
+    securityContext.fsGroupChangePolicy === SHARED_WORKSPACE_FS_GROUP_CHANGE_POLICY
+  );
 }
 
 export class DevModeManager {
@@ -376,6 +398,7 @@ export class DevModeManager {
     const deploymentName = existing.metadata?.name || opts.deploymentName;
     const workDir = devConfig.workDir || '/workspace';
     const existingContainerName = existing.spec?.template?.spec?.containers?.[0]?.name || deploymentName;
+    const existingPodSecurityContext = existing.spec?.template?.spec?.securityContext;
     const nodeSelector = requiredNodeName
       ? {
           ...(existing.spec?.template?.spec?.nodeSelector || {}),
@@ -397,6 +420,7 @@ export class DevModeManager {
         template: {
           spec: {
             ...(nodeSelector ? { nodeSelector } : {}),
+            securityContext: buildSharedWorkspacePodSecurityContext(existingPodSecurityContext),
             volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: pvcName } }],
             containers: [
               {
@@ -590,6 +614,12 @@ export class DevModeManager {
       liveSpec?.nodeSelector,
       desiredTemplate.spec?.template?.spec?.nodeSelector
     );
+    this.appendValuePatch(
+      patch,
+      '/spec/template/spec/securityContext',
+      liveSpec?.securityContext,
+      desiredTemplate.spec?.template?.spec?.securityContext
+    );
 
     if (patch.length === 0) {
       return;
@@ -696,6 +726,7 @@ export class DevModeManager {
       volumeMounts: liveContainer?.volumeMounts ? deepClone(liveContainer.volumeMounts) : null,
       volumes: liveSpec?.volumes ? deepClone(liveSpec.volumes) : null,
       nodeSelector: liveSpec?.nodeSelector ? deepClone(liveSpec.nodeSelector) : null,
+      securityContext: liveSpec?.securityContext ? deepClone(liveSpec.securityContext) : null,
     };
   }
 
@@ -823,6 +854,12 @@ export class DevModeManager {
       '/spec/template/spec/nodeSelector',
       existing.spec?.template?.spec?.nodeSelector,
       snapshot.nodeSelector
+    );
+    this.appendValuePatch(
+      patch,
+      '/spec/template/spec/securityContext',
+      existing.spec?.template?.spec?.securityContext,
+      snapshot.securityContext
     );
 
     if (patch.length === 0) {
@@ -989,6 +1026,17 @@ export class DevModeManager {
           op: 'remove',
           path: `/spec/template/spec/nodeSelector/${SAME_NODE_SELECTOR_KEY.replace('/', '~1')}`,
         });
+      }
+    }
+
+    const liveSecurityContext = liveSpec?.securityContext;
+    if (isLikelyDevPatched && hasSharedWorkspacePodSecurityContext(liveSecurityContext)) {
+      const securityContextKeys = Object.keys(liveSecurityContext || {});
+      if (securityContextKeys.length === 2) {
+        patch.push({ op: 'remove', path: '/spec/template/spec/securityContext' });
+      } else {
+        patch.push({ op: 'remove', path: '/spec/template/spec/securityContext/fsGroup' });
+        patch.push({ op: 'remove', path: '/spec/template/spec/securityContext/fsGroupChangePolicy' });
       }
     }
 

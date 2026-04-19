@@ -26,7 +26,7 @@ jest.mock('server/lib/agentSession/pvcFactory', () => ({
   deleteAgentPvc: jest.fn(),
 }));
 jest.mock('../agentSessionCandidates', () => ({
-  resolveAgentSessionServiceCandidates: jest.fn(),
+  resolveAgentSessionServiceCandidatesForBuild: jest.fn(),
   resolveRequestedAgentSessionServices: jest.fn(),
 }));
 jest.mock('server/lib/logger', () => ({
@@ -46,7 +46,10 @@ import Build from 'server/models/Build';
 import { fetchLifecycleConfig } from 'server/models/yaml';
 import AgentPrewarmService from 'server/services/agentPrewarm';
 import { deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
-import { resolveAgentSessionServiceCandidates, resolveRequestedAgentSessionServices } from '../agentSessionCandidates';
+import {
+  resolveAgentSessionServiceCandidatesForBuild,
+  resolveRequestedAgentSessionServices,
+} from '../agentSessionCandidates';
 
 describe('AgentPrewarmService', () => {
   beforeEach(() => {
@@ -82,6 +85,18 @@ describe('AgentPrewarmService', () => {
         revision: 'sha-123',
         configuredServiceNames: ['api', 'web'],
         services: [],
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'sample-branch',
+            revision: 'sha-123',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        serviceRefs: [],
+        skillPlan: { skills: [] },
       });
       (AgentPrewarm.query as jest.Mock).mockReturnValue({
         where: jest.fn().mockReturnThis(),
@@ -91,6 +106,17 @@ describe('AgentPrewarmService', () => {
             revision: 'sha-123',
             services: ['web', 'api'],
             status: 'ready',
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'sample-branch',
+                revision: 'sha-123',
+                mountPath: '/workspace',
+                primary: true,
+              },
+            ],
+            serviceRefs: [],
           },
         ]),
       });
@@ -114,6 +140,18 @@ describe('AgentPrewarmService', () => {
         revision: 'sha-123',
         configuredServiceNames: ['api', 'web'],
         services: [],
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'sample-branch',
+            revision: 'sha-123',
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        serviceRefs: [],
+        skillPlan: { skills: [] },
       });
       (AgentPrewarm.query as jest.Mock).mockReturnValue({
         where: jest.fn().mockReturnThis(),
@@ -128,10 +166,296 @@ describe('AgentPrewarmService', () => {
           buildUuid: 'build-123',
           requestId: 'req-123',
         }),
-        {
-          jobId: 'agent-prewarm:build-123:sha-123:api,web',
-        }
+        expect.objectContaining({
+          jobId: expect.stringMatching(/^agent-prewarm:build-123:sha-123:api,web:/),
+        })
       );
+    });
+
+    it('enqueues when an active prewarm has the same services but a different workspace identity', async () => {
+      const queueAdd = jest.fn().mockResolvedValue(undefined);
+      const queueManager = {
+        registerQueue: jest.fn().mockReturnValue({ add: queueAdd }),
+      };
+      const service = new AgentPrewarmService({} as any, {} as any, {} as any, queueManager as any);
+      jest.spyOn(service as any, 'resolveBuildPrewarmPlan').mockResolvedValue({
+        buildUuid: 'build-123',
+        namespace: 'env-sample',
+        repo: 'example-org/example-repo',
+        repoUrl: 'https://github.com/example-org/example-repo.git',
+        branch: 'sample-branch',
+        revision: 'sha-123',
+        configuredServiceNames: ['api', 'web'],
+        services: [],
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'sample-branch',
+            revision: 'sha-123',
+            mountPath: '/workspace/repos/example-org/example-repo',
+            primary: true,
+          },
+          {
+            repo: 'example-org/example-api',
+            repoUrl: 'https://github.com/example-org/example-api.git',
+            branch: 'api-branch',
+            revision: 'sha-api',
+            mountPath: '/workspace/repos/example-org/example-api',
+            primary: false,
+          },
+        ],
+        serviceRefs: [
+          { name: 'web', deployId: 1, repo: 'example-org/example-repo', branch: 'sample-branch' },
+          { name: 'api', deployId: 2, repo: 'example-org/example-api', branch: 'api-branch' },
+        ],
+        skillPlan: { skills: [] },
+      });
+      (AgentPrewarm.query as jest.Mock).mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([
+          {
+            revision: 'sha-123',
+            services: ['web', 'api'],
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'sample-branch',
+                revision: 'sha-123',
+                mountPath: '/workspace/repos/example-org/example-repo',
+                primary: false,
+              },
+              {
+                repo: 'example-org/example-api',
+                repoUrl: 'https://github.com/example-org/example-api.git',
+                branch: 'api-branch',
+                revision: 'sha-api',
+                mountPath: '/workspace/repos/example-org/example-api',
+                primary: true,
+              },
+            ],
+            serviceRefs: [
+              { name: 'web', deployId: 1, repo: 'example-org/example-repo', branch: 'sample-branch' },
+              { name: 'api', deployId: 2, repo: 'example-org/example-api', branch: 'api-branch' },
+            ],
+            status: 'ready',
+          },
+        ]),
+      });
+
+      await expect(service.queueBuildPrewarm('build-123')).resolves.toBe(true);
+      expect(queueAdd).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('getCompatibleReadyPrewarm', () => {
+    it('matches a multi-repo prewarm when workspace layout and requested deploys align', async () => {
+      (AgentPrewarm.query as jest.Mock).mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([
+          {
+            uuid: 'prewarm-123',
+            status: 'ready',
+            revision: 'sha-repo',
+            services: ['web', 'api'],
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'sample-branch',
+                revision: 'sha-repo',
+                mountPath: '/workspace/repos/example-org/example-repo',
+                primary: true,
+              },
+              {
+                repo: 'example-org/example-api',
+                repoUrl: 'https://github.com/example-org/example-api.git',
+                branch: 'api-branch',
+                revision: 'sha-api',
+                mountPath: '/workspace/repos/example-org/example-api',
+                primary: false,
+              },
+            ],
+            serviceRefs: [
+              { name: 'web', deployId: 1, repo: 'example-org/example-repo', branch: 'sample-branch' },
+              { name: 'api', deployId: 2, repo: 'example-org/example-api', branch: 'api-branch' },
+            ],
+          },
+        ]),
+      });
+      const service = new AgentPrewarmService(
+        {} as any,
+        {} as any,
+        {} as any,
+        {
+          registerQueue: jest.fn().mockReturnValue({ add: jest.fn() }),
+        } as any
+      );
+
+      await expect(
+        service.getCompatibleReadyPrewarm({
+          buildUuid: 'build-123',
+          requestedServices: ['api'],
+          revision: 'sha-repo',
+          workspaceRepos: [
+            {
+              repo: 'example-org/example-repo',
+              repoUrl: 'https://github.com/example-org/example-repo.git',
+              branch: 'sample-branch',
+              revision: 'sha-repo',
+              mountPath: '/workspace/repos/example-org/example-repo',
+              primary: true,
+            },
+            {
+              repo: 'example-org/example-api',
+              repoUrl: 'https://github.com/example-org/example-api.git',
+              branch: 'api-branch',
+              revision: 'sha-api',
+              mountPath: '/workspace/repos/example-org/example-api',
+              primary: false,
+            },
+          ],
+          requestedServiceRefs: [
+            {
+              name: 'api',
+              deployId: 2,
+              repo: 'example-org/example-api',
+              branch: 'api-branch',
+              workspacePath: '/workspace/repos/example-org/example-api',
+            },
+          ],
+        })
+      ).resolves.toEqual(expect.objectContaining({ uuid: 'prewarm-123' }));
+    });
+
+    it('rejects a ready prewarm when the requested workspace layout differs', async () => {
+      (AgentPrewarm.query as jest.Mock).mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([
+          {
+            uuid: 'prewarm-123',
+            status: 'ready',
+            revision: 'sha-repo',
+            services: ['web', 'api'],
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'sample-branch',
+                revision: 'sha-repo',
+                mountPath: '/workspace/repos/example-org/example-repo',
+                primary: true,
+              },
+            ],
+            serviceRefs: [{ name: 'web', deployId: 1, repo: 'example-org/example-repo', branch: 'sample-branch' }],
+          },
+        ]),
+      });
+      const service = new AgentPrewarmService(
+        {} as any,
+        {} as any,
+        {} as any,
+        {
+          registerQueue: jest.fn().mockReturnValue({ add: jest.fn() }),
+        } as any
+      );
+
+      await expect(
+        service.getCompatibleReadyPrewarm({
+          buildUuid: 'build-123',
+          requestedServices: ['web'],
+          revision: 'sha-repo',
+          workspaceRepos: [
+            {
+              repo: 'example-org/example-repo',
+              repoUrl: 'https://github.com/example-org/example-repo.git',
+              branch: 'sample-branch',
+              revision: 'sha-repo',
+              mountPath: '/workspace',
+              primary: true,
+            },
+          ],
+          requestedServiceRefs: [
+            {
+              name: 'web',
+              deployId: 1,
+              repo: 'example-org/example-repo',
+              branch: 'sample-branch',
+              workspacePath: '/workspace',
+            },
+          ],
+        })
+      ).resolves.toBeNull();
+    });
+
+    it('rejects a ready prewarm when the requested deploy identity differs', async () => {
+      (AgentPrewarm.query as jest.Mock).mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockResolvedValue([
+          {
+            uuid: 'prewarm-123',
+            status: 'ready',
+            revision: 'sha-repo',
+            services: ['api'],
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'sample-branch',
+                revision: 'sha-repo',
+                mountPath: '/workspace/repos/example-org/example-repo',
+                primary: true,
+              },
+            ],
+            serviceRefs: [
+              {
+                name: 'api',
+                deployId: 2,
+                repo: 'example-org/example-repo',
+                branch: 'sample-branch',
+                workspacePath: '/workspace/repos/example-org/example-repo',
+              },
+            ],
+          },
+        ]),
+      });
+      const service = new AgentPrewarmService(
+        {} as any,
+        {} as any,
+        {} as any,
+        {
+          registerQueue: jest.fn().mockReturnValue({ add: jest.fn() }),
+        } as any
+      );
+
+      await expect(
+        service.getCompatibleReadyPrewarm({
+          buildUuid: 'build-123',
+          requestedServices: ['api'],
+          revision: 'sha-repo',
+          workspaceRepos: [
+            {
+              repo: 'example-org/example-repo',
+              repoUrl: 'https://github.com/example-org/example-repo.git',
+              branch: 'sample-branch',
+              revision: 'sha-repo',
+              mountPath: '/workspace/repos/example-org/example-repo',
+              primary: true,
+            },
+          ],
+          requestedServiceRefs: [
+            {
+              name: 'api',
+              deployId: 3,
+              repo: 'example-org/example-repo',
+              branch: 'sample-branch',
+              workspacePath: '/workspace/repos/example-org/example-repo',
+            },
+          ],
+        })
+      ).resolves.toBeNull();
     });
   });
 
@@ -167,7 +491,7 @@ describe('AgentPrewarmService', () => {
           },
         },
       });
-      (resolveAgentSessionServiceCandidates as jest.Mock).mockReturnValue([
+      (resolveAgentSessionServiceCandidatesForBuild as jest.Mock).mockResolvedValue([
         { name: 'web', deployId: 1, devConfig: { command: 'pnpm dev' } },
       ]);
       (resolveRequestedAgentSessionServices as jest.Mock).mockReturnValue([
@@ -178,6 +502,87 @@ describe('AgentPrewarmService', () => {
 
       expect(plan?.revision).toBe('0123456789abcdef0123456789abcdef01234567');
       expect(plan?.revision).not.toBe('1b9337');
+    });
+
+    it('builds a prewarm plan for multi-repo service selections', async () => {
+      const queueManager = {
+        registerQueue: jest.fn().mockReturnValue({ add: jest.fn() }),
+      };
+      const service = new AgentPrewarmService({} as any, {} as any, {} as any, queueManager as any);
+      const build = {
+        kind: 'environment',
+        namespace: 'env-sample',
+        pullRequest: {
+          fullName: 'example-org/example-repo',
+          branchName: 'sample-branch',
+          latestCommit: 'sha-repo',
+        },
+        deploys: [],
+      };
+
+      (Build.query as jest.Mock).mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue(build),
+        }),
+      });
+      (fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        environment: {
+          agentSession: {
+            prewarm: {
+              services: ['api', 'web'],
+            },
+          },
+        },
+      });
+      (resolveAgentSessionServiceCandidatesForBuild as jest.Mock).mockResolvedValue([
+        { name: 'web', deployId: 1, devConfig: { command: 'pnpm dev' } },
+        { name: 'api', deployId: 2, devConfig: { command: 'pnpm dev' } },
+      ]);
+      (resolveRequestedAgentSessionServices as jest.Mock).mockReturnValue([
+        {
+          name: 'api',
+          deployId: 2,
+          devConfig: { command: 'pnpm dev' },
+          repo: 'example-org/example-api',
+          branch: 'api-branch',
+          revision: 'sha-api',
+        },
+        {
+          name: 'web',
+          deployId: 1,
+          devConfig: { command: 'pnpm dev' },
+          repo: 'example-org/example-repo',
+          branch: 'sample-branch',
+          revision: 'sha-repo',
+        },
+      ]);
+
+      const plan = await (service as any).resolveBuildPrewarmPlan('build-123');
+
+      expect(plan?.workspaceRepos).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            repo: 'example-org/example-repo',
+            branch: 'sample-branch',
+            mountPath: '/workspace/repos/example-org/example-repo',
+            primary: true,
+          }),
+          expect.objectContaining({
+            repo: 'example-org/example-api',
+            branch: 'api-branch',
+            mountPath: '/workspace/repos/example-org/example-api',
+            primary: false,
+          }),
+        ])
+      );
+      expect(plan?.serviceRefs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'web', deployId: 1, repo: 'example-org/example-repo' }),
+          expect.objectContaining({ name: 'api', deployId: 2, repo: 'example-org/example-api' }),
+        ])
+      );
+      expect(plan?.repo).toBe('example-org/example-repo');
+      expect(plan?.revision).toBe('sha-repo');
     });
   });
 
