@@ -50,10 +50,13 @@ jest.mock('server/lib/logger', () => ({
 
 import {
   buildSessionWorkspacePodSpec,
+  createSessionWorkspacePodWithoutWaiting,
   createSessionWorkspacePod,
   deleteSessionWorkspacePod,
   SessionWorkspacePodOptions,
   SESSION_WORKSPACE_GATEWAY_PORT_NAME,
+  waitForSessionWorkspacePodReady,
+  waitForSessionWorkspacePodScheduled,
 } from '../podFactory';
 
 const baseOpts: SessionWorkspacePodOptions = {
@@ -859,6 +862,15 @@ describe('podFactory', () => {
   });
 
   describe('createSessionWorkspacePod', () => {
+    it('creates pod without waiting when requested explicitly', async () => {
+      mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
+
+      await createSessionWorkspacePodWithoutWaiting(baseOpts);
+
+      expect(mockCreatePod).toHaveBeenCalledTimes(1);
+      expect(mockReadPod).not.toHaveBeenCalled();
+    });
+
     it('creates pod via K8s API', async () => {
       mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
 
@@ -1000,6 +1012,63 @@ describe('podFactory', () => {
           },
         })
       ).rejects.toThrow('Session workspace pod did not become ready within 1ms');
+    });
+
+    it('returns once the pod is scheduled even before readiness succeeds', async () => {
+      mockReadPod
+        .mockResolvedValueOnce({
+          body: {
+            spec: {
+              nodeName: 'worker-a',
+            },
+            status: {
+              phase: 'Pending',
+            },
+          },
+        })
+        .mockResolvedValue({
+          body: {
+            status: {
+              phase: 'Running',
+              conditions: [{ type: 'Ready', status: 'True' }],
+            },
+          },
+        });
+
+      await expect(waitForSessionWorkspacePodScheduled('test-ns', 'agent-abc123')).resolves.toEqual(
+        expect.objectContaining({
+          spec: expect.objectContaining({
+            nodeName: 'worker-a',
+          }),
+        })
+      );
+    });
+
+    it('times out when the pod never gets a node assignment', async () => {
+      mockReadPod.mockResolvedValue({
+        body: {
+          status: {
+            phase: 'Pending',
+          },
+        },
+      });
+
+      await expect(
+        waitForSessionWorkspacePodScheduled('test-ns', 'agent-abc123', {
+          timeoutMs: 1,
+          pollMs: 0,
+        })
+      ).rejects.toThrow('Session workspace pod was not scheduled within 1ms');
+    });
+
+    it('keeps the ready wait available as a standalone helper', async () => {
+      await expect(waitForSessionWorkspacePodReady('test-ns', 'agent-abc123')).resolves.toEqual(
+        expect.objectContaining({
+          status: expect.objectContaining({
+            conditions: [{ type: 'Ready', status: 'True' }],
+          }),
+        })
+      );
     });
   });
 

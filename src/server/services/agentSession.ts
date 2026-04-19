@@ -27,8 +27,11 @@ import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFacto
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
 import {
   SESSION_WORKSPACE_GATEWAY_CONTAINER_NAME,
+  createSessionWorkspacePodWithoutWaiting,
   createSessionWorkspacePod,
   deleteSessionWorkspacePod,
+  waitForSessionWorkspacePodReady,
+  waitForSessionWorkspacePodScheduled,
 } from 'server/lib/agentSession/podFactory';
 import {
   createSessionWorkspaceService,
@@ -267,8 +270,41 @@ class DevModeBatchEnableError extends Error {
   }
 }
 
+class AgentSessionStageError extends Error {
+  stage: AgentSessionStartupFailureStage;
+  causeError: unknown;
+
+  constructor(stage: AgentSessionStartupFailureStage, error: unknown) {
+    super(error instanceof Error ? error.message : String(error ?? 'Agent session startup failed'));
+    this.name = 'AgentSessionStageError';
+    this.stage = stage;
+    this.causeError = error;
+  }
+}
+
 function buildSnapshotMapFromEnabledServices(enabledServices: DevModeEnabledService[]): SessionSnapshotMap {
   return Object.fromEntries(enabledServices.map((service) => [String(service.deployId), service.snapshot]));
+}
+
+function recordEnabledServicesFromResult(
+  result: DevModeEnabledService[],
+  enabledDevModeDeployIds: number[],
+  devModeSnapshots: SessionSnapshotMap
+): void {
+  enabledDevModeDeployIds.push(...result.map((service) => service.deployId));
+  Object.assign(devModeSnapshots, buildSnapshotMapFromEnabledServices(result));
+}
+
+function recordEnabledServicesFromError(
+  error: unknown,
+  enabledDevModeDeployIds: number[],
+  devModeSnapshots: SessionSnapshotMap
+): void {
+  if (!(error instanceof DevModeBatchEnableError)) {
+    return;
+  }
+
+  recordEnabledServicesFromResult(error.successfulServices, enabledDevModeDeployIds, devModeSnapshots);
 }
 
 async function enableServicesInDevModeParallel(opts: {
@@ -841,6 +877,8 @@ export default class AgentSessionService {
     const devModeSnapshots: SessionSnapshotMap = {};
     const enabledDevModeDeployIds: number[] = [];
     const persistedDevModeDeployIds: number[] = [];
+    let pendingEnabledServicesPromise: Promise<DevModeEnabledService[]> | null = null;
+    let pendingWorkspacePodReadyPromise: Promise<k8s.V1Pod> | null = null;
     let failureStage: AgentSessionStartupFailureStage = 'create_session';
     let sessionPersisted = false;
     let session: AgentSession | null = null;
@@ -968,8 +1006,8 @@ export default class AgentSessionService {
       const infraSetupMs = elapsedMs(infraSetupStartedAt);
 
       failureStage = 'connect_runtime';
-      const podStartupStartedAt = Date.now();
-      const workspacePod = await createSessionWorkspacePod({
+      const servicesToEnable = resolvedServices || [];
+      const workspacePodOptions = {
         podName,
         namespace: opts.namespace,
         pvcName,
@@ -996,30 +1034,77 @@ export default class AgentSessionService {
         skipWorkspaceBootstrap: Boolean(compatiblePrewarm),
         serviceAccountName: agentServiceAccountName,
         resources: opts.resources,
-      });
-      const podStartupMs = elapsedMs(podStartupStartedAt);
-      const agentNodeName = workspacePod.spec?.nodeName || null;
+      };
+      const startEnabledServices = (requiredNodeName?: string): Promise<DevModeEnabledService[]> =>
+        enableServicesInDevModeParallel({
+          namespace: opts.namespace,
+          pvcName,
+          services: servicesToEnable,
+          requiredNodeName,
+        })
+          .then((enabledServices) => {
+            recordEnabledServicesFromResult(enabledServices, enabledDevModeDeployIds, devModeSnapshots);
+            return enabledServices;
+          })
+          .catch((error) => {
+            recordEnabledServicesFromError(error, enabledDevModeDeployIds, devModeSnapshots);
+            throw new AgentSessionStageError('attach_services', error);
+          });
+      const podStartupStartedAt = Date.now();
+      let enabledServices: DevModeEnabledService[];
+      const shouldOverlapPrewarmServiceAttach = Boolean(compatiblePrewarm && servicesToEnable.length > 0);
 
-      if ((resolvedServices || []).length > 0 && keepAttachedServicesOnSessionNode && !agentNodeName) {
-        throw new Error(`Session workspace pod ${podName} did not report a scheduled node`);
-      }
+      if (shouldOverlapPrewarmServiceAttach) {
+        logger().info(
+          `Session: overlap start sessionId=${sessionUuid} namespace=${opts.namespace} podName=${podName} sameNode=${
+            keepAttachedServicesOnSessionNode ? 'true' : 'false'
+          } services=${resolvedServiceNames.join(',')}`
+        );
 
-      const enabledServices = await enableServicesInDevModeParallel({
-        namespace: opts.namespace,
-        pvcName,
-        services: resolvedServices || [],
-        requiredNodeName: keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined,
-      }).catch((error) => {
-        if (error instanceof DevModeBatchEnableError) {
-          enabledDevModeDeployIds.push(...error.successfulServices.map((service) => service.deployId));
-          Object.assign(devModeSnapshots, buildSnapshotMapFromEnabledServices(error.successfulServices));
+        await createSessionWorkspacePodWithoutWaiting(workspacePodOptions);
+        pendingWorkspacePodReadyPromise = waitForSessionWorkspacePodReady(
+          opts.namespace,
+          podName,
+          opts.readiness
+        ).catch((error) => {
+          throw new AgentSessionStageError('connect_runtime', error);
+        });
+
+        if (keepAttachedServicesOnSessionNode) {
+          const scheduledPod = await waitForSessionWorkspacePodScheduled(opts.namespace, podName, opts.readiness).catch(
+            (error) => {
+              throw new AgentSessionStageError('connect_runtime', error);
+            }
+          );
+          const agentNodeName = scheduledPod.spec?.nodeName || null;
+
+          if (!agentNodeName) {
+            throw new AgentSessionStageError(
+              'connect_runtime',
+              new Error(`Session workspace pod ${podName} did not report a scheduled node`)
+            );
+          }
+
+          pendingEnabledServicesPromise = startEnabledServices(agentNodeName);
+        } else {
+          pendingEnabledServicesPromise = startEnabledServices();
         }
 
-        throw error;
-      });
+        [, enabledServices] = await Promise.all([pendingWorkspacePodReadyPromise, pendingEnabledServicesPromise]);
+      } else {
+        const workspacePod = await createSessionWorkspacePod(workspacePodOptions);
+        const agentNodeName = workspacePod.spec?.nodeName || null;
 
-      enabledDevModeDeployIds.push(...enabledServices.map((service) => service.deployId));
-      Object.assign(devModeSnapshots, buildSnapshotMapFromEnabledServices(enabledServices));
+        if (servicesToEnable.length > 0 && keepAttachedServicesOnSessionNode && !agentNodeName) {
+          throw new Error(`Session workspace pod ${podName} did not report a scheduled node`);
+        }
+
+        enabledServices = await startEnabledServices(
+          keepAttachedServicesOnSessionNode ? agentNodeName || undefined : undefined
+        );
+      }
+
+      const podStartupMs = elapsedMs(podStartupStartedAt);
 
       if (enabledServices.length > 0) {
         await AgentSession.query()
@@ -1066,7 +1151,9 @@ export default class AgentSessionService {
           resolvedServiceNames.join(',') || 'none'
         } prewarm=${compatiblePrewarm ? 'reused' : 'new'} durationMs=${elapsedMs(
           sessionStartedAt
-        )} preflightMs=${preflightMs} infraMs=${infraSetupMs} podMs=${podStartupMs} finalizeMs=${finalizeMs}`
+        )} preflightMs=${preflightMs} infraMs=${infraSetupMs} podMs=${podStartupMs} finalizeMs=${finalizeMs} overlap=${
+          shouldOverlapPrewarmServiceAttach ? 'true' : 'false'
+        }`
       );
 
       const readySession = session;
@@ -1085,16 +1172,26 @@ export default class AgentSessionService {
 
       return session!;
     } catch (err) {
+      if (pendingWorkspacePodReadyPromise) {
+        void pendingWorkspacePodReadyPromise.catch(() => {});
+      }
+
+      if (pendingEnabledServicesPromise) {
+        await pendingEnabledServicesPromise.catch(() => {});
+      }
+
+      const startupError = err instanceof AgentSessionStageError ? err.causeError : err;
+      failureStage = err instanceof AgentSessionStageError ? err.stage : failureStage;
       const startupFailure = buildAgentSessionStartupFailure({
         sessionId: sessionUuid,
-        error: err,
+        error: startupError,
         stage: failureStage,
       });
 
       if (
         buildKind === BuildKind.ENVIRONMENT &&
         opts.buildUuid &&
-        isUniqueConstraintError(err, ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX)
+        isUniqueConstraintError(startupError, ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX)
       ) {
         const activeSession = await AgentSessionService.getEnvironmentActiveSession(opts.buildUuid, opts.userId);
         if (activeSession) {
@@ -1103,7 +1200,7 @@ export default class AgentSessionService {
       }
 
       logger().error(
-        { error: err, sessionId: sessionUuid, failureStage },
+        { error: startupError, sessionId: sessionUuid, failureStage },
         `Session: startup failed sessionId=${sessionUuid} stage=${failureStage}`
       );
 
@@ -1176,7 +1273,7 @@ export default class AgentSessionService {
           .catch(() => {});
       }
 
-      throw err;
+      throw startupError;
     }
   }
 

@@ -208,7 +208,13 @@ import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
 import { createAgentApiKeySecret, deleteAgentApiKeySecret } from 'server/lib/agentSession/apiKeySecretFactory';
-import { createSessionWorkspacePod, deleteSessionWorkspacePod } from 'server/lib/agentSession/podFactory';
+import {
+  createSessionWorkspacePod,
+  createSessionWorkspacePodWithoutWaiting,
+  deleteSessionWorkspacePod,
+  waitForSessionWorkspacePodReady,
+  waitForSessionWorkspacePodScheduled,
+} from 'server/lib/agentSession/podFactory';
 import {
   createSessionWorkspaceService,
   deleteSessionWorkspaceService,
@@ -288,6 +294,9 @@ const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
 (createAgentPvc as jest.Mock).mockResolvedValue({});
 (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
 (createSessionWorkspacePod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+(createSessionWorkspacePodWithoutWaiting as jest.Mock).mockResolvedValue(undefined);
+(waitForSessionWorkspacePodReady as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+(waitForSessionWorkspacePodScheduled as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
 (createSessionWorkspaceService as jest.Mock).mockResolvedValue({});
 (ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
 (deleteSessionWorkspacePod as jest.Mock).mockResolvedValue(undefined);
@@ -401,6 +410,9 @@ describe('AgentSessionService', () => {
     (createAgentPvc as jest.Mock).mockResolvedValue({});
     (createAgentApiKeySecret as jest.Mock).mockResolvedValue({});
     (createSessionWorkspacePod as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+    (createSessionWorkspacePodWithoutWaiting as jest.Mock).mockResolvedValue(undefined);
+    (waitForSessionWorkspacePodReady as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
+    (waitForSessionWorkspacePodScheduled as jest.Mock).mockResolvedValue({ spec: { nodeName: 'agent-node-a' } });
     (createSessionWorkspaceService as jest.Mock).mockResolvedValue({});
     (ensureAgentSessionServiceAccount as jest.Mock).mockResolvedValue('agent-sa');
     (deleteSessionWorkspacePod as jest.Mock).mockResolvedValue(undefined);
@@ -615,12 +627,15 @@ describe('AgentSessionService', () => {
         })
       );
       expect(createAgentPvc).not.toHaveBeenCalled();
-      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePodWithoutWaiting).toHaveBeenCalledWith(
         expect.objectContaining({
           pvcName: 'agent-prewarm-pvc-1234',
           skipWorkspaceBootstrap: true,
         })
       );
+      expect(waitForSessionWorkspacePodScheduled).toHaveBeenCalledWith('test-ns', 'agent-build-123', undefined);
+      expect(waitForSessionWorkspacePodReady).toHaveBeenCalledWith('test-ns', 'agent-build-123', undefined);
       expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
         expect.objectContaining({
           pvcName: 'agent-prewarm-pvc-1234',
@@ -739,7 +754,8 @@ describe('AgentSessionService', () => {
         })
       );
       expect(createAgentPvc).not.toHaveBeenCalled();
-      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+      expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePodWithoutWaiting).toHaveBeenCalledWith(
         expect.objectContaining({
           pvcName: 'agent-prewarm-pvc-5678',
           skipWorkspaceBootstrap: true,
@@ -752,6 +768,8 @@ describe('AgentSessionService', () => {
           ]),
         })
       );
+      expect(waitForSessionWorkspacePodScheduled).toHaveBeenCalledWith('test-ns', 'agent-build-123', undefined);
+      expect(waitForSessionWorkspacePodReady).toHaveBeenCalledWith('test-ns', 'agent-build-123', undefined);
     });
 
     it('passes resolved agent-session resources through to pod creation when provided', async () => {
@@ -1007,6 +1025,97 @@ describe('AgentSessionService', () => {
       await expect(createPromise).resolves.toEqual(expect.objectContaining({ status: 'active' }));
     });
 
+    it('starts attached services after scheduling but before the agent pod is ready for prewarmed same-node sessions', async () => {
+      const scheduled = createDeferred<{ spec: { nodeName: string } }>();
+      const ready = createDeferred<{ spec: { nodeName: string } }>();
+
+      mockGetCompatibleReadyPrewarm.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        services: ['web'],
+        status: 'ready',
+      });
+      (waitForSessionWorkspacePodScheduled as jest.Mock).mockImplementationOnce(() => scheduled.promise);
+      (waitForSessionWorkspacePodReady as jest.Mock).mockImplementationOnce(() => ready.promise);
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+        ],
+      };
+
+      const createPromise = AgentSessionService.createSession(optsWithServices);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(createSessionWorkspacePodWithoutWaiting).toHaveBeenCalled();
+      expect(mockEnableDevMode).not.toHaveBeenCalled();
+
+      scheduled.resolve({ spec: { nodeName: 'agent-node-a' } });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: 'agent-node-a',
+        })
+      );
+      expect(mockSessionQuery.patch).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
+
+      ready.resolve({ spec: { nodeName: 'agent-node-a' } });
+
+      await expect(createPromise).resolves.toEqual(expect.objectContaining({ status: 'active' }));
+    });
+
+    it('starts attached services immediately for prewarmed sessions when same-node placement is disabled', async () => {
+      const ready = createDeferred<{ spec: { nodeName: string } }>();
+
+      mockGetCompatibleReadyPrewarm.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        services: ['web'],
+        status: 'ready',
+      });
+      (waitForSessionWorkspacePodReady as jest.Mock).mockImplementationOnce(() => ready.promise);
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        keepAttachedServicesOnSessionNode: false,
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+        ],
+      };
+
+      const createPromise = AgentSessionService.createSession(optsWithServices);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(createSessionWorkspacePodWithoutWaiting).toHaveBeenCalled();
+      expect(waitForSessionWorkspacePodScheduled).not.toHaveBeenCalled();
+      expect(mockEnableDevMode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deploymentName: 'web-build-uuid',
+          requiredNodeName: undefined,
+        })
+      );
+      expect(mockSessionQuery.patch).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'active' }));
+
+      ready.resolve({ spec: { nodeName: 'agent-node-a' } });
+
+      await expect(createPromise).resolves.toEqual(expect.objectContaining({ status: 'active' }));
+    });
+
     it('does not pin services to the session node when same-node placement is disabled', async () => {
       const optsWithServices: CreateSessionOptions = {
         ...baseOpts,
@@ -1034,6 +1143,36 @@ describe('AgentSessionService', () => {
           requiredNodeName: undefined,
         })
       );
+    });
+
+    it('persists attach-service failures under the attach_services startup stage', async () => {
+      mockGetCompatibleReadyPrewarm.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        services: ['web'],
+        status: 'ready',
+      });
+      mockEnableDevMode.mockRejectedValueOnce(new Error('service attach failed'));
+
+      const optsWithServices: CreateSessionOptions = {
+        ...baseOpts,
+        buildUuid: 'build-123',
+        keepAttachedServicesOnSessionNode: false,
+        services: [
+          {
+            name: 'web',
+            deployId: 1,
+            resourceName: 'web-build-uuid',
+            devConfig: { image: 'node:20', command: 'pnpm dev' },
+          },
+        ],
+      };
+
+      await expect(AgentSessionService.createSession(optsWithServices)).rejects.toThrow('service attach failed');
+
+      const startupFailurePayload = JSON.parse(mockRedis.setex.mock.calls[0][2]);
+      expect(startupFailurePayload.stage).toBe('attach_services');
+      expect(startupFailurePayload.title).toBe('Attached services failed to start');
     });
 
     it('restores successful sibling services when one parallel dev-mode enable fails', async () => {
