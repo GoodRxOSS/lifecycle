@@ -132,7 +132,10 @@ if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.a
   echo "ECR Region: \${AWS_REGION}"
   
   echo "Installing AWS CLI and Docker CLI..."
-  apk add --no-cache aws-cli docker-cli
+  apk add --no-cache --retries 5 aws-cli docker-cli
+
+  export AWS_MAX_ATTEMPTS=5
+  export AWS_RETRY_MODE=adaptive
   
   echo "Testing AWS credentials..."
   if aws sts get-caller-identity; then
@@ -151,7 +154,7 @@ if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.a
 else
   echo "Using in-cluster registry: \${REGISTRY_DOMAIN}"
   echo "Installing Docker CLI..."
-  apk add --no-cache docker-cli
+  apk add --no-cache --retries 5 docker-cli
 fi
 
 echo "Setting DOCKER_CONFIG..."
@@ -316,10 +319,13 @@ export async function buildWithEngine(
   const ecrMatch = registryDomain.match(ecrRegex);
   if (ecrMatch) {
     const region = ecrMatch[1] || 'us-west-2';
-    registryLoginScript =
-      `aws ecr get-login-password --region ${region} | ` +
-      `{ read PASSWORD; mkdir -p /workspace/.docker && ` +
-      `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > /workspace/.docker/config.json; }`;
+    registryLoginScript = [
+      'set -e',
+      'export AWS_MAX_ATTEMPTS=5',
+      'export AWS_RETRY_MODE=adaptive',
+      `aws ecr get-login-password --region ${region} | { read PASSWORD; mkdir -p /workspace/.docker && ` +
+        `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > /workspace/.docker/config.json; }`,
+    ].join('\n');
   } else {
     registryLoginScript =
       `echo "Using in-cluster registry: ${registryDomain}"; ` +
