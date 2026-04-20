@@ -92,25 +92,6 @@ function countChangedLines(value: string): number {
   return value.split('\n').length;
 }
 
-function buildUnifiedDiff(path: string, before: string, after: string): string | null {
-  if (before === after) {
-    return null;
-  }
-
-  const displayPath = trimWorkspacePrefix(path);
-  const beforeLines = before.split('\n');
-  const afterLines = after.split('\n');
-
-  return [
-    `diff --git a/${displayPath} b/${displayPath}`,
-    `--- a/${displayPath}`,
-    `+++ b/${displayPath}`,
-    `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
-    ...beforeLines.map((line) => `-${line}`),
-    ...afterLines.map((line) => `+${line}`),
-  ].join('\n');
-}
-
 function unwrapToolPayload(value: unknown): unknown {
   if (!isRecord(value) || !Array.isArray(value.content)) {
     return value;
@@ -270,7 +251,7 @@ export function buildProposedFileChanges({
       additions: countChangedLines(args.newText),
       deletions: countChangedLines(args.oldText),
       truncated: false,
-      unifiedDiff: buildUnifiedDiff(args.path, args.oldText, args.newText),
+      unifiedDiff: null,
       beforeTextPreview: args.oldText,
       afterTextPreview: args.newText,
       summary: `Proposed update to ${trimWorkspacePrefix(args.path)}`,
