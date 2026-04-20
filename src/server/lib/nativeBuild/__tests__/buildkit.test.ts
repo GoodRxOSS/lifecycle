@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { buildkitBuild, BuildkitBuildOptions, generateSecretArgsScript } from '../engines';
+import { buildkitBuild, NativeBuildOptions, generateSecretArgsScript } from '../engines';
 import { shellPromise } from '../../shell';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
@@ -68,7 +68,7 @@ describe('buildkitBuild', () => {
     build: { isStatic: false },
   } as any;
 
-  const mockOptions: BuildkitBuildOptions = {
+  const mockOptions: NativeBuildOptions = {
     ecrRepo: 'test-repo',
     ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
     envVars: { NODE_ENV: 'production' },
@@ -247,6 +247,35 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('build-arg:NODE_ENV=production');
   });
 
+  it('keeps registry bootstrap installs default and adds AWS retry env vars', async () => {
+    await buildkitBuild(mockDeploy, mockOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('apk add --no-cache aws-cli docker-cli');
+    expect(fullCommand).toContain('apk add --no-cache docker-cli');
+    expect(fullCommand).toContain('export AWS_MAX_ATTEMPTS=5');
+    expect(fullCommand).toContain('export AWS_RETRY_MODE=adaptive');
+  });
+
+  it('renders registry domain safely for non-ECR buildkit targets', async () => {
+    const optionsWithCustomRegistry = {
+      ...mockOptions,
+      ecrDomain: 'registry.internal.svc.cluster.local',
+    };
+
+    await buildkitBuild(mockDeploy, optionsWithCustomRegistry);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"registry.internal.svc.cluster.local\\"');
+    expect(fullCommand).toContain('apk add --no-cache docker-cli');
+  });
+
   it('coerces numeric env var values to strings for Kubernetes compatibility', async () => {
     const optionsWithNumericEnv = {
       ...mockOptions,
@@ -320,7 +349,7 @@ describe('build resource precedence', () => {
     build: { isStatic: false },
   } as any;
 
-  const baseOptions: BuildkitBuildOptions = {
+  const baseOptions: NativeBuildOptions = {
     ecrRepo: 'test-repo',
     ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
     envVars: { NODE_ENV: 'production' },
@@ -495,7 +524,7 @@ describe('build pod annotations', () => {
     build: { isStatic: false },
   } as any;
 
-  const baseOptions: BuildkitBuildOptions = {
+  const baseOptions: NativeBuildOptions = {
     ecrRepo: 'test-repo',
     ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
     envVars: { NODE_ENV: 'production' },
@@ -653,5 +682,71 @@ describe('generateSecretArgsScript', () => {
     expect(result).not.toContain('\\$');
     expect(result).toContain('$MY_SECRET');
     expect(result).toContain('--opt build-arg:MY_SECRET=');
+  });
+});
+
+describe('kaniko registry login bootstrap', () => {
+  const mockDeploy = {
+    deployable: { name: 'test-service' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  const baseOptions: NativeBuildOptions = {
+    ecrRepo: 'test-repo',
+    ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    envVars: { NODE_ENV: 'production' },
+    dockerfilePath: 'Dockerfile',
+    tag: 'v1.0.0',
+    revision: 'abc123def456789',
+    repo: 'owner/repo',
+    branch: 'main',
+    namespace: 'env-test-123',
+    buildId: '456',
+    deployUuid: 'test-service-abc123',
+    jobTimeout: 1800,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({}),
+    });
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'Build completed successfully',
+      success: true,
+    });
+  });
+
+  it('adds AWS retry env vars for ECR login', async () => {
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, baseOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('image: "amazon/aws-cli:2.13.0"');
+    expect(fullCommand).toContain('export AWS_MAX_ATTEMPTS=5');
+    expect(fullCommand).toContain('export AWS_RETRY_MODE=adaptive');
+    expect(fullCommand).toContain('aws ecr get-login-password --region us-east-1');
+  });
+
+  it('keeps non-ECR login bootstrap generic', async () => {
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, {
+      ...baseOptions,
+      ecrDomain: 'registry.internal.svc.cluster.local',
+    });
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('image: "alpine:3.18"');
+    expect(fullCommand).toContain('Using in-cluster registry: registry.internal.svc.cluster.local');
+    expect(fullCommand).not.toContain('AWS_MAX_ATTEMPTS=5');
   });
 });
