@@ -833,9 +833,7 @@ export async function getTcpSocketPort(deployment: DeploymentConfig): Promise<nu
   if (deployment?.readiness?.httpGet?.port && deployment?.readiness?.httpGet?.path) {
     return null;
   }
-  const { serviceDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-
-  return serviceDefaults.readinessTcpSocketPort;
+  return null;
 }
 
 /**
@@ -852,12 +850,7 @@ export async function getHttpGetPortAndHost(deployment: DeploymentConfig): Promi
     };
   }
   if (!deployment?.readiness?.httpGet?.port && !deployment?.readiness?.httpGet?.path) {
-    const { serviceDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-
-    return {
-      port: serviceDefaults.readinessHttpGetPort,
-      path: serviceDefaults.readinessHttpGetPath,
-    };
+    return null;
   }
   return {
     port: deployment.readiness.httpGet.port,

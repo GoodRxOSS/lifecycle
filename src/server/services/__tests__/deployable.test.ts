@@ -40,9 +40,6 @@ const serviceDefaults = {
   readinessTimeoutSeconds: 1,
   readinessSuccessThreshold: 1,
   readinessFailureThreshold: 30,
-  readinessTcpSocketPort: 8090,
-  readinessHttpGetPort: 8080,
-  readinessHttpGetPath: '/__lbheartbeat__',
   acmARN: 'arn:aws:acm:us-west-2:account-id:certificate/ceritifcate-id',
   grpc: false,
   defaultIPWhiteList: '{ 70.52.40.40/32,160.72.36.84/32 }',
@@ -391,6 +388,40 @@ describe('Deployable Service', () => {
         deploymentDependsOn: [],
         helm: undefined,
       });
+    });
+
+    test('Generate config should not infer readiness when not configured', async () => {
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+              ports: [8080],
+            },
+          },
+          deployment: {
+            public: false,
+            capacityType: 'SPOT',
+          },
+        },
+      };
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        githubService
+      );
+
+      expect(result.readinessTcpSocketPort).toBeNull();
+      expect(result.readinessHttpGetPort).toBeUndefined();
+      expect(result.readinessHttpGetPath).toBeUndefined();
     });
   });
 });
