@@ -247,15 +247,15 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('build-arg:NODE_ENV=production');
   });
 
-  it('adds retry settings to registry bootstrap commands', async () => {
+  it('keeps registry bootstrap installs default and adds AWS retry env vars', async () => {
     await buildkitBuild(mockDeploy, mockOptions);
 
     const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
     const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
     const fullCommand = applyCall[0];
 
-    expect(fullCommand).toContain('apk add --no-cache --retries 5 aws-cli docker-cli');
-    expect(fullCommand).toContain('apk add --no-cache --retries 5 docker-cli');
+    expect(fullCommand).toContain('apk add --no-cache aws-cli docker-cli');
+    expect(fullCommand).toContain('apk add --no-cache docker-cli');
     expect(fullCommand).toContain('export AWS_MAX_ATTEMPTS=5');
     expect(fullCommand).toContain('export AWS_RETRY_MODE=adaptive');
   });
@@ -273,7 +273,7 @@ describe('buildkitBuild', () => {
     const fullCommand = applyCall[0];
 
     expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"registry.internal.svc.cluster.local\\"');
-    expect(fullCommand).toContain('apk add --no-cache --retries 5 docker-cli');
+    expect(fullCommand).toContain('apk add --no-cache docker-cli');
   });
 
   it('coerces numeric env var values to strings for Kubernetes compatibility', async () => {

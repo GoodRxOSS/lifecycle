@@ -132,7 +132,7 @@ if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.a
   echo "ECR Region: \${AWS_REGION}"
   
   echo "Installing AWS CLI and Docker CLI..."
-  apk add --no-cache --retries 5 aws-cli docker-cli
+  apk add --no-cache aws-cli docker-cli
 
   export AWS_MAX_ATTEMPTS=5
   export AWS_RETRY_MODE=adaptive
@@ -154,7 +154,7 @@ if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.a
 else
   echo "Using in-cluster registry: \${REGISTRY_DOMAIN}"
   echo "Installing Docker CLI..."
-  apk add --no-cache --retries 5 docker-cli
+  apk add --no-cache docker-cli
 fi
 
 echo "Setting DOCKER_CONFIG..."
