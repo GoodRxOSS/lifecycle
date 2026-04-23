@@ -332,6 +332,7 @@ export default class BuildService extends BaseService {
           'statusMessage',
           'active',
           'devMode',
+          'cname',
           'deployableId',
           'branchName',
           'deployPipelineId',
