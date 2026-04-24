@@ -1182,6 +1182,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             dockerImage: { type: 'string', example: 'myapp:web' },
             buildLogs: { type: 'string', example: 'https://g.codefresh.io/build/123...' },
             active: { type: 'boolean', example: true },
+            cname: { type: 'string', example: 'myapp.example.com' },
             devMode: { type: 'boolean', example: false },
             branchName: { type: 'string', example: 'main' },
             publicUrl: { type: 'string', example: 'http://myapp.example.com' },

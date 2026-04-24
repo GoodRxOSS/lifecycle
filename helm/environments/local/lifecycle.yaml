@@ -30,8 +30,6 @@ global:
     # Add any global env vars here if needed
     - name: PORT
       value: '80'
-    - name: ENABLE_AUTH
-      value: 'false'
     - name: OBJECT_STORE_TYPE
       value: 'minio'
     - name: OBJECT_STORE_ENDPOINT
@@ -46,8 +44,6 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
-    - name: ALLOWED_ORIGINS
-      value: 'http://localhost:3000'
     - name: AGENT_SESSION_WORKSPACE_IMAGE
       value: 'lifecycle-workspace:latest'
     - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
