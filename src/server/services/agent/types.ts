@@ -31,6 +31,7 @@ export type AgentCapabilityKey = (typeof AGENT_CAPABILITY_KEYS)[number];
 export type AgentApprovalMode = 'allow' | 'require_approval' | 'deny';
 export type AgentRunStatus =
   | 'queued'
+  | 'starting'
   | 'running'
   | 'waiting_for_approval'
   | 'waiting_for_input'
@@ -103,6 +104,7 @@ export interface AgentApprovalPolicy {
 }
 
 export interface AgentUIMessageMetadata {
+  clientMessageId?: string;
   sessionId?: string;
   threadId?: string;
   runId?: string;

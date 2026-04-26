@@ -48,7 +48,7 @@ describe('agent session system prompt', () => {
         skillsAvailable: true,
         toolLines: [
           '- inspect files, services, and git state: workspace.read_file, workspace.exec',
-          '- run mutating or networked shell commands: workspace.exec_mutation',
+          '- run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
         ],
         services: [
           {
@@ -68,7 +68,7 @@ describe('agent session system prompt', () => {
         '- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it',
         '- equipped tools:',
         '  - inspect files, services, and git state: workspace.read_file, workspace.exec',
-        '  - run mutating or networked shell commands: workspace.exec_mutation',
+        '  - run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
       ].join('\n')
     );
   });

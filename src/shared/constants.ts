@@ -78,6 +78,27 @@ export enum BuildKind {
   SANDBOX = 'sandbox',
 }
 
+export enum AgentSessionKind {
+  ENVIRONMENT = 'environment',
+  SANDBOX = 'sandbox',
+  CHAT = 'chat',
+}
+
+export enum AgentChatStatus {
+  READY = 'ready',
+  ENDED = 'ended',
+  ERROR = 'error',
+}
+
+export enum AgentWorkspaceStatus {
+  NONE = 'none',
+  PROVISIONING = 'provisioning',
+  READY = 'ready',
+  HIBERNATED = 'hibernated',
+  FAILED = 'failed',
+  ENDED = 'ended',
+}
+
 export enum PullRequestStatus {
   OPEN = 'open',
   CLOSED = 'closed',

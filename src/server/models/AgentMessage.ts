@@ -17,10 +17,13 @@
 import Model from './_Model';
 
 export default class AgentMessage extends Model {
+  uuid!: string;
+  clientMessageId!: string | null;
   threadId!: number;
   runId!: number | null;
   role!: 'user' | 'assistant' | 'system' | 'tool';
-  uiMessage!: Record<string, unknown>;
+  parts!: Array<Record<string, unknown>>;
+  uiMessage!: Record<string, unknown> | null;
   metadata!: Record<string, unknown>;
 
   static tableName = 'agent_messages';
@@ -29,19 +32,25 @@ export default class AgentMessage extends Model {
 
   static jsonSchema = {
     type: 'object',
-    required: ['threadId', 'role', 'uiMessage'],
+    required: ['threadId', 'role'],
     properties: {
       id: { type: 'integer' },
+      uuid: {
+        type: 'string',
+        pattern: '^[0-9a-fA-F-]{36}$',
+      },
       threadId: { type: 'integer' },
+      clientMessageId: { type: ['string', 'null'] },
       runId: { type: ['integer', 'null'] },
       role: { type: 'string', enum: ['user', 'assistant', 'system', 'tool'] },
-      uiMessage: { type: 'object' },
+      parts: { type: 'array', items: { type: 'object' }, default: [] },
+      uiMessage: { type: ['object', 'null'] },
       metadata: { type: 'object', default: {} },
     },
   };
 
   static get jsonAttributes() {
-    return ['uiMessage', 'metadata'];
+    return ['parts', 'uiMessage', 'metadata'];
   }
 
   static get relationMappings() {

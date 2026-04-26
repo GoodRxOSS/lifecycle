@@ -15,8 +15,6 @@
  */
 
 export const SUPPORTED_AGENT_PROVIDER_NAMES = ['anthropic', 'openai', 'gemini', 'google'] as const;
-export const AGENT_API_KEY_HEADER = 'x-lifecycle-agent-api-key';
-export const AGENT_API_KEY_PROVIDER_HEADER = 'x-lifecycle-agent-api-key-provider';
 
 export type SupportedAgentProviderName = (typeof SUPPORTED_AGENT_PROVIDER_NAMES)[number];
 export const STORED_AGENT_PROVIDER_NAMES = ['anthropic', 'openai', 'gemini'] as const;

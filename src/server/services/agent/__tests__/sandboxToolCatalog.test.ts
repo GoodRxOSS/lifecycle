@@ -71,7 +71,7 @@ describe('sandboxToolCatalog', () => {
     ).toEqual([
       '- inspect files, services, and git state: workspace.read_file, workspace.glob, workspace.grep, workspace.exec, session.get_workspace_state, session.list_ports, session.list_processes, session.get_service_status, git.status, git.diff',
       '- change workspace files directly: workspace.write_file, workspace.edit_file',
-      '- run mutating or networked shell commands: workspace.exec_mutation',
+      '- run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
       '- manage git changes: git.add, git.commit, git.branch',
       '- discover and learn equipped skills: skills.list, skills.learn',
       '- do not claim a tool is unavailable unless it is not equipped here or a real tool call fails',

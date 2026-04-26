@@ -54,6 +54,12 @@ const resourceRequirementsSchema = {
   additionalProperties: false,
 };
 
+const workspaceStorageSizeSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 64,
+};
+
 export const agentSessionControlPlaneConfigSchema = {
   type: 'object',
   properties: {
@@ -98,6 +104,43 @@ export const agentSessionRuntimeSettingsSchema = {
         workspace: resourceRequirementsSchema,
         editor: resourceRequirementsSchema,
         workspaceGateway: resourceRequirementsSchema,
+      },
+      additionalProperties: false,
+    },
+    workspaceStorage: {
+      type: 'object',
+      properties: {
+        defaultSize: workspaceStorageSizeSchema,
+        allowedSizes: {
+          type: 'array',
+          items: workspaceStorageSizeSchema,
+          uniqueItems: true,
+        },
+        allowClientOverride: { type: 'boolean' },
+        accessMode: { type: 'string', enum: ['ReadWriteOnce', 'ReadWriteMany'] },
+      },
+      additionalProperties: false,
+    },
+    cleanup: {
+      type: 'object',
+      properties: {
+        activeIdleSuspendMs: positiveIntegerSchema,
+        startingTimeoutMs: positiveIntegerSchema,
+        hibernatedRetentionMs: positiveIntegerSchema,
+        intervalMs: positiveIntegerSchema,
+        redisTtlSeconds: positiveIntegerSchema,
+      },
+      additionalProperties: false,
+    },
+    durability: {
+      type: 'object',
+      properties: {
+        runExecutionLeaseMs: positiveIntegerSchema,
+        queuedRunDispatchStaleMs: positiveIntegerSchema,
+        dispatchRecoveryLimit: positiveIntegerSchema,
+        maxDurablePayloadBytes: positiveIntegerSchema,
+        payloadPreviewBytes: positiveIntegerSchema,
+        fileChangePreviewChars: positiveIntegerSchema,
       },
       additionalProperties: false,
     },

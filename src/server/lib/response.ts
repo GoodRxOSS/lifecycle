@@ -20,6 +20,8 @@ import { getLogger } from 'server/lib/logger';
 
 interface Metadata {
   pagination?: PaginationMetadata;
+  limit?: number;
+  maxLimit?: number;
 }
 
 type SuccessStatusCode = 200 | 201;

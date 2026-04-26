@@ -17,6 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 
 const mockCreatePvc = jest.fn();
+const mockReadPvc = jest.fn();
 const mockDeletePvc = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => {
@@ -27,6 +28,7 @@ jest.mock('@kubernetes/client-node', () => {
       loadFromDefault: jest.fn(),
       makeApiClient: jest.fn().mockReturnValue({
         createNamespacedPersistentVolumeClaim: mockCreatePvc,
+        readNamespacedPersistentVolumeClaim: mockReadPvc,
         deleteNamespacedPersistentVolumeClaim: mockDeletePvc,
       }),
     })),
@@ -94,14 +96,24 @@ describe('pvcFactory', () => {
       expect(pvcBody.spec.accessModes).toEqual(['ReadWriteOnce']);
     });
 
-    it('honors AGENT_SESSION_PVC_ACCESS_MODE when configured', async () => {
-      process.env.AGENT_SESSION_PVC_ACCESS_MODE = 'ReadWriteMany';
+    it('honors the configured access mode when provided', async () => {
       mockCreatePvc.mockResolvedValue({ body: { metadata: { name: 'test-pvc' } } });
 
-      await createAgentPvc('test-ns', 'test-pvc');
+      await createAgentPvc('test-ns', 'test-pvc', '10Gi', undefined, 'ReadWriteMany');
 
       const [, pvcBody] = mockCreatePvc.mock.calls[0];
       expect(pvcBody.spec.accessModes).toEqual(['ReadWriteMany']);
+    });
+
+    it('reuses an existing PVC on resume', async () => {
+      mockCreatePvc.mockRejectedValue(new k8s.HttpError({ statusCode: 409 } as any, 'already exists', 409));
+      mockReadPvc.mockResolvedValue({ body: { metadata: { name: 'test-pvc' } } });
+
+      await expect(createAgentPvc('test-ns', 'test-pvc')).resolves.toEqual({
+        metadata: { name: 'test-pvc' },
+      });
+
+      expect(mockReadPvc).toHaveBeenCalledWith('test-pvc', 'test-ns');
     });
   });
 

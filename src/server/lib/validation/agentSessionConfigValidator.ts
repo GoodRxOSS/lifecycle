@@ -84,6 +84,50 @@ function validateBooleanField(value: unknown, fieldName: string): void {
   }
 }
 
+function validateOptionalStringField(value: unknown, fieldName: string, maxLength = 2048): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a non-empty string.`);
+  }
+
+  if (value.length > maxLength) {
+    throw new AgentSessionConfigValidationError(`${fieldName} exceeds maximum length of ${maxLength} characters.`);
+  }
+}
+
+function validateStringArrayField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be an array.`);
+  }
+
+  const seen = new Set<string>();
+  for (const item of value) {
+    validateOptionalStringField(item, `${fieldName} entry`, 64);
+    const normalized = item.trim();
+    if (seen.has(normalized)) {
+      throw new AgentSessionConfigValidationError(`${fieldName} contains duplicate value "${normalized}".`);
+    }
+    seen.add(normalized);
+  }
+}
+
+function validateAccessModeField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (value !== 'ReadWriteOnce' && value !== 'ReadWriteMany') {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be ReadWriteOnce or ReadWriteMany.`);
+  }
+}
+
 export function validateAgentSessionControlPlaneConfig(config: Partial<AgentSessionControlPlaneConfigValue>): void {
   validatePromptField(config.systemPrompt, 'systemPrompt');
   validatePromptField(config.appendSystemPrompt, 'appendSystemPrompt');
@@ -132,4 +176,19 @@ export function validateAgentSessionRuntimeSettings(config: AgentSessionRuntimeS
   validateStringRecord(config.resources?.editor?.limits, 'resources.editor.limits');
   validateStringRecord(config.resources?.workspaceGateway?.requests, 'resources.workspaceGateway.requests');
   validateStringRecord(config.resources?.workspaceGateway?.limits, 'resources.workspaceGateway.limits');
+  validateOptionalStringField(config.workspaceStorage?.defaultSize, 'workspaceStorage.defaultSize', 64);
+  validateStringArrayField(config.workspaceStorage?.allowedSizes, 'workspaceStorage.allowedSizes');
+  validateBooleanField(config.workspaceStorage?.allowClientOverride, 'workspaceStorage.allowClientOverride');
+  validateAccessModeField(config.workspaceStorage?.accessMode, 'workspaceStorage.accessMode');
+  validatePositiveIntegerField(config.cleanup?.activeIdleSuspendMs, 'cleanup.activeIdleSuspendMs');
+  validatePositiveIntegerField(config.cleanup?.startingTimeoutMs, 'cleanup.startingTimeoutMs');
+  validatePositiveIntegerField(config.cleanup?.hibernatedRetentionMs, 'cleanup.hibernatedRetentionMs');
+  validatePositiveIntegerField(config.cleanup?.intervalMs, 'cleanup.intervalMs');
+  validatePositiveIntegerField(config.cleanup?.redisTtlSeconds, 'cleanup.redisTtlSeconds');
+  validatePositiveIntegerField(config.durability?.runExecutionLeaseMs, 'durability.runExecutionLeaseMs');
+  validatePositiveIntegerField(config.durability?.queuedRunDispatchStaleMs, 'durability.queuedRunDispatchStaleMs');
+  validatePositiveIntegerField(config.durability?.dispatchRecoveryLimit, 'durability.dispatchRecoveryLimit');
+  validatePositiveIntegerField(config.durability?.maxDurablePayloadBytes, 'durability.maxDurablePayloadBytes');
+  validatePositiveIntegerField(config.durability?.payloadPreviewBytes, 'durability.payloadPreviewBytes');
+  validatePositiveIntegerField(config.durability?.fileChangePreviewChars, 'durability.fileChangePreviewChars');
 }

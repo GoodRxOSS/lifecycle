@@ -18,6 +18,7 @@ import { NextResponse } from 'next/server';
 import type { Middleware } from './chain';
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) => o.trim()) ?? [];
+const allowedHeaders = ['Content-Type', 'Authorization', 'Last-Event-ID'];
 
 export const corsMiddleware: Middleware = async (request, next) => {
   const origin = request.headers.get('origin');
@@ -27,7 +28,7 @@ export const corsMiddleware: Middleware = async (request, next) => {
     'Access-Control-Allow-Origin': isAllowedOrigin ? origin : allowedOrigins[0],
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': allowedHeaders.join(', '),
   };
 
   if (request.method === 'OPTIONS') {

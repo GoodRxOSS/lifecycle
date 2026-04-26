@@ -89,7 +89,6 @@ describe('resolveRequestedModelSelection', () => {
 
 describe('AgentProviderRegistry credential resolution', () => {
   const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
-  const originalEnableAuth = process.env.ENABLE_AUTH;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -118,12 +117,6 @@ describe('AgentProviderRegistry credential resolution', () => {
       delete process.env.ANTHROPIC_API_KEY;
     } else {
       process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
-    }
-
-    if (originalEnableAuth === undefined) {
-      delete process.env.ENABLE_AUTH;
-    } else {
-      process.env.ENABLE_AUTH = originalEnableAuth;
     }
   });
 
@@ -224,66 +217,7 @@ describe('AgentProviderRegistry credential resolution', () => {
     ).rejects.toBeInstanceOf(MissingAgentProviderApiKeyError);
   });
 
-  it('uses the request api key for local auth-disabled sessions when the provider matches', async () => {
-    process.env.ENABLE_AUTH = 'false';
-
-    await expect(
-      AgentProviderRegistry.getRequiredStoredApiKey({
-        provider: 'anthropic',
-        userIdentity: {
-          userId: 'sample-user',
-          githubUsername: 'sample-user',
-        },
-        requestApiKey: 'sample-browser-anthropic-key',
-        requestApiKeyProvider: 'anthropic',
-      })
-    ).resolves.toBe('sample-browser-anthropic-key');
-
-    await expect(
-      AgentProviderRegistry.resolveCredentialEnvMap({
-        repoFullName: 'example-org/example-repo',
-        userIdentity: {
-          userId: 'sample-user',
-          githubUsername: 'sample-user',
-        },
-        requestApiKey: 'sample-browser-anthropic-key',
-        requestApiKeyProvider: 'anthropic',
-      })
-    ).resolves.toEqual({
-      ANTHROPIC_API_KEY: 'sample-browser-anthropic-key',
-    });
-
-    await expect(
-      AgentProviderRegistry.getRequiredStoredApiKey({
-        provider: 'google',
-        userIdentity: {
-          userId: 'sample-user',
-          githubUsername: 'sample-user',
-        },
-        requestApiKey: 'sample-browser-gemini-key',
-        requestApiKeyProvider: 'gemini',
-      })
-    ).resolves.toBe('sample-browser-gemini-key');
-  });
-
-  it('does not treat a mismatched local request key as valid for another provider', async () => {
-    process.env.ENABLE_AUTH = 'false';
-
-    await expect(
-      AgentProviderRegistry.getRequiredStoredApiKey({
-        provider: 'gemini',
-        userIdentity: {
-          userId: 'sample-user',
-          githubUsername: 'sample-user',
-        },
-        requestApiKey: 'sample-browser-anthropic-key',
-        requestApiKeyProvider: 'anthropic',
-      })
-    ).rejects.toBeInstanceOf(MissingAgentProviderApiKeyError);
-  });
-
-  it('exposes provider-scoped local request keys in the available model list', async () => {
-    process.env.ENABLE_AUTH = 'false';
+  it('lists only models backed by stored user keys', async () => {
     mockGetEffectiveConfig.mockResolvedValueOnce({
       providers: [
         {
@@ -316,6 +250,9 @@ describe('AgentProviderRegistry credential resolution', () => {
         },
       ],
     });
+    (UserApiKeyService.getDecryptedKey as jest.Mock).mockImplementation(async (_userId: string, provider: string) =>
+      provider === 'gemini' ? 'user-gemini-key' : null
+    );
 
     await expect(
       AgentProviderRegistry.listAvailableModelsForUser({
@@ -324,8 +261,6 @@ describe('AgentProviderRegistry credential resolution', () => {
           userId: 'sample-user',
           githubUsername: 'sample-user',
         },
-        requestApiKey: 'sample-browser-gemini-key',
-        requestApiKeyProvider: 'gemini',
       })
     ).resolves.toEqual([
       {
