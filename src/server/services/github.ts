@@ -18,7 +18,12 @@ import { parse as fParse } from 'flatted';
 import _ from 'lodash';
 import Service from './_service';
 import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
-import { IssueCommentEvent, PullRequestEvent, PushEvent } from '@octokit/webhooks-types';
+import {
+  IssueCommentEvent,
+  PullRequestEvent,
+  PushEvent,
+  RepositoryEvent as GithubRepositoryEvent,
+} from '@octokit/webhooks-types';
 import {
   GithubPullRequestActions,
   GithubWebhookTypes,
@@ -29,11 +34,12 @@ import {
 import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
-import { Environment, Repository, Build, PullRequest } from 'server/models';
+import { Repository, Build, PullRequest } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
 import { enableKillSwitch, isStaging, hasDeployLabel, isLifecycleLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
+import RepositoryService from './repository';
 
 interface PullRequestPatchState {
   deployLabelPresent: boolean;
@@ -41,17 +47,84 @@ interface PullRequestPatchState {
 }
 
 export default class GithubService extends Service {
+  private readonly repositoryService = new RepositoryService(this.db, this.redis, this.redlock, this.queueManager);
+
+  public shouldProcessWebhook = async (body: {
+    repository?: {
+      id?: number;
+      full_name?: string;
+      html_url?: string;
+      owner?: { id?: number };
+    };
+    installation?: { id?: number };
+  }): Promise<boolean> => {
+    const repositoryPayload = body?.repository;
+    const installationId = body?.installation?.id;
+
+    if (!repositoryPayload) {
+      return true;
+    }
+
+    if (!repositoryPayload?.id) {
+      getLogger().warn('Webhook: skipped reason=missing_repository_id');
+      return false;
+    }
+
+    if (!installationId) {
+      getLogger({ githubRepositoryId: repositoryPayload.id }).warn('Webhook: skipped reason=missing_installation_id');
+      return false;
+    }
+
+    const onboarded = await this.repositoryService.isRepositoryOnboarded(installationId, repositoryPayload.id);
+
+    if (!onboarded) {
+      getLogger({
+        githubRepositoryId: repositoryPayload.id,
+        githubInstallationId: installationId,
+        fullName: repositoryPayload.full_name,
+      }).debug('Webhook: skipped reason=repository_not_onboarded');
+    }
+
+    return onboarded;
+  };
+
+  handleRepositoryWebhook = async (body: GithubRepositoryEvent) => {
+    const { action, repository, installation } = body;
+    getLogger({}).info(`GitHub: repository event action=${action} repo=${repository?.full_name}`);
+
+    if (action !== 'renamed') {
+      return;
+    }
+
+    if (!installation?.id || !repository?.id || !repository?.full_name) {
+      getLogger({
+        githubRepositoryId: repository?.id,
+        fullName: repository?.full_name,
+      }).warn('GitHub: repository rename skipped reason=missing_required_metadata');
+      return;
+    }
+
+    await this.db.services.Repository.syncRepositoryRename({
+      githubRepositoryId: repository.id,
+      githubInstallationId: installation.id,
+      ownerId: repository.owner?.id,
+      ownerLogin: repository.owner?.login,
+      name: repository.name,
+      fullName: repository.full_name,
+      htmlUrl: repository.html_url,
+    });
+  };
+
   // Handle the pull request webhook mapping the entrance with webhook body
   async handlePullRequestHook({
     action,
     number,
     repository: {
       id: repositoryId,
-      owner: { id: ownerId, html_url: htmlUrl },
-      name,
+      owner: { id: ownerId },
       full_name: fullName,
     },
-    installation: { id: installationId },
+    installation,
     pull_request: {
       id: githubPullRequestId,
       head: { ref: branch, sha: branchSha },
@@ -65,11 +138,23 @@ export default class GithubService extends Service {
       action as GithubPullRequestActions
     );
     const isClosed = action === GithubPullRequestActions.CLOSED;
-    let environment = {} as Environment;
     let lifecycleConfig = {} as LifecycleYamlConfigOptions;
-    let pullRequest: PullRequest, repository: Repository, build: Build;
+    let pullRequest: PullRequest, repository: Repository | undefined, build: Build;
 
     try {
+      const installationId = installation?.id;
+      if (!installationId) {
+        getLogger({ githubRepositoryId: repositoryId }).warn('PR: skipped reason=missing_installation_id');
+        return;
+      }
+
+      repository = await this.db.services.Repository.findRepository(ownerId, repositoryId, installationId);
+
+      if (!repository) {
+        getLogger({}).info(`PR: skipping non-onboarded repository repo=${fullName} repositoryId=${repositoryId}`);
+        return;
+      }
+
       if (isOpened) {
         try {
           lifecycleConfig = (await github.getYamlFileContent({
@@ -82,25 +167,7 @@ export default class GithubService extends Service {
           getLogger({}).warn({ error }, `Config: fetch failed repo=${fullName}/${branch}`);
         }
       }
-      repository = await this.db.services.Repository.findRepository(ownerId, repositoryId, installationId);
       const autoDeploy = lifecycleConfig?.environment?.autoDeploy;
-
-      if (!repository) {
-        environment = await this.db.services.Environment.findOrCreateEnvironment(name, name, autoDeploy);
-
-        repository = await this.db.services.Repository.findOrCreateRepository(
-          ownerId,
-          repositoryId,
-          installationId,
-          fullName,
-          htmlUrl,
-          environment.id
-        );
-
-        // NOTE: we don't want to create a service record by default anymore to avoid naming the service after the repo name
-        // const isFullYaml = this.db.services.Environment.enableFullYamlSupport(environment);
-        // if (isFullYaml) this.db.services.LCService.findOrCreateDefaultService(environment, repository);
-      }
 
       pullRequest = await this.db.services.PullRequest.findOrCreatePullRequest(repository, githubPullRequestId, {
         title,
@@ -329,9 +396,12 @@ export default class GithubService extends Service {
           getLogger().info(`Push: skipping dev mode service deployId=${deploy.id} service=${deploy.service?.name}`);
           return false;
         }
-        const serviceBranchName: string = deploy.build.enableFullYaml
-          ? deploy.deployable.defaultBranchName
-          : deploy.service.branchName;
+        const serviceBranchName = deploy.build.enableFullYaml
+          ? deploy.deployable?.defaultBranchName
+          : deploy.service?.branchName;
+        if (!serviceBranchName) {
+          return false;
+        }
         const shouldBuild =
           deploy.build.trackDefaultBranches || serviceBranchName.toLowerCase() !== branchName.toLowerCase();
 
@@ -439,6 +509,11 @@ export default class GithubService extends Service {
       throw new Error('Webhook not verified');
     }
 
+    const shouldProcessWebhook = await this.shouldProcessWebhook(body);
+    if (!shouldProcessWebhook) {
+      return;
+    }
+
     switch (type) {
       case GithubWebhookTypes.PULL_REQUEST:
         try {
@@ -466,6 +541,13 @@ export default class GithubService extends Service {
           return await this.handleIssueCommentWebhook(body);
         } catch (e) {
           getLogger({}).error({ error: e }, `GitHub: ISSUE_COMMENT event handling failed`);
+          throw e;
+        }
+      case GithubWebhookTypes.REPOSITORY:
+        try {
+          return await this.handleRepositoryWebhook(body as GithubRepositoryEvent);
+        } catch (e) {
+          getLogger({}).error({ error: e }, `GitHub: REPOSITORY event handling failed`);
           throw e;
         }
       default:

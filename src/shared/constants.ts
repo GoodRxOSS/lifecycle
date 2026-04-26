@@ -103,6 +103,7 @@ export enum GithubWebhookTypes {
   PULL_REQUEST = 'pull_request',
   INTEGRATION_INSTALLATION = 'integration_installation',
   PUSH = 'push',
+  REPOSITORY = 'repository',
   LABELED = 'labeled',
   UNLABELED = 'unlabeled',
   ISSUE_COMMENT = 'issue_comment',

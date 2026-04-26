@@ -16,6 +16,7 @@
 
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 import Github from '../github';
+import RepositoryService from '../repository';
 import { DeployStatus, PullRequestStatus } from 'shared/constants';
 import { PushEvent } from '@octokit/webhooks-types';
 import * as githubLib from 'server/lib/github';
@@ -46,13 +47,14 @@ jest.mock('server/lib/logger', () => ({
     debug: jest.fn(),
     child: jest.fn().mockReturnThis(),
   })),
-  withLogContext: jest.fn((ctx, fn) => fn()),
+  withLogContext: jest.fn((_ctx, fn) => fn()),
   extractContextForQueue: jest.fn(() => ({})),
   LogStage: {},
 }));
 
 jest.mock('server/lib/github', () => ({
   getYamlFileContent: jest.fn(),
+  verifyWebhookSignature: jest.fn(() => true),
 }));
 
 const createDedupeAwareResolveEnqueue = (queueAdd: jest.Mock) => {
@@ -65,6 +67,98 @@ const createDedupeAwareResolveEnqueue = (queueAdd: jest.Mock) => {
     return queueAdd('resolve-deploy', payload);
   });
 };
+
+describe('Github Service - repository onboarding gate', () => {
+  let githubService: Github;
+  let mockDb: any;
+  let mockQueueManager: any;
+  let isRepositoryOnboarded: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isRepositoryOnboarded = jest.spyOn(RepositoryService.prototype, 'isRepositoryOnboarded');
+    mockDb = {
+      services: {
+        Repository: {
+          syncRepositoryRename: jest.fn(),
+        },
+      },
+    };
+    mockQueueManager = {
+      registerQueue: jest.fn().mockReturnValue({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      }),
+    };
+    githubService = new Github(mockDb, {}, {} as any, mockQueueManager);
+  });
+
+  test('skips repo-scoped webhooks for repositories that are not onboarded', async () => {
+    isRepositoryOnboarded.mockResolvedValue(false);
+    const handlePushWebhook = jest.spyOn(githubService, 'handlePushWebhook').mockResolvedValue(undefined);
+
+    await githubService.dispatchWebhook({
+      headers: { 'x-github-event': 'push' },
+      body: {
+        installation: { id: 34 },
+        repository: {
+          id: 12,
+          full_name: 'example-org/example-repo',
+        },
+      },
+    } as any);
+
+    expect(isRepositoryOnboarded).toHaveBeenCalledWith(34, 12);
+    expect(handlePushWebhook).not.toHaveBeenCalled();
+  });
+
+  test('processes repo-scoped webhooks for onboarded repositories', async () => {
+    isRepositoryOnboarded.mockResolvedValue(true);
+    const handlePushWebhook = jest.spyOn(githubService, 'handlePushWebhook').mockResolvedValue(undefined);
+    const body = {
+      installation: { id: 34 },
+      repository: {
+        id: 12,
+        full_name: 'example-org/example-repo',
+      },
+    };
+
+    await githubService.dispatchWebhook({
+      headers: { 'x-github-event': 'push' },
+      body,
+    } as any);
+
+    expect(handlePushWebhook).toHaveBeenCalledWith(body);
+  });
+
+  test('syncs repository metadata on rename webhooks', async () => {
+    await githubService.handleRepositoryWebhook({
+      action: 'renamed',
+      installation: { id: 34 },
+      repository: {
+        id: 12,
+        name: 'renamed-repo',
+        full_name: 'example-org/renamed-repo',
+        html_url: 'https://github.com/example-org/renamed-repo',
+        owner: {
+          id: 56,
+          login: 'example-org',
+        },
+      },
+    } as any);
+
+    expect(mockDb.services.Repository.syncRepositoryRename).toHaveBeenCalledWith({
+      githubRepositoryId: 12,
+      githubInstallationId: 34,
+      ownerId: 56,
+      ownerLogin: 'example-org',
+      name: 'renamed-repo',
+      fullName: 'example-org/renamed-repo',
+      htmlUrl: 'https://github.com/example-org/renamed-repo',
+    });
+  });
+});
 
 describe('Github Service - handlePullRequestHook', () => {
   let githubService: Github;
@@ -165,7 +259,7 @@ describe('Github Service - handlePullRequestHook', () => {
       }),
     };
 
-    githubService = new Github(mockDb, {}, {}, mockQueueManager);
+    githubService = new Github(mockDb, {}, {} as any, mockQueueManager);
   });
 
   test('queues initial build when a non-autoDeploy PR is opened with the deploy label', async () => {
@@ -240,6 +334,16 @@ describe('Github Service - handlePullRequestHook', () => {
         labels: [],
       })
     );
+  });
+
+  test('skips pull request webhooks for repositories that are not onboarded', async () => {
+    mockDb.services.Repository.findRepository.mockResolvedValue(null);
+
+    await githubService.handlePullRequestHook(createMockPullRequestEvent());
+
+    expect(mockGetYamlFileContent).not.toHaveBeenCalled();
+    expect(mockDb.services.PullRequest.findOrCreatePullRequest).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.createBuildAndDeploys).not.toHaveBeenCalled();
   });
 
   test('queues one effective build across labeled -> opened -> labeled for a pre-labeled autoDeploy PR', async () => {
@@ -630,7 +734,7 @@ describe('Github Service - handleLabelWebhook', () => {
       }),
     };
 
-    githubService = new Github(mockDb, {}, {}, mockQueueManager);
+    githubService = new Github(mockDb, {}, {} as any, mockQueueManager);
   });
 
   test('should skip processing when changed label is not a lifecycle label', async () => {

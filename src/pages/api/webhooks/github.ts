@@ -51,6 +51,13 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
       return;
     }
 
+    const shouldProcessWebhook = await services.GithubService.shouldProcessWebhook(req.body);
+    if (!shouldProcessWebhook) {
+      getLogger({ stage: LogStage.WEBHOOK_SKIPPED }).debug('Webhook: skipped reason=repository_not_onboarded');
+      res.status(200).end();
+      return;
+    }
+
     try {
       if (LIFECYCLE_MODE === 'all') BootstrapJobs(services);
       const message = stringify({ ...req, ...{ headers: req.headers } });
