@@ -53,6 +53,7 @@ export interface DevConfig {
 
 export interface Service {
   readonly name: string;
+  readonly ignoreFiles?: string[];
   appShort?: string;
   readonly defaultUUID?: string;
   readonly requires?: DependencyService[];

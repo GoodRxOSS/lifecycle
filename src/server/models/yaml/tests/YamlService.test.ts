@@ -279,6 +279,29 @@ services:
 
       expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
     });
+
+    test('accepts environment-level and service-level ignoreFiles', () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+environment:
+  ignoreFiles:
+    - 'docs/**'
+services:
+  - name: 'githubApp'
+    ignoreFiles:
+      - '**/*.spec.ts'
+    github:
+      repository: 'org/foobar'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'app1/app.Dockerfile'
+`);
+
+      expect(() => new YamlConfigValidator().validate_1_0_0(config)).not.toThrow();
+    });
   });
 
   describe('isGithubService', () => {

@@ -35,7 +35,16 @@ jest.mock('server/services/globalConfig', () => {
 
 jest.mock('server/lib/github/client');
 
-jest.mock('server/lib/logger/rootLogger');
+jest.mock('server/lib/logger/rootLogger', () => ({
+  __esModule: true,
+  default: {
+    child: jest.fn(() => ({
+      debug: jest.fn(),
+      error: jest.fn(),
+      info: jest.fn(),
+    })),
+  },
+}));
 
 import { rootLogger as logger } from 'server/lib/logger';
 
