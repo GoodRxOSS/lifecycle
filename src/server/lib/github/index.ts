@@ -28,6 +28,41 @@ import { getRefForBranchName } from 'server/lib/github/utils';
 import { Deploy } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 
+export async function getRepositoryByFullName(fullName: string, installationId: number) {
+  try {
+    const client = await createOctokitClient({ installationId, caller: 'getRepositoryByFullName' });
+    return await client.request(`GET /repos/${fullName}`);
+  } catch (error) {
+    if (error?.status === 404) {
+      getLogger({ repo: fullName, installationId }).info('GitHub: repository not found');
+      throw new Error(`Repository not found or GitHub App cannot access it: ${fullName}`);
+    }
+    getLogger({ error, repo: fullName, installationId }).error('GitHub: repository fetch failed');
+    throw new Error(error?.message || 'Unable to retrieve repository');
+  }
+}
+
+export async function listInstallationRepositories({
+  installationId,
+  page,
+  perPage,
+}: {
+  installationId: number;
+  page: number;
+  perPage: number;
+}) {
+  try {
+    const client = await createOctokitClient({ installationId, caller: 'listInstallationRepositories' });
+    return await client.request('GET /installation/repositories', {
+      page,
+      per_page: perPage,
+    });
+  } catch (error) {
+    getLogger({ error, installationId, page, perPage }).error('GitHub: installation repositories fetch failed');
+    throw new Error(error?.message || 'Unable to retrieve installation repositories');
+  }
+}
+
 export async function createOrUpdatePullRequestComment({
   installationId,
   pullRequestNumber,
@@ -296,7 +331,7 @@ export async function checkIfCommentExists({
 }
 
 export class ConfigFileNotFound extends LifecycleError {
-  constructor(msg: string, uuid: string = null, service: string = null) {
+  constructor(msg: string, uuid: string | null = null, service: string | null = null) {
     super(uuid, service, msg);
   }
 }

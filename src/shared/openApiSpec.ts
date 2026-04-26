@@ -137,11 +137,19 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         RepositorySearchResult: {
           type: 'object',
           properties: {
+            id: { type: 'integer' },
             githubRepositoryId: { type: 'integer' },
+            githubInstallationId: { type: 'integer' },
+            ownerId: { type: 'integer', nullable: true },
             fullName: { type: 'string' },
             htmlUrl: { type: 'string', nullable: true },
+            defaultEnvId: { type: 'integer', nullable: true },
+            onboarded: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            deletedAt: { type: 'string', format: 'date-time', nullable: true },
           },
-          required: ['githubRepositoryId', 'fullName'],
+          required: ['githubRepositoryId', 'fullName', 'onboarded'],
         },
 
         SearchRepositoriesResponse: {
@@ -162,6 +170,133 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/SearchRepositoriesResponse' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        OnboardRepositoryRequest: {
+          type: 'object',
+          properties: {
+            fullName: {
+              type: 'string',
+              description: 'GitHub repository full name. GitHub URLs and .git suffixes are accepted.',
+              example: 'example-org/example-repo',
+            },
+            installationId: {
+              type: 'integer',
+              description: 'Optional GitHub App installation ID. Defaults to GITHUB_APP_INSTALLATION_ID.',
+            },
+          },
+          required: ['fullName'],
+        },
+
+        OnboardedRepository: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            githubRepositoryId: { type: 'integer' },
+            githubInstallationId: { type: 'integer' },
+            ownerId: { type: 'integer', nullable: true },
+            fullName: { type: 'string' },
+            htmlUrl: { type: 'string', nullable: true },
+            defaultEnvId: { type: 'integer', nullable: true },
+            onboarded: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            deletedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'githubRepositoryId', 'githubInstallationId', 'fullName', 'onboarded'],
+        },
+
+        InstalledRepository: {
+          type: 'object',
+          properties: {
+            githubRepositoryId: { type: 'integer' },
+            ownerId: { type: 'integer', nullable: true },
+            ownerLogin: { type: 'string', nullable: true },
+            name: { type: 'string' },
+            fullName: { type: 'string' },
+            htmlUrl: { type: 'string', nullable: true },
+            private: { type: 'boolean', nullable: true },
+            archived: { type: 'boolean', nullable: true },
+            disabled: { type: 'boolean', nullable: true },
+            visibility: { type: 'string', nullable: true },
+            defaultBranch: { type: 'string', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            pushedAt: { type: 'string', format: 'date-time', nullable: true },
+            onboarded: { type: 'boolean' },
+          },
+          required: ['githubRepositoryId', 'name', 'fullName', 'onboarded'],
+        },
+
+        ListRepositoriesResponse: {
+          type: 'object',
+          properties: {
+            repositories: {
+              type: 'array',
+              items: {
+                oneOf: [
+                  { $ref: '#/components/schemas/OnboardedRepository' },
+                  { $ref: '#/components/schemas/InstalledRepository' },
+                ],
+              },
+            },
+          },
+          required: ['repositories'],
+        },
+
+        ListRepositoriesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/ListRepositoriesResponse' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        OnboardRepositoryResponse: {
+          type: 'object',
+          properties: {
+            repository: { $ref: '#/components/schemas/OnboardedRepository' },
+            created: { type: 'boolean' },
+          },
+          required: ['repository', 'created'],
+        },
+
+        OnboardRepositorySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/OnboardRepositoryResponse' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        RemoveRepositoryResponse: {
+          type: 'object',
+          properties: {
+            repository: { $ref: '#/components/schemas/OnboardedRepository' },
+          },
+          required: ['repository'],
+        },
+
+        RemoveRepositorySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/RemoveRepositoryResponse' },
               },
               required: ['data'],
             },

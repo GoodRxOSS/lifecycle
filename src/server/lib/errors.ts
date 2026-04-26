@@ -15,10 +15,10 @@
  */
 
 export class LifecycleError extends Error {
-  uuid: string;
-  service: string;
+  uuid: string | null;
+  service: string | null;
 
-  constructor(uuid: string, service: string, msg: string) {
+  constructor(uuid: string | null, service: string | null, msg: string) {
     super(msg);
 
     this.uuid = uuid;

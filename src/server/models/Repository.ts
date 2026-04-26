@@ -20,6 +20,7 @@ import { PullRequest, Environment } from '.';
 export default class Repository extends Model {
   githubRepositoryId: number;
   githubInstallationId: number;
+  ownerId: number;
   fullName: string;
   htmlUrl: string;
 

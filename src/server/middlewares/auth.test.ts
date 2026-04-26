@@ -64,4 +64,21 @@ describe('authMiddleware', () => {
     expect(response.status).toBe(401);
     expect(body.error.message).toBe('Unauthorized');
   });
+
+  it('rejects repository self-service API requests without valid bearer auth', async () => {
+    const next = jest.fn().mockResolvedValue(NextResponse.next());
+    mockVerifyAuth.mockResolvedValue({
+      success: false,
+      error: { message: 'Unauthorized', status: 401 },
+    });
+    const request = new NextRequest('http://localhost/api/v2/repositories');
+
+    const response = await authMiddleware(request, next);
+    const body = await response.json();
+
+    expect(mockVerifyAuth).toHaveBeenCalledWith(request);
+    expect(next).not.toHaveBeenCalled();
+    expect(response.status).toBe(401);
+    expect(body.error.message).toBe('Unauthorized');
+  });
 });
