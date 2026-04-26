@@ -17,6 +17,7 @@
 import AgentMessage from 'server/models/AgentMessage';
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRun from 'server/models/AgentRun';
+import AgentRunEvent from 'server/models/AgentRunEvent';
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
 import AgentToolExecution from 'server/models/AgentToolExecution';
@@ -25,9 +26,11 @@ import UserMcpConnection from 'server/models/UserMcpConnection';
 import AgentSessionService from 'server/services/agentSession';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 import AgentRunService from './RunService';
+import AgentRunEventService from './RunEventService';
 import ApprovalService from './ApprovalService';
 import AgentThreadService from './ThreadService';
-import type { AgentUIMessage } from './types';
+import AgentMessageStore from './MessageStore';
+import type { CanonicalAgentMessage } from './canonicalMessages';
 import type {
   McpAuthConfig,
   McpDiscoveredTool,
@@ -69,6 +72,7 @@ type AdminToolExecutionRecord = {
   source: string;
   serverSlug: string | null;
   toolName: string;
+  toolCallId: string | null;
   args: Record<string, unknown>;
   result: Record<string, unknown> | null;
   status: AgentToolExecution['status'];
@@ -117,10 +121,6 @@ function normalizeSearchTerm(value?: string | null): string | null {
   return trimmed ? trimmed : null;
 }
 
-function toAgentUiMessage(message: AgentMessage): AgentUIMessage {
-  return message.uiMessage as unknown as AgentUIMessage;
-}
-
 function toToolExecutionRecord(row: AgentToolExecution): AdminToolExecutionRecord {
   const enrichedRow = row as AgentToolExecution & {
     threadUuid?: string;
@@ -136,6 +136,7 @@ function toToolExecutionRecord(row: AgentToolExecution): AdminToolExecutionRecor
     source: row.source,
     serverSlug: row.serverSlug,
     toolName: row.toolName,
+    toolCallId: row.toolCallId || null,
     args: (row.args || {}) as Record<string, unknown>,
     result: (row.result as Record<string, unknown> | null) || null,
     status: row.status,
@@ -147,6 +148,18 @@ function toToolExecutionRecord(row: AgentToolExecution): AdminToolExecutionRecor
     createdAt: row.createdAt || null,
     updatedAt: row.updatedAt || null,
   };
+}
+
+function toCanonicalMessageRecord(message: AgentMessage, threadUuid: string): CanonicalAgentMessage | null {
+  try {
+    return AgentMessageStore.serializeCanonicalMessage(
+      message,
+      threadUuid,
+      (message as AgentMessage & { runUuid?: string | null }).runUuid || null
+    );
+  } catch {
+    return null;
+  }
 }
 
 function paginateArray<T>(items: T[], page = 1, limit = 25) {
@@ -177,6 +190,7 @@ function serializeSessionSummary(
 ) {
   return {
     id: session.uuid,
+    sessionKind: session.sessionKind,
     buildUuid: session.buildUuid,
     baseBuildUuid: session.baseBuildUuid,
     buildKind: session.buildKind,
@@ -187,6 +201,8 @@ function serializeSessionSummary(
     pvcName: session.pvcName,
     model: session.model,
     status: session.status,
+    chatStatus: session.chatStatus,
+    workspaceStatus: session.workspaceStatus,
     repo: session.repo,
     branch: session.branch,
     primaryRepo: session.primaryRepo,
@@ -202,7 +218,7 @@ function serializeSessionSummary(
     lastRunAt: counts?.lastRunAt ?? null,
     createdAt: session.createdAt || null,
     updatedAt: session.updatedAt || null,
-    editorUrl: `/api/agent-session/workspace-editor/${session.uuid}/`,
+    editorUrl: session.podName && session.namespace ? `/api/agent-session/workspace-editor/${session.uuid}/` : null,
   };
 }
 
@@ -372,9 +388,14 @@ export default class AgentAdminService {
       throw new Error('Agent session not found');
     }
 
-    const [sessionDetail, messageRows, runRows, pendingRows, toolRows] = await Promise.all([
+    const [sessionDetail, messageRows, runRows, pendingRows, toolRows, eventRows] = await Promise.all([
       this.getSession(session.uuid),
-      AgentMessage.query().where({ threadId: thread.id }).orderBy('createdAt', 'asc'),
+      AgentMessage.query()
+        .alias('message')
+        .leftJoinRelated('run')
+        .where('message.threadId', thread.id)
+        .select('message.*', 'run.uuid as runUuid')
+        .orderBy('message.createdAt', 'asc'),
       AgentRun.query().where({ threadId: thread.id }).orderBy('createdAt', 'asc'),
       AgentPendingAction.query()
         .alias('action')
@@ -384,11 +405,18 @@ export default class AgentAdminService {
         .orderBy('action.createdAt', 'asc'),
       AgentToolExecution.query()
         .alias('tool')
-        .joinRelated('run')
+        .joinRelated('[run, thread]')
         .leftJoinRelated('pendingAction')
         .where('tool.threadId', thread.id)
-        .select('tool.*', 'run.uuid as runUuid', 'pendingAction.uuid as pendingActionUuid')
+        .select('tool.*', 'thread.uuid as threadUuid', 'run.uuid as runUuid', 'pendingAction.uuid as pendingActionUuid')
         .orderBy('tool.createdAt', 'asc'),
+      AgentRunEvent.query()
+        .alias('event')
+        .joinRelated('run')
+        .where('run.threadId', thread.id)
+        .select('event.*', 'run.uuid as runUuid')
+        .orderBy('event.runId', 'asc')
+        .orderBy('event.sequence', 'asc'),
     ]);
 
     const runs = runRows.map((run) =>
@@ -415,8 +443,19 @@ export default class AgentAdminService {
     return {
       session: sessionDetail.session,
       thread: threadSummary,
-      messages: messageRows.map(toAgentUiMessage),
+      messages: messageRows.flatMap((message) => {
+        const serialized = toCanonicalMessageRecord(message, thread.uuid);
+        return serialized ? [serialized] : [];
+      }),
       runs,
+      events: eventRows.map((event) =>
+        AgentRunEventService.serializeRunEvent({
+          ...event,
+          runUuid: (event as AgentRunEvent & { runUuid?: string }).runUuid,
+          threadUuid: thread.uuid,
+          sessionUuid: session.uuid,
+        } as AgentRunEvent)
+      ),
       pendingActions,
       toolExecutions: toolRows.map(toToolExecutionRecord),
     };

@@ -15,6 +15,7 @@
  */
 
 import type { AgentApprovalMode, AgentCapabilityKey } from 'server/services/agent/types';
+import type { AgentSessionWorkspaceStorageAccessMode } from './globalConfig';
 
 export type AgentSessionToolRuleMode = AgentApprovalMode;
 export type AgentSessionToolRuleSelection = AgentSessionToolRuleMode | 'inherit';
@@ -52,6 +53,30 @@ export interface AgentSessionResourceRequirementsValue {
   limits?: Record<string, string>;
 }
 
+export interface AgentSessionWorkspaceStorageSettingsValue {
+  defaultSize?: string;
+  allowedSizes?: string[];
+  allowClientOverride?: boolean;
+  accessMode?: AgentSessionWorkspaceStorageAccessMode;
+}
+
+export interface AgentSessionCleanupSettingsValue {
+  activeIdleSuspendMs?: number;
+  startingTimeoutMs?: number;
+  hibernatedRetentionMs?: number;
+  intervalMs?: number;
+  redisTtlSeconds?: number;
+}
+
+export interface AgentSessionDurabilitySettingsValue {
+  runExecutionLeaseMs?: number;
+  queuedRunDispatchStaleMs?: number;
+  dispatchRecoveryLimit?: number;
+  maxDurablePayloadBytes?: number;
+  payloadPreviewBytes?: number;
+  fileChangePreviewChars?: number;
+}
+
 export interface AgentSessionRuntimeSettingsValue {
   workspaceImage?: string;
   workspaceEditorImage?: string;
@@ -66,6 +91,9 @@ export interface AgentSessionRuntimeSettingsValue {
     editor?: AgentSessionResourceRequirementsValue;
     workspaceGateway?: AgentSessionResourceRequirementsValue;
   };
+  workspaceStorage?: AgentSessionWorkspaceStorageSettingsValue;
+  cleanup?: AgentSessionCleanupSettingsValue;
+  durability?: AgentSessionDurabilitySettingsValue;
 }
 
 export interface AgentSessionToolInventoryEntry {

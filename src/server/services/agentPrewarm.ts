@@ -412,7 +412,13 @@ export default class AgentPrewarmService extends BaseService {
     } as unknown as Partial<AgentPrewarm>);
 
     try {
-      await createAgentPvc(plan.namespace, pvcName, '10Gi', plan.buildUuid).catch((error: unknown) => {
+      await createAgentPvc(
+        plan.namespace,
+        pvcName,
+        runtimeConfig.workspaceStorage.defaultSize,
+        plan.buildUuid,
+        runtimeConfig.workspaceStorage.accessMode
+      ).catch((error: unknown) => {
         const httpError = error as k8s.HttpError;
         if (httpError?.statusCode === 409 || httpError?.response?.statusCode === 409) {
           return null;

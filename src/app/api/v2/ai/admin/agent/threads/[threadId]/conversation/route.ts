@@ -26,8 +26,8 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *   get:
  *     summary: Get full agent thread conversation for admin review
  *     description: >
- *       Returns the persisted UI messages for a thread together with runs,
- *       pending actions, and tool executions so admins can replay the session.
+ *       Returns the canonical messages for a thread together with runs, run
+ *       events, pending actions, and tool executions so admins can replay the session.
  *     tags:
  *       - Agent Admin
  *     operationId: getAdminAgentThreadConversation

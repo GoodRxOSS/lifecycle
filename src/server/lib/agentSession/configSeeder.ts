@@ -15,7 +15,7 @@
  */
 
 import { posix as pathPosix } from 'path';
-import type { AgentSessionWorkspaceRepo } from './workspace';
+import { SESSION_WORKSPACE_ROOT, type AgentSessionWorkspaceRepo } from './workspace';
 
 export const SESSION_WORKSPACE_SHARED_HOME_DIR = '/home/agent/.lifecycle-session';
 export const SESSION_WORKSPACE_HOME_VOLUME_NAME = 'session-home';
@@ -69,8 +69,8 @@ function resolveInitWorkspaceRepos(opts: InitScriptOpts): AgentSessionWorkspaceR
     return opts.workspaceRepos;
   }
 
-  if (!opts.repoUrl || !opts.branch || !opts.workspacePath) {
-    throw new Error('repoUrl, branch, and workspacePath are required when workspaceRepos is not provided');
+  if (!opts.repoUrl || !opts.branch) {
+    return [];
   }
 
   return [
@@ -161,12 +161,15 @@ export function generateInitScript(opts: InitScriptOpts): string {
   const { installCommand } = opts;
   const workspaceRepos = resolveInitWorkspaceRepos(opts);
   const primaryRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+  const workspaceRoot = opts.workspacePath || SESSION_WORKSPACE_ROOT;
 
   const lines = ['#!/bin/sh', 'set -e'];
 
   appendGitIdentityAndAuthLines(lines, opts);
 
-  if (workspaceRepos.length === 1) {
+  if (workspaceRepos.length === 0) {
+    lines.push('', `mkdir -p "${escapeDoubleQuotedShell(workspaceRoot)}"`);
+  } else if (workspaceRepos.length === 1) {
     lines.push('', ...buildRepoCloneLines(workspaceRepos[0]));
   } else {
     lines.push('', 'clone_pids=""');
@@ -182,7 +185,7 @@ export function generateInitScript(opts: InitScriptOpts): string {
     lines.push('for clone_pid in $clone_pids; do', '  wait "$clone_pid"', 'done');
   }
 
-  if (installCommand) {
+  if (installCommand && primaryRepo) {
     lines.push('', `cd "${escapeDoubleQuotedShell(primaryRepo.mountPath)}"`, installCommand);
   }
 

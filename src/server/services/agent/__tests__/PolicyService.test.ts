@@ -15,6 +15,7 @@
  */
 
 import AgentPolicyService from '../PolicyService';
+import { DEFAULT_AGENT_APPROVAL_POLICY } from '../types';
 
 describe('AgentPolicyService', () => {
   it('keeps read-only sandbox tools in the read capability', () => {
@@ -39,5 +40,11 @@ describe('AgentPolicyService', () => {
 
   it('maps mutating external MCP tools to external_mcp_write without workspace heuristics', () => {
     expect(AgentPolicyService.capabilityForExternalMcpTool('editJiraIssue')).toBe('external_mcp_write');
+  });
+
+  it('requires approval for deployment mutations by default', () => {
+    expect(AgentPolicyService.modeForCapability(DEFAULT_AGENT_APPROVAL_POLICY, 'deploy_k8s_mutation')).toBe(
+      'require_approval'
+    );
   });
 });

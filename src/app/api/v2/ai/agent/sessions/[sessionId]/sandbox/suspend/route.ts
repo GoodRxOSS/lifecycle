@@ -17,27 +17,28 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import ApprovalService from 'server/services/agent/ApprovalService';
+import { errorResponse, successResponse } from 'server/lib/response';
+import AgentSessionService, { ActiveAgentRunSuspensionError } from 'server/services/agentSession';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
 
 /**
  * @openapi
- * /api/v2/ai/agent/pending-actions/{actionId}/deny:
+ * /api/v2/ai/agent/sessions/{sessionId}/sandbox/suspend:
  *   post:
- *     summary: Deny a pending action
+ *     summary: Suspend a chat session sandbox runtime
  *     tags:
  *       - Agent Sessions
- *     operationId: denyAgentPendingAction
+ *     operationId: suspendAgentSessionSandbox
  *     parameters:
  *       - in: path
- *         name: actionId
+ *         name: sessionId
  *         required: true
  *         schema:
  *           type: string
  *     responses:
  *       '200':
- *         description: Pending action denied
+ *         description: Suspended session
  *         content:
  *           application/json:
  *             schema:
@@ -47,22 +48,33 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *                   required: [data]
  *                   properties:
  *                     data:
- *                       $ref: '#/components/schemas/AgentPendingAction'
+ *                       $ref: '#/components/schemas/AgentSessionSummary'
+ *       '400':
+ *         description: Session cannot be suspended
+ *       '401':
+ *         description: Unauthorized
+ *       '409':
+ *         description: Session has an active agent run
  */
-const postHandler = async (req: NextRequest, { params }: { params: { actionId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) {
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
-  const body = await req.json().catch(() => ({}));
-  const action = await ApprovalService.resolvePendingAction(params.actionId, userIdentity.userId, 'denied', {
-    approved: false,
-    reason: typeof body?.reason === 'string' ? body.reason : null,
-    source: 'endpoint',
-  });
+  try {
+    const session = await AgentSessionService.suspendChatRuntime({
+      sessionId: params.sessionId,
+      userId: userIdentity.userId,
+    });
 
-  return successResponse(ApprovalService.serializePendingAction(action), { status: 200 }, req);
+    return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof ActiveAgentRunSuspensionError) {
+      return errorResponse(error, { status: 409 }, req);
+    }
+    return errorResponse(error, { status: 400 }, req);
+  }
 };
 
 export const POST = createApiHandler(postHandler);

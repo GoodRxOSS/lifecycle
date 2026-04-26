@@ -30,6 +30,7 @@ jest.mock('ioredis', () => {
   return jest.fn().mockImplementation(() => ({
     hgetall: jest.fn(),
     hmset: jest.fn(),
+    del: jest.fn(),
   }));
 });
 jest.mock('@octokit/auth-app', () => ({
@@ -86,6 +87,32 @@ describe('GlobalConfigService', () => {
       expect(mockGetAllConfigsFromDb).toHaveBeenCalled();
 
       mockGetAllConfigsFromDb.mockRestore(); // Clean up after the test
+    });
+  });
+
+  describe('setConfig', () => {
+    it('updates shared cache and clears the in-memory config cache after writing', async () => {
+      const upsertQuery = {
+        insert: jest.fn().mockReturnThis(),
+        onConflict: jest.fn().mockReturnThis(),
+        merge: jest.fn().mockResolvedValue(undefined),
+      };
+      service.db = {
+        knex: jest.fn().mockReturnValue(upsertQuery),
+      };
+      service.memoryCache = { agentSessionDefaults: { workspaceImage: 'stale-image' } };
+      service.memoryCacheExpiry = Date.now() + 10000;
+
+      const config = { workspaceImage: 'workspace-image:v2' };
+      await service.setConfig('agentSessionDefaults', config);
+
+      expect(service.db.knex).toHaveBeenCalledWith('global_config');
+      expect(upsertQuery.insert).toHaveBeenCalledWith({ key: 'agentSessionDefaults', config });
+      expect(upsertQuery.onConflict).toHaveBeenCalledWith('key');
+      expect(upsertQuery.merge).toHaveBeenCalledWith();
+      expect(service.redis.del).toHaveBeenCalledWith('global_config');
+      expect(service.memoryCache).toBeNull();
+      expect(service.memoryCacheExpiry).toBe(0);
     });
   });
 

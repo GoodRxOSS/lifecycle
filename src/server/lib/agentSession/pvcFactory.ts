@@ -17,6 +17,11 @@
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from 'server/lib/logger';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import {
+  DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE,
+  DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE,
+} from './runtimeConfig';
+import type { AgentSessionWorkspaceStorageAccessMode } from 'server/services/types/globalConfig';
 
 function getCoreApi(): k8s.CoreV1Api {
   const kc = new k8s.KubeConfig();
@@ -24,24 +29,15 @@ function getCoreApi(): k8s.CoreV1Api {
   return kc.makeApiClient(k8s.CoreV1Api);
 }
 
-function getAccessMode(): 'ReadWriteMany' | 'ReadWriteOnce' {
-  const configured = process.env.AGENT_SESSION_PVC_ACCESS_MODE;
-  if (configured === 'ReadWriteMany' || configured === 'ReadWriteOnce') {
-    return configured;
-  }
-
-  return 'ReadWriteOnce';
-}
-
 export async function createAgentPvc(
   namespace: string,
   pvcName: string,
-  storageSize = '10Gi',
-  buildUuid?: string
+  storageSize = DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE,
+  buildUuid?: string,
+  accessMode: AgentSessionWorkspaceStorageAccessMode = DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE
 ): Promise<k8s.V1PersistentVolumeClaim> {
   const logger = getLogger();
   const coreApi = getCoreApi();
-  const accessMode = getAccessMode();
 
   const pvc: k8s.V1PersistentVolumeClaim = {
     apiVersion: 'v1',
@@ -64,11 +60,21 @@ export async function createAgentPvc(
     },
   };
 
-  const { body: result } = await coreApi.createNamespacedPersistentVolumeClaim(namespace, pvc);
-  logger.info(
-    `AgentRuntime: workspace prepared pvcName=${pvcName} namespace=${namespace} size=${storageSize} accessMode=${accessMode}`
-  );
-  return result;
+  try {
+    const { body: result } = await coreApi.createNamespacedPersistentVolumeClaim(namespace, pvc);
+    logger.info(
+      `AgentRuntime: workspace prepared pvcName=${pvcName} namespace=${namespace} size=${storageSize} accessMode=${accessMode}`
+    );
+    return result;
+  } catch (error: any) {
+    if (error instanceof k8s.HttpError && error.response?.statusCode === 409) {
+      const { body: existing } = await coreApi.readNamespacedPersistentVolumeClaim(pvcName, namespace);
+      logger.info(`AgentRuntime: workspace prepared reason=exists pvcName=${pvcName} namespace=${namespace}`);
+      return existing;
+    }
+
+    throw error;
+  }
 }
 
 export async function deleteAgentPvc(namespace: string, pvcName: string): Promise<void> {

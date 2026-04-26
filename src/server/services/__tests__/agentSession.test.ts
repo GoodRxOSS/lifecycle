@@ -23,8 +23,22 @@ const mockGetReadyPrewarmByPvc = jest.fn();
 const mockExecInPod = jest.fn();
 const mockResolveSessionPodServersForRepo = jest.fn().mockResolvedValue([]);
 const mockGetDefaultThreadForSession = jest.fn().mockResolvedValue({ uuid: 'default-thread-1' });
+const mockCreateOrUpdateNamespace = jest.fn().mockResolvedValue(undefined);
+const mockDeleteNamespace = jest.fn().mockResolvedValue(undefined);
+const mockCreateOrUpdateChatPreview = jest.fn().mockResolvedValue({
+  url: 'https://chat-aaaaaaaa-3000.example.test',
+  host: 'chat-aaaaaaaa-3000.example.test',
+  path: '/',
+  port: 3000,
+  serviceName: 'agent-preview-aaaaaaaa-3000',
+  ingressName: 'agent-preview-ingress-aaaaaaaa-3000',
+});
 
 jest.mock('server/models/AgentSession');
+jest.mock('server/models/AgentThread');
+jest.mock('server/models/AgentSource');
+jest.mock('server/models/AgentSandbox');
+jest.mock('server/models/AgentSandboxExposure');
 jest.mock('server/models/Build');
 jest.mock('server/models/Deploy');
 jest.mock('server/lib/dependencies', () => ({}));
@@ -37,6 +51,13 @@ jest.mock('server/lib/agentSession/gvisorCheck');
 jest.mock('server/lib/agentSession/configSeeder');
 jest.mock('server/lib/agentSession/devModeManager');
 jest.mock('server/lib/agentSession/forwardedEnv');
+jest.mock('server/lib/agentSession/chatPreviewFactory', () => ({
+  createOrUpdateChatPreview: (...args: unknown[]) => mockCreateOrUpdateChatPreview(...args),
+}));
+jest.mock('server/lib/kubernetes', () => ({
+  createOrUpdateNamespace: (...args: unknown[]) => mockCreateOrUpdateNamespace(...args),
+  deleteNamespace: (...args: unknown[]) => mockDeleteNamespace(...args),
+}));
 jest.mock('server/lib/kubernetes/networkPolicyFactory');
 jest.mock('server/services/ai/mcp/config', () => ({
   __esModule: true,
@@ -50,6 +71,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
     __esModule: true,
     ...actual,
     resolveAgentSessionControlPlaneConfig: jest.fn(actual.resolveAgentSessionControlPlaneConfig),
+    resolveAgentSessionRuntimeConfig: jest.fn(actual.resolveAgentSessionRuntimeConfig),
   };
 });
 jest.mock('server/lib/agentSession/systemPrompt', () => {
@@ -204,6 +226,10 @@ jest.mock('server/services/globalConfig', () => ({
 
 import AgentSessionService, { CreateSessionOptions, buildAgentSessionPodName } from 'server/services/agentSession';
 import AgentSession from 'server/models/AgentSession';
+import AgentThread from 'server/models/AgentThread';
+import AgentSource from 'server/models/AgentSource';
+import AgentSandbox from 'server/models/AgentSandbox';
+import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
@@ -231,6 +257,7 @@ import { deployHelm } from 'server/lib/nativeHelm/helm';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
 import BuildServiceModule from 'server/services/build';
 import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionCandidates';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 
 const mockRedis = {
   setex: jest.fn().mockResolvedValue('OK'),
@@ -314,10 +341,43 @@ const mockSessionQuery = {
   select: jest.fn(),
   findById: jest.fn().mockReturnThis(),
   patch: jest.fn().mockResolvedValue(1),
+  patchAndFetchById: jest.fn(),
   insert: jest.fn().mockResolvedValue({}),
   insertAndFetch: jest.fn(),
 };
 (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(mockSessionQuery);
+(AgentSession.transaction as jest.Mock) = jest.fn();
+
+const mockThreadQuery = {
+  insertAndFetch: jest.fn(),
+};
+(AgentThread.query as jest.Mock) = jest.fn().mockReturnValue(mockThreadQuery);
+
+const mockSourceQuery = {
+  findOne: jest.fn(),
+  insert: jest.fn().mockResolvedValue({}),
+  insertAndFetch: jest.fn(),
+  patchAndFetchById: jest.fn(),
+};
+(AgentSource.query as jest.Mock) = jest.fn().mockReturnValue(mockSourceQuery);
+
+const mockSandboxQuery = {
+  where: jest.fn().mockReturnThis(),
+  orderBy: jest.fn().mockReturnThis(),
+  first: jest.fn(),
+  insertAndFetch: jest.fn(),
+  patchAndFetchById: jest.fn(),
+};
+(AgentSandbox.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxQuery);
+
+const mockSandboxExposureQuery = {
+  where: jest.fn().mockReturnThis(),
+  whereNull: jest.fn().mockReturnThis(),
+  first: jest.fn(),
+  insert: jest.fn().mockResolvedValue({}),
+  patchAndFetchById: jest.fn(),
+};
+(AgentSandboxExposure.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxExposureQuery);
 
 const mockDeployQuery = {
   where: jest.fn().mockReturnThis(),
@@ -363,6 +423,11 @@ describe('AgentSessionService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(mockSessionQuery);
+    (AgentSession.transaction as jest.Mock) = jest.fn(async (callback) => callback({ trx: true }));
+    (AgentThread.query as jest.Mock) = jest.fn().mockReturnValue(mockThreadQuery);
+    (AgentSource.query as jest.Mock) = jest.fn().mockReturnValue(mockSourceQuery);
+    (AgentSandbox.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxQuery);
+    (AgentSandboxExposure.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxExposureQuery);
     (Deploy.query as jest.Mock) = jest.fn().mockReturnValue(mockDeployQuery);
     mockSessionQuery.where.mockReturnThis();
     mockSessionQuery.whereIn.mockReturnThis();
@@ -372,21 +437,87 @@ describe('AgentSessionService', () => {
     mockSessionQuery.select.mockResolvedValue({ id: 123 });
     mockSessionQuery.findById.mockReturnThis();
     mockSessionQuery.patch.mockResolvedValue(1);
-    mockSessionQuery.insert.mockResolvedValue({});
-    mockSessionQuery.insertAndFetch.mockResolvedValue({
+    mockSessionQuery.patchAndFetchById.mockResolvedValue({
       id: 123,
       uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       userId: 'user-123',
       ownerGithubUsername: null,
+      sessionKind: 'environment',
       podName: 'agent-aaaaaaaa',
       namespace: 'test-ns',
       pvcName: 'agent-pvc-aaaaaaaa',
       model: 'claude-sonnet-4-6',
       buildKind: 'environment',
       status: 'starting',
+      chatStatus: 'ready',
+      workspaceStatus: 'provisioning',
+      defaultThreadId: 456,
       devModeSnapshots: {},
       forwardedAgentSecretProviders: [],
     });
+    mockSessionQuery.insert.mockResolvedValue({});
+    mockSessionQuery.insertAndFetch.mockResolvedValue({
+      id: 123,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: null,
+      sessionKind: 'environment',
+      podName: 'agent-aaaaaaaa',
+      namespace: 'test-ns',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: 'environment',
+      status: 'starting',
+      chatStatus: 'ready',
+      workspaceStatus: 'provisioning',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+    });
+    mockThreadQuery.insertAndFetch.mockResolvedValue({
+      id: 456,
+      uuid: 'default-thread-1',
+      sessionId: 123,
+      title: 'Default thread',
+      isDefault: true,
+      metadata: {
+        sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      },
+    });
+    mockSourceQuery.findOne.mockResolvedValue(null);
+    mockSourceQuery.insert.mockResolvedValue({});
+    mockSourceQuery.insertAndFetch.mockResolvedValue({
+      id: 321,
+      uuid: 'source-1',
+      sessionId: 123,
+      status: 'ready',
+    });
+    mockSourceQuery.patchAndFetchById.mockResolvedValue({});
+    mockSandboxQuery.where.mockReturnThis();
+    mockSandboxQuery.orderBy.mockReturnThis();
+    mockSandboxQuery.first.mockResolvedValue(null);
+    mockSandboxQuery.insertAndFetch.mockResolvedValue({
+      id: 654,
+      uuid: 'sandbox-1',
+      sessionId: 123,
+      generation: 1,
+      provider: 'lifecycle_kubernetes',
+      status: 'provisioning',
+      endedAt: null,
+    });
+    mockSandboxQuery.patchAndFetchById.mockResolvedValue({
+      id: 654,
+      uuid: 'sandbox-1',
+      sessionId: 123,
+      generation: 1,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      endedAt: null,
+    });
+    mockSandboxExposureQuery.where.mockReturnThis();
+    mockSandboxExposureQuery.whereNull.mockReturnThis();
+    mockSandboxExposureQuery.first.mockResolvedValue(null);
+    mockSandboxExposureQuery.insert.mockResolvedValue({});
+    mockSandboxExposureQuery.patchAndFetchById.mockResolvedValue({});
     mockDeployQuery.where.mockReturnThis();
     mockDeployQuery.whereIn.mockReturnThis();
     mockDeployQuery.findById.mockReturnThis();
@@ -428,6 +559,16 @@ describe('AgentSessionService', () => {
     mockGetCompatibleReadyPrewarm.mockResolvedValue(null);
     mockGetReadyPrewarmByPvc.mockResolvedValue(null);
     mockGetDefaultThreadForSession.mockResolvedValue({ uuid: 'default-thread-1' });
+    mockCreateOrUpdateNamespace.mockResolvedValue(undefined);
+    mockDeleteNamespace.mockResolvedValue(undefined);
+    mockCreateOrUpdateChatPreview.mockResolvedValue({
+      url: 'https://chat-aaaaaaaa-3000.example.test',
+      host: 'chat-aaaaaaaa-3000.example.test',
+      path: '/',
+      port: 3000,
+      serviceName: 'agent-preview-aaaaaaaa-3000',
+      ingressName: 'agent-preview-ingress-aaaaaaaa-3000',
+    });
     mockExecInPod.mockImplementation(
       async (
         _namespace: string,
@@ -458,6 +599,36 @@ describe('AgentSessionService', () => {
     (runtimeConfig.resolveAgentSessionControlPlaneConfig as jest.Mock).mockResolvedValue({
       appendSystemPrompt: undefined,
     });
+    (runtimeConfig.resolveAgentSessionRuntimeConfig as jest.Mock).mockResolvedValue({
+      workspaceImage: 'lifecycle-agent:latest',
+      workspaceEditorImage: 'codercom/code-server:4.98.2',
+      workspaceGatewayImage: 'lifecycle-agent:latest',
+      nodeSelector: undefined,
+      keepAttachedServicesOnSessionNode: true,
+      readiness: undefined,
+      resources: undefined,
+      workspaceStorage: {
+        defaultSize: '10Gi',
+        allowedSizes: ['10Gi'],
+        allowClientOverride: false,
+        accessMode: 'ReadWriteOnce',
+      },
+      cleanup: {
+        activeIdleSuspendMs: 30 * 60 * 1000,
+        startingTimeoutMs: 15 * 60 * 1000,
+        hibernatedRetentionMs: 24 * 60 * 60 * 1000,
+        intervalMs: 5 * 60 * 1000,
+        redisTtlSeconds: 7200,
+      },
+      durability: {
+        runExecutionLeaseMs: 30 * 60 * 1000,
+        queuedRunDispatchStaleMs: 30 * 1000,
+        dispatchRecoveryLimit: 50,
+        maxDurablePayloadBytes: 64 * 1024,
+        payloadPreviewBytes: 16 * 1024,
+        fileChangePreviewChars: 4000,
+      },
+    });
     (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mockImplementation(
       jest.requireActual('server/lib/agentSession/systemPrompt').buildAgentSessionDynamicSystemPrompt
     );
@@ -467,6 +638,221 @@ describe('AgentSessionService', () => {
     (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockImplementation(
       jest.requireActual('server/lib/agentSession/systemPrompt').resolveAgentSessionPromptContext
     );
+  });
+
+  it('creates a chat session without provisioning runtime resources', async () => {
+    mockSessionQuery.insertAndFetch.mockResolvedValueOnce({
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: null,
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    });
+    mockThreadQuery.insertAndFetch.mockResolvedValueOnce({
+      id: 654,
+      uuid: 'default-thread-1',
+      sessionId: 321,
+      title: 'Default thread',
+      isDefault: true,
+      metadata: {
+        sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      },
+    });
+    mockSessionQuery.patchAndFetchById.mockResolvedValueOnce({
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: null,
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      defaultThreadId: 654,
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    });
+
+    const session = await AgentSessionService.createChatSession({
+      userId: 'user-123',
+      model: 'claude-sonnet-4-6',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKind: AgentSessionKind.CHAT,
+        buildKind: null,
+        podName: null,
+        namespace: null,
+        pvcName: null,
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.NONE,
+      })
+    );
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(createSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(mockThreadQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 321,
+        title: 'Default thread',
+        isDefault: true,
+      })
+    );
+    expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 321,
+        adapter: 'blank_workspace',
+        status: 'ready',
+      })
+    );
+    expect(AgentSession.transaction).toHaveBeenCalledTimes(1);
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+      321,
+      expect.objectContaining({
+        defaultThreadId: 654,
+      })
+    );
+    expect(mockGetDefaultThreadForSession).not.toHaveBeenCalled();
+    expect(session.sessionKind).toBe('chat');
+    expect(session.workspaceStatus).toBe('none');
+    expect(session.defaultThreadId).toBe(654);
+  });
+
+  it('provisions a blank workspace runtime for a chat session on demand', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: 'ready',
+    };
+
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+
+    const session = await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: {
+        userId: 'user-123',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(mockCreateOrUpdateNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'chat-aaaaaaaa',
+        buildUUID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        author: 'sample-user',
+      })
+    );
+    expect(createAgentPvc).toHaveBeenCalledWith(
+      'chat-aaaaaaaa',
+      'agent-pvc-aaaaaaaa',
+      '10Gi',
+      undefined,
+      'ReadWriteOnce'
+    );
+    expect(createAgentApiKeySecret).toHaveBeenCalledWith(
+      'chat-aaaaaaaa',
+      'agent-secret-aaaaaaaa',
+      {},
+      'sample-gh-token',
+      undefined,
+      {},
+      {
+        LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+      }
+    );
+    expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: 'chat-aaaaaaaa',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        workspaceRepos: [],
+      })
+    );
+    expect(createSessionWorkspaceService).toHaveBeenCalledWith('chat-aaaaaaaa', 'agent-aaaaaaaa');
+    expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+      })
+    );
+    expect(session.workspaceStatus).toBe('ready');
+    expect(session.namespace).toBe('chat-aaaaaaaa');
+  });
+
+  it('publishes a chat session HTTP port through ingress', async () => {
+    mockSessionQuery.findOne.mockResolvedValue({
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      sessionKind: 'chat',
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      workspaceStatus: 'ready',
+      status: 'active',
+    });
+
+    const publication = await AgentSessionService.publishChatHttpPort({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      port: 3000,
+    });
+
+    expect(mockCreateOrUpdateChatPreview).toHaveBeenCalledWith({
+      sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      port: 3000,
+    });
+    expect(publication.url).toBe('https://chat-aaaaaaaa-3000.example.test');
   });
 
   describe('createSession', () => {
@@ -518,7 +904,7 @@ describe('AgentSessionService', () => {
     it('creates PVC, pod, network policy, and session record', async () => {
       const session = await AgentSessionService.createSession(baseOpts);
 
-      expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', undefined);
+      expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', undefined, 'ReadWriteOnce');
       expect(ensureAgentSessionServiceAccount).toHaveBeenCalledWith('test-ns');
       expect(createAgentApiKeySecret).toHaveBeenCalledWith(
         'test-ns',
@@ -546,6 +932,7 @@ describe('AgentSessionService', () => {
         })
       );
       expect(createSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa', undefined);
+      expect(AgentSession.transaction).toHaveBeenCalledTimes(1);
       expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
         expect.objectContaining({
           uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -676,7 +1063,13 @@ describe('AgentSessionService', () => {
           ],
         })
       );
-      expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-aaaaaaaa', '10Gi', 'build-123');
+      expect(createAgentPvc).toHaveBeenCalledWith(
+        'test-ns',
+        'agent-pvc-aaaaaaaa',
+        '10Gi',
+        'build-123',
+        'ReadWriteOnce'
+      );
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
         expect.objectContaining({
           podName: 'agent-build-123',
@@ -2218,7 +2611,6 @@ describe('AgentSessionService', () => {
 
       expect(DeploymentManager).toHaveBeenCalledWith(devModeDeploys);
       expect(deployManagerDeploy).toHaveBeenCalled();
-      expect(mockDisableDevMode).toHaveBeenCalledTimes(1);
       expect(mockDisableDevMode).toHaveBeenCalledWith(
         'test-ns',
         'deploy-10',

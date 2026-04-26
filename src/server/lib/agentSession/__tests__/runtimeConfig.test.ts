@@ -26,9 +26,23 @@ jest.mock('server/services/globalConfig', () => ({
 }));
 
 import {
+  AgentSessionWorkspaceStorageConfigError,
   AgentSessionRuntimeConfigError,
+  DEFAULT_AGENT_SESSION_ACTIVE_IDLE_SUSPEND_MS,
+  DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
+  DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
+  DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS,
+  DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS,
   DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE,
   DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
+  DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES,
+  DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES,
+  DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS,
+  DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS,
+  DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS,
+  DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS,
+  DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE,
+  DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE,
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
   mergeAgentSessionReadiness,
@@ -36,9 +50,13 @@ import {
   mergeAgentSessionResources,
   resolveAgentSessionControlPlaneConfig,
   resolveAgentSessionControlPlaneConfigFromDefaults,
+  resolveAgentSessionDurabilityFromDefaults,
+  resolveAgentSessionCleanupFromDefaults,
   resolveAgentSessionReadinessFromDefaults,
   resolveAgentSessionResourcesFromDefaults,
   resolveAgentSessionRuntimeConfig,
+  resolveAgentSessionWorkspaceStorageFromDefaults,
+  resolveAgentSessionWorkspaceStorageIntent,
 } from '../runtimeConfig';
 
 const DEFAULT_READINESS = {
@@ -79,11 +97,38 @@ const DEFAULT_RESOURCES = {
   },
 };
 
+const DEFAULT_WORKSPACE_STORAGE = {
+  defaultSize: DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE,
+  allowedSizes: [DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE],
+  allowClientOverride: false,
+  accessMode: DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE,
+};
+
+const DEFAULT_CLEANUP = {
+  activeIdleSuspendMs: DEFAULT_AGENT_SESSION_ACTIVE_IDLE_SUSPEND_MS,
+  startingTimeoutMs: DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS,
+  hibernatedRetentionMs: DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS,
+  intervalMs: DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
+  redisTtlSeconds: DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS,
+};
+
+const DEFAULT_DURABILITY = {
+  runExecutionLeaseMs: DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS,
+  queuedRunDispatchStaleMs: DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS,
+  dispatchRecoveryLimit: DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
+  maxDurablePayloadBytes: DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES,
+  payloadPreviewBytes: DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES,
+  fileChangePreviewChars: DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS,
+};
+
 function buildExpectedRuntimeConfig(overrides?: {
   nodeSelector?: Record<string, string>;
   keepAttachedServicesOnSessionNode?: boolean;
   readiness?: typeof DEFAULT_READINESS;
   resources?: typeof DEFAULT_RESOURCES;
+  workspaceStorage?: typeof DEFAULT_WORKSPACE_STORAGE;
+  cleanup?: typeof DEFAULT_CLEANUP;
+  durability?: typeof DEFAULT_DURABILITY;
 }) {
   return {
     workspaceImage: 'lifecycle-workspace:sha-123',
@@ -93,6 +138,9 @@ function buildExpectedRuntimeConfig(overrides?: {
     keepAttachedServicesOnSessionNode: DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE,
     readiness: DEFAULT_READINESS,
     resources: DEFAULT_RESOURCES,
+    workspaceStorage: DEFAULT_WORKSPACE_STORAGE,
+    cleanup: DEFAULT_CLEANUP,
+    durability: DEFAULT_DURABILITY,
     ...overrides,
   };
 }
@@ -233,6 +281,88 @@ describe('runtimeConfig', () => {
     );
   });
 
+  it('returns configured workspace storage, cleanup, and durability settings when present', async () => {
+    getAllConfigs.mockResolvedValue({
+      agentSessionDefaults: {
+        workspaceImage: 'lifecycle-workspace:sha-123',
+        workspaceEditorImage: 'codercom/code-server:4.98.2',
+        workspaceStorage: {
+          defaultSize: '20Gi',
+          allowedSizes: ['10Gi', '20Gi'],
+          allowClientOverride: true,
+          accessMode: 'ReadWriteMany',
+        },
+        cleanup: {
+          activeIdleSuspendMs: 60_000,
+          startingTimeoutMs: 120_000,
+          hibernatedRetentionMs: 180_000,
+          intervalMs: 30_000,
+          redisTtlSeconds: 900,
+        },
+        durability: {
+          runExecutionLeaseMs: 45_000,
+          queuedRunDispatchStaleMs: 5_000,
+          dispatchRecoveryLimit: 12,
+          maxDurablePayloadBytes: 4096,
+          payloadPreviewBytes: 512,
+          fileChangePreviewChars: 600,
+        },
+      },
+    });
+
+    await expect(resolveAgentSessionRuntimeConfig()).resolves.toEqual(
+      buildExpectedRuntimeConfig({
+        workspaceStorage: {
+          defaultSize: '20Gi',
+          allowedSizes: ['10Gi', '20Gi'],
+          allowClientOverride: true,
+          accessMode: 'ReadWriteMany',
+        },
+        cleanup: {
+          activeIdleSuspendMs: 60_000,
+          startingTimeoutMs: 120_000,
+          hibernatedRetentionMs: 180_000,
+          intervalMs: 30_000,
+          redisTtlSeconds: 900,
+        },
+        durability: {
+          runExecutionLeaseMs: 45_000,
+          queuedRunDispatchStaleMs: 5_000,
+          dispatchRecoveryLimit: 12,
+          maxDurablePayloadBytes: 4096,
+          payloadPreviewBytes: 512,
+          fileChangePreviewChars: 600,
+        },
+      })
+    );
+  });
+
+  it('resolves client workspace storage intent only when overrides are enabled and allowed', () => {
+    const storage = resolveAgentSessionWorkspaceStorageFromDefaults({
+      defaultSize: '10Gi',
+      allowedSizes: ['10Gi', '20Gi'],
+      allowClientOverride: true,
+      accessMode: 'ReadWriteOnce',
+    });
+
+    expect(resolveAgentSessionWorkspaceStorageIntent({ requestedSize: '20Gi', storage })).toEqual({
+      requestedSize: '20Gi',
+      storageSize: '20Gi',
+      accessMode: 'ReadWriteOnce',
+    });
+    expect(() =>
+      resolveAgentSessionWorkspaceStorageIntent({
+        requestedSize: '30Gi',
+        storage,
+      })
+    ).toThrow(AgentSessionWorkspaceStorageConfigError);
+  });
+
+  it('resolves cleanup and durability defaults independently', () => {
+    expect(resolveAgentSessionCleanupFromDefaults()).toEqual(DEFAULT_CLEANUP);
+    expect(resolveAgentSessionDurabilityFromDefaults()).toEqual(DEFAULT_DURABILITY);
+  });
+
   it('returns the configured control-plane append prompt from the neutral path', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
@@ -264,7 +394,8 @@ describe('runtimeConfig', () => {
         'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.\n' +
         'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
       appendSystemPrompt:
-        'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.',
+        'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.\n' +
+        'When showing multi-line exact text such as file contents, command output, diffs, or JSON, use a fenced code block instead of inline code.',
       maxIterations: DEFAULT_AGENT_SESSION_MAX_ITERATIONS,
       workspaceToolDiscoveryTimeoutMs: DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
       workspaceToolExecutionTimeoutMs: DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,

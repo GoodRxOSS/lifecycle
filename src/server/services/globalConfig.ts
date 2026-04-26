@@ -276,6 +276,12 @@ export default class GlobalConfigService extends BaseService {
   async setConfig(key: string, value: any): Promise<void> {
     try {
       await this.db.knex('global_config').insert({ key, config: value }).onConflict('key').merge();
+      this.clearMemoryCache();
+      try {
+        await this.redis.del(REDIS_CACHE_KEY);
+      } catch (cacheError) {
+        getLogger().warn({ error: cacheError }, `Config: cache clear failed key=${key}`);
+      }
       getLogger().info(`Config: set key=${key}`);
     } catch (err: any) {
       getLogger().error({ error: err }, `Config: set failed key=${key}`);

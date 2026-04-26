@@ -43,7 +43,14 @@ import {
 import { McpConfigService } from 'server/services/ai/mcp/config';
 import { normalizeAuthConfig, requiresUserConnection } from 'server/services/ai/mcp/connectionConfig';
 import AgentPolicyService from './agent/PolicyService';
-import { buildAgentToolKey, SESSION_WORKSPACE_SERVER_NAME, SESSION_WORKSPACE_SERVER_SLUG } from './agent/toolKeys';
+import {
+  buildAgentToolKey,
+  CHAT_PUBLISH_HTTP_TOOL_NAME,
+  LIFECYCLE_BUILTIN_SERVER_NAME,
+  LIFECYCLE_BUILTIN_SERVER_SLUG,
+  SESSION_WORKSPACE_SERVER_NAME,
+  SESSION_WORKSPACE_SERVER_SLUG,
+} from './agent/toolKeys';
 import type { McpDiscoveredTool } from 'server/services/ai/mcp/types';
 import {
   getSessionWorkspaceToolSortKey,
@@ -119,6 +126,22 @@ function normalizeStringRecord(value: unknown): Record<string, string> | undefin
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = Array.from(
+    new Set(value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()))
+  ).filter(Boolean);
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeWorkspaceStorageAccessMode(value: unknown): 'ReadWriteOnce' | 'ReadWriteMany' | undefined {
+  return value === 'ReadWriteOnce' || value === 'ReadWriteMany' ? value : undefined;
+}
+
 function normalizeResourceRequirements(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
@@ -137,7 +160,7 @@ function normalizeResourceRequirements(value: unknown) {
   };
 }
 
-function validateRequiredRuntimeImages(config: Partial<GlobalConfig['agentSessionDefaults']>): void {
+function validateRequiredRuntimeImages(config: Partial<AgentSessionDefaults>): void {
   const missingFields: string[] = [];
 
   if (!normalizeOptionalString(config.workspaceImage)) {
@@ -228,6 +251,51 @@ function normalizeRuntimeSettings(value: unknown): AgentSessionRuntimeSettingsVa
   const workspaceGatewayResources = normalizeResourceRequirements(
     (value as { resources?: { workspaceGateway?: unknown } }).resources?.workspaceGateway
   );
+  const workspaceStorageDefaultSize = normalizeOptionalString(
+    (value as { workspaceStorage?: { defaultSize?: unknown } }).workspaceStorage?.defaultSize
+  );
+  const workspaceStorageAllowedSizes = normalizeStringArray(
+    (value as { workspaceStorage?: { allowedSizes?: unknown } }).workspaceStorage?.allowedSizes
+  );
+  const workspaceStorageAllowClientOverride = normalizeBoolean(
+    (value as { workspaceStorage?: { allowClientOverride?: unknown } }).workspaceStorage?.allowClientOverride
+  );
+  const workspaceStorageAccessMode = normalizeWorkspaceStorageAccessMode(
+    (value as { workspaceStorage?: { accessMode?: unknown } }).workspaceStorage?.accessMode
+  );
+  const cleanupActiveIdleSuspendMs = normalizePositiveInteger(
+    (value as { cleanup?: { activeIdleSuspendMs?: unknown } }).cleanup?.activeIdleSuspendMs
+  );
+  const cleanupStartingTimeoutMs = normalizePositiveInteger(
+    (value as { cleanup?: { startingTimeoutMs?: unknown } }).cleanup?.startingTimeoutMs
+  );
+  const cleanupHibernatedRetentionMs = normalizePositiveInteger(
+    (value as { cleanup?: { hibernatedRetentionMs?: unknown } }).cleanup?.hibernatedRetentionMs
+  );
+  const cleanupIntervalMs = normalizePositiveInteger(
+    (value as { cleanup?: { intervalMs?: unknown } }).cleanup?.intervalMs
+  );
+  const cleanupRedisTtlSeconds = normalizePositiveInteger(
+    (value as { cleanup?: { redisTtlSeconds?: unknown } }).cleanup?.redisTtlSeconds
+  );
+  const durabilityRunExecutionLeaseMs = normalizePositiveInteger(
+    (value as { durability?: { runExecutionLeaseMs?: unknown } }).durability?.runExecutionLeaseMs
+  );
+  const durabilityQueuedRunDispatchStaleMs = normalizePositiveInteger(
+    (value as { durability?: { queuedRunDispatchStaleMs?: unknown } }).durability?.queuedRunDispatchStaleMs
+  );
+  const durabilityDispatchRecoveryLimit = normalizePositiveInteger(
+    (value as { durability?: { dispatchRecoveryLimit?: unknown } }).durability?.dispatchRecoveryLimit
+  );
+  const durabilityMaxDurablePayloadBytes = normalizePositiveInteger(
+    (value as { durability?: { maxDurablePayloadBytes?: unknown } }).durability?.maxDurablePayloadBytes
+  );
+  const durabilityPayloadPreviewBytes = normalizePositiveInteger(
+    (value as { durability?: { payloadPreviewBytes?: unknown } }).durability?.payloadPreviewBytes
+  );
+  const durabilityFileChangePreviewChars = normalizePositiveInteger(
+    (value as { durability?: { fileChangePreviewChars?: unknown } }).durability?.fileChangePreviewChars
+  );
 
   return {
     ...(workspaceImage ? { workspaceImage } : {}),
@@ -255,6 +323,67 @@ function normalizeRuntimeSettings(value: unknown): AgentSessionRuntimeSettingsVa
             ...(workspaceResources ? { workspace: workspaceResources } : {}),
             ...(editorResources ? { editor: editorResources } : {}),
             ...(workspaceGatewayResources ? { workspaceGateway: workspaceGatewayResources } : {}),
+          },
+        }
+      : {}),
+    ...(workspaceStorageDefaultSize ||
+    workspaceStorageAllowedSizes ||
+    workspaceStorageAllowClientOverride !== undefined ||
+    workspaceStorageAccessMode
+      ? {
+          workspaceStorage: {
+            ...(workspaceStorageDefaultSize ? { defaultSize: workspaceStorageDefaultSize } : {}),
+            ...(workspaceStorageAllowedSizes ? { allowedSizes: workspaceStorageAllowedSizes } : {}),
+            ...(workspaceStorageAllowClientOverride !== undefined
+              ? { allowClientOverride: workspaceStorageAllowClientOverride }
+              : {}),
+            ...(workspaceStorageAccessMode ? { accessMode: workspaceStorageAccessMode } : {}),
+          },
+        }
+      : {}),
+    ...(cleanupActiveIdleSuspendMs !== undefined ||
+    cleanupStartingTimeoutMs !== undefined ||
+    cleanupHibernatedRetentionMs !== undefined ||
+    cleanupIntervalMs !== undefined ||
+    cleanupRedisTtlSeconds !== undefined
+      ? {
+          cleanup: {
+            ...(cleanupActiveIdleSuspendMs !== undefined ? { activeIdleSuspendMs: cleanupActiveIdleSuspendMs } : {}),
+            ...(cleanupStartingTimeoutMs !== undefined ? { startingTimeoutMs: cleanupStartingTimeoutMs } : {}),
+            ...(cleanupHibernatedRetentionMs !== undefined
+              ? { hibernatedRetentionMs: cleanupHibernatedRetentionMs }
+              : {}),
+            ...(cleanupIntervalMs !== undefined ? { intervalMs: cleanupIntervalMs } : {}),
+            ...(cleanupRedisTtlSeconds !== undefined ? { redisTtlSeconds: cleanupRedisTtlSeconds } : {}),
+          },
+        }
+      : {}),
+    ...(durabilityRunExecutionLeaseMs !== undefined ||
+    durabilityQueuedRunDispatchStaleMs !== undefined ||
+    durabilityDispatchRecoveryLimit !== undefined ||
+    durabilityMaxDurablePayloadBytes !== undefined ||
+    durabilityPayloadPreviewBytes !== undefined ||
+    durabilityFileChangePreviewChars !== undefined
+      ? {
+          durability: {
+            ...(durabilityRunExecutionLeaseMs !== undefined
+              ? { runExecutionLeaseMs: durabilityRunExecutionLeaseMs }
+              : {}),
+            ...(durabilityQueuedRunDispatchStaleMs !== undefined
+              ? { queuedRunDispatchStaleMs: durabilityQueuedRunDispatchStaleMs }
+              : {}),
+            ...(durabilityDispatchRecoveryLimit !== undefined
+              ? { dispatchRecoveryLimit: durabilityDispatchRecoveryLimit }
+              : {}),
+            ...(durabilityMaxDurablePayloadBytes !== undefined
+              ? { maxDurablePayloadBytes: durabilityMaxDurablePayloadBytes }
+              : {}),
+            ...(durabilityPayloadPreviewBytes !== undefined
+              ? { payloadPreviewBytes: durabilityPayloadPreviewBytes }
+              : {}),
+            ...(durabilityFileChangePreviewChars !== undefined
+              ? { fileChangePreviewChars: durabilityFileChangePreviewChars }
+              : {}),
           },
         }
       : {}),
@@ -359,6 +488,9 @@ export default class AgentSessionConfigService extends BaseService {
     delete nextDefaults.scheduling;
     delete nextDefaults.readiness;
     delete nextDefaults.resources;
+    delete nextDefaults.workspaceStorage;
+    delete nextDefaults.cleanup;
+    delete nextDefaults.durability;
 
     if (normalized.workspaceImage) {
       nextDefaults.workspaceImage = normalized.workspaceImage;
@@ -377,6 +509,15 @@ export default class AgentSessionConfigService extends BaseService {
     }
     if (normalized.resources) {
       nextDefaults.resources = normalized.resources;
+    }
+    if (normalized.workspaceStorage) {
+      nextDefaults.workspaceStorage = normalized.workspaceStorage;
+    }
+    if (normalized.cleanup) {
+      nextDefaults.cleanup = normalized.cleanup;
+    }
+    if (normalized.durability) {
+      nextDefaults.durability = normalized.durability;
     }
 
     validateRequiredRuntimeImages(nextDefaults);
@@ -487,6 +628,7 @@ export default class AgentSessionConfigService extends BaseService {
       serverName,
       sourceType,
       sourceScope,
+      capabilityKey: capabilityKeyOverride,
       annotations,
     }: {
       toolName: string;
@@ -495,13 +637,15 @@ export default class AgentSessionConfigService extends BaseService {
       serverName: string;
       sourceType: 'builtin' | 'mcp';
       sourceScope: string;
+      capabilityKey?: AgentSessionToolInventoryEntry['capabilityKey'];
       annotations?: McpDiscoveredTool['annotations'];
     }) => {
       const toolKey = buildAgentToolKey(serverSlug, toolName);
       const capabilityKey =
-        sourceType === 'builtin'
+        capabilityKeyOverride ||
+        (sourceType === 'builtin'
           ? AgentPolicyService.capabilityForSessionWorkspaceTool(toolName, annotations)
-          : AgentPolicyService.capabilityForExternalMcpTool(toolName, annotations);
+          : AgentPolicyService.capabilityForExternalMcpTool(toolName, annotations));
       const approvalMode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
       const scopeRuleMode = toRuleSelection(activeScopeConfig.toolRules || [], toolKey);
       const effectiveRuleMode = toRuleSelection(effectiveConfig.toolRules, toolKey);
@@ -540,6 +684,16 @@ export default class AgentSessionConfigService extends BaseService {
         annotations: tool.annotations,
       });
     }
+
+    appendEntry({
+      toolName: CHAT_PUBLISH_HTTP_TOOL_NAME,
+      description: 'Expose a running HTTP app from the chat workspace and return its reachable URL.',
+      serverSlug: LIFECYCLE_BUILTIN_SERVER_SLUG,
+      serverName: LIFECYCLE_BUILTIN_SERVER_NAME,
+      sourceType: 'builtin',
+      sourceScope: 'session',
+      capabilityKey: 'deploy_k8s_mutation',
+    });
 
     for (const config of mcpDefinitions) {
       const tools = await this.listDiscoveredToolsForDefinition(config);
