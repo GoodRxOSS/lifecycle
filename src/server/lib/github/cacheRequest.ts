@@ -56,14 +56,22 @@ export async function cacheRequest(
     );
     await cache.expire(cacheKey, GITHUB_API_CACHE_EXPIRATION_SECONDS);
 
+    getLogger({
+      endpoint,
+      cacheHit: false,
+      rateLimitRemaining: respHeaders?.['x-ratelimit-remaining'],
+      rateLimitReset: respHeaders?.['x-ratelimit-reset'],
+    }).debug('GitHub: cache request fetched');
+
     return resp;
   } catch (error) {
     if (error?.status === 304) {
       const cachedData = cached?.data;
       try {
         if (!cachedData) throw new Error('No cached data');
-        const data = JSON.parse(cached?.data);
-        return { data };
+        const data = JSON.parse(cachedData);
+        getLogger({ endpoint, cacheHit: true }).debug('GitHub: cache request hit');
+        return { data, cacheHit: true };
       } catch (error) {
         return cacheRequest(endpoint, requestData, { cache, ignoreCache: true });
       }
@@ -71,8 +79,14 @@ export async function cacheRequest(
       getLogger().info(`GitHub: cache request not found endpoint=${endpoint}`);
       throw new Error('Resource not found');
     } else {
-      getLogger().error({ error }, `GitHub: cache request failed endpoint=${endpoint}`);
-      throw new Error('GitHub API request failed');
+      const errorHeaders = error?.response?.headers || error?.headers;
+      getLogger({
+        error,
+        endpoint,
+        rateLimitRemaining: errorHeaders?.['x-ratelimit-remaining'],
+        rateLimitReset: errorHeaders?.['x-ratelimit-reset'],
+      }).error('GitHub: cache request failed');
+      throw Object.assign(new Error('GitHub API request failed'), { headers: errorHeaders });
     }
   }
 }

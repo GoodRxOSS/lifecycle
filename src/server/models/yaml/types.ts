@@ -14,9 +14,12 @@
  * limitations under the License.
  */
 
+import type { Service as LifecycleYamlService } from './YamlService';
+
 export type LifecycleYamlConfigEnvironment = {
   autoDeploy?: boolean;
   githubDeployments?: boolean;
+  ignoreFiles?: string[];
   defaultServices?: YamlService[];
   optionalServices?: YamlService[];
   webhooks?: YamlWebhook[];
@@ -40,6 +43,7 @@ export type LifecycleYamlConfigEnvironment = {
 
 export type LifecycleYamlConfigOptions = {
   environment: LifecycleYamlConfigEnvironment;
+  services?: LifecycleYamlService[];
 };
 
 export type YamlService = {

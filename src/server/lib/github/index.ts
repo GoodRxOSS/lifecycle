@@ -28,6 +28,48 @@ import { getRefForBranchName } from 'server/lib/github/utils';
 import { Deploy } from 'server/models';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 
+const MAX_COMPARE_FILES = 300;
+
+export interface ChangedFilesForPushResult {
+  canSkip: boolean;
+  files: string[];
+  reason?: string;
+}
+
+interface PushPayloadCommitFiles {
+  added?: string[];
+  removed?: string[];
+  modified?: string[];
+}
+
+export function getChangedFilesFromPushPayload({
+  commits,
+  commitCount,
+}: {
+  commits?: PushPayloadCommitFiles[];
+  commitCount?: number;
+}): ChangedFilesForPushResult {
+  if (!Array.isArray(commits) || commits.length === 0) {
+    return { canSkip: false, files: [], reason: 'payload_missing_commits' };
+  }
+
+  if (typeof commitCount === 'number' && commits.length < commitCount) {
+    return { canSkip: false, files: [], reason: 'payload_commits_incomplete' };
+  }
+
+  if (commits.some((commit) => Array.isArray(commit.removed) && commit.removed.length > 0)) {
+    return { canSkip: false, files: [], reason: 'payload_has_removed_files' };
+  }
+
+  const changedFiles = commits.flatMap((commit) => [...(commit.added || []), ...(commit.modified || [])]);
+  const uniqueChangedFiles = Array.from(new Set(changedFiles.filter(Boolean)));
+  if (uniqueChangedFiles.length === 0) {
+    return { canSkip: false, files: [], reason: 'payload_missing_files' };
+  }
+
+  return { canSkip: true, files: uniqueChangedFiles };
+}
+
 export async function getRepositoryByFullName(fullName: string, installationId: number) {
   try {
     const client = await createOctokitClient({ installationId, caller: 'getRepositoryByFullName' });
@@ -236,6 +278,50 @@ export async function getSHAForBranch(branchName: string, owner: string, name: s
       branch: branchName,
     }).warn('GitHub: SHA fetch failed');
     throw new Error(error?.message || 'Unable to retrieve SHA from branch');
+  }
+}
+
+export async function getChangedFilesForPush({
+  fullName,
+  before,
+  after,
+}: {
+  fullName: string;
+  before: string;
+  after: string;
+}): Promise<ChangedFilesForPushResult> {
+  try {
+    const response = await cacheRequest(`GET /repos/${fullName}/compare/${before}...${after}`);
+    const files = response?.data?.files;
+    if (!Array.isArray(files) || files.length === 0) {
+      return { canSkip: false, files: [], reason: 'no_files' };
+    }
+
+    if (files.length >= MAX_COMPARE_FILES) {
+      getLogger({ repo: fullName, fileCount: files.length }).info(
+        'GitHub: compare file list may be incomplete, redeploying'
+      );
+      return { canSkip: false, files: [], reason: 'large_or_incomplete_compare' };
+    }
+
+    const changedFiles = files
+      .map((file) => file?.filename)
+      .filter((fileName): fileName is string => typeof fileName === 'string' && fileName.length > 0);
+
+    if (changedFiles.length !== files.length) {
+      return { canSkip: false, files: [], reason: 'missing_file_names' };
+    }
+
+    return { canSkip: true, files: changedFiles };
+  } catch (error) {
+    const headers = error?.response?.headers || error?.headers;
+    getLogger({
+      error,
+      repo: fullName,
+      rateLimitRemaining: headers?.['x-ratelimit-remaining'],
+      rateLimitReset: headers?.['x-ratelimit-reset'],
+    }).warn('GitHub: compare fetch failed, redeploying');
+    return { canSkip: false, files: [], reason: 'compare_fetch_failed' };
   }
 }
 

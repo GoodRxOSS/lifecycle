@@ -72,6 +72,11 @@ const agentSessionSkills = {
   items: agentSessionSkillRef,
 };
 
+const ignoreFiles = {
+  type: 'array',
+  items: { type: 'string' },
+};
+
 const schema_1_0_0 = {
   id: 'schema-1.0.0',
   type: 'object',
@@ -83,6 +88,7 @@ const schema_1_0_0 = {
       additionalProperties: false,
       properties: {
         enabledFeatures: { type: 'array' },
+        ignoreFiles,
         autoDeploy: { type: 'boolean' },
         githubDeployments: { type: 'boolean' },
         useGithubStatusComment: { type: 'boolean' },
@@ -136,6 +142,7 @@ const schema_1_0_0 = {
         additionalProperties: false,
         properties: {
           name: { type: 'string' },
+          ignoreFiles,
           appShort: { type: 'string' },
           defaultUUID: { type: 'string' },
           requires: {

@@ -113,6 +113,10 @@ environment:
         branch: ''
         # @param environment.agentSession.skills.path (required)
         path: ''
+  # @param environment.ignoreFiles
+  ignoreFiles:
+    # @param environment.ignoreFiles[]
+    - ''
 # @section services
 services:
   # @param services[]
@@ -778,3 +782,7 @@ services:
             branch: ''
             # @param services.dev.agentSession.skills.path (required)
             path: ''
+    # @param services.ignoreFiles
+    ignoreFiles:
+      # @param services.ignoreFiles[]
+      - ''

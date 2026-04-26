@@ -30,21 +30,38 @@ import {
   PullRequestStatus,
   FallbackLabels,
   DeployStatus,
+  BuildStatus,
 } from 'shared/constants';
 import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
 import * as github from 'server/lib/github';
-import { Repository, Build, PullRequest } from 'server/models';
+import { Repository, Build, PullRequest, Deploy } from 'server/models';
+import * as YamlService from 'server/models/yaml';
 import { LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { createOrUpdateGithubDeployment, deleteGithubDeploymentAndEnvironment } from 'server/lib/github/deployments';
 import { enableKillSwitch, isStaging, hasDeployLabel, isLifecycleLabel } from 'server/lib/utils';
 import { redisClient } from 'server/lib/dependencies';
 import RepositoryService from './repository';
+import {
+  getEffectiveIgnoreFiles,
+  PushIgnoreDecision,
+  PushIgnoreServicePolicy,
+  shouldSkipPushDeploy,
+} from 'server/lib/pushIgnoreFiles';
+
+const SKIPPED_PUSH_WEBHOOK_STATUSES = new Set<string>([BuildStatus.DEPLOYED, BuildStatus.ERROR, BuildStatus.TORN_DOWN]);
+const IGNORE_FILES_FEATURE_FLAG = 'ignoreFiles';
 
 interface PullRequestPatchState {
   deployLabelPresent: boolean;
   deployOnUpdate: boolean;
 }
+
+type LifecycleConfigCache = Map<string, Promise<YamlService.LifecycleConfig>>;
+type PushEventWithCommitCounts = PushEvent & {
+  distinct_size?: number;
+  size?: number;
+};
 
 export default class GithubService extends Service {
   private readonly repositoryService = new RepositoryService(this.db, this.redis, this.redlock, this.queueManager);
@@ -359,13 +376,149 @@ export default class GithubService extends Service {
     }
   };
 
-  handlePushWebhook = async ({ ref, before: previousCommit, after: latestCommit, repository }: PushEvent) => {
+  private async getLifecycleConfigForPush(
+    repoName: string,
+    branchName: string,
+    lifecycleConfigCache: LifecycleConfigCache
+  ): Promise<YamlService.LifecycleConfig> {
+    const cacheKey = `${repoName}:${branchName}`;
+    if (!lifecycleConfigCache.has(cacheKey)) {
+      lifecycleConfigCache.set(cacheKey, YamlService.fetchLifecycleConfig(repoName, branchName));
+    }
+
+    return lifecycleConfigCache.get(cacheKey)!;
+  }
+
+  private getDeployServiceName(deploy: Deploy): string | null {
+    return (deploy.build?.enableFullYaml ? deploy.deployable?.name : deploy.service?.name) ?? null;
+  }
+
+  private async getPushIgnoreServicePolicies({
+    repoName,
+    branchName,
+    deploys,
+    lifecycleConfigCache,
+  }: {
+    repoName: string;
+    branchName: string;
+    deploys: Deploy[];
+    lifecycleConfigCache: LifecycleConfigCache;
+  }): Promise<PushIgnoreServicePolicy[]> {
+    const lifecycleConfig = await this.getLifecycleConfigForPush(repoName, branchName, lifecycleConfigCache);
+    if (!lifecycleConfig) {
+      throw new Error(`Lifecycle config not found for ${repoName}:${branchName}`);
+    }
+
+    return deploys.map((deploy) => {
+      const serviceName = this.getDeployServiceName(deploy);
+      if (!serviceName) {
+        throw new Error(`Deploy ${deploy.id} does not have a service name`);
+      }
+
+      const service = lifecycleConfig.services?.find((candidate) => candidate.name === serviceName);
+      if (!service) {
+        throw new Error(`Service ${serviceName} not found in ${repoName}:${branchName}`);
+      }
+
+      return {
+        serviceName,
+        ignoreFiles: getEffectiveIgnoreFiles(lifecycleConfig.environment?.ignoreFiles, service.ignoreFiles),
+      };
+    });
+  }
+
+  private async shouldSkipBuildDeployForPush({
+    repoName,
+    branchName,
+    build,
+    affectedDeploys,
+    changedFiles,
+    lifecycleConfigCache,
+  }: {
+    repoName: string;
+    branchName: string;
+    build: Build;
+    affectedDeploys: Deploy[];
+    changedFiles: string[];
+    lifecycleConfigCache: LifecycleConfigCache;
+  }): Promise<PushIgnoreDecision> {
+    try {
+      const servicePolicies = await this.getPushIgnoreServicePolicies({
+        repoName,
+        branchName,
+        deploys: affectedDeploys,
+        lifecycleConfigCache,
+      });
+
+      return shouldSkipPushDeploy({ changedFiles, servicePolicies });
+    } catch (error) {
+      getLogger({ error, buildId: build.id, repo: repoName, branch: branchName }).warn(
+        'Push: ignoreFiles policy resolution failed, redeploying'
+      );
+      return { shouldSkip: false, reason: 'policy_resolution_failed' };
+    }
+  }
+
+  private async isIgnoreFilesFeatureEnabled(): Promise<boolean> {
+    try {
+      const { features } = await this.db.services.GlobalConfig.getAllConfigs();
+      return features?.[IGNORE_FILES_FEATURE_FLAG] === true;
+    } catch (error) {
+      getLogger({ error, featureFlag: IGNORE_FILES_FEATURE_FLAG }).warn(
+        'Push: ignoreFiles feature flag fetch failed, using dry-run mode'
+      );
+      return false;
+    }
+  }
+
+  private async queueWebhooksForSkippedPush(build: Build): Promise<void> {
+    if (!SKIPPED_PUSH_WEBHOOK_STATUSES.has(build.status)) {
+      getLogger({ buildId: build.id, status: build.status }).info('Push: skipped deploy without webhook');
+      return;
+    }
+
+    await this.db.services.Webhook.webhookQueue.add('webhook', {
+      buildId: build.id,
+      ...extractContextForQueue(),
+    });
+    getLogger({ buildId: build.id, status: build.status }).info('Push: skipped deploy and queued webhooks');
+  }
+
+  handlePushWebhook = async (pushEvent: PushEvent) => {
+    const { ref, before: previousCommit, after: latestCommit, repository } = pushEvent;
+    const pushEventWithCounts = pushEvent as PushEventWithCommitCounts;
     const { id: githubRepositoryId, full_name: repoName } = repository;
     const branchName = ref.split('refs/heads/')[1];
     if (!branchName) return;
     const hasVoidCommit = [previousCommit, latestCommit].some((commit) => this.isVoidCommit(commit));
     getLogger({}).debug(`Push event repo=${repoName} branch=${branchName}`);
     const models = this.db.models;
+    let changedFilesForPush: github.ChangedFilesForPushResult | null = null;
+    const lifecycleConfigCache: LifecycleConfigCache = new Map();
+
+    const loadChangedFilesForPush = async () => {
+      if (!changedFilesForPush) {
+        changedFilesForPush = github.getChangedFilesFromPushPayload({
+          commits: pushEvent.commits,
+          commitCount: pushEventWithCounts.distinct_size ?? pushEventWithCounts.size,
+        });
+
+        if (!changedFilesForPush.canSkip) {
+          getLogger({
+            repo: repoName,
+            branch: branchName,
+            reason: changedFilesForPush.reason,
+          }).info('Push: changed files unavailable from payload, falling back to compare');
+          changedFilesForPush = await github.getChangedFilesForPush({
+            fullName: repoName,
+            before: previousCommit,
+            after: latestCommit,
+          });
+        }
+      }
+
+      return changedFilesForPush;
+    };
 
     try {
       if (!hasVoidCommit) {
@@ -438,6 +591,57 @@ export default class GithubService extends Service {
         }
 
         if (!hasFailedDeploys) {
+          if (!hasVoidCommit) {
+            const changedFilesResult = await loadChangedFilesForPush();
+            if (changedFilesResult.canSkip) {
+              const affectedDeploys = deploysToRebuild.filter((deploy) => deploy.build?.id === buildId);
+              const skipDecision = await this.shouldSkipBuildDeployForPush({
+                repoName,
+                branchName,
+                build,
+                affectedDeploys,
+                changedFiles: changedFilesResult.files,
+                lifecycleConfigCache,
+              });
+
+              if (skipDecision.shouldSkip) {
+                const ignoreFilesEnabled = await this.isIgnoreFilesFeatureEnabled();
+                getLogger({
+                  buildId,
+                  repo: repoName,
+                  branch: branchName,
+                  reason: skipDecision.reason,
+                  ignoreFilesEnabled,
+                }).info(
+                  ignoreFilesEnabled
+                    ? 'Push: skipped deploy reason=ignoreFiles'
+                    : 'Push: dry-run would skip deploy reason=ignoreFiles'
+                );
+
+                if (ignoreFilesEnabled) {
+                  await this.queueWebhooksForSkippedPush(build);
+                  continue;
+                }
+              } else {
+                getLogger({
+                  buildId,
+                  repo: repoName,
+                  branch: branchName,
+                  reason: skipDecision.reason,
+                  serviceName: skipDecision.serviceName,
+                  filePath: skipDecision.filePath,
+                }).info('Push: deploying reason=ignoreFiles_not_matched');
+              }
+            } else {
+              getLogger({
+                buildId,
+                repo: repoName,
+                branch: branchName,
+                reason: changedFilesResult.reason,
+              }).info('Push: deploying reason=changed_files_unavailable');
+            }
+          }
+
           getLogger().info(`Push: deploying repo=${repoName} branch=${branchName}`);
         }
 
@@ -453,10 +657,10 @@ export default class GithubService extends Service {
   };
 
   /**
-   * okay! most times the static environment builds are in a separate repo. because of this, we will not have a deploy with this repo's
-   * github repository id and branch name causing pushes to this branch to not trigger a redeploy.
-   * Ideally when a service is added or removed in a static env branch, we want to rebuild the whole environment.
-   * this is a patch to achieve this
+   * Static environment builds are often defined in a separate config repo, so they may not have deploy records
+   * for the pushed repo and branch. In that case, rebuild the whole static environment for matching default-branch pushes.
+   * Static environments intentionally bypass ignoreFiles diff checks because their service graph can change from
+   * the config repo itself, and redeploying is the safer default.
    */
   handlePushForStaticEnv = async ({
     githubRepositoryId,
