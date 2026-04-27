@@ -137,28 +137,3 @@ export function sanitizeAgentRunStreamChunks(chunks: AgentUiMessageChunk[]): Age
     } as AgentUiMessageChunk;
   });
 }
-
-export function sanitizeAgentRunStreamState(streamState?: Record<string, unknown> | null): Record<string, unknown> {
-  if (!streamState || typeof streamState !== 'object') {
-    return {};
-  }
-
-  const nextState = cloneValue(streamState);
-  const rawChunks = Array.isArray(nextState.chunks) ? nextState.chunks : [];
-  const sanitizedChunks = sanitizeAgentRunStreamChunks(rawChunks as AgentUiMessageChunk[]);
-
-  if (sanitizedChunks.length > 0) {
-    nextState.chunks = sanitizedChunks;
-  }
-
-  const finishChunk = sanitizedChunks.find((chunk) => isRecord(chunk) && chunk.type === 'finish');
-  if (
-    typeof nextState.finishReason === 'string' &&
-    isRecord(finishChunk) &&
-    finishChunk.finishReason === nextState.finishReason
-  ) {
-    delete nextState.finishReason;
-  }
-
-  return nextState;
-}

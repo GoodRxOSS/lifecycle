@@ -48,26 +48,6 @@ export class MissingAgentProviderApiKeyError extends Error {
   }
 }
 
-function resolveRequestApiKeyForProvider(
-  provider: string,
-  requestApiKey?: string | null,
-  requestApiKeyProvider?: string | null
-): string | null {
-  if (process.env.ENABLE_AUTH === 'true') {
-    return null;
-  }
-
-  const normalizedProvider = normalizeStoredAgentProviderName(provider);
-  const normalizedRequestProvider = normalizeStoredAgentProviderName(requestApiKeyProvider);
-
-  if (!normalizedProvider || normalizedRequestProvider !== normalizedProvider) {
-    return null;
-  }
-
-  const normalized = requestApiKey?.trim();
-  return normalized ? normalized : null;
-}
-
 function getProviderInstance(provider: AgentResolvedModelSelection['provider'], apiKey: string) {
   switch (provider) {
     case 'anthropic':
@@ -170,13 +150,9 @@ export default class AgentProviderRegistry {
   static async listAvailableModelsForUser({
     repoFullName,
     userIdentity,
-    requestApiKey,
-    requestApiKeyProvider,
   }: {
     repoFullName?: string;
     userIdentity: Pick<RequestUserIdentity, 'userId' | 'githubUsername'>;
-    requestApiKey?: string | null;
-    requestApiKeyProvider?: string | null;
   }): Promise<AgentModelSummary[]> {
     const models = await this.listAvailableModels(repoFullName);
     const uniqueProviders = [...new Set(models.map((model) => model.provider))];
@@ -196,24 +172,15 @@ export default class AgentProviderRegistry {
       })
     );
 
-    const localRequestProvider = normalizeStoredAgentProviderName(requestApiKeyProvider);
-    if (process.env.ENABLE_AUTH !== 'true' && requestApiKey?.trim() && localRequestProvider) {
-      configuredProviders.add(localRequestProvider);
-    }
-
     return models.filter((model) => configuredProviders.has(model.provider));
   }
 
   static async resolveCredentialEnvMap({
     repoFullName,
     userIdentity,
-    requestApiKey,
-    requestApiKeyProvider,
   }: {
     repoFullName?: string;
     userIdentity: Pick<RequestUserIdentity, 'userId' | 'githubUsername'>;
-    requestApiKey?: string | null;
-    requestApiKeyProvider?: string | null;
   }): Promise<Record<string, string>> {
     let config;
     try {
@@ -234,9 +201,11 @@ export default class AgentProviderRegistry {
         .filter((provider) => provider?.enabled !== false && typeof provider.name === 'string')
         .map(async (provider) => {
           const envVarCandidates = this.getProviderEnvVarCandidates(provider.name, provider.apiKeyEnvVar);
-          const apiKey =
-            resolveRequestApiKeyForProvider(provider.name, requestApiKey, requestApiKeyProvider) ||
-            (await UserApiKeyService.getDecryptedKey(userIdentity.userId, provider.name, userIdentity.githubUsername));
+          const apiKey = await UserApiKeyService.getDecryptedKey(
+            userIdentity.userId,
+            provider.name,
+            userIdentity.githubUsername
+          );
 
           if (!apiKey) {
             return;
@@ -267,17 +236,11 @@ export default class AgentProviderRegistry {
   static async getRequiredStoredApiKey({
     provider,
     userIdentity,
-    requestApiKey,
-    requestApiKeyProvider,
   }: {
     provider: string;
     userIdentity: Pick<RequestUserIdentity, 'userId' | 'githubUsername'>;
-    requestApiKey?: string | null;
-    requestApiKeyProvider?: string | null;
   }): Promise<string> {
-    const apiKey =
-      resolveRequestApiKeyForProvider(provider, requestApiKey, requestApiKeyProvider) ||
-      (await UserApiKeyService.getDecryptedKey(userIdentity.userId, provider, userIdentity.githubUsername));
+    const apiKey = await UserApiKeyService.getDecryptedKey(userIdentity.userId, provider, userIdentity.githubUsername);
 
     if (!apiKey) {
       throw new MissingAgentProviderApiKeyError(provider);
@@ -289,20 +252,14 @@ export default class AgentProviderRegistry {
   static async createLanguageModel({
     selection,
     userIdentity,
-    requestApiKey,
-    requestApiKeyProvider,
   }: {
     repoFullName?: string;
     selection: AgentResolvedModelSelection;
     userIdentity: RequestUserIdentity;
-    requestApiKey?: string | null;
-    requestApiKeyProvider?: string | null;
   }): Promise<LanguageModel> {
     const apiKey = await this.getRequiredStoredApiKey({
       provider: selection.provider,
       userIdentity,
-      requestApiKey,
-      requestApiKeyProvider,
     });
     const provider = getProviderInstance(selection.provider, apiKey);
 

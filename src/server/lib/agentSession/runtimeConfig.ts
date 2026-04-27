@@ -17,10 +17,14 @@
 import GlobalConfigService from 'server/services/globalConfig';
 import type {
   AgentSessionControlPlaneConfig,
+  AgentSessionCleanupConfig,
   AgentSessionDefaults,
+  AgentSessionDurabilityConfig,
   AgentSessionReadinessConfig,
   AgentSessionResourcesConfig,
   AgentSessionSchedulingConfig,
+  AgentSessionWorkspaceStorageAccessMode,
+  AgentSessionWorkspaceStorageConfig,
   ResourceRequirements,
 } from 'server/services/types/globalConfig';
 
@@ -32,6 +36,9 @@ export interface AgentSessionRuntimeConfig {
   keepAttachedServicesOnSessionNode: boolean;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
+  workspaceStorage: ResolvedAgentSessionWorkspaceStorageConfig;
+  cleanup: ResolvedAgentSessionCleanupConfig;
+  durability: ResolvedAgentSessionDurabilityConfig;
 }
 
 export interface ResolvedAgentSessionReadinessConfig {
@@ -50,6 +57,36 @@ export interface ResolvedAgentSessionResources {
   workspaceGateway: ResolvedAgentSessionResourceRequirements;
 }
 
+export interface ResolvedAgentSessionWorkspaceStorageConfig {
+  defaultSize: string;
+  allowedSizes: string[];
+  allowClientOverride: boolean;
+  accessMode: AgentSessionWorkspaceStorageAccessMode;
+}
+
+export interface ResolvedAgentSessionWorkspaceStorageIntent {
+  requestedSize: string | null;
+  storageSize: string;
+  accessMode: AgentSessionWorkspaceStorageAccessMode;
+}
+
+export interface ResolvedAgentSessionCleanupConfig {
+  activeIdleSuspendMs: number;
+  startingTimeoutMs: number;
+  hibernatedRetentionMs: number;
+  intervalMs: number;
+  redisTtlSeconds: number;
+}
+
+export interface ResolvedAgentSessionDurabilityConfig {
+  runExecutionLeaseMs: number;
+  queuedRunDispatchStaleMs: number;
+  dispatchRecoveryLimit: number;
+  maxDurablePayloadBytes: number;
+  payloadPreviewBytes: number;
+  fileChangePreviewChars: number;
+}
+
 export interface ResolvedAgentSessionControlPlaneConfig {
   systemPrompt?: string;
   appendSystemPrompt?: string;
@@ -66,8 +103,10 @@ export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
   'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
 ].join('\n');
 
-export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT =
-  'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.';
+export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT = [
+  'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.',
+  'When showing multi-line exact text such as file contents, command output, diffs, or JSON, use a fenced code block instead of inline code.',
+].join('\n');
 export const DEFAULT_AGENT_SESSION_MAX_ITERATIONS = 8;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS = 3000;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS = 15000;
@@ -75,6 +114,20 @@ export const DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE = true
 
 const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
 const DEFAULT_AGENT_READY_POLL_MS = 1000;
+export const DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE = '10Gi';
+export const DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE: AgentSessionWorkspaceStorageAccessMode =
+  'ReadWriteOnce';
+export const DEFAULT_AGENT_SESSION_ACTIVE_IDLE_SUSPEND_MS = 30 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS = 15 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS = 7200;
+export const DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS = 30 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS = 30 * 1000;
+export const DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT = 50;
+export const DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES = 64 * 1024;
+export const DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES = 16 * 1024;
+export const DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS = 4000;
 const DEFAULT_WORKSPACE_RESOURCES: ResolvedAgentSessionResourceRequirements = {
   requests: {
     cpu: '500m',
@@ -151,6 +204,20 @@ function normalizeBoolean(value: unknown): boolean | undefined {
   }
 
   return undefined;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()))
+  ).filter(Boolean);
+}
+
+function normalizeAccessMode(value: unknown): AgentSessionWorkspaceStorageAccessMode | undefined {
+  return value === 'ReadWriteMany' || value === 'ReadWriteOnce' ? value : undefined;
 }
 
 function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
@@ -276,6 +343,107 @@ export function mergeAgentSessionResources(
   };
 }
 
+export function resolveAgentSessionWorkspaceStorageFromDefaults(
+  storageDefaults?: AgentSessionWorkspaceStorageConfig | null
+): ResolvedAgentSessionWorkspaceStorageConfig {
+  const defaultSize =
+    normalizeOptionalString(storageDefaults?.defaultSize) || DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE;
+  const configuredAllowedSizes = normalizeStringArray(storageDefaults?.allowedSizes);
+  const allowedSizes = configuredAllowedSizes.includes(defaultSize)
+    ? configuredAllowedSizes
+    : [defaultSize, ...configuredAllowedSizes];
+
+  return {
+    defaultSize,
+    allowedSizes,
+    allowClientOverride: normalizeBoolean(storageDefaults?.allowClientOverride) ?? false,
+    accessMode:
+      normalizeAccessMode(storageDefaults?.accessMode) ||
+      normalizeAccessMode(process.env.AGENT_SESSION_PVC_ACCESS_MODE) ||
+      DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE,
+  };
+}
+
+export class AgentSessionWorkspaceStorageConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentSessionWorkspaceStorageConfigError';
+  }
+}
+
+export function resolveAgentSessionWorkspaceStorageIntent({
+  requestedSize,
+  storage,
+}: {
+  requestedSize?: string | null;
+  storage: ResolvedAgentSessionWorkspaceStorageConfig;
+}): ResolvedAgentSessionWorkspaceStorageIntent {
+  const normalizedRequestedSize = normalizeOptionalString(requestedSize) || null;
+
+  if (!normalizedRequestedSize) {
+    return {
+      requestedSize: null,
+      storageSize: storage.defaultSize,
+      accessMode: storage.accessMode,
+    };
+  }
+
+  if (!storage.allowClientOverride) {
+    throw new AgentSessionWorkspaceStorageConfigError('workspace.storageSize overrides are not enabled.');
+  }
+
+  if (!storage.allowedSizes.includes(normalizedRequestedSize)) {
+    throw new AgentSessionWorkspaceStorageConfigError(
+      `workspace.storageSize must be one of: ${storage.allowedSizes.join(', ')}.`
+    );
+  }
+
+  return {
+    requestedSize: normalizedRequestedSize,
+    storageSize: normalizedRequestedSize,
+    accessMode: storage.accessMode,
+  };
+}
+
+export function resolveAgentSessionCleanupFromDefaults(
+  cleanupDefaults?: AgentSessionCleanupConfig | null
+): ResolvedAgentSessionCleanupConfig {
+  return {
+    activeIdleSuspendMs:
+      normalizePositiveInteger(cleanupDefaults?.activeIdleSuspendMs) ?? DEFAULT_AGENT_SESSION_ACTIVE_IDLE_SUSPEND_MS,
+    startingTimeoutMs:
+      normalizePositiveInteger(cleanupDefaults?.startingTimeoutMs) ?? DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS,
+    hibernatedRetentionMs:
+      normalizePositiveInteger(cleanupDefaults?.hibernatedRetentionMs) ?? DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS,
+    intervalMs: normalizePositiveInteger(cleanupDefaults?.intervalMs) ?? DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
+    redisTtlSeconds:
+      normalizePositiveInteger(cleanupDefaults?.redisTtlSeconds) ?? DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS,
+  };
+}
+
+export function resolveAgentSessionDurabilityFromDefaults(
+  durabilityDefaults?: AgentSessionDurabilityConfig | null
+): ResolvedAgentSessionDurabilityConfig {
+  return {
+    runExecutionLeaseMs:
+      normalizePositiveInteger(durabilityDefaults?.runExecutionLeaseMs) ?? DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS,
+    queuedRunDispatchStaleMs:
+      normalizePositiveInteger(durabilityDefaults?.queuedRunDispatchStaleMs) ??
+      DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS,
+    dispatchRecoveryLimit:
+      normalizePositiveInteger(durabilityDefaults?.dispatchRecoveryLimit) ??
+      DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
+    maxDurablePayloadBytes:
+      normalizePositiveInteger(durabilityDefaults?.maxDurablePayloadBytes) ??
+      DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES,
+    payloadPreviewBytes:
+      normalizePositiveInteger(durabilityDefaults?.payloadPreviewBytes) ?? DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES,
+    fileChangePreviewChars:
+      normalizePositiveInteger(durabilityDefaults?.fileChangePreviewChars) ??
+      DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS,
+  };
+}
+
 export function resolveAgentSessionControlPlaneConfigFromDefaults(
   agentSessionDefaults?: AgentSessionDefaults | null
 ): ResolvedAgentSessionControlPlaneConfig {
@@ -306,6 +474,16 @@ export function resolveAgentSessionControlPlaneConfigFromDefaults(
 export async function resolveAgentSessionControlPlaneConfig(): Promise<ResolvedAgentSessionControlPlaneConfig> {
   const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   return resolveAgentSessionControlPlaneConfigFromDefaults(agentSessionDefaults);
+}
+
+export async function resolveAgentSessionCleanupConfig(): Promise<ResolvedAgentSessionCleanupConfig> {
+  const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  return resolveAgentSessionCleanupFromDefaults(agentSessionDefaults?.cleanup);
+}
+
+export async function resolveAgentSessionDurabilityConfig(): Promise<ResolvedAgentSessionDurabilityConfig> {
+  const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  return resolveAgentSessionDurabilityFromDefaults(agentSessionDefaults?.durability);
 }
 
 export class AgentSessionRuntimeConfigError extends Error {
@@ -345,5 +523,8 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
     keepAttachedServicesOnSessionNode: resolveKeepAttachedServicesOnSessionNode(agentSessionDefaults?.scheduling),
     readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),
     resources: resolveAgentSessionResourcesFromDefaults(agentSessionDefaults?.resources),
+    workspaceStorage: resolveAgentSessionWorkspaceStorageFromDefaults(agentSessionDefaults?.workspaceStorage),
+    cleanup: resolveAgentSessionCleanupFromDefaults(agentSessionDefaults?.cleanup),
+    durability: resolveAgentSessionDurabilityFromDefaults(agentSessionDefaults?.durability),
   };
 }

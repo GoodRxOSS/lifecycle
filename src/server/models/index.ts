@@ -33,10 +33,14 @@ import ConversationMessage from './ConversationMessage';
 import MessageFeedback from './MessageFeedback';
 import ConversationFeedback from './ConversationFeedback';
 import AgentSession from './AgentSession';
+import AgentSource from './AgentSource';
+import AgentSandbox from './AgentSandbox';
+import AgentSandboxExposure from './AgentSandboxExposure';
 import AgentPrewarm from './AgentPrewarm';
 import UserApiKey from './UserApiKey';
 import AgentThread from './AgentThread';
 import AgentRun from './AgentRun';
+import AgentRunEvent from './AgentRunEvent';
 import AgentMessage from './AgentMessage';
 import AgentPendingAction from './AgentPendingAction';
 import AgentToolExecution from './AgentToolExecution';
@@ -62,10 +66,14 @@ export interface IModels {
   MessageFeedback: typeof MessageFeedback;
   ConversationFeedback: typeof ConversationFeedback;
   AgentSession: typeof AgentSession;
+  AgentSource: typeof AgentSource;
+  AgentSandbox: typeof AgentSandbox;
+  AgentSandboxExposure: typeof AgentSandboxExposure;
   AgentPrewarm: typeof AgentPrewarm;
   UserApiKey: typeof UserApiKey;
   AgentThread: typeof AgentThread;
   AgentRun: typeof AgentRun;
+  AgentRunEvent: typeof AgentRunEvent;
   AgentMessage: typeof AgentMessage;
   AgentPendingAction: typeof AgentPendingAction;
   AgentToolExecution: typeof AgentToolExecution;
@@ -92,10 +100,14 @@ export {
   MessageFeedback,
   ConversationFeedback,
   AgentSession,
+  AgentSource,
+  AgentSandbox,
+  AgentSandboxExposure,
   AgentPrewarm,
   UserApiKey,
   AgentThread,
   AgentRun,
+  AgentRunEvent,
   AgentMessage,
   AgentPendingAction,
   AgentToolExecution,

@@ -23,6 +23,12 @@ import { MAX_GITHUB_API_REQUEST, GITHUB_API_REQUEST_INTERVAL, QUEUE_NAMES } from
 import { processAgentSessionCleanup } from './agentSessionCleanup';
 import { processAgentSessionPrewarm } from './agentSessionPrewarm';
 import { processAgentSandboxSessionLaunch } from './agentSandboxSessionLaunch';
+import { processAgentRunExecute } from './agentRunExecute';
+import { processAgentRunDispatchRecovery } from './agentRunDispatchRecovery';
+import {
+  DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
+  resolveAgentSessionCleanupConfig,
+} from 'server/lib/agentSession/runtimeConfig';
 
 let isBootstrapped = false;
 
@@ -121,6 +127,16 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 5,
   });
 
+  queueManager.registerWorker(QUEUE_NAMES.AGENT_RUN_EXECUTE, processAgentRunExecute, {
+    connection: redisClient.getConnection(),
+    concurrency: 5,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.AGENT_RUN_RECOVERY, processAgentRunDispatchRecovery, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
   const agentCleanupQueue = queueManager.registerQueue(QUEUE_NAMES.AGENT_SESSION_CLEANUP, {
     connection: redisClient.getConnection(),
     defaultJobOptions: {
@@ -130,12 +146,47 @@ export default function bootstrapJobs(services: IServices) {
     },
   });
 
-  agentCleanupQueue.add(
-    'agent-session-cleanup',
+  void resolveAgentSessionCleanupConfig()
+    .then((cleanupConfig) =>
+      agentCleanupQueue.add(
+        'agent-session-cleanup',
+        {},
+        {
+          repeat: {
+            every: cleanupConfig.intervalMs,
+          },
+        }
+      )
+    )
+    .catch((error) => {
+      getLogger().warn({ error }, 'Jobs: cleanup schedule config failed queue=agent_session_cleanup');
+      return agentCleanupQueue.add(
+        'agent-session-cleanup',
+        {},
+        {
+          repeat: {
+            every: DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
+          },
+        }
+      );
+    });
+
+  const agentRunRecoveryQueue = queueManager.registerQueue(QUEUE_NAMES.AGENT_RUN_RECOVERY, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  });
+
+  agentRunRecoveryQueue.add(
+    'agent-run-recovery',
     {},
     {
+      jobId: 'agent-run-recovery',
       repeat: {
-        every: 5 * 60 * 1000,
+        every: 60 * 1000,
       },
     }
   );

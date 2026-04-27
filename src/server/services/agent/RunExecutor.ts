@@ -15,6 +15,9 @@
  */
 
 import { stepCountIs, ToolLoopAgent } from 'ai';
+import { randomBytes } from 'crypto';
+import os from 'os';
+import type AgentRun from 'server/models/AgentRun';
 import type AgentSession from 'server/models/AgentSession';
 import type AgentThread from 'server/models/AgentThread';
 import { getLogger } from 'server/lib/logger';
@@ -28,10 +31,14 @@ import AgentCapabilityService from './CapabilityService';
 import AgentMessageStore from './MessageStore';
 import { AgentRunObservabilityTracker, buildMessageObservabilityMetadataPatch } from './observability';
 import AgentProviderRegistry from './ProviderRegistry';
+import AgentRunQueueService from './RunQueueService';
 import AgentRunService from './RunService';
 import type { AgentFileChangeData, AgentUIMessage } from './types';
 import { applyApprovalResponsesToFileChangeParts, buildResultFileChanges } from './fileChanges';
 import { AgentRunTerminalFailure, SessionWorkspaceGatewayUnavailableError } from './errors';
+import { limitDurablePayloadValue } from './payloadLimits';
+import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
+import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
 
 function buildSystemPrompt(parts: Array<string | undefined>): string | undefined {
   const normalized = parts.map((part) => part?.trim()).filter(Boolean) as string[];
@@ -154,16 +161,36 @@ function classifyTerminalRunFailure({
   }
 }
 
+function readRunMaxIterations(run?: AgentRun): number | null {
+  const runtimeOptions = run?.policySnapshot?.runtimeOptions;
+  if (!runtimeOptions || typeof runtimeOptions !== 'object' || Array.isArray(runtimeOptions)) {
+    return null;
+  }
+
+  const maxIterations = (runtimeOptions as Record<string, unknown>).maxIterations;
+  return typeof maxIterations === 'number' && Number.isInteger(maxIterations) && maxIterations > 0
+    ? maxIterations
+    : null;
+}
+
+function resolveHeartbeatIntervalMs(runExecutionLeaseMs: number): number {
+  return Math.min(Math.max(Math.floor(runExecutionLeaseMs / 3), 10_000), 60_000);
+}
+
+function buildDirectExecutionOwner(): string {
+  return `direct:${os.hostname()}:${process.pid}:${randomBytes(6).toString('hex')}`;
+}
+
 export default class AgentRunExecutor {
   static async execute({
     session,
     thread,
     userIdentity,
-    messages: _messages,
     requestedProvider,
     requestedModelId,
-    requestApiKey,
-    requestApiKeyProvider,
+    requestGitHubToken,
+    existingRun,
+    dispatchAttemptId,
     onFileChange,
   }: {
     session: AgentSession;
@@ -172,8 +199,9 @@ export default class AgentRunExecutor {
     messages: AgentUIMessage[];
     requestedProvider?: string;
     requestedModelId?: string;
-    requestApiKey?: string | null;
-    requestApiKeyProvider?: string | null;
+    requestGitHubToken?: string | null;
+    existingRun?: AgentRun;
+    dispatchAttemptId?: string;
     onFileChange?: (change: AgentFileChangeData) => Promise<void> | void;
   }) {
     const { repoFullName, approvalPolicy } = await AgentCapabilityService.resolveSessionContext(
@@ -189,8 +217,6 @@ export default class AgentRunExecutor {
       repoFullName,
       selection,
       userIdentity,
-      requestApiKey,
-      requestApiKeyProvider,
     });
     const observabilityTracker = new AgentRunObservabilityTracker();
     const touchSessionActivity = async () => {
@@ -204,12 +230,18 @@ export default class AgentRunExecutor {
       }
     };
     const effectiveSessionConfig = await AgentSessionConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const runMaxIterations = readRunMaxIterations(existingRun);
+    const runControlPlaneConfig = {
+      ...effectiveSessionConfig,
+      ...(runMaxIterations ? { maxIterations: runMaxIterations } : {}),
+    };
     const sessionPrompt = await AgentSessionService.getSessionAppendSystemPrompt(
       session.uuid,
       repoFullName,
-      effectiveSessionConfig.appendSystemPrompt
+      runControlPlaneConfig.appendSystemPrompt
     );
     let run: Awaited<ReturnType<typeof AgentRunService.createRun>> | null = null;
+    let heartbeatTimer: NodeJS.Timeout | null = null;
 
     const requireRun = () => {
       if (!run) {
@@ -218,6 +250,12 @@ export default class AgentRunExecutor {
 
       return run;
     };
+    const clearHeartbeatTimer = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
 
     try {
       const tools = await AgentCapabilityService.buildToolSet({
@@ -225,9 +263,10 @@ export default class AgentRunExecutor {
         repoFullName,
         userIdentity,
         approvalPolicy,
-        workspaceToolDiscoveryTimeoutMs: effectiveSessionConfig.workspaceToolDiscoveryTimeoutMs,
-        workspaceToolExecutionTimeoutMs: effectiveSessionConfig.workspaceToolExecutionTimeoutMs,
-        toolRules: effectiveSessionConfig.toolRules,
+        workspaceToolDiscoveryTimeoutMs: runControlPlaneConfig.workspaceToolDiscoveryTimeoutMs,
+        workspaceToolExecutionTimeoutMs: runControlPlaneConfig.workspaceToolExecutionTimeoutMs,
+        requestGitHubToken,
+        toolRules: runControlPlaneConfig.toolRules,
         hooks: {
           onToolStarted: async (audit) => {
             const activeRun = requireRun();
@@ -271,6 +310,7 @@ export default class AgentRunExecutor {
             }
 
             const completedAt = new Date().toISOString();
+            const durability = await resolveAgentSessionDurabilityConfig();
             const fileChanges = audit.toolCallId
               ? buildResultFileChanges({
                   toolCallId: audit.toolCallId,
@@ -278,12 +318,13 @@ export default class AgentRunExecutor {
                   input: audit.args,
                   result: audit.result,
                   failed: audit.status === 'failed',
+                  previewChars: durability.fileChangePreviewChars,
                 })
               : [];
             await AgentToolExecution.query().patchAndFetchById(execution.id, {
               status: audit.status,
               result: {
-                value: audit.result,
+                value: limitDurablePayloadValue(audit.result, durability),
                 ...(fileChanges.length > 0 ? { fileChanges } : {}),
               },
               completedAt,
@@ -296,20 +337,84 @@ export default class AgentRunExecutor {
         },
       });
 
-      run = await AgentRunService.createRun({
-        thread,
-        session,
-        provider: selection.provider,
-        model: selection.modelId,
-        policy: approvalPolicy,
-      });
+      if (existingRun) {
+        if (!existingRun.executionOwner) {
+          throw new Error('Agent run execution owner is required.');
+        }
+
+        run = await AgentRunService.startRunForExecutionOwner(
+          existingRun.uuid,
+          existingRun.executionOwner,
+          {
+            resolvedHarness: existingRun.requestedHarness || session.defaultHarness || 'lifecycle_ai_sdk',
+            provider: selection.provider,
+            model: selection.modelId,
+            sandboxGeneration: existingRun.sandboxGeneration,
+          },
+          { dispatchAttemptId }
+        );
+      } else {
+        const queuedRun = await AgentRunService.createQueuedRun({
+          thread,
+          session,
+          policy: approvalPolicy,
+          requestedHarness: session.defaultHarness,
+          requestedProvider,
+          requestedModel: requestedModelId,
+          resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
+          resolvedProvider: selection.provider,
+          resolvedModel: selection.modelId,
+        });
+        const executionOwner = buildDirectExecutionOwner();
+        const claimedRun = await AgentRunService.claimQueuedRunForExecution(queuedRun.uuid, executionOwner);
+        if (!claimedRun) {
+          throw new Error('Agent run could not be claimed for execution.');
+        }
+        run = await AgentRunService.startRunForExecutionOwner(
+          claimedRun.uuid,
+          executionOwner,
+          {
+            resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
+            provider: selection.provider,
+            model: selection.modelId,
+            sandboxGeneration: claimedRun.sandboxGeneration,
+          },
+          { dispatchAttemptId }
+        );
+      }
+      const activeRun = run;
       const controller = new AbortController();
-      AgentRunService.registerAbortController(run.uuid, controller);
+      const activeExecutionOwner = activeRun.executionOwner || null;
+      AgentRunService.registerAbortController(activeRun.uuid, controller);
+      if (activeExecutionOwner) {
+        const { runExecutionLeaseMs } = await resolveAgentSessionDurabilityConfig();
+        heartbeatTimer = setInterval(() => {
+          void AgentRunService.heartbeatRunExecution(activeRun.uuid, activeExecutionOwner).catch((error) => {
+            if (error instanceof AgentRunOwnershipLostError) {
+              getLogger().info(
+                {
+                  runId: activeRun.uuid,
+                  owner: activeExecutionOwner,
+                  currentStatus: error.currentStatus || null,
+                  currentOwner: error.currentExecutionOwner || null,
+                },
+                `AgentExec: ownership lost runId=${activeRun.uuid} owner=${activeExecutionOwner}`
+              );
+              controller.abort(error);
+              clearHeartbeatTimer();
+              return;
+            }
+
+            getLogger().warn({ error, runId: activeRun.uuid }, `AgentExec: heartbeat failed runId=${activeRun.uuid}`);
+          });
+        }, resolveHeartbeatIntervalMs(runExecutionLeaseMs));
+        heartbeatTimer.unref?.();
+      }
       const agent = new ToolLoopAgent({
         model,
-        instructions: buildSystemPrompt([effectiveSessionConfig.systemPrompt, sessionPrompt]),
+        instructions: buildSystemPrompt([runControlPlaneConfig.systemPrompt, sessionPrompt]),
         tools,
-        stopWhen: stepCountIs(effectiveSessionConfig.maxIterations),
+        stopWhen: stepCountIs(runControlPlaneConfig.maxIterations),
         onStepFinish: async (step) => {
           try {
             const usageSummary = observabilityTracker.updateFromStep({
@@ -325,14 +430,22 @@ export default class AgentRunExecutor {
                 : undefined,
             });
 
-            await AgentRunService.patchRun(run.uuid, {
-              usageSummary: usageSummary as Record<string, unknown>,
-            });
+            if (activeExecutionOwner) {
+              await AgentRunService.patchProgressForExecutionOwner(activeRun.uuid, activeExecutionOwner, {
+                usageSummary: usageSummary as Record<string, unknown>,
+              });
+            }
             await touchSessionActivity();
           } catch (error) {
+            if (error instanceof AgentRunOwnershipLostError) {
+              controller.abort(error);
+              clearHeartbeatTimer();
+              throw error;
+            }
+
             getLogger().warn(
-              { error, runId: run.uuid },
-              `AgentExec: step observability patch failed runId=${run.uuid}`
+              { error, runId: activeRun.uuid },
+              `AgentExec: step observability patch failed runId=${activeRun.uuid}`
             );
           }
         },
@@ -366,10 +479,12 @@ export default class AgentRunExecutor {
       });
 
       return {
-        run,
+        run: activeRun,
         agent,
         abortSignal: controller.signal,
         selection,
+        approvalPolicy,
+        toolRules: runControlPlaneConfig.toolRules,
         onStreamFinish: async ({
           messages: updatedMessages,
           finishReason,
@@ -381,90 +496,170 @@ export default class AgentRunExecutor {
         }) => {
           const observabilitySummary = observabilityTracker.getSummary();
           try {
+            if (!activeExecutionOwner) {
+              throw new Error('Agent run execution owner is required.');
+            }
+
             const messagesWithApprovalStages = applyApprovalResponsesToFileChangeParts(updatedMessages);
             const messagesWithObservability = applyFinalObservabilityToMessages(
               messagesWithApprovalStages,
-              run.uuid,
+              activeRun.uuid,
               buildMessageObservabilityMetadataPatch(observabilitySummary)
             );
-            const persistedMessages = await AgentMessageStore.syncMessages(
-              thread.uuid,
-              userIdentity.userId,
-              messagesWithObservability,
-              run.uuid
-            );
-            const pendingApprovals = await ApprovalService.syncApprovalRequestsFromMessages({
-              thread,
-              run,
-              messages: persistedMessages,
-            });
-            await touchSessionActivity();
-
-            const currentRun = await AgentRunService.getRunByUuid(run.uuid);
-            if (currentRun?.status === 'cancelled') {
-              return;
-            }
-
-            if (pendingApprovals.length > 0) {
-              await AgentRunService.patchStatus(run.uuid, 'waiting_for_approval', {
-                usageSummary: observabilitySummary as Record<string, unknown>,
-                streamState: {
-                  finishReason: finishReason || null,
-                },
-              });
-              return;
-            }
-
             const terminalFailure = classifyTerminalRunFailure({
               finishReason,
-              maxIterations: effectiveSessionConfig.maxIterations,
+              maxIterations: runControlPlaneConfig.maxIterations,
             });
-            if (terminalFailure) {
-              await AgentRunService.markFailed(run.uuid, terminalFailure, observabilitySummary, {
-                finishReason: finishReason || null,
+            const completedAt = new Date().toISOString();
+
+            const finalizedRun = await AgentRunService.finalizeRunForExecutionOwner(
+              activeRun.uuid,
+              activeExecutionOwner,
+              async ({ run, trx }) => {
+                await AgentMessageStore.upsertCanonicalUiMessagesForThread(thread, messagesWithObservability, {
+                  trx,
+                  runId: run.id,
+                });
+                const approvalSync = await ApprovalService.syncApprovalRequestStateFromMessages({
+                  thread,
+                  run,
+                  messages: messagesWithObservability,
+                  approvalPolicy,
+                  toolRules: runControlPlaneConfig.toolRules,
+                  trx,
+                });
+
+                if (approvalSync.pendingActions.length > 0) {
+                  return {
+                    status: 'waiting_for_approval',
+                    patch: {
+                      usageSummary: observabilitySummary as Record<string, unknown>,
+                    },
+                  };
+                }
+
+                if (approvalSync.resolvedActionCount > 0) {
+                  return {
+                    status: 'queued',
+                    patch: {
+                      queuedAt: completedAt,
+                      usageSummary: observabilitySummary as Record<string, unknown>,
+                    },
+                  };
+                }
+
+                if (terminalFailure) {
+                  return {
+                    status: 'failed',
+                    error: terminalFailure,
+                    patch: {
+                      completedAt,
+                      usageSummary: observabilitySummary as Record<string, unknown>,
+                    },
+                  };
+                }
+
+                return {
+                  status: 'completed',
+                  patch: {
+                    completedAt,
+                    usageSummary: observabilitySummary as Record<string, unknown>,
+                  },
+                };
+              },
+              { dispatchAttemptId }
+            );
+            if (finalizedRun.status === 'queued') {
+              await AgentRunQueueService.enqueueRun(finalizedRun.uuid, 'approval_resolved', {
+                githubToken: requestGitHubToken,
+              }).catch((error) => {
+                getLogger().warn(
+                  { error, runId: finalizedRun.uuid },
+                  `AgentExec: approval resume enqueue failed runId=${finalizedRun.uuid}`
+                );
               });
-              return;
+            }
+            await touchSessionActivity();
+          } catch (error) {
+            if (error instanceof AgentRunOwnershipLostError) {
+              controller.abort(error);
+              throw error;
             }
 
-            await AgentRunService.markCompleted(run.uuid, observabilitySummary, {
-              finishReason: finishReason || null,
-            });
-          } catch (error) {
-            await AgentRunService.markFailed(run.uuid, error, observabilitySummary, {
-              finishReason: finishReason || null,
-            }).catch((runFailureError) => {
-              getLogger().warn(
-                { error: runFailureError, runId: run.uuid },
-                `AgentExec: stream finalization failure record failed runId=${run.uuid}`
-              );
-            });
+            if (activeExecutionOwner) {
+              await AgentRunService.markFailedForExecutionOwner(
+                activeRun.uuid,
+                activeExecutionOwner,
+                error,
+                observabilitySummary,
+                { dispatchAttemptId }
+              ).catch((runFailureError) => {
+                if (runFailureError instanceof AgentRunOwnershipLostError) {
+                  throw runFailureError;
+                }
+
+                getLogger().warn(
+                  { error: runFailureError, runId: activeRun.uuid },
+                  `AgentExec: stream finalization failure record failed runId=${activeRun.uuid}`
+                );
+              });
+            }
 
             throw error;
+          } finally {
+            clearHeartbeatTimer();
+            AgentRunService.clearAbortController(activeRun.uuid);
           }
+        },
+        dispose: () => {
+          clearHeartbeatTimer();
+          AgentRunService.clearAbortController(activeRun.uuid);
         },
       };
     } catch (error) {
-      if (error instanceof SessionWorkspaceGatewayUnavailableError) {
-        await AgentSessionService.markSessionRuntimeFailure(session.uuid, error).catch((runtimeFailureError) => {
-          getLogger().warn(
-            { error: runtimeFailureError, sessionId: session.uuid },
-            `Session: runtime failure record failed sessionId=${session.uuid}`
-          );
-        });
-      }
-
-      if (run) {
-        await AgentRunService.markFailed(run.uuid, error, observabilityTracker.getSummary()).catch(
-          (runFailureError) => {
+      try {
+        if (error instanceof SessionWorkspaceGatewayUnavailableError) {
+          await AgentSessionService.markSessionRuntimeFailure(session.uuid, error).catch((runtimeFailureError) => {
             getLogger().warn(
-              { error: runFailureError, runId: run.uuid },
-              `AgentExec: run failure record failed runId=${run.uuid}`
+              { error: runtimeFailureError, sessionId: session.uuid },
+              `Session: runtime failure record failed sessionId=${session.uuid}`
             );
-          }
-        );
-      }
+          });
+        }
 
-      throw error;
+        const failedRun = run || existingRun;
+        if (error instanceof AgentRunOwnershipLostError) {
+          throw error;
+        }
+
+        if (failedRun) {
+          const failureOwner = failedRun.executionOwner || existingRun?.executionOwner || null;
+          if (!failureOwner) {
+            throw error;
+          }
+
+          await AgentRunService.markFailedForExecutionOwner(
+            failedRun.uuid,
+            failureOwner,
+            error,
+            observabilityTracker.getSummary(),
+            { dispatchAttemptId }
+          ).catch((runFailureError) => {
+            if (runFailureError instanceof AgentRunOwnershipLostError) {
+              throw runFailureError;
+            }
+
+            getLogger().warn(
+              { error: runFailureError, runId: failedRun.uuid },
+              `AgentExec: run failure record failed runId=${failedRun.uuid}`
+            );
+          });
+        }
+
+        throw error;
+      } finally {
+        clearHeartbeatTimer();
+      }
     }
   }
 }

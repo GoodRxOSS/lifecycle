@@ -19,19 +19,25 @@ import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeMan
 import type { AgentSessionSkillPlan } from 'server/lib/agentSession/skillPlan';
 import { EMPTY_AGENT_SESSION_SKILL_PLAN } from 'server/lib/agentSession/skillPlan';
 import type { AgentSessionSelectedService, AgentSessionWorkspaceRepo } from 'server/lib/agentSession/workspace';
-import { BuildKind } from 'shared/constants';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind } from 'shared/constants';
 
 export default class AgentSession extends Model {
   uuid!: string;
+  defaultThreadId!: number | null;
+  defaultModel!: string;
+  defaultHarness!: string | null;
   buildUuid!: string | null;
-  buildKind!: BuildKind;
+  buildKind!: BuildKind | null;
+  sessionKind!: AgentSessionKind;
   userId!: string;
   ownerGithubUsername!: string | null;
-  podName!: string;
-  namespace!: string;
-  pvcName!: string;
+  podName!: string | null;
+  namespace!: string | null;
+  pvcName!: string | null;
   model!: string;
   status!: 'starting' | 'active' | 'ended' | 'error';
+  chatStatus!: AgentChatStatus;
+  workspaceStatus!: AgentWorkspaceStatus;
   keepAttachedServicesOnSessionNode!: boolean | null;
   lastActivity!: string;
   endedAt!: string | null;
@@ -47,22 +53,36 @@ export default class AgentSession extends Model {
 
   static jsonSchema = {
     type: 'object',
-    required: ['userId', 'podName', 'namespace', 'pvcName', 'model'],
+    required: ['userId', 'model', 'sessionKind', 'chatStatus', 'workspaceStatus'],
     properties: {
       id: { type: 'integer' },
       uuid: {
         type: 'string',
         pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
       },
+      defaultThreadId: { type: ['integer', 'null'] },
+      defaultModel: { type: 'string' },
+      defaultHarness: { type: ['string', 'null'] },
       buildUuid: { type: ['string', 'null'] },
-      buildKind: { type: 'string', enum: Object.values(BuildKind), default: BuildKind.ENVIRONMENT },
+      buildKind: {
+        type: ['string', 'null'],
+        enum: [...Object.values(BuildKind), null],
+        default: BuildKind.ENVIRONMENT,
+      },
+      sessionKind: { type: 'string', enum: Object.values(AgentSessionKind), default: AgentSessionKind.ENVIRONMENT },
       userId: { type: 'string' },
       ownerGithubUsername: { type: ['string', 'null'] },
-      podName: { type: 'string' },
-      namespace: { type: 'string' },
-      pvcName: { type: 'string' },
+      podName: { type: ['string', 'null'] },
+      namespace: { type: ['string', 'null'] },
+      pvcName: { type: ['string', 'null'] },
       model: { type: 'string' },
       status: { type: 'string', enum: ['starting', 'active', 'ended', 'error'], default: 'starting' },
+      chatStatus: { type: 'string', enum: Object.values(AgentChatStatus), default: AgentChatStatus.READY },
+      workspaceStatus: {
+        type: 'string',
+        enum: Object.values(AgentWorkspaceStatus),
+        default: AgentWorkspaceStatus.READY,
+      },
       keepAttachedServicesOnSessionNode: { type: ['boolean', 'null'] },
       lastActivity: { type: 'string' },
       endedAt: { type: ['string', 'null'] },
@@ -87,6 +107,9 @@ export default class AgentSession extends Model {
 
   static get relationMappings() {
     const Deploy = require('./Deploy').default;
+    const AgentThread = require('./AgentThread').default;
+    const AgentSource = require('./AgentSource').default;
+    const AgentSandbox = require('./AgentSandbox').default;
     return {
       deploys: {
         relation: Model.HasManyRelation,
@@ -94,6 +117,30 @@ export default class AgentSession extends Model {
         join: {
           from: 'agent_sessions.id',
           to: 'deploys.devModeSessionId',
+        },
+      },
+      defaultThread: {
+        relation: Model.BelongsToOneRelation,
+        modelClass: AgentThread,
+        join: {
+          from: 'agent_sessions.defaultThreadId',
+          to: 'agent_threads.id',
+        },
+      },
+      source: {
+        relation: Model.HasOneRelation,
+        modelClass: AgentSource,
+        join: {
+          from: 'agent_sessions.id',
+          to: 'agent_sources.sessionId',
+        },
+      },
+      sandboxes: {
+        relation: Model.HasManyRelation,
+        modelClass: AgentSandbox,
+        join: {
+          from: 'agent_sessions.id',
+          to: 'agent_sandboxes.sessionId',
         },
       },
     };

@@ -17,27 +17,29 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import ApprovalService from 'server/services/agent/ApprovalService';
+import { errorResponse, successResponse } from 'server/lib/response';
+import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import AgentSessionService from 'server/services/agentSession';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
 
 /**
  * @openapi
- * /api/v2/ai/agent/pending-actions/{actionId}/approve:
+ * /api/v2/ai/agent/sessions/{sessionId}/sandbox/resume:
  *   post:
- *     summary: Approve a pending action
+ *     summary: Resume a chat session sandbox runtime
  *     tags:
  *       - Agent Sessions
- *     operationId: approveAgentPendingAction
+ *     operationId: resumeAgentSessionSandbox
  *     parameters:
  *       - in: path
- *         name: actionId
+ *         name: sessionId
  *         required: true
  *         schema:
  *           type: string
  *     responses:
  *       '200':
- *         description: Pending action approved
+ *         description: Resumed session
  *         content:
  *           application/json:
  *             schema:
@@ -47,22 +49,31 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *                   required: [data]
  *                   properties:
  *                     data:
- *                       $ref: '#/components/schemas/AgentPendingAction'
+ *                       $ref: '#/components/schemas/AgentSessionSummary'
+ *       '400':
+ *         description: Session cannot be resumed
+ *       '401':
+ *         description: Unauthorized
  */
-const postHandler = async (req: NextRequest, { params }: { params: { actionId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) {
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
-  const body = await req.json().catch(() => ({}));
-  const action = await ApprovalService.resolvePendingAction(params.actionId, userIdentity.userId, 'approved', {
-    approved: true,
-    reason: typeof body?.reason === 'string' ? body.reason : null,
-    source: 'endpoint',
-  });
+  try {
+    const githubToken = await resolveRequestGitHubToken(req);
+    const session = await AgentSessionService.resumeChatRuntime({
+      sessionId: params.sessionId,
+      userId: userIdentity.userId,
+      userIdentity,
+      githubToken,
+    });
 
-  return successResponse(ApprovalService.serializePendingAction(action), { status: 200 }, req);
+    return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 200 }, req);
+  } catch (error) {
+    return errorResponse(error, { status: 400 }, req);
+  }
 };
 
 export const POST = createApiHandler(postHandler);

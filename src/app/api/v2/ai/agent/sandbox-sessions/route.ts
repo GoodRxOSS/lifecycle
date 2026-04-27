@@ -22,14 +22,15 @@ import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import {
   AgentSessionRuntimeConfigError,
+  AgentSessionWorkspaceStorageConfigError,
   resolveAgentSessionRuntimeConfig,
+  resolveAgentSessionWorkspaceStorageIntent,
 } from 'server/lib/agentSession/runtimeConfig';
 import { encrypt } from 'server/lib/encryption';
 import { redisClient } from 'server/lib/dependencies';
 import QueueManager from 'server/lib/queueManager';
 import { QUEUE_NAMES } from 'shared/config';
 import { setSandboxLaunchState, toPublicSandboxLaunchState } from 'server/lib/agentSession/sandboxLaunchState';
-import { AGENT_API_KEY_HEADER, AGENT_API_KEY_PROVIDER_HEADER } from 'server/services/agent/providerConfig';
 import AgentSandboxSessionService, {
   formatRequestedSandboxServicesLabel,
   summarizeRequestedSandboxServices,
@@ -44,6 +45,9 @@ interface CreateSandboxSessionBody {
   service?: unknown;
   services?: unknown;
   model?: string;
+  workspace?: {
+    storageSize?: string;
+  };
 }
 
 function isRequestedSandboxServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
@@ -96,6 +100,27 @@ function parseRequestedSandboxServicesFromBody(body: CreateSandboxSessionBody): 
   }
 
   throw new Error('service or services is required');
+}
+
+function parseRequestedWorkspaceStorageSize(body: CreateSandboxSessionBody): string | undefined {
+  const workspace = body.workspace;
+  if (workspace === undefined) {
+    return undefined;
+  }
+
+  if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
+    throw new Error('workspace must be an object');
+  }
+
+  if (workspace.storageSize === undefined) {
+    return undefined;
+  }
+
+  if (typeof workspace.storageSize !== 'string' || !workspace.storageSize.trim()) {
+    throw new Error('workspace.storageSize must be a non-empty string');
+  }
+
+  return workspace.storageSize.trim();
 }
 
 const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.AGENT_SANDBOX_SESSION_LAUNCH, {
@@ -198,6 +223,12 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                             type: string
  *                   model:
  *                     type: string
+ *                   workspace:
+ *                     type: object
+ *                     properties:
+ *                       storageSize:
+ *                         type: string
+ *                         description: Optional workspace PVC size. Accepted only when admin runtime settings allow client overrides.
  *               - type: object
  *                 required:
  *                   - baseBuildUuid
@@ -223,6 +254,12 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                               type: string
  *                   model:
  *                     type: string
+ *                   workspace:
+ *                     type: object
+ *                     properties:
+ *                       storageSize:
+ *                         type: string
+ *                         description: Optional workspace PVC size. Accepted only when admin runtime settings allow client overrides.
  *     responses:
  *       '200':
  *         description: Sandbox session launch queued
@@ -348,12 +385,15 @@ const postHandler = async (req: NextRequest) => {
 
   try {
     const requestedServices = parseRequestedSandboxServicesFromBody(body);
+    const requestedWorkspaceStorageSize = parseRequestedWorkspaceStorageSize(body);
     const requestedServiceSummary = summarizeRequestedSandboxServices(requestedServices);
     const requestedServiceLabel = formatRequestedSandboxServicesLabel(requestedServices);
     const runtimeConfig = await resolveAgentSessionRuntimeConfig();
+    const workspaceStorage = resolveAgentSessionWorkspaceStorageIntent({
+      requestedSize: requestedWorkspaceStorageSize,
+      storage: runtimeConfig.workspaceStorage,
+    });
     const githubToken = await resolveRequestGitHubToken(req);
-    const requestApiKey = req.headers.get(AGENT_API_KEY_HEADER);
-    const requestApiKeyProvider = req.headers.get(AGENT_API_KEY_PROVIDER_HEADER);
     const launchId = uuid();
     const now = new Date().toISOString();
     await setSandboxLaunchState(redisClient.getRedis(), {
@@ -380,8 +420,6 @@ const postHandler = async (req: NextRequest) => {
         userId: userIdentity.userId,
         userIdentity,
         encryptedGithubToken: githubToken ? encrypt(githubToken) : null,
-        encryptedRequestApiKey: requestApiKey ? encrypt(requestApiKey) : null,
-        requestApiKeyProvider,
         baseBuildUuid: body.baseBuildUuid,
         services: requestedServices,
         model: body.model,
@@ -392,6 +430,8 @@ const postHandler = async (req: NextRequest) => {
         keepAttachedServicesOnSessionNode: runtimeConfig.keepAttachedServicesOnSessionNode,
         readiness: runtimeConfig.readiness,
         resources: runtimeConfig.resources,
+        workspaceStorage,
+        redisTtlSeconds: runtimeConfig.cleanup.redisTtlSeconds,
       } as SandboxSessionLaunchJob,
       {
         jobId: launchId,
@@ -425,6 +465,10 @@ const postHandler = async (req: NextRequest) => {
 
     if (err instanceof AgentSessionRuntimeConfigError) {
       return errorResponse(err, { status: 503 }, req);
+    }
+
+    if (err instanceof AgentSessionWorkspaceStorageConfigError) {
+      return errorResponse(err, { status: 400 }, req);
     }
 
     return errorResponse(err, { status: 400 }, req);

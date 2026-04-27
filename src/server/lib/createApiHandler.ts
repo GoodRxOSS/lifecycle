@@ -15,6 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { unstable_noStore as noStore } from 'next/cache';
+import { isDynamicUsageError } from 'next/dist/export/helpers/is-dynamic-usage-error';
 import { errorResponse } from './response';
 import { requireRole, type LifecycleRole } from './roles';
 
@@ -48,9 +50,15 @@ export function createApiHandler(handler: RouteHandler, options?: ApiHandlerOpti
   }
 
   return async (req: NextRequest, ...args: any[]) => {
+    noStore();
+
     try {
       return await wrapped(req, ...args);
     } catch (error) {
+      if (isDynamicUsageError(error)) {
+        throw error;
+      }
+
       return errorResponse(error, { status: 500 }, req);
     }
   };

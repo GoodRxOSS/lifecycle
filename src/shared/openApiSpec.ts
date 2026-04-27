@@ -1,5 +1,87 @@
 import { OAS3Options } from 'swagger-jsdoc';
-import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from './constants';
+import {
+  AgentChatStatus,
+  AgentSessionKind,
+  AgentWorkspaceStatus,
+  BuildKind,
+  BuildStatus,
+  DeployStatus,
+  DeployTypes,
+} from './constants';
+
+const agentRunEventBaseProperties = {
+  id: { type: 'string' },
+  runId: { type: 'string', description: 'Public run UUID.' },
+  threadId: { type: 'string', description: 'Public thread UUID.' },
+  sessionId: { type: 'string', description: 'Public session UUID.' },
+  sequence: { type: 'integer' },
+  version: { type: 'integer', enum: [1] },
+  createdAt: { type: 'string', format: 'date-time', nullable: true },
+  updatedAt: { type: 'string', format: 'date-time', nullable: true },
+};
+
+const agentRunEventRequired = [
+  'id',
+  'runId',
+  'threadId',
+  'sessionId',
+  'sequence',
+  'eventType',
+  'version',
+  'payload',
+  'createdAt',
+  'updatedAt',
+];
+
+function agentRunEventSchema(eventTypes: string[], payload: Record<string, unknown>) {
+  return {
+    type: 'object',
+    properties: {
+      ...agentRunEventBaseProperties,
+      eventType: { type: 'string', enum: eventTypes },
+      payload: {
+        oneOf: [payload, { $ref: '#/components/schemas/AgentRunTruncatedValue' }],
+      },
+    },
+    required: agentRunEventRequired,
+    additionalProperties: false,
+  };
+}
+
+const agentRunEventDiscriminatorMapping = {
+  'message.created': '#/components/schemas/AgentRunMessageCreatedEvent',
+  'message.metadata': '#/components/schemas/AgentRunMessageMetadataEvent',
+  'message.part.started': '#/components/schemas/AgentRunMessagePartEvent',
+  'message.delta': '#/components/schemas/AgentRunMessagePartEvent',
+  'message.part.completed': '#/components/schemas/AgentRunMessagePartEvent',
+  'message.source': '#/components/schemas/AgentRunMessageSourceEvent',
+  'message.file': '#/components/schemas/AgentRunMessageFileEvent',
+  'tool.call.input.started': '#/components/schemas/AgentRunToolInputStartedEvent',
+  'tool.call.input.delta': '#/components/schemas/AgentRunToolInputDeltaEvent',
+  'tool.call.started': '#/components/schemas/AgentRunToolStartedEvent',
+  'tool.call.completed': '#/components/schemas/AgentRunToolCompletedEvent',
+  'tool.file_change': '#/components/schemas/AgentRunToolFileChangeEvent',
+  'approval.requested': '#/components/schemas/AgentRunApprovalRequestedEvent',
+  'approval.resolved': '#/components/schemas/AgentRunApprovalResolvedEvent',
+  'approval.responded': '#/components/schemas/AgentRunApprovalRespondedEvent',
+  'run.queued': '#/components/schemas/AgentRunStatusEvent',
+  'run.started': '#/components/schemas/AgentRunStatusEvent',
+  'run.waiting_for_approval': '#/components/schemas/AgentRunStatusEvent',
+  'run.completed': '#/components/schemas/AgentRunStatusEvent',
+  'run.failed': '#/components/schemas/AgentRunStatusEvent',
+  'run.cancelled': '#/components/schemas/AgentRunStatusEvent',
+  'run.updated': '#/components/schemas/AgentRunStatusEvent',
+  'run.step.started': '#/components/schemas/AgentRunStepEvent',
+  'run.step.completed': '#/components/schemas/AgentRunStepEvent',
+  'run.finished': '#/components/schemas/AgentRunFinishedEvent',
+  'run.error': '#/components/schemas/AgentRunErrorEvent',
+  'run.aborted': '#/components/schemas/AgentRunAbortedEvent',
+};
+
+const agentRunEventPayloadMetadata = {
+  type: 'object',
+  additionalProperties: true,
+};
 
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
@@ -76,6 +158,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             pagination: { $ref: '#/components/schemas/PaginationMetadata' },
+            limit: { type: 'integer' },
+            maxLimit: { type: 'integer' },
           },
         },
 
@@ -342,45 +426,227 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           additionalProperties: false,
-        },
-
-        AgentUIMessageMetadata: {
-          type: 'object',
-          properties: {
-            sessionId: { type: 'string', nullable: true },
-            threadId: { type: 'string', nullable: true },
-            runId: { type: 'string', nullable: true },
-            provider: { type: 'string', nullable: true },
-            model: { type: 'string', nullable: true },
-            createdAt: { type: 'string', format: 'date-time', nullable: true },
-            completedAt: { type: 'string', format: 'date-time', nullable: true },
-            usage: { type: 'object', nullable: true, additionalProperties: true },
+          example: {
+            maxIterations: 12,
+            workspaceToolDiscoveryTimeoutMs: 30000,
+            workspaceToolExecutionTimeoutMs: 120000,
+            toolRules: [
+              {
+                toolKey: 'mcp__sandbox__workspace_edit_file',
+                mode: 'require_approval',
+              },
+            ],
           },
-          additionalProperties: true,
         },
 
-        AgentUIMessagePart: {
-          type: 'object',
-          properties: {
-            type: { type: 'string' },
-          },
-          required: ['type'],
-          additionalProperties: true,
+        CanonicalAgentMessagePart: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['text'] },
+                text: { type: 'string', minLength: 1 },
+              },
+              required: ['type', 'text'],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['reasoning'] },
+                text: { type: 'string', minLength: 1 },
+              },
+              required: ['type', 'text'],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['file_ref'] },
+                path: { type: 'string', minLength: 1, nullable: true },
+                url: { type: 'string', minLength: 1, nullable: true },
+                mediaType: { type: 'string', minLength: 1, nullable: true },
+                title: { type: 'string', minLength: 1, nullable: true },
+              },
+              required: ['type'],
+              anyOf: [
+                {
+                  type: 'object',
+                  properties: { path: { type: 'string', minLength: 1 } },
+                  required: ['path'],
+                },
+                {
+                  type: 'object',
+                  properties: { url: { type: 'string', minLength: 1 } },
+                  required: ['url'],
+                },
+              ],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['source_ref'] },
+                url: { type: 'string', minLength: 1, nullable: true },
+                title: { type: 'string', minLength: 1, nullable: true },
+                sourceType: { type: 'string', minLength: 1, nullable: true },
+              },
+              required: ['type'],
+              anyOf: [
+                {
+                  type: 'object',
+                  properties: { url: { type: 'string', minLength: 1 } },
+                  required: ['url'],
+                },
+                {
+                  type: 'object',
+                  properties: { title: { type: 'string', minLength: 1 } },
+                  required: ['title'],
+                },
+              ],
+              additionalProperties: false,
+            },
+          ],
         },
 
-        AgentUIMessage: {
+        AgentMessage: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            role: { type: 'string', enum: ['system', 'user', 'assistant', 'tool'] },
-            metadata: { $ref: '#/components/schemas/AgentUIMessageMetadata' },
+            clientMessageId: { type: 'string', nullable: true },
+            threadId: { type: 'string' },
+            runId: { type: 'string', nullable: true },
+            role: { type: 'string', enum: ['user', 'assistant'] },
             parts: {
               type: 'array',
-              items: { $ref: '#/components/schemas/AgentUIMessagePart' },
+              items: { $ref: '#/components/schemas/CanonicalAgentMessagePart' },
+              minItems: 1,
+            },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'clientMessageId', 'threadId', 'runId', 'role', 'parts', 'createdAt'],
+          additionalProperties: false,
+          example: {
+            id: 'message-1',
+            clientMessageId: 'client-message-1',
+            threadId: 'thread-1',
+            runId: 'run-1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'Check the sample service.' }],
+            createdAt: '2026-04-25T00:00:00.000Z',
+          },
+        },
+
+        AgentThreadMessagesResponse: {
+          type: 'object',
+          properties: {
+            thread: { $ref: '#/components/schemas/AgentThread' },
+            messages: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentMessage' },
+            },
+            pagination: {
+              type: 'object',
+              properties: {
+                hasMore: { type: 'boolean' },
+                nextBeforeMessageId: { type: 'string', nullable: true },
+              },
+              required: ['hasMore', 'nextBeforeMessageId'],
+              additionalProperties: false,
             },
           },
-          required: ['id', 'role', 'parts'],
-          additionalProperties: true,
+          required: ['thread', 'messages', 'pagination'],
+          additionalProperties: false,
+        },
+
+        AgentRunRuntimeOptions: {
+          type: 'object',
+          properties: {
+            maxIterations: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+            },
+          },
+          additionalProperties: false,
+          example: {
+            workspaceImage: 'registry.example.test/lifecycle/workspace:sample',
+            workspaceEditorImage: 'registry.example.test/lifecycle/editor:sample',
+            workspaceGatewayImage: 'registry.example.test/lifecycle/gateway:sample',
+            scheduling: {
+              keepAttachedServicesOnSessionNode: true,
+            },
+            readiness: {
+              timeoutMs: 120000,
+              pollMs: 2000,
+            },
+            workspaceStorage: {
+              defaultSize: '10Gi',
+              allowedSizes: ['10Gi', '20Gi'],
+              allowClientOverride: true,
+              accessMode: 'ReadWriteOnce',
+            },
+            cleanup: {
+              activeIdleSuspendMs: 1800000,
+              startingTimeoutMs: 900000,
+              hibernatedRetentionMs: 86400000,
+              intervalMs: 300000,
+              redisTtlSeconds: 7200,
+            },
+            durability: {
+              runExecutionLeaseMs: 1800000,
+              queuedRunDispatchStaleMs: 30000,
+              dispatchRecoveryLimit: 50,
+              maxDurablePayloadBytes: 65536,
+              payloadPreviewBytes: 16384,
+              fileChangePreviewChars: 4000,
+            },
+          },
+        },
+
+        CreateAgentThreadRunMessage: {
+          type: 'object',
+          properties: {
+            clientMessageId: { type: 'string' },
+            parts: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/CanonicalAgentMessagePart' },
+              minItems: 1,
+            },
+          },
+          required: ['parts'],
+          additionalProperties: false,
+        },
+
+        CreateAgentThreadRunRequest: {
+          type: 'object',
+          properties: {
+            message: { $ref: '#/components/schemas/CreateAgentThreadRunMessage' },
+            model: {
+              type: 'object',
+              properties: {
+                provider: { type: 'string' },
+                id: { type: 'string' },
+              },
+              additionalProperties: false,
+            },
+            runtimeOptions: { $ref: '#/components/schemas/AgentRunRuntimeOptions' },
+          },
+          required: ['message'],
+          additionalProperties: false,
+          example: {
+            message: {
+              clientMessageId: 'client-message-1',
+              parts: [{ type: 'text', text: 'Check the sample service.' }],
+            },
+            model: {
+              provider: 'openai',
+              id: 'gpt-5.2',
+            },
+            runtimeOptions: {
+              maxIterations: 12,
+            },
+          },
         },
 
         AgentThread: {
@@ -399,28 +665,152 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['id', 'isDefault', 'metadata'],
         },
 
-        AgentSessionSummary: {
+        AgentSessionDefaults: {
+          type: 'object',
+          properties: {
+            model: { type: 'string' },
+            harness: { type: 'string', nullable: true },
+          },
+          required: ['model', 'harness'],
+        },
+
+        AgentSource: {
           type: 'object',
           properties: {
             id: { type: 'string' },
+            adapter: { type: 'string' },
+            status: { type: 'string', enum: ['requested', 'preparing', 'ready', 'failed', 'cleaned_up'] },
+            input: { type: 'object', additionalProperties: true },
+            sandboxRequirements: { type: 'object', additionalProperties: true },
+            error: { type: 'object', additionalProperties: true, nullable: true },
+            preparedAt: { type: 'string', format: 'date-time', nullable: true },
+            cleanedUpAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'adapter', 'status', 'input', 'sandboxRequirements', 'error'],
+        },
+
+        AgentSandboxExposure: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            kind: { type: 'string' },
+            status: { type: 'string', enum: ['provisioning', 'ready', 'failed', 'ended'] },
+            targetPort: { type: 'integer', nullable: true },
+            url: { type: 'string', nullable: true },
+            metadata: { type: 'object', additionalProperties: true },
+            lastVerifiedAt: { type: 'string', format: 'date-time', nullable: true },
+            endedAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'kind', 'status', 'metadata'],
+        },
+
+        AgentSandbox: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', nullable: true },
+            generation: { type: 'integer', nullable: true },
+            provider: { type: 'string', nullable: true },
+            status: {
+              type: 'string',
+              enum: ['none', 'provisioning', 'ready', 'suspending', 'suspended', 'resuming', 'failed', 'ended'],
+            },
+            capabilitySnapshot: { type: 'object', additionalProperties: true },
+            exposures: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentSandboxExposure' },
+            },
+            suspendedAt: { type: 'string', format: 'date-time', nullable: true },
+            endedAt: { type: 'string', format: 'date-time', nullable: true },
+            error: { type: 'object', additionalProperties: true, nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'generation', 'provider', 'status', 'capabilitySnapshot', 'exposures', 'error'],
+        },
+
+        AgentSessionSummary: {
+          type: 'object',
+          properties: {
+            session: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                status: { type: 'string', enum: ['ready', 'ended', 'error'] },
+                userId: { type: 'string' },
+                ownerGithubUsername: { type: 'string', nullable: true },
+                defaults: { $ref: '#/components/schemas/AgentSessionDefaults' },
+                defaultThreadId: { type: 'string', nullable: true },
+                lastActivity: { type: 'string', format: 'date-time', nullable: true },
+                endedAt: { type: 'string', format: 'date-time', nullable: true },
+                createdAt: { type: 'string', format: 'date-time', nullable: true },
+                updatedAt: { type: 'string', format: 'date-time', nullable: true },
+              },
+              required: ['id', 'status', 'userId', 'ownerGithubUsername', 'defaults', 'defaultThreadId'],
+            },
+            source: { $ref: '#/components/schemas/AgentSource' },
+            sandbox: { $ref: '#/components/schemas/AgentSandbox' },
+          },
+          required: ['session', 'source', 'sandbox'],
+        },
+
+        AgentAdminSessionSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            sessionKind: {
+              type: 'string',
+              enum: Object.values(AgentSessionKind),
+            },
             buildUuid: { type: 'string', nullable: true },
             baseBuildUuid: { type: 'string', nullable: true },
-            buildKind: { $ref: '#/components/schemas/BuildKind' },
+            buildKind: {
+              type: 'string',
+              enum: Object.values(BuildKind),
+              nullable: true,
+            },
             userId: { type: 'string' },
             ownerGithubUsername: { type: 'string', nullable: true },
-            podName: { type: 'string' },
-            namespace: { type: 'string' },
-            pvcName: { type: 'string' },
+            podName: { type: 'string', nullable: true },
+            namespace: { type: 'string', nullable: true },
+            pvcName: { type: 'string', nullable: true },
             model: { type: 'string' },
-            status: { type: 'string', enum: ['starting', 'active', 'ended', 'error'] },
+            status: {
+              type: 'string',
+              enum: ['starting', 'active', 'ended', 'error'],
+            },
+            chatStatus: {
+              type: 'string',
+              enum: Object.values(AgentChatStatus),
+            },
+            workspaceStatus: {
+              type: 'string',
+              enum: Object.values(AgentWorkspaceStatus),
+            },
             repo: { type: 'string', nullable: true },
             branch: { type: 'string', nullable: true },
             primaryRepo: { type: 'string', nullable: true },
             primaryBranch: { type: 'string', nullable: true },
-            services: { type: 'array', items: { type: 'string' } },
-            workspaceRepos: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            selectedServices: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            startupFailure: { type: 'object', additionalProperties: true, nullable: true },
+            services: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            workspaceRepos: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+            },
+            selectedServices: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+            },
+            startupFailure: {
+              type: 'object',
+              additionalProperties: true,
+              nullable: true,
+            },
             lastActivity: { type: 'string', format: 'date-time', nullable: true },
             endedAt: { type: 'string', format: 'date-time', nullable: true },
             threadCount: { type: 'integer' },
@@ -428,10 +818,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             lastRunAt: { type: 'string', format: 'date-time', nullable: true },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
-            editorUrl: { type: 'string' },
+            editorUrl: { type: 'string', nullable: true },
           },
           required: [
             'id',
+            'sessionKind',
             'buildUuid',
             'baseBuildUuid',
             'buildKind',
@@ -442,6 +833,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'pvcName',
             'model',
             'status',
+            'chatStatus',
+            'workspaceStatus',
             'repo',
             'branch',
             'primaryRepo',
@@ -461,38 +854,446 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        AgentRunStatus: {
+          type: 'string',
+          enum: [
+            'queued',
+            'starting',
+            'running',
+            'waiting_for_approval',
+            'waiting_for_input',
+            'completed',
+            'failed',
+            'cancelled',
+          ],
+        },
+
         AgentRun: {
           type: 'object',
           properties: {
             id: { type: 'string' },
             threadId: { type: 'string', nullable: true },
             sessionId: { type: 'string', nullable: true },
-            status: {
-              type: 'string',
-              enum: [
-                'queued',
-                'running',
-                'waiting_for_approval',
-                'waiting_for_input',
-                'completed',
-                'failed',
-                'cancelled',
-              ],
-            },
+            status: { $ref: '#/components/schemas/AgentRunStatus' },
+            requestedHarness: { type: 'string', nullable: true },
+            resolvedHarness: { type: 'string', nullable: true },
+            requestedProvider: { type: 'string', nullable: true },
+            requestedModel: { type: 'string', nullable: true },
+            resolvedProvider: { type: 'string', nullable: true },
+            resolvedModel: { type: 'string', nullable: true },
             provider: { type: 'string' },
             model: { type: 'string' },
+            sandboxRequirement: { type: 'object', additionalProperties: true },
+            sandboxGeneration: { type: 'integer', nullable: true },
             queuedAt: { type: 'string', format: 'date-time', nullable: true },
             startedAt: { type: 'string', format: 'date-time', nullable: true },
             completedAt: { type: 'string', format: 'date-time', nullable: true },
             cancelledAt: { type: 'string', format: 'date-time', nullable: true },
             usageSummary: { type: 'object', additionalProperties: true },
             policySnapshot: { type: 'object', additionalProperties: true },
-            streamState: { type: 'object', additionalProperties: true },
-            error: { type: 'object', additionalProperties: true, nullable: true },
+            error: {
+              allOf: [{ $ref: '#/components/schemas/AgentRunError' }],
+              nullable: true,
+            },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
           },
-          required: ['id', 'status', 'provider', 'model', 'usageSummary', 'policySnapshot', 'streamState'],
+          required: [
+            'id',
+            'status',
+            'requestedHarness',
+            'resolvedHarness',
+            'requestedProvider',
+            'requestedModel',
+            'resolvedProvider',
+            'resolvedModel',
+            'provider',
+            'model',
+            'sandboxRequirement',
+            'sandboxGeneration',
+            'usageSummary',
+            'policySnapshot',
+          ],
+        },
+
+        CreateAgentThreadRunResponse: {
+          type: 'object',
+          properties: {
+            run: { $ref: '#/components/schemas/AgentRun' },
+            message: { $ref: '#/components/schemas/AgentMessage' },
+            links: {
+              type: 'object',
+              properties: {
+                events: { type: 'string' },
+                eventStream: { type: 'string' },
+                pendingActions: { type: 'string' },
+              },
+              required: ['events', 'eventStream', 'pendingActions'],
+              additionalProperties: false,
+            },
+          },
+          required: ['run', 'message', 'links'],
+          additionalProperties: false,
+        },
+
+        AgentRunError: {
+          type: 'object',
+          properties: {
+            message: { type: 'string' },
+            name: { type: 'string', nullable: true },
+            code: { type: 'string', nullable: true },
+            stack: { type: 'string', nullable: true },
+            details: { type: 'object', additionalProperties: true, nullable: true },
+          },
+          required: ['message'],
+          additionalProperties: true,
+        },
+
+        AgentRunTruncatedValue: {
+          type: 'object',
+          properties: {
+            truncated: { type: 'boolean', enum: [true] },
+            originalJsonBytes: { type: 'integer' },
+            preview: { type: 'string' },
+          },
+          required: ['truncated', 'originalJsonBytes', 'preview'],
+          additionalProperties: false,
+        },
+
+        AgentRunMessageCreatedEvent: agentRunEventSchema(['message.created'], {
+          type: 'object',
+          properties: {
+            messageId: { type: 'string' },
+            metadata: agentRunEventPayloadMetadata,
+          },
+          required: ['messageId', 'metadata'],
+          additionalProperties: false,
+        }),
+
+        AgentRunMessageMetadataEvent: agentRunEventSchema(['message.metadata'], {
+          type: 'object',
+          properties: {
+            metadata: agentRunEventPayloadMetadata,
+          },
+          required: ['metadata'],
+          additionalProperties: false,
+        }),
+
+        AgentRunMessagePartEvent: agentRunEventSchema(
+          ['message.part.started', 'message.delta', 'message.part.completed'],
+          {
+            type: 'object',
+            properties: {
+              partType: { type: 'string', enum: ['text', 'reasoning'] },
+              partId: { type: 'string' },
+              delta: { type: 'string' },
+              providerMetadata: agentRunEventPayloadMetadata,
+            },
+            required: ['partType', 'partId'],
+            additionalProperties: false,
+          }
+        ),
+
+        AgentRunMessageSourceEvent: agentRunEventSchema(['message.source'], {
+          type: 'object',
+          properties: {
+            sourceType: { type: 'string', enum: ['url', 'document'] },
+            sourceId: { type: 'string' },
+            url: { type: 'string' },
+            mediaType: { type: 'string' },
+            title: { type: 'string' },
+            filename: { type: 'string' },
+            providerMetadata: agentRunEventPayloadMetadata,
+          },
+          required: ['sourceType', 'sourceId'],
+          additionalProperties: false,
+        }),
+
+        AgentRunMessageFileEvent: agentRunEventSchema(['message.file'], {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            mediaType: { type: 'string' },
+            providerMetadata: agentRunEventPayloadMetadata,
+          },
+          required: ['url', 'mediaType'],
+          additionalProperties: false,
+        }),
+
+        AgentRunToolInputStartedEvent: agentRunEventSchema(['tool.call.input.started'], {
+          type: 'object',
+          properties: {
+            toolCallId: { type: 'string' },
+            toolName: { type: 'string' },
+            providerExecuted: { type: 'boolean' },
+            providerMetadata: agentRunEventPayloadMetadata,
+            dynamic: { type: 'boolean' },
+            title: { type: 'string' },
+          },
+          required: ['toolCallId', 'toolName'],
+          additionalProperties: false,
+        }),
+
+        AgentRunToolInputDeltaEvent: agentRunEventSchema(['tool.call.input.delta'], {
+          type: 'object',
+          properties: {
+            toolCallId: { type: 'string' },
+            inputTextDelta: { type: 'string' },
+          },
+          required: ['toolCallId', 'inputTextDelta'],
+          additionalProperties: false,
+        }),
+
+        AgentRunToolInputEvent: {
+          oneOf: [
+            { $ref: '#/components/schemas/AgentRunToolInputStartedEvent' },
+            { $ref: '#/components/schemas/AgentRunToolInputDeltaEvent' },
+          ],
+          discriminator: {
+            propertyName: 'eventType',
+            mapping: {
+              'tool.call.input.started': '#/components/schemas/AgentRunToolInputStartedEvent',
+              'tool.call.input.delta': '#/components/schemas/AgentRunToolInputDeltaEvent',
+            },
+          },
+        },
+
+        AgentRunToolStartedEvent: agentRunEventSchema(['tool.call.started'], {
+          type: 'object',
+          properties: {
+            toolCallId: { type: 'string' },
+            toolName: { type: 'string' },
+            inputStatus: { type: 'string', enum: ['available', 'error'] },
+            input: { nullable: true },
+            errorText: { type: 'string', nullable: true },
+            providerExecuted: { type: 'boolean' },
+            providerMetadata: agentRunEventPayloadMetadata,
+            dynamic: { type: 'boolean' },
+            title: { type: 'string' },
+          },
+          required: ['toolCallId', 'toolName', 'inputStatus', 'input', 'errorText'],
+          additionalProperties: false,
+        }),
+
+        AgentRunToolCompletedEvent: agentRunEventSchema(['tool.call.completed'], {
+          type: 'object',
+          properties: {
+            toolCallId: { type: 'string' },
+            output: { nullable: true },
+            errorText: { type: 'string', nullable: true },
+            status: { type: 'string', enum: ['completed', 'denied', 'failed'] },
+            providerExecuted: { type: 'boolean' },
+            providerMetadata: agentRunEventPayloadMetadata,
+            dynamic: { type: 'boolean' },
+            preliminary: { type: 'boolean' },
+          },
+          required: ['toolCallId', 'output', 'errorText', 'status'],
+          additionalProperties: false,
+        }),
+
+        AgentRunToolCallEvent: {
+          oneOf: [
+            { $ref: '#/components/schemas/AgentRunToolStartedEvent' },
+            { $ref: '#/components/schemas/AgentRunToolCompletedEvent' },
+          ],
+          discriminator: {
+            propertyName: 'eventType',
+            mapping: {
+              'tool.call.started': '#/components/schemas/AgentRunToolStartedEvent',
+              'tool.call.completed': '#/components/schemas/AgentRunToolCompletedEvent',
+            },
+          },
+        },
+
+        AgentRunToolFileChangeEvent: agentRunEventSchema(['tool.file_change'], {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            data: { type: 'object', additionalProperties: true },
+            transient: { type: 'boolean' },
+          },
+          required: ['data'],
+          additionalProperties: false,
+        }),
+
+        AgentRunApprovalRequestedEvent: agentRunEventSchema(['approval.requested'], {
+          type: 'object',
+          properties: {
+            actionId: { type: 'string' },
+            approvalId: { type: 'string' },
+            toolCallId: { type: 'string' },
+          },
+          required: ['approvalId', 'toolCallId'],
+          additionalProperties: false,
+        }),
+
+        AgentRunApprovalResolvedEvent: agentRunEventSchema(['approval.resolved'], {
+          type: 'object',
+          properties: {
+            actionId: { type: 'string' },
+            approvalId: { type: 'string' },
+            toolCallId: { type: 'string', nullable: true },
+            approved: { type: 'boolean' },
+            reason: { type: 'string', nullable: true },
+          },
+          required: ['actionId', 'approvalId', 'toolCallId', 'approved', 'reason'],
+          additionalProperties: false,
+        }),
+
+        AgentRunApprovalRespondedEvent: agentRunEventSchema(['approval.responded'], {
+          type: 'object',
+          properties: {
+            actionId: { type: 'string' },
+            approvalId: { type: 'string' },
+            toolCallId: { type: 'string', nullable: true },
+            approved: { type: 'boolean' },
+            reason: { type: 'string', nullable: true },
+          },
+          required: ['actionId', 'approvalId', 'toolCallId', 'approved', 'reason'],
+          additionalProperties: false,
+        }),
+
+        AgentRunApprovalEvent: {
+          oneOf: [
+            { $ref: '#/components/schemas/AgentRunApprovalRequestedEvent' },
+            { $ref: '#/components/schemas/AgentRunApprovalResolvedEvent' },
+            { $ref: '#/components/schemas/AgentRunApprovalRespondedEvent' },
+          ],
+          discriminator: {
+            propertyName: 'eventType',
+            mapping: {
+              'approval.requested': '#/components/schemas/AgentRunApprovalRequestedEvent',
+              'approval.resolved': '#/components/schemas/AgentRunApprovalResolvedEvent',
+              'approval.responded': '#/components/schemas/AgentRunApprovalRespondedEvent',
+            },
+          },
+        },
+
+        AgentRunStatusEvent: agentRunEventSchema(
+          [
+            'run.queued',
+            'run.started',
+            'run.waiting_for_approval',
+            'run.completed',
+            'run.failed',
+            'run.cancelled',
+            'run.updated',
+          ],
+          {
+            type: 'object',
+            properties: {
+              threadId: { type: 'string' },
+              sessionId: { type: 'string' },
+              status: { $ref: '#/components/schemas/AgentRunStatus' },
+              error: {
+                allOf: [{ $ref: '#/components/schemas/AgentRunError' }],
+                nullable: true,
+              },
+              usageSummary: { type: 'object', additionalProperties: true },
+            },
+            additionalProperties: false,
+          }
+        ),
+
+        AgentRunStepEvent: agentRunEventSchema(['run.step.started', 'run.step.completed'], {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        }),
+
+        AgentRunFinishedEvent: agentRunEventSchema(['run.finished'], {
+          type: 'object',
+          properties: {
+            finishReason: { type: 'string' },
+            metadata: agentRunEventPayloadMetadata,
+          },
+          required: ['finishReason', 'metadata'],
+          additionalProperties: false,
+        }),
+
+        AgentRunErrorEvent: agentRunEventSchema(['run.error'], {
+          type: 'object',
+          properties: {
+            errorText: { type: 'string' },
+          },
+          required: ['errorText'],
+          additionalProperties: false,
+        }),
+
+        AgentRunAbortedEvent: agentRunEventSchema(['run.aborted'], {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+          },
+          required: ['reason'],
+          additionalProperties: false,
+        }),
+
+        AgentRunEvent: {
+          oneOf: [
+            { $ref: '#/components/schemas/AgentRunMessageCreatedEvent' },
+            { $ref: '#/components/schemas/AgentRunMessageMetadataEvent' },
+            { $ref: '#/components/schemas/AgentRunMessagePartEvent' },
+            { $ref: '#/components/schemas/AgentRunMessageSourceEvent' },
+            { $ref: '#/components/schemas/AgentRunMessageFileEvent' },
+            { $ref: '#/components/schemas/AgentRunToolInputStartedEvent' },
+            { $ref: '#/components/schemas/AgentRunToolInputDeltaEvent' },
+            { $ref: '#/components/schemas/AgentRunToolStartedEvent' },
+            { $ref: '#/components/schemas/AgentRunToolCompletedEvent' },
+            { $ref: '#/components/schemas/AgentRunToolFileChangeEvent' },
+            { $ref: '#/components/schemas/AgentRunApprovalRequestedEvent' },
+            { $ref: '#/components/schemas/AgentRunApprovalResolvedEvent' },
+            { $ref: '#/components/schemas/AgentRunApprovalRespondedEvent' },
+            { $ref: '#/components/schemas/AgentRunStatusEvent' },
+            { $ref: '#/components/schemas/AgentRunStepEvent' },
+            { $ref: '#/components/schemas/AgentRunFinishedEvent' },
+            { $ref: '#/components/schemas/AgentRunErrorEvent' },
+            { $ref: '#/components/schemas/AgentRunAbortedEvent' },
+          ],
+          discriminator: {
+            propertyName: 'eventType',
+            mapping: agentRunEventDiscriminatorMapping,
+          },
+          example: {
+            id: 'event-1',
+            runId: 'run-1',
+            threadId: 'thread-1',
+            sessionId: 'session-1',
+            sequence: 3,
+            eventType: 'message.delta',
+            version: 1,
+            payload: {
+              partType: 'text',
+              partId: 'text-1',
+              delta: 'Hello',
+            },
+            createdAt: '2026-04-25T00:00:02.000Z',
+            updatedAt: '2026-04-25T00:00:02.000Z',
+          },
+        },
+
+        AgentPendingActionArgumentSummary: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            value: { type: 'string' },
+          },
+          required: ['name', 'value'],
+          additionalProperties: false,
+        },
+
+        AgentPendingActionFileChangePreview: {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            action: { type: 'string' },
+            summary: { type: 'string' },
+            additions: { type: 'integer', nullable: true },
+            deletions: { type: 'integer', nullable: true },
+            truncated: { type: 'boolean' },
+          },
+          required: ['path', 'action', 'summary', 'additions', 'deletions', 'truncated'],
+          additionalProperties: false,
         },
 
         AgentPendingAction: {
@@ -503,16 +1304,67 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             runId: { type: 'string', nullable: true },
             kind: { type: 'string' },
             status: { type: 'string', enum: ['pending', 'approved', 'denied'] },
-            capabilityKey: { type: 'string' },
             title: { type: 'string' },
             description: { type: 'string' },
-            payload: { type: 'object', additionalProperties: true },
-            resolution: { type: 'object', additionalProperties: true, nullable: true },
-            resolvedAt: { type: 'string', format: 'date-time', nullable: true },
-            createdAt: { type: 'string', format: 'date-time', nullable: true },
-            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            requestedAt: { type: 'string', format: 'date-time', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            toolName: { type: 'string', nullable: true },
+            argumentsSummary: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentPendingActionArgumentSummary' },
+            },
+            commandPreview: { type: 'string', nullable: true },
+            fileChangePreview: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentPendingActionFileChangePreview' },
+            },
+            riskLabels: {
+              type: 'array',
+              items: { type: 'string' },
+            },
           },
-          required: ['id', 'kind', 'status', 'capabilityKey', 'title', 'description', 'payload'],
+          required: [
+            'id',
+            'kind',
+            'status',
+            'threadId',
+            'runId',
+            'title',
+            'description',
+            'requestedAt',
+            'expiresAt',
+            'toolName',
+            'argumentsSummary',
+            'commandPreview',
+            'fileChangePreview',
+            'riskLabels',
+          ],
+          additionalProperties: false,
+          example: {
+            id: 'action-1',
+            threadId: 'thread-1',
+            runId: 'run-1',
+            kind: 'tool_approval',
+            status: 'pending',
+            title: 'Approve workspace edit',
+            description: 'A workspace edit requires approval.',
+            requestedAt: '2026-04-25T00:00:03.000Z',
+            expiresAt: null,
+            toolName: 'mcp__sandbox__workspace_edit_file',
+            argumentsSummary: [{ name: 'path', value: 'sample-file.txt' }],
+            commandPreview: null,
+            fileChangePreview: [
+              {
+                path: 'sample-file.txt',
+                action: 'edited',
+                summary: 'edited sample-file.txt',
+                additions: 1,
+                deletions: 0,
+                truncated: false,
+              },
+            ],
+            riskLabels: ['Workspace write'],
+          },
         },
 
         AgentToolExecution: {
@@ -525,6 +1377,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             source: { type: 'string' },
             serverSlug: { type: 'string', nullable: true },
             toolName: { type: 'string' },
+            toolCallId: { type: 'string', nullable: true },
             args: { type: 'object', additionalProperties: true },
             result: { type: 'object', additionalProperties: true, nullable: true },
             status: { type: 'string', enum: ['queued', 'running', 'completed', 'failed', 'cancelled'] },
@@ -544,6 +1397,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'source',
             'serverSlug',
             'toolName',
+            'toolCallId',
             'args',
             'result',
             'status',
@@ -555,6 +1409,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'createdAt',
             'updatedAt',
           ],
+          additionalProperties: false,
+          example: {
+            id: 'tool-execution-1',
+            threadId: 'thread-1',
+            runId: 'run-1',
+            pendingActionId: 'action-1',
+            source: 'mcp',
+            serverSlug: 'sandbox',
+            toolName: 'workspace.edit_file',
+            toolCallId: 'tool-call-1',
+            args: { path: 'sample-file.txt' },
+            result: null,
+            status: 'completed',
+            safetyLevel: null,
+            approved: true,
+            startedAt: '2026-04-25T00:00:04.000Z',
+            completedAt: '2026-04-25T00:00:05.000Z',
+            durationMs: 1000,
+            createdAt: '2026-04-25T00:00:04.000Z',
+            updatedAt: '2026-04-25T00:00:05.000Z',
+          },
         },
 
         AgentAdminThreadSummary: {
@@ -576,7 +1451,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentAdminSessionDetail: {
           type: 'object',
           properties: {
-            session: { $ref: '#/components/schemas/AgentSessionSummary' },
+            session: { $ref: '#/components/schemas/AgentAdminSessionSummary' },
             threads: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentAdminThreadSummary' },
@@ -588,15 +1463,19 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentAdminThreadConversation: {
           type: 'object',
           properties: {
-            session: { $ref: '#/components/schemas/AgentSessionSummary' },
+            session: { $ref: '#/components/schemas/AgentAdminSessionSummary' },
             thread: { $ref: '#/components/schemas/AgentAdminThreadSummary' },
             messages: {
               type: 'array',
-              items: { $ref: '#/components/schemas/AgentUIMessage' },
+              items: { $ref: '#/components/schemas/AgentMessage' },
             },
             runs: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentRun' },
+            },
+            events: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentRunEvent' },
             },
             pendingActions: {
               type: 'array',
@@ -607,7 +1486,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { $ref: '#/components/schemas/AgentToolExecution' },
             },
           },
-          required: ['session', 'thread', 'messages', 'runs', 'pendingActions', 'toolExecutions'],
+          required: ['session', 'thread', 'messages', 'runs', 'events', 'pendingActions', 'toolExecutions'],
         },
 
         AgentAdminMcpServerCoverage: {
@@ -1207,6 +2086,21 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           enum: Object.values(BuildKind),
         },
 
+        AgentSessionKind: {
+          type: 'string',
+          enum: Object.values(AgentSessionKind),
+        },
+
+        AgentChatStatus: {
+          type: 'string',
+          enum: Object.values(AgentChatStatus),
+        },
+
+        AgentWorkspaceStatus: {
+          type: 'string',
+          enum: Object.values(AgentWorkspaceStatus),
+        },
+
         /**
          * @description The main Build object.
          */
@@ -1708,6 +2602,46 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
+        AgentSessionWorkspaceStorageSettings: {
+          type: 'object',
+          properties: {
+            defaultSize: { type: 'string', minLength: 1, maxLength: 64 },
+            allowedSizes: {
+              type: 'array',
+              items: { type: 'string', minLength: 1, maxLength: 64 },
+              uniqueItems: true,
+            },
+            allowClientOverride: { type: 'boolean' },
+            accessMode: { type: 'string', enum: ['ReadWriteOnce', 'ReadWriteMany'] },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionCleanupSettings: {
+          type: 'object',
+          properties: {
+            activeIdleSuspendMs: { type: 'integer', minimum: 1 },
+            startingTimeoutMs: { type: 'integer', minimum: 1 },
+            hibernatedRetentionMs: { type: 'integer', minimum: 1 },
+            intervalMs: { type: 'integer', minimum: 1 },
+            redisTtlSeconds: { type: 'integer', minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionDurabilitySettings: {
+          type: 'object',
+          properties: {
+            runExecutionLeaseMs: { type: 'integer', minimum: 1 },
+            queuedRunDispatchStaleMs: { type: 'integer', minimum: 1 },
+            dispatchRecoveryLimit: { type: 'integer', minimum: 1 },
+            maxDurablePayloadBytes: { type: 'integer', minimum: 1 },
+            payloadPreviewBytes: { type: 'integer', minimum: 1 },
+            fileChangePreviewChars: { type: 'integer', minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+
         AgentSessionRuntimeSettings: {
           type: 'object',
           properties: {
@@ -1747,6 +2681,9 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
               additionalProperties: false,
             },
+            workspaceStorage: { $ref: '#/components/schemas/AgentSessionWorkspaceStorageSettings' },
+            cleanup: { $ref: '#/components/schemas/AgentSessionCleanupSettings' },
+            durability: { $ref: '#/components/schemas/AgentSessionDurabilitySettings' },
           },
           additionalProperties: false,
         },
@@ -2983,7 +3920,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 metadata: { $ref: '#/components/schemas/ResponseMetadata' },
                 data: {
                   type: 'array',
-                  items: { $ref: '#/components/schemas/AgentSessionSummary' },
+                  items: { $ref: '#/components/schemas/AgentAdminSessionSummary' },
                 },
               },
               required: ['data'],

@@ -54,6 +54,18 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *                           type: array
  *                           items:
  *                             $ref: '#/components/schemas/AgentPendingAction'
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Thread not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -61,14 +73,21 @@ const getHandler = async (req: NextRequest, { params }: { params: { threadId: st
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
-  const pendingActions = await ApprovalService.listPendingActions(params.threadId, userIdentity.userId);
-  return successResponse(
-    {
-      pendingActions: pendingActions.map((action) => ApprovalService.serializePendingAction(action)),
-    },
-    { status: 200 },
-    req
-  );
+  try {
+    const pendingActions = await ApprovalService.listPendingActions(params.threadId, userIdentity.userId);
+    return successResponse(
+      {
+        pendingActions: pendingActions.map((action) => ApprovalService.serializePendingAction(action)),
+      },
+      { status: 200 },
+      req
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Agent thread not found') {
+      return errorResponse(error, { status: 404 }, req);
+    }
+    throw error;
+  }
 };
 
 export const GET = createApiHandler(getHandler);

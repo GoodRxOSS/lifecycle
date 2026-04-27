@@ -119,6 +119,8 @@ export const QUEUE_NAMES = {
   AGENT_SESSION_CLEANUP: 'agent_session_cleanup',
   AGENT_SESSION_PREWARM: 'agent_session_prewarm',
   AGENT_SANDBOX_SESSION_LAUNCH: 'agent_sandbox_session_launch',
+  AGENT_RUN_EXECUTE: 'agent_run_execute',
+  AGENT_RUN_RECOVERY: 'agent_run_recovery',
 } as const;
 
 export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');

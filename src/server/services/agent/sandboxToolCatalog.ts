@@ -231,7 +231,7 @@ const PROMPT_CATEGORY_COPY: Record<SessionWorkspaceToolCategory, { label: string
     toolNames: ['workspace.write_file', 'workspace.edit_file'],
   },
   command: {
-    label: 'run mutating or networked shell commands',
+    label: 'run mutating or networked shell commands that are not direct file edits',
     toolNames: [SESSION_WORKSPACE_MUTATION_TOOL_NAME],
   },
   git_change: {

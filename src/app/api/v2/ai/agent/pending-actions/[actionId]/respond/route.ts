@@ -19,6 +19,7 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
+import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import ApprovalService from 'server/services/agent/ApprovalService';
 
 /**
@@ -41,11 +42,15 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - approved
+ *             additionalProperties: false
  *             properties:
  *               approved:
  *                 type: boolean
  *               reason:
  *                 type: string
+ *                 nullable: true
  *     responses:
  *       '200':
  *         description: Pending action resolved
@@ -59,6 +64,24 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *                   properties:
  *                     data:
  *                       $ref: '#/components/schemas/AgentPendingAction'
+ *       '400':
+ *         description: Invalid pending action response
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Pending action not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const postHandler = async (req: NextRequest, { params }: { params: { actionId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -66,20 +89,33 @@ const postHandler = async (req: NextRequest, { params }: { params: { actionId: s
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
   }
 
-  const body = await req.json().catch(() => ({}));
-  const approved = body?.approved === true;
-  const action = await ApprovalService.resolvePendingAction(
-    params.actionId,
-    userIdentity.userId,
-    approved ? 'approved' : 'denied',
-    {
-      approved,
-      reason: typeof body?.reason === 'string' ? body.reason : null,
-      source: 'endpoint',
-    }
-  );
+  const body = await req.json().catch(() => null);
+  const responseBody = ApprovalService.normalizePendingActionResponseBody(body);
+  if (responseBody instanceof Error) {
+    return errorResponse(responseBody, { status: 400 }, req);
+  }
 
-  return successResponse(ApprovalService.serializePendingAction(action), { status: 200 }, req);
+  const githubToken = await resolveRequestGitHubToken(req);
+  try {
+    const action = await ApprovalService.resolvePendingAction(
+      params.actionId,
+      userIdentity.userId,
+      responseBody.approved ? 'approved' : 'denied',
+      {
+        approved: responseBody.approved,
+        reason: responseBody.reason,
+        source: 'endpoint',
+      },
+      { githubToken }
+    );
+
+    return successResponse(ApprovalService.serializePendingAction(action), { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Pending action not found') {
+      return errorResponse(error, { status: 404 }, req);
+    }
+    throw error;
+  }
 };
 
 export const POST = createApiHandler(postHandler);

@@ -20,7 +20,26 @@ export default class AgentRun extends Model {
   uuid!: string;
   threadId!: number;
   sessionId!: number;
-  status!: 'queued' | 'running' | 'waiting_for_approval' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
+  status!:
+    | 'queued'
+    | 'starting'
+    | 'running'
+    | 'waiting_for_approval'
+    | 'waiting_for_input'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  requestedHarness!: string | null;
+  resolvedHarness!: string | null;
+  requestedProvider!: string | null;
+  requestedModel!: string | null;
+  resolvedProvider!: string | null;
+  resolvedModel!: string | null;
+  sandboxRequirement!: Record<string, unknown>;
+  sandboxGeneration!: number | null;
+  executionOwner!: string | null;
+  leaseExpiresAt!: string | null;
+  heartbeatAt!: string | null;
   provider!: string;
   model!: string;
   queuedAt!: string;
@@ -29,7 +48,6 @@ export default class AgentRun extends Model {
   cancelledAt!: string | null;
   usageSummary!: Record<string, unknown>;
   policySnapshot!: Record<string, unknown>;
-  streamState!: Record<string, unknown>;
   error!: Record<string, unknown> | null;
 
   static tableName = 'agent_runs';
@@ -49,8 +67,28 @@ export default class AgentRun extends Model {
       sessionId: { type: 'integer' },
       status: {
         type: 'string',
-        enum: ['queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'completed', 'failed', 'cancelled'],
+        enum: [
+          'queued',
+          'starting',
+          'running',
+          'waiting_for_approval',
+          'waiting_for_input',
+          'completed',
+          'failed',
+          'cancelled',
+        ],
       },
+      requestedHarness: { type: ['string', 'null'] },
+      resolvedHarness: { type: ['string', 'null'] },
+      requestedProvider: { type: ['string', 'null'] },
+      requestedModel: { type: ['string', 'null'] },
+      resolvedProvider: { type: ['string', 'null'] },
+      resolvedModel: { type: ['string', 'null'] },
+      sandboxRequirement: { type: 'object', default: {} },
+      sandboxGeneration: { type: ['integer', 'null'] },
+      executionOwner: { type: ['string', 'null'] },
+      leaseExpiresAt: { type: ['string', 'null'] },
+      heartbeatAt: { type: ['string', 'null'] },
       provider: { type: 'string' },
       model: { type: 'string' },
       queuedAt: { type: 'string' },
@@ -59,13 +97,12 @@ export default class AgentRun extends Model {
       cancelledAt: { type: ['string', 'null'] },
       usageSummary: { type: 'object', default: {} },
       policySnapshot: { type: 'object', default: {} },
-      streamState: { type: 'object', default: {} },
       error: { type: ['object', 'null'], default: null },
     },
   };
 
   static get jsonAttributes() {
-    return ['usageSummary', 'policySnapshot', 'streamState', 'error'];
+    return ['sandboxRequirement', 'usageSummary', 'policySnapshot', 'error'];
   }
 
   static get relationMappings() {
@@ -74,6 +111,7 @@ export default class AgentRun extends Model {
     const AgentMessage = require('./AgentMessage').default;
     const AgentPendingAction = require('./AgentPendingAction').default;
     const AgentToolExecution = require('./AgentToolExecution').default;
+    const AgentRunEvent = require('./AgentRunEvent').default;
 
     return {
       thread: {
@@ -114,6 +152,14 @@ export default class AgentRun extends Model {
         join: {
           from: 'agent_runs.id',
           to: 'agent_tool_executions.runId',
+        },
+      },
+      events: {
+        relation: Model.HasManyRelation,
+        modelClass: AgentRunEvent,
+        join: {
+          from: 'agent_runs.id',
+          to: 'agent_run_events.runId',
         },
       },
     };

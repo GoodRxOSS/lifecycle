@@ -19,26 +19,22 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
-import {
-  AgentSessionRuntimeConfigError,
-  mergeAgentSessionReadinessForServices,
-  mergeAgentSessionResources,
-  resolveAgentSessionRuntimeConfig,
-} from 'server/lib/agentSession/runtimeConfig';
-import { MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
-import { AGENT_API_KEY_HEADER, AGENT_API_KEY_PROVIDER_HEADER } from 'server/services/agent/providerConfig';
-import AgentSessionService, { ActiveEnvironmentSessionError } from 'server/services/agentSession';
-import {
-  resolveAgentSessionServiceCandidatesForBuild,
-  resolveRequestedAgentSessionServices,
-  type RequestedAgentSessionServiceRef,
-} from 'server/services/agentSessionCandidates';
-import { serializeAgentSessionSummary } from 'server/services/agent/serializeSessionSummary';
-import Build from 'server/models/Build';
-import { fetchLifecycleConfig, type LifecycleConfig } from 'server/models/yaml';
 import type { DevConfig } from 'server/models/yaml/YamlService';
-import { BuildKind } from 'shared/constants';
+import type { LifecycleConfig } from 'server/models/yaml';
+import AgentChatSessionService from 'server/services/agent/ChatSessionService';
+import { MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
+import {
+  DEFAULT_AGENT_SESSION_LIST_LIMIT,
+  MAX_AGENT_SESSION_LIST_LIMIT,
+} from 'server/services/agent/SessionReadService';
+import { AgentSessionKind, BuildKind } from 'shared/constants';
+
+interface RequestedAgentSessionServiceRef {
+  name: string;
+  repo?: string | null;
+  branch?: string | null;
+}
 
 interface ResolvedSessionService {
   name: string;
@@ -53,13 +49,17 @@ interface ResolvedSessionService {
 }
 
 interface CreateSessionBody {
-  buildUuid?: string;
-  services?: unknown[];
-  model?: string;
-  repoUrl?: string;
-  branch?: string;
-  prNumber?: number;
-  namespace?: string;
+  defaults?: {
+    model?: string;
+    harness?: string;
+  };
+  source?: {
+    adapter?: string;
+    input?: Record<string, unknown>;
+  };
+  workspace?: {
+    storageSize?: string;
+  };
 }
 
 function repoNameFromRepoUrl(repoUrl?: string | null) {
@@ -71,6 +71,27 @@ function repoNameFromRepoUrl(repoUrl?: string | null) {
   return normalized || null;
 }
 
+function parseRequestedWorkspaceStorageSize(body: CreateSessionBody): string | undefined {
+  const workspace = body.workspace;
+  if (workspace === undefined) {
+    return undefined;
+  }
+
+  if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
+    throw new Error('workspace must be an object');
+  }
+
+  if (workspace.storageSize === undefined) {
+    return undefined;
+  }
+
+  if (typeof workspace.storageSize !== 'string' || !workspace.storageSize.trim()) {
+    throw new Error('workspace.storageSize must be a non-empty string');
+  }
+
+  return workspace.storageSize.trim();
+}
+
 async function resolveLifecycleConfigForSession({
   buildContext,
   repoUrl,
@@ -80,6 +101,8 @@ async function resolveLifecycleConfigForSession({
   repoUrl?: string | null;
   branch?: string | null;
 }): Promise<LifecycleConfig | null> {
+  const { fetchLifecycleConfig } = await import('server/models/yaml');
+
   if (buildContext?.pullRequest?.fullName && buildContext.pullRequest.branchName) {
     return fetchLifecycleConfig(buildContext.pullRequest.fullName, buildContext.pullRequest.branchName);
   }
@@ -115,6 +138,7 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
 }
 
 async function resolveBuildContext(buildUuid: string) {
+  const { default: Build } = await import('server/models/Build');
   return Build.query()
     .findOne({ uuid: buildUuid })
     .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
@@ -140,6 +164,10 @@ async function resolveRequestedServices(
   if (!buildContext) {
     throw new Error('Build not found');
   }
+
+  const { resolveAgentSessionServiceCandidatesForBuild, resolveRequestedAgentSessionServices } = await import(
+    'server/services/agentSessionCandidates'
+  );
 
   const requestedRefs = requestedServices.map((service) => {
     if (typeof service === 'string') {
@@ -181,6 +209,21 @@ async function resolveRequestedServices(
  *         schema:
  *           type: boolean
  *         description: When true, include ended and errored sessions in the response.
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *           minimum: 1
+ *         description: Page number for pagination.
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 25
+ *           minimum: 1
+ *           maximum: 100
+ *         description: Number of sessions per page.
  *     responses:
  *       '200':
  *         description: Agent sessions
@@ -195,146 +238,9 @@ async function resolveRequestedServices(
  *                 data:
  *                   type: array
  *                   items:
- *                     type: object
- *                     required:
- *                       - id
- *                       - buildUuid
- *                       - baseBuildUuid
- *                       - buildKind
- *                       - userId
- *                       - ownerGithubUsername
- *                       - podName
- *                       - namespace
- *                       - model
- *                       - status
- *                       - repo
- *                       - branch
- *                       - services
- *                       - lastActivity
- *                       - createdAt
- *                       - updatedAt
- *                       - endedAt
- *                       - startupFailure
- *                       - editorUrl
- *                     properties:
- *                       id:
- *                         type: string
- *                       buildUuid:
- *                         type: string
- *                         nullable: true
- *                       baseBuildUuid:
- *                         type: string
- *                         nullable: true
- *                       buildKind:
- *                         $ref: '#/components/schemas/BuildKind'
- *                       userId:
- *                         type: string
- *                       ownerGithubUsername:
- *                         type: string
- *                         nullable: true
- *                       podName:
- *                         type: string
- *                       namespace:
- *                         type: string
- *                       model:
- *                         type: string
- *                       status:
- *                         type: string
- *                         enum: [starting, active, ended, error]
- *                       repo:
- *                         type: string
- *                         nullable: true
- *                       branch:
- *                         type: string
- *                         nullable: true
- *                       primaryRepo:
- *                         type: string
- *                         nullable: true
- *                       primaryBranch:
- *                         type: string
- *                         nullable: true
- *                       workspaceRepos:
- *                         type: array
- *                         items:
- *                           type: object
- *                           required: [repo, repoUrl, branch, mountPath]
- *                           properties:
- *                             repo:
- *                               type: string
- *                             repoUrl:
- *                               type: string
- *                             branch:
- *                               type: string
- *                             revision:
- *                               type: string
- *                               nullable: true
- *                             mountPath:
- *                               type: string
- *                             primary:
- *                               type: boolean
- *                       selectedServices:
- *                         type: array
- *                         items:
- *                           type: object
- *                           required: [name, deployId, repo, branch, workspacePath]
- *                           properties:
- *                             name:
- *                               type: string
- *                             deployId:
- *                               type: integer
- *                             repo:
- *                               type: string
- *                             branch:
- *                               type: string
- *                             revision:
- *                               type: string
- *                               nullable: true
- *                             resourceName:
- *                               type: string
- *                               nullable: true
- *                             workspacePath:
- *                               type: string
- *                             workDir:
- *                               type: string
- *                               nullable: true
- *                       services:
- *                         type: array
- *                         items:
- *                           type: string
- *                       lastActivity:
- *                         type: string
- *                         format: date-time
- *                       createdAt:
- *                         type: string
- *                         format: date-time
- *                       updatedAt:
- *                         type: string
- *                         format: date-time
- *                       endedAt:
- *                         type: string
- *                         nullable: true
- *                         format: date-time
- *                       startupFailure:
- *                         type: object
- *                         nullable: true
- *                         required:
- *                           - stage
- *                           - title
- *                           - message
- *                           - recordedAt
- *                         properties:
- *                           stage:
- *                             type: string
- *                             enum: [create_session, connect_runtime, attach_services]
- *                           title:
- *                             type: string
- *                           message:
- *                             type: string
- *                           recordedAt:
- *                             type: string
- *                             format: date-time
- *                       editorUrl:
- *                         type: string
+ *                     $ref: '#/components/schemas/AgentSessionSummary'
+ *                 metadata:
+ *                   $ref: '#/components/schemas/ResponseMetadata'
  *                 error:
  *                   nullable: true
  *       '401':
@@ -344,7 +250,7 @@ async function resolveRequestedServices(
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
- *     summary: Create a new interactive agent session
+ *     summary: Create a new agent session
  *     tags:
  *       - Agent Sessions
  *     operationId: createAgentSession
@@ -354,28 +260,43 @@ async function resolveRequestedServices(
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - buildUuid
+ *             required: [source]
  *             properties:
- *               buildUuid:
- *                 type: string
- *               services:
- *                 type: array
- *                 description: Optional service names or repo-qualified service references to enable dev mode for.
- *                 items:
- *                   oneOf:
- *                     - type: string
- *                     - type: object
- *                       required: [name]
- *                       properties:
- *                         name:
- *                           type: string
- *                         repo:
- *                           type: string
- *                         branch:
- *                           type: string
- *               model:
- *                 type: string
+ *               defaults:
+ *                 type: object
+ *                 properties:
+ *                   model:
+ *                     type: string
+ *                   harness:
+ *                     type: string
+ *               source:
+ *                 type: object
+ *                 required: [adapter]
+ *                 properties:
+ *                   adapter:
+ *                     type: string
+ *                   input:
+ *                     type: object
+ *                     additionalProperties: true
+ *               workspace:
+ *                 type: object
+ *                 properties:
+ *                   storageSize:
+ *                     type: string
+ *                     description: Optional workspace PVC size. Accepted only when admin runtime settings allow client overrides.
+ *               sandbox:
+ *                 type: object
+ *                 properties:
+ *                   providerHint:
+ *                     type: string
+ *                   requirements:
+ *                     type: object
+ *                     additionalProperties: true
+ *               thread:
+ *                 type: object
+ *                 properties:
+ *                   createDefault:
+ *                     type: boolean
  *     responses:
  *       '201':
  *         description: Agent session created
@@ -388,146 +309,7 @@ async function resolveRequestedServices(
  *                 request_id:
  *                   type: string
  *                 data:
- *                   type: object
- *                   required:
- *                     - id
- *                     - buildUuid
- *                     - baseBuildUuid
- *                     - buildKind
- *                     - userId
- *                     - ownerGithubUsername
- *                     - podName
- *                     - namespace
- *                     - model
- *                     - status
- *                     - repo
- *                     - branch
- *                     - services
- *                     - editorUrl
- *                     - lastActivity
- *                     - createdAt
- *                     - updatedAt
- *                     - endedAt
- *                     - startupFailure
- *                   properties:
- *                     id:
- *                       type: string
- *                     buildUuid:
- *                       type: string
- *                       nullable: true
- *                     baseBuildUuid:
- *                       type: string
- *                       nullable: true
- *                     buildKind:
- *                       $ref: '#/components/schemas/BuildKind'
- *                     userId:
- *                       type: string
- *                     ownerGithubUsername:
- *                       type: string
- *                       nullable: true
- *                     podName:
- *                       type: string
- *                     namespace:
- *                       type: string
- *                     model:
- *                       type: string
- *                     status:
- *                       type: string
- *                       enum: [starting, active, ended, error]
- *                     repo:
- *                       type: string
- *                       nullable: true
- *                     branch:
- *                       type: string
- *                       nullable: true
- *                     primaryRepo:
- *                       type: string
- *                       nullable: true
- *                     primaryBranch:
- *                       type: string
- *                       nullable: true
- *                     workspaceRepos:
- *                       type: array
- *                       items:
- *                         type: object
- *                         required: [repo, repoUrl, branch, mountPath]
- *                         properties:
- *                           repo:
- *                             type: string
- *                           repoUrl:
- *                             type: string
- *                           branch:
- *                             type: string
- *                           revision:
- *                             type: string
- *                             nullable: true
- *                           mountPath:
- *                             type: string
- *                           primary:
- *                             type: boolean
- *                     selectedServices:
- *                       type: array
- *                       items:
- *                         type: object
- *                         required: [name, deployId, repo, branch, workspacePath]
- *                         properties:
- *                           name:
- *                             type: string
- *                           deployId:
- *                             type: integer
- *                           repo:
- *                             type: string
- *                           branch:
- *                             type: string
- *                           revision:
- *                             type: string
- *                             nullable: true
- *                           resourceName:
- *                             type: string
- *                             nullable: true
- *                           workspacePath:
- *                             type: string
- *                           workDir:
- *                             type: string
- *                             nullable: true
- *                     services:
- *                       type: array
- *                       items:
- *                         type: string
- *                     editorUrl:
- *                       type: string
- *                     lastActivity:
- *                       type: string
- *                       format: date-time
- *                     createdAt:
- *                       type: string
- *                       format: date-time
- *                     updatedAt:
- *                       type: string
- *                       format: date-time
- *                     endedAt:
- *                       type: string
- *                       nullable: true
- *                       format: date-time
- *                     startupFailure:
- *                       type: object
- *                       nullable: true
- *                       required:
- *                         - stage
- *                         - title
- *                         - message
- *                         - recordedAt
- *                       properties:
- *                         stage:
- *                           type: string
- *                           enum: [create_session, connect_runtime, attach_services]
- *                         title:
- *                           type: string
- *                         message:
- *                           type: string
- *                         recordedAt:
- *                           type: string
- *                           format: date-time
+ *                   $ref: '#/components/schemas/AgentSessionSummary'
  *                 error:
  *                   nullable: true
  *       '400':
@@ -560,10 +342,26 @@ const getHandler = async (req: NextRequest) => {
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
   const includeEnded = req.nextUrl.searchParams.get('includeEnded') === 'true';
-  const sessions = await AgentSessionService.getSessions(userIdentity.userId, { includeEnded });
+  const page = parseInt(req.nextUrl.searchParams.get('page') || '1', 10);
+  const requestedLimit = parseInt(
+    req.nextUrl.searchParams.get('limit') || String(DEFAULT_AGENT_SESSION_LIST_LIMIT),
+    10
+  );
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(requestedLimit, MAX_AGENT_SESSION_LIST_LIMIT)
+    : DEFAULT_AGENT_SESSION_LIST_LIMIT;
+  const result = await AgentSessionReadService.listOwnedSessionRecords(userIdentity.userId, {
+    includeEnded,
+    page,
+    limit,
+  });
+
   return successResponse(
-    sessions.map((session) => serializeAgentSessionSummary(session)),
-    { status: 200 },
+    result.records,
+    {
+      status: 200,
+      metadata: result.metadata,
+    },
     req
   );
 };
@@ -573,12 +371,89 @@ const postHandler = async (req: NextRequest) => {
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
   const body = (await req.json()) as CreateSessionBody;
-  const { buildUuid, services, model } = body;
+  let requestedWorkspaceStorageSize: string | undefined;
+  try {
+    requestedWorkspaceStorageSize = parseRequestedWorkspaceStorageSize(body);
+  } catch (err) {
+    return errorResponse(err, { status: 400 }, req);
+  }
+  const sourceInput =
+    body.source?.input && typeof body.source.input === 'object' && !Array.isArray(body.source.input)
+      ? body.source.input
+      : {};
+  const buildUuid =
+    typeof (sourceInput as { buildUuid?: unknown }).buildUuid === 'string'
+      ? (sourceInput as { buildUuid: string }).buildUuid
+      : undefined;
+  const services = Array.isArray((sourceInput as { services?: unknown[] }).services)
+    ? (sourceInput as { services: unknown[] }).services
+    : undefined;
+  const requestedModel = body.defaults?.model;
+  const sessionKind =
+    body.source?.adapter === 'blank_workspace'
+      ? AgentSessionKind.CHAT
+      : body.source?.adapter === 'lifecycle_fork'
+      ? AgentSessionKind.SANDBOX
+      : AgentSessionKind.ENVIRONMENT;
 
-  let repoUrl = body.repoUrl;
-  let branch = body.branch;
-  let prNumber = body.prNumber;
-  let namespace = body.namespace;
+  if (sessionKind === AgentSessionKind.CHAT) {
+    if (buildUuid || (Array.isArray(services) && services.length > 0)) {
+      return errorResponse(
+        new Error('Chat sessions cannot be created with buildUuid or attached services'),
+        { status: 400 },
+        req
+      );
+    }
+
+    try {
+      const { resolveAgentSessionRuntimeConfig, resolveAgentSessionWorkspaceStorageIntent } = await import(
+        'server/lib/agentSession/runtimeConfig'
+      );
+      const workspaceStorage = requestedWorkspaceStorageSize
+        ? resolveAgentSessionWorkspaceStorageIntent({
+            requestedSize: requestedWorkspaceStorageSize,
+            storage: (await resolveAgentSessionRuntimeConfig()).workspaceStorage,
+          })
+        : undefined;
+      const session = await AgentChatSessionService.createChatSession({
+        userId: userIdentity.userId,
+        userIdentity,
+        model: requestedModel,
+        workspaceStorage,
+      });
+
+      return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 201 }, req);
+    } catch (err) {
+      const { AgentSessionRuntimeConfigError, AgentSessionWorkspaceStorageConfigError } = await import(
+        'server/lib/agentSession/runtimeConfig'
+      );
+      if (err instanceof MissingAgentProviderApiKeyError) {
+        return errorResponse(err, { status: 400 }, req);
+      }
+      if (err instanceof AgentSessionRuntimeConfigError || err instanceof AgentSessionWorkspaceStorageConfigError) {
+        return errorResponse(err, { status: 400 }, req);
+      }
+
+      return errorResponse(err, { status: 500 }, req);
+    }
+  }
+
+  let repoUrl =
+    typeof (sourceInput as { repoUrl?: unknown }).repoUrl === 'string'
+      ? (sourceInput as { repoUrl: string }).repoUrl
+      : undefined;
+  let branch =
+    typeof (sourceInput as { branch?: unknown }).branch === 'string'
+      ? (sourceInput as { branch: string }).branch
+      : undefined;
+  let prNumber =
+    typeof (sourceInput as { prNumber?: unknown }).prNumber === 'number'
+      ? (sourceInput as { prNumber: number }).prNumber
+      : undefined;
+  let namespace =
+    typeof (sourceInput as { namespace?: unknown }).namespace === 'string'
+      ? (sourceInput as { namespace: string }).namespace
+      : undefined;
   let buildKind = BuildKind.ENVIRONMENT;
   let buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null = null;
   let lifecycleConfig: LifecycleConfig | null = null;
@@ -618,18 +493,34 @@ const postHandler = async (req: NextRequest) => {
   }
 
   try {
+    const [
+      { resolveRequestGitHubToken },
+      {
+        mergeAgentSessionReadinessForServices,
+        mergeAgentSessionResources,
+        resolveAgentSessionRuntimeConfig,
+        resolveAgentSessionWorkspaceStorageIntent,
+      },
+      { default: AgentSessionService },
+    ] = await Promise.all([
+      import('server/lib/agentSession/githubToken'),
+      import('server/lib/agentSession/runtimeConfig'),
+      import('server/services/agentSession'),
+    ]);
     const runtimeConfig = await resolveAgentSessionRuntimeConfig();
+    const workspaceStorage = resolveAgentSessionWorkspaceStorageIntent({
+      requestedSize: requestedWorkspaceStorageSize,
+      storage: runtimeConfig.workspaceStorage,
+    });
     const githubToken = await resolveRequestGitHubToken(req);
     const session = await AgentSessionService.createSession({
       userId: userIdentity.userId,
       userIdentity,
       githubToken,
-      requestApiKey: req.headers.get(AGENT_API_KEY_HEADER),
-      requestApiKeyProvider: req.headers.get(AGENT_API_KEY_PROVIDER_HEADER),
       buildUuid,
       buildKind,
       services: resolvedServices,
-      model,
+      model: requestedModel,
       environmentSkillRefs: lifecycleConfig?.environment?.agentSession?.skills,
       repoUrl,
       branch,
@@ -648,21 +539,17 @@ const postHandler = async (req: NextRequest) => {
         runtimeConfig.resources,
         lifecycleConfig?.environment?.agentSession?.resources
       ),
+      workspaceStorage,
+      redisTtlSeconds: runtimeConfig.cleanup.redisTtlSeconds,
     });
 
-    return successResponse(
-      serializeAgentSessionSummary({
-        ...session,
-        baseBuildUuid: null,
-        repo: repoNameFromRepoUrl(repoUrl),
-        branch,
-        services: resolvedServices.map((service) => service.name),
-        startupFailure: null,
-      }),
-      { status: 201 },
-      req
-    );
+    return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 201 }, req);
   } catch (err) {
+    const { ActiveEnvironmentSessionError } = await import('server/services/agentSession');
+    const { AgentSessionRuntimeConfigError, AgentSessionWorkspaceStorageConfigError } = await import(
+      'server/lib/agentSession/runtimeConfig'
+    );
+
     if (err instanceof ActiveEnvironmentSessionError) {
       return errorResponse(err, { status: 409 }, req);
     }
@@ -671,6 +558,9 @@ const postHandler = async (req: NextRequest) => {
     }
     if (err instanceof AgentSessionRuntimeConfigError) {
       return errorResponse(err, { status: 503 }, req);
+    }
+    if (err instanceof AgentSessionWorkspaceStorageConfigError) {
+      return errorResponse(err, { status: 400 }, req);
     }
     throw err;
   }

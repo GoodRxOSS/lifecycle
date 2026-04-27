@@ -27,16 +27,12 @@ describe('Agent model validation', () => {
     ).not.toThrow();
   });
 
-  test('allows ui messages with non-uuid ids because row identity comes from uiMessage.id', () => {
+  test('allows canonical messages without a uiMessage projection', () => {
     expect(() =>
       AgentMessage.fromJson({
         threadId: 42,
         role: 'user',
-        uiMessage: {
-          id: 'msg_local_123',
-          role: 'user',
-          parts: [{ type: 'text', text: 'hello' }],
-        },
+        parts: [{ type: 'text', text: 'hello' }],
         metadata: {},
       })
     ).not.toThrow();

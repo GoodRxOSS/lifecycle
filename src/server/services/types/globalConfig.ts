@@ -82,6 +82,32 @@ export type AgentSessionResourcesConfig = {
   workspaceGateway?: ResourceRequirements | null;
 };
 
+export type AgentSessionWorkspaceStorageAccessMode = 'ReadWriteOnce' | 'ReadWriteMany';
+
+export type AgentSessionWorkspaceStorageConfig = {
+  defaultSize?: string | null;
+  allowedSizes?: string[] | null;
+  allowClientOverride?: boolean | null;
+  accessMode?: AgentSessionWorkspaceStorageAccessMode | null;
+};
+
+export type AgentSessionCleanupConfig = {
+  activeIdleSuspendMs?: number | string | null;
+  startingTimeoutMs?: number | string | null;
+  hibernatedRetentionMs?: number | string | null;
+  intervalMs?: number | string | null;
+  redisTtlSeconds?: number | string | null;
+};
+
+export type AgentSessionDurabilityConfig = {
+  runExecutionLeaseMs?: number | string | null;
+  queuedRunDispatchStaleMs?: number | string | null;
+  dispatchRecoveryLimit?: number | string | null;
+  maxDurablePayloadBytes?: number | string | null;
+  payloadPreviewBytes?: number | string | null;
+  fileChangePreviewChars?: number | string | null;
+};
+
 export type AgentSessionDefaults = {
   workspaceImage?: string | null;
   workspaceEditorImage?: string | null;
@@ -89,6 +115,9 @@ export type AgentSessionDefaults = {
   scheduling?: AgentSessionSchedulingConfig;
   readiness?: AgentSessionReadinessConfig;
   resources?: AgentSessionResourcesConfig;
+  workspaceStorage?: AgentSessionWorkspaceStorageConfig;
+  cleanup?: AgentSessionCleanupConfig;
+  durability?: AgentSessionDurabilityConfig;
   controlPlane?: AgentSessionControlPlaneConfig;
 };
 

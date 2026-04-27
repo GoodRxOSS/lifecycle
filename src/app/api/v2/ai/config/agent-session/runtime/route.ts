@@ -37,6 +37,12 @@ import AgentSessionConfigService from 'server/services/agentSessionConfig';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/GetGlobalAgentSessionRuntimeConfigSuccessResponse'
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  *   put:
  *     summary: Update global Agent Session runtime configuration
  *     tags:
@@ -57,6 +63,12 @@ import AgentSessionConfigService from 'server/services/agentSessionConfig';
  *               $ref: '#/components/schemas/GetGlobalAgentSessionRuntimeConfigSuccessResponse'
  *       '400':
  *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '401':
+ *         description: Unauthorized
  *         content:
  *           application/json:
  *             schema:

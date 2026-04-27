@@ -17,8 +17,9 @@
 import { createHash } from 'node:crypto';
 import { type DynamicToolUIPart, type ToolUIPart, type UITools } from 'ai';
 import type { AgentFileChangeArtifact, AgentFileChangeData, AgentFileChangeStage, AgentUIMessage } from './types';
+import { DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS } from 'server/lib/agentSession/runtimeConfig';
 
-const MAX_FILE_CHANGE_PREVIEW_CHARS = 4000;
+const MAX_FILE_CHANGE_PREVIEW_CHARS = DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS;
 
 type ToolLikePart = ToolUIPart<UITools> | DynamicToolUIPart;
 
@@ -74,14 +75,12 @@ function trimWorkspacePrefix(path: string): string {
   return path.replace(/^\/workspace\//, '').replace(/^\.\//, '');
 }
 
-function trimPreview(value: string | null | undefined): string | null {
+function trimPreview(value: string | null | undefined, maxChars = MAX_FILE_CHANGE_PREVIEW_CHARS): string | null {
   if (!value) {
     return null;
   }
 
-  return value.length > MAX_FILE_CHANGE_PREVIEW_CHARS
-    ? `${value.slice(0, MAX_FILE_CHANGE_PREVIEW_CHARS)}\n\n[truncated]`
-    : value;
+  return value.length > maxChars ? `${value.slice(0, maxChars)}\n\n[truncated]` : value;
 }
 
 function countChangedLines(value: string): number {
@@ -133,11 +132,13 @@ function mapArtifactToData({
   toolCallId,
   sourceTool,
   stage,
+  previewChars,
 }: {
   artifact: AgentFileChangeArtifact;
   toolCallId: string;
   sourceTool: string;
   stage: AgentFileChangeStage;
+  previewChars?: number;
 }): AgentFileChangeData {
   return {
     ...artifact,
@@ -147,8 +148,8 @@ function mapArtifactToData({
     displayPath: trimWorkspacePrefix(artifact.path),
     stage,
     unifiedDiff: artifact.unifiedDiff ?? null,
-    beforeTextPreview: trimPreview(artifact.beforeTextPreview),
-    afterTextPreview: trimPreview(artifact.afterTextPreview),
+    beforeTextPreview: trimPreview(artifact.beforeTextPreview, previewChars),
+    afterTextPreview: trimPreview(artifact.afterTextPreview, previewChars),
     summary: artifact.summary ?? summarizeChange(artifact.kind, artifact.path),
   };
 }
@@ -232,10 +233,12 @@ export function buildProposedFileChanges({
   toolCallId,
   sourceTool,
   input,
+  previewChars,
 }: {
   toolCallId: string;
   sourceTool: string;
   input: Record<string, unknown>;
+  previewChars?: number;
 }): AgentFileChangeData[] {
   const toolKey = normalizeToolKey(sourceTool);
 
@@ -268,6 +271,7 @@ export function buildProposedFileChanges({
         toolCallId,
         sourceTool,
         stage: 'awaiting-approval',
+        previewChars,
       }),
     ];
   }
@@ -301,6 +305,7 @@ export function buildProposedFileChanges({
         toolCallId,
         sourceTool,
         stage: 'awaiting-approval',
+        previewChars,
       }),
     ];
   }
@@ -314,12 +319,14 @@ export function buildResultFileChanges({
   input,
   result,
   failed,
+  previewChars,
 }: {
   toolCallId: string;
   sourceTool: string;
   input: Record<string, unknown>;
   result: unknown;
   failed: boolean;
+  previewChars?: number;
 }): AgentFileChangeData[] {
   const payload = unwrapToolPayload(result);
   const artifacts =
@@ -336,6 +343,7 @@ export function buildResultFileChanges({
         toolCallId,
         sourceTool,
         stage: failed ? 'failed' : 'applied',
+        previewChars,
       })
     );
   }
@@ -348,6 +356,7 @@ export function buildResultFileChanges({
     toolCallId,
     sourceTool,
     input,
+    previewChars,
   }).map((change) => ({
     ...change,
     stage: 'failed',

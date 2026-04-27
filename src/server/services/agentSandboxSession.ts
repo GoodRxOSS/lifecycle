@@ -24,6 +24,7 @@ import {
   mergeAgentSessionResources,
   type ResolvedAgentSessionReadinessConfig,
   type ResolvedAgentSessionResources,
+  type ResolvedAgentSessionWorkspaceStorageIntent,
 } from 'server/lib/agentSession/runtimeConfig';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { getLogger } from 'server/lib/logger';
@@ -133,8 +134,6 @@ export interface LaunchSandboxSessionOptions {
   userId: string;
   userIdentity?: RequestUserIdentity;
   githubToken?: string | null;
-  requestApiKey?: string | null;
-  requestApiKeyProvider?: string | null;
   baseBuildUuid: string;
   services?: RequestedSandboxServices;
   model?: string;
@@ -145,6 +144,8 @@ export interface LaunchSandboxSessionOptions {
   keepAttachedServicesOnSessionNode?: boolean;
   readiness: ResolvedAgentSessionReadinessConfig;
   resources: ResolvedAgentSessionResources;
+  workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
+  redisTtlSeconds?: number;
   onProgress?: (stage: SandboxLaunchStage, message: string) => Promise<void> | void;
 }
 
@@ -262,8 +263,6 @@ export default class AgentSandboxSessionService extends BaseService {
         buildUuid: sandboxBuild.uuid,
         buildKind: BuildKind.SANDBOX,
         githubToken: opts.githubToken,
-        requestApiKey: opts.requestApiKey,
-        requestApiKeyProvider: opts.requestApiKeyProvider,
         services: selectedSandboxServices.map(({ selectedService, sandboxDeploy }) => ({
           name: selectedService.name,
           deployId: sandboxDeploy.id,
@@ -287,6 +286,8 @@ export default class AgentSandboxSessionService extends BaseService {
           selectedServices.map((service) => service.devConfig.agentSession?.readiness)
         ),
         resources: mergeAgentSessionResources(opts.resources, lifecycleConfig.environment?.agentSession?.resources),
+        workspaceStorage: opts.workspaceStorage,
+        redisTtlSeconds: opts.redisTtlSeconds,
         userIdentity: opts.userIdentity,
       });
       const sessionOpenMs = elapsedMs(openSessionStartedAt);

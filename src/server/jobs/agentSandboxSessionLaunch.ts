@@ -36,8 +36,6 @@ const logger = () => getLogger();
 export interface SandboxSessionLaunchJob extends Omit<LaunchSandboxSessionOptions, 'onProgress' | 'githubToken'> {
   launchId: string;
   encryptedGithubToken?: string | null;
-  encryptedRequestApiKey?: string | null;
-  requestApiKeyProvider?: string | null;
 }
 
 export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLaunchJob>): Promise<void> {
@@ -47,8 +45,6 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     userId,
     userIdentity,
     encryptedGithubToken,
-    encryptedRequestApiKey,
-    requestApiKeyProvider,
     baseBuildUuid,
     services,
     model,
@@ -59,6 +55,8 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
     keepAttachedServicesOnSessionNode,
     readiness,
     resources,
+    workspaceStorage,
+    redisTtlSeconds,
   } = job.data;
 
   const reportProgress = async (stage: SandboxLaunchStage, message: string): Promise<void> => {
@@ -75,8 +73,6 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       userId,
       userIdentity,
       githubToken: encryptedGithubToken ? decrypt(encryptedGithubToken) : null,
-      requestApiKey: encryptedRequestApiKey ? decrypt(encryptedRequestApiKey) : null,
-      requestApiKeyProvider,
       baseBuildUuid,
       services,
       model,
@@ -87,6 +83,8 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       keepAttachedServicesOnSessionNode,
       readiness,
       resources,
+      workspaceStorage,
+      redisTtlSeconds,
       onProgress: reportProgress,
     });
 

@@ -19,7 +19,7 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { serializeAgentSessionSummary } from 'server/services/agent/serializeSessionSummary';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import AgentSessionService from 'server/services/agentSession';
 
 /**
@@ -48,146 +48,7 @@ import AgentSessionService from 'server/services/agentSession';
  *                 request_id:
  *                   type: string
  *                 data:
- *                   type: object
- *                   required:
- *                     - id
- *                     - buildUuid
- *                     - baseBuildUuid
- *                     - buildKind
- *                     - userId
- *                     - ownerGithubUsername
- *                     - podName
- *                     - namespace
- *                     - model
- *                     - status
- *                     - repo
- *                     - branch
- *                     - services
- *                     - lastActivity
- *                     - createdAt
- *                     - updatedAt
- *                     - endedAt
- *                     - startupFailure
- *                     - editorUrl
- *                   properties:
- *                     id:
- *                       type: string
- *                     buildUuid:
- *                       type: string
- *                       nullable: true
- *                     baseBuildUuid:
- *                       type: string
- *                       nullable: true
- *                     buildKind:
- *                       $ref: '#/components/schemas/BuildKind'
- *                     userId:
- *                       type: string
- *                     ownerGithubUsername:
- *                       type: string
- *                       nullable: true
- *                     podName:
- *                       type: string
- *                     namespace:
- *                       type: string
- *                     model:
- *                       type: string
- *                     status:
- *                       type: string
- *                       enum: [starting, active, ended, error]
- *                     repo:
- *                       type: string
- *                       nullable: true
- *                     branch:
- *                       type: string
- *                       nullable: true
- *                     primaryRepo:
- *                       type: string
- *                       nullable: true
- *                     primaryBranch:
- *                       type: string
- *                       nullable: true
- *                     workspaceRepos:
- *                       type: array
- *                       items:
- *                         type: object
- *                         required: [repo, repoUrl, branch, mountPath]
- *                         properties:
- *                           repo:
- *                             type: string
- *                           repoUrl:
- *                             type: string
- *                           branch:
- *                             type: string
- *                           revision:
- *                             type: string
- *                             nullable: true
- *                           mountPath:
- *                             type: string
- *                           primary:
- *                             type: boolean
- *                     selectedServices:
- *                       type: array
- *                       items:
- *                         type: object
- *                         required: [name, deployId, repo, branch, workspacePath]
- *                         properties:
- *                           name:
- *                             type: string
- *                           deployId:
- *                             type: integer
- *                           repo:
- *                             type: string
- *                           branch:
- *                             type: string
- *                           revision:
- *                             type: string
- *                             nullable: true
- *                           resourceName:
- *                             type: string
- *                             nullable: true
- *                           workspacePath:
- *                             type: string
- *                           workDir:
- *                             type: string
- *                             nullable: true
- *                     services:
- *                       type: array
- *                       items:
- *                         type: string
- *                     lastActivity:
- *                       type: string
- *                       format: date-time
- *                     createdAt:
- *                       type: string
- *                       format: date-time
- *                     updatedAt:
- *                       type: string
- *                       format: date-time
- *                     endedAt:
- *                       type: string
- *                       nullable: true
- *                       format: date-time
- *                     startupFailure:
- *                       type: object
- *                       nullable: true
- *                       required:
- *                         - stage
- *                         - title
- *                         - message
- *                         - recordedAt
- *                       properties:
- *                         stage:
- *                           type: string
- *                           enum: [create_session, connect_runtime, attach_services]
- *                         title:
- *                           type: string
- *                         message:
- *                           type: string
- *                         recordedAt:
- *                           type: string
- *                           format: date-time
- *                     editorUrl:
- *                       type: string
+ *                   $ref: '#/components/schemas/AgentSessionSummary'
  *                 error:
  *                   nullable: true
  *       '401':
@@ -251,16 +112,12 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sess
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
   const { sessionId } = await params;
-  const session = await AgentSessionService.getSession(sessionId);
-  if (!session) {
+  const sessionRecord = await AgentSessionReadService.getOwnedSessionRecord(sessionId, userIdentity.userId);
+  if (!sessionRecord) {
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
-  if (session.userId !== userIdentity.userId) {
-    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
-  }
-
-  return successResponse(serializeAgentSessionSummary(session), { status: 200 }, req);
+  return successResponse(sessionRecord, { status: 200 }, req);
 };
 
 const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {

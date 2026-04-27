@@ -16,21 +16,40 @@
 
 import { Knex } from 'knex';
 
+async function dropColumnIfExists(knex: Knex, tableName: string, columnName: string): Promise<void> {
+  const exists = await knex.schema.hasColumn(tableName, columnName);
+
+  if (!exists) {
+    return;
+  }
+
+  await knex.schema.alterTable(tableName, (table) => {
+    table.dropColumn(columnName);
+  });
+}
+
+async function addColumnIfMissing(
+  knex: Knex,
+  tableName: string,
+  columnName: string,
+  addColumn: (table: Knex.AlterTableBuilder) => void
+): Promise<void> {
+  const exists = await knex.schema.hasColumn(tableName, columnName);
+
+  if (exists) {
+    return;
+  }
+
+  await knex.schema.alterTable(tableName, addColumn);
+}
+
 export async function up(knex: Knex): Promise<void> {
-  await knex.schema.alterTable('services', (table) => {
-    table.dropColumn('scaleToZero');
-    table.dropColumn('scaleToZeroMetricsCheckInterval');
-  });
-
-  await knex.schema.alterTable('deployables', (table) => {
-    table.dropColumn('scaleToZero');
-    table.dropColumn('scaleToZeroMetricsCheckInterval');
-    table.dropColumn('kedaScaleToZero');
-  });
-
-  await knex.schema.alterTable('deploys', (table) => {
-    table.dropColumn('kedaScaleToZero');
-  });
+  await dropColumnIfExists(knex, 'services', 'scaleToZero');
+  await dropColumnIfExists(knex, 'services', 'scaleToZeroMetricsCheckInterval');
+  await dropColumnIfExists(knex, 'deployables', 'scaleToZero');
+  await dropColumnIfExists(knex, 'deployables', 'scaleToZeroMetricsCheckInterval');
+  await dropColumnIfExists(knex, 'deployables', 'kedaScaleToZero');
+  await dropColumnIfExists(knex, 'deploys', 'kedaScaleToZero');
 
   await knex.raw(`
     DELETE FROM global_config
@@ -46,18 +65,22 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 export async function down(knex: Knex): Promise<void> {
-  await knex.schema.alterTable('services', (table) => {
+  await addColumnIfMissing(knex, 'services', 'scaleToZero', (table) => {
     table.boolean('scaleToZero').defaultTo(false);
+  });
+  await addColumnIfMissing(knex, 'services', 'scaleToZeroMetricsCheckInterval', (table) => {
     table.integer('scaleToZeroMetricsCheckInterval').defaultTo(1800);
   });
-
-  await knex.schema.alterTable('deployables', (table) => {
+  await addColumnIfMissing(knex, 'deployables', 'scaleToZero', (table) => {
     table.boolean('scaleToZero').defaultTo(false);
+  });
+  await addColumnIfMissing(knex, 'deployables', 'scaleToZeroMetricsCheckInterval', (table) => {
     table.integer('scaleToZeroMetricsCheckInterval').defaultTo(1800);
+  });
+  await addColumnIfMissing(knex, 'deployables', 'kedaScaleToZero', (table) => {
     table.json('kedaScaleToZero').defaultTo('{}');
   });
-
-  await knex.schema.alterTable('deploys', (table) => {
+  await addColumnIfMissing(knex, 'deploys', 'kedaScaleToZero', (table) => {
     table.json('kedaScaleToZero').defaultTo('{}');
   });
 
@@ -70,7 +93,12 @@ export async function down(knex: Knex): Promise<void> {
       now(),
       null,
       'This is the default configuration for Keda Scale To Zero'
-    );
+    )
+    ON CONFLICT (key) DO UPDATE
+    SET config = EXCLUDED.config,
+        "updatedAt" = now(),
+        "deletedAt" = null,
+        description = EXCLUDED.description;
   `);
 
   await knex.raw(`

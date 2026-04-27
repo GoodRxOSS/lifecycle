@@ -15,6 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
+import { unstable_noStore as noStore } from 'next/cache';
+import { isDynamicUsageError } from 'next/dist/export/helpers/is-dynamic-usage-error';
 import { getLogger } from 'server/lib/logger';
 
 // eslint-disable-next-line no-unused-vars
@@ -22,9 +24,15 @@ type StreamRouteHandler = (req: NextRequest, ...args: any[]) => Promise<Response
 
 export function createStreamHandler(handler: StreamRouteHandler): StreamRouteHandler {
   return async (req: NextRequest, ...args: any[]) => {
+    noStore();
+
     try {
       return await handler(req, ...args);
     } catch (error) {
+      if (isDynamicUsageError(error)) {
+        throw error;
+      }
+
       let errorMessage = 'An unexpected error occurred.';
       let errorStack = '';
 

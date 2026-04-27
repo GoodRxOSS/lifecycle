@@ -20,6 +20,8 @@ load("ext://restart_process", "docker_build_with_restart")
 load("ext://secret", "secret_create_generic")
 load('ext://dotenv', 'dotenv')
 
+update_settings(k8s_upsert_timeout_secs=180)
+
 # Load .env file if it exists
 dotenv()
 
