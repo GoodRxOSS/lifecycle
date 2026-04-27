@@ -20,16 +20,22 @@ export function serializeAgentSessionSummary<T extends { id: string | number; uu
     id: _internalId,
     uuid: _uuid,
     skillPlan: _skillPlan,
+    podName,
+    namespace,
     ...serialized
   } = session as T & {
     uuid?: string | null;
     id: string | number;
     skillPlan?: unknown;
+    podName?: string | null;
+    namespace?: string | null;
   };
 
   return {
     ...serialized,
+    podName: podName ?? null,
+    namespace: namespace ?? null,
     id: sessionId,
-    editorUrl: `/api/agent-session/workspace-editor/${sessionId}/`,
+    editorUrl: podName && namespace ? `/api/agent-session/workspace-editor/${sessionId}/` : null,
   };
 }

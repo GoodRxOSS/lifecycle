@@ -19,7 +19,6 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
-import { AGENT_API_KEY_HEADER, AGENT_API_KEY_PROVIDER_HEADER } from 'server/services/agent/providerConfig';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,8 +72,6 @@ const getHandler = async (req: NextRequest) => {
   const models = await AgentProviderRegistry.listAvailableModelsForUser({
     repoFullName: repo,
     userIdentity,
-    requestApiKey: req.headers.get(AGENT_API_KEY_HEADER),
-    requestApiKeyProvider: req.headers.get(AGENT_API_KEY_PROVIDER_HEADER),
   });
 
   return successResponse({ models }, { status: 200 }, req);

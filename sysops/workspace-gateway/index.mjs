@@ -28,6 +28,7 @@ const MAX_GREP_RESULTS = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_GREP
 const MAX_COMMAND_OUTPUT_CHARS = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_COMMAND_OUTPUT_CHARS, 24_000);
 const MAX_FILE_CHANGE_PREVIEW_CHARS = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_FILE_CHANGE_PREVIEW_CHARS, 4000);
 const MAX_FILE_CHANGE_DIFF_CHARS = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_FILE_CHANGE_DIFF_CHARS, 16_000);
+const MAX_EXEC_FILE_CHANGES = parsePositiveInt(process.env.LIFECYCLE_SANDBOX_MAX_EXEC_FILE_CHANGES, 50);
 const STATE_FILE = process.env.LIFECYCLE_SANDBOX_STATE_FILE || '';
 const PORTS_FILE = process.env.LIFECYCLE_SANDBOX_PORTS_FILE || '';
 const PROCESSES_FILE = process.env.LIFECYCLE_SANDBOX_PROCESSES_FILE || '';
@@ -316,6 +317,178 @@ async function buildFileChangeArtifact({
   };
 }
 
+async function findNearestGitRoot(startPath) {
+  let current = resolve(startPath);
+
+  while (isWithinWorkspace(current)) {
+    if (await fileExists(resolve(current, '.git'))) {
+      return current;
+    }
+
+    if (current === WORKSPACE_ROOT) {
+      break;
+    }
+
+    current = dirname(current);
+  }
+
+  return null;
+}
+
+function snapshotHasPathUnderRoot(snapshot, workspaceRootPath) {
+  return [...snapshot.keys()].some(
+    (path) =>
+      path === workspaceRootPath || path.startsWith(`${workspaceRootPath}/`)
+  );
+}
+
+function normalizeGitStatusPath(value) {
+  return value.split(sep).join('/').replace(/^\.\/+/, '');
+}
+
+function gitStatusPathCoversFile(statusPath, repoRelativePath) {
+  const normalizedStatusPath = normalizeGitStatusPath(statusPath);
+  const normalizedRepoRelativePath = normalizeGitStatusPath(repoRelativePath);
+
+  return (
+    normalizedStatusPath === normalizedRepoRelativePath ||
+    (normalizedStatusPath.endsWith('/') && normalizedRepoRelativePath.startsWith(normalizedStatusPath))
+  );
+}
+
+function parseGitStatusPaths(stdout) {
+  const entries = stdout.split('\0').filter(Boolean);
+  const paths = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+
+    if (path) {
+      paths.push(path);
+    }
+
+    if (status.includes('R') || status.includes('C')) {
+      index += 1;
+    }
+  }
+
+  return paths;
+}
+
+async function readGitStatusPaths(repoRoot) {
+  try {
+    const result = await execFile('/usr/bin/git', [
+      '-C',
+      repoRoot,
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=normal',
+    ]);
+
+    return parseGitStatusPaths(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+async function readGitHeadText(repoRoot, repoRelativePath) {
+  try {
+    const result = await execFile(
+      '/usr/bin/git',
+      ['-C', repoRoot, 'show', `HEAD:${repoRelativePath}`],
+      {
+        maxBuffer: 10 * 1024 * 1024,
+      }
+    );
+
+    return result.stdout;
+  } catch {
+    return null;
+  }
+}
+
+async function getNewGitRepoInfoForPath(path, beforeSnapshot, cache) {
+  const absolutePath = resolveWorkspacePath(path);
+  const repoRoot = await findNearestGitRoot(dirname(absolutePath));
+
+  if (!repoRoot) {
+    return null;
+  }
+
+  const workspaceRootPath = toWorkspaceRelativePath(repoRoot);
+  const existedBefore = workspaceRootPath
+    ? snapshotHasPathUnderRoot(beforeSnapshot, workspaceRootPath)
+    : beforeSnapshot.size > 0;
+  if (existedBefore) {
+    return null;
+  }
+
+  if (!cache.has(repoRoot)) {
+    cache.set(
+      repoRoot,
+      readGitStatusPaths(repoRoot).then((statusPaths) => ({
+        repoRoot,
+        statusPaths,
+      }))
+    );
+  }
+
+  return cache.get(repoRoot);
+}
+
+async function normalizeSnapshotChangeCandidate({
+  path,
+  beforeSnapshot,
+  afterSnapshot,
+  newGitRepoInfoCache,
+}) {
+  const hadBefore = beforeSnapshot.has(path);
+  const hasAfter = afterSnapshot.has(path);
+
+  if (!hadBefore && hasAfter) {
+    const newRepoInfo = await getNewGitRepoInfoForPath(
+      path,
+      beforeSnapshot,
+      newGitRepoInfoCache
+    );
+    if (newRepoInfo?.statusPaths) {
+      const repoRelativePath = normalizeGitStatusPath(
+        relative(newRepoInfo.repoRoot, resolveWorkspacePath(path))
+      );
+      const repoReportsPath = newRepoInfo.statusPaths.some((statusPath) =>
+        gitStatusPathCoversFile(statusPath, repoRelativePath)
+      );
+
+      if (!repoReportsPath) {
+        return null;
+      }
+
+      const baselineText = await readGitHeadText(
+        newRepoInfo.repoRoot,
+        repoRelativePath
+      );
+      if (baselineText !== null) {
+        return {
+          path,
+          kind: 'edited',
+          before: baselineText,
+          after: afterSnapshot.get(path) || '',
+        };
+      }
+    }
+  }
+
+  return {
+    path,
+    kind: !hadBefore ? 'created' : !hasAfter ? 'deleted' : 'edited',
+    before: beforeSnapshot.get(path) || '',
+    after: afterSnapshot.get(path) || '',
+  };
+}
+
 function isWithinWorkspace(candidate) {
   const normalized = resolve(candidate);
   return normalized === WORKSPACE_ROOT || normalized.startsWith(`${WORKSPACE_ROOT}${sep}`);
@@ -518,24 +691,127 @@ async function editWorkspaceFile({ path, oldText, newText, replaceAll = false })
   };
 }
 
-async function runWorkspaceCommand({ command, cwd = '.', timeoutMs = 30000 }) {
-  const resolvedCwd = resolveWorkspacePath(cwd);
-  const { stdout, stderr } = await execFile('/bin/bash', ['-lc', command], {
-    cwd: resolvedCwd,
-    timeout: timeoutMs,
-    maxBuffer: 10 * 1024 * 1024,
-    env: {
-      ...process.env,
-      HOME: process.env.HOME || WORKSPACE_ROOT,
-    },
-  });
+async function snapshotWorkspaceTextFiles() {
+  const snapshot = new Map();
+  let files = [];
+  try {
+    files = await collectFilesUnderPath('.');
+  } catch {
+    return snapshot;
+  }
+
+  for (const absolutePath of files) {
+    try {
+      if (isReservedWorkspacePath(absolutePath)) {
+        continue;
+      }
+      const text = await readFile(absolutePath, 'utf8');
+      snapshot.set(toWorkspaceRelativePath(absolutePath), text);
+    } catch {
+      // Ignore files that disappear or cannot be decoded while snapshotting.
+    }
+  }
+
+  return snapshot;
+}
+
+async function buildFileChangesFromSnapshots(beforeSnapshot, afterSnapshot) {
+  const changedPaths = [...new Set([...beforeSnapshot.keys(), ...afterSnapshot.keys()])]
+    .filter((path) => beforeSnapshot.get(path) !== afterSnapshot.get(path))
+    .sort();
+  const newGitRepoInfoCache = new Map();
+  const candidates = [];
+
+  for (const path of changedPaths) {
+    const candidate = await normalizeSnapshotChangeCandidate({
+      path,
+      beforeSnapshot,
+      afterSnapshot,
+      newGitRepoInfoCache,
+    });
+
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+
+  const limitedCandidates = candidates.slice(0, MAX_EXEC_FILE_CHANGES);
+  const fileChanges = [];
+
+  for (const candidate of limitedCandidates) {
+    fileChanges.push(
+      await buildFileChangeArtifact({
+        path: candidate.path,
+        kind: candidate.kind,
+        before: candidate.before,
+        after: candidate.after,
+      })
+    );
+  }
 
   return {
-    cwd: toWorkspaceRelativePath(resolvedCwd),
-    stdout: truncateText(stdout),
-    stderr: truncateText(stderr),
-    success: true,
+    fileChanges,
+    fileChangesTruncated: candidates.length > limitedCandidates.length,
   };
+}
+
+function getCommandErrorFileChanges(error) {
+  return isRecord(error) && Array.isArray(error.fileChanges) ? error.fileChanges : [];
+}
+
+function getCommandErrorFileChangesTruncated(error) {
+  return isRecord(error) && error.fileChangesTruncated === true;
+}
+
+function commandErrorText(message, error) {
+  const fileChanges = getCommandErrorFileChanges(error);
+  const fileChangesTruncated = getCommandErrorFileChangesTruncated(error);
+
+  return textResult({
+    ok: false,
+    error: message,
+    details: error instanceof Error ? error.message : String(error),
+    ...(fileChanges.length > 0 ? { fileChanges } : {}),
+    ...(fileChangesTruncated ? { fileChangesTruncated } : {}),
+  });
+}
+
+async function runWorkspaceCommand({ command, cwd = '.', timeoutMs = 30000, captureFileChanges = false }) {
+  const resolvedCwd = resolveWorkspacePath(cwd);
+  const beforeSnapshot = captureFileChanges ? await snapshotWorkspaceTextFiles() : null;
+
+  try {
+    const { stdout, stderr } = await execFile('/bin/bash', ['-lc', command], {
+      cwd: resolvedCwd,
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        ...process.env,
+        HOME: process.env.HOME || WORKSPACE_ROOT,
+      },
+    });
+
+    const changes = beforeSnapshot
+      ? await buildFileChangesFromSnapshots(beforeSnapshot, await snapshotWorkspaceTextFiles())
+      : { fileChanges: [], fileChangesTruncated: false };
+
+    return {
+      cwd: toWorkspaceRelativePath(resolvedCwd),
+      stdout: truncateText(stdout),
+      stderr: truncateText(stderr),
+      success: true,
+      ...(changes.fileChanges.length > 0 ? { fileChanges: changes.fileChanges } : {}),
+      ...(changes.fileChangesTruncated ? { fileChangesTruncated: true } : {}),
+    };
+  } catch (error) {
+    if (beforeSnapshot && isRecord(error)) {
+      const changes = await buildFileChangesFromSnapshots(beforeSnapshot, await snapshotWorkspaceTextFiles());
+      error.fileChanges = changes.fileChanges;
+      error.fileChangesTruncated = changes.fileChangesTruncated;
+    }
+
+    throw error;
+  }
 }
 
 async function walkFiles(rootDir, relativePrefix = '', results = [], limit = MAX_LIST_RESULTS) {
@@ -1106,10 +1382,11 @@ function buildServer() {
         command: z.string().min(1).describe('Command to run with bash -lc'),
         cwd: z.string().optional().describe('Working directory relative to the workspace'),
         timeoutMs: z.number().int().positive().max(120000).optional().describe('Command timeout in milliseconds'),
+        captureFileChanges: z.boolean().optional().describe('Internal Lifecycle flag for file-change capture'),
       },
       annotations: { destructiveHint: true, openWorldHint: true },
     },
-    async ({ command, cwd, timeoutMs }) => {
+    async ({ command, cwd, timeoutMs, captureFileChanges }) => {
       try {
         return textResult({
           ok: true,
@@ -1118,10 +1395,11 @@ function buildServer() {
             command,
             cwd: cwd || '.',
             timeoutMs: timeoutMs || 30000,
+            captureFileChanges: captureFileChanges === true,
           }),
         });
       } catch (error) {
-        return errorText('Unable to run workspace command', error instanceof Error ? error.message : String(error));
+        return commandErrorText('Unable to run workspace command', error);
       }
     }
   );

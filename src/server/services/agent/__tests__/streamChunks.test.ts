@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import { sanitizeAgentRunStreamChunks, sanitizeAgentRunStreamState } from '../streamState';
+import { sanitizeAgentRunStreamChunks } from '../streamChunks';
 
-describe('agent stream replay sanitization', () => {
+describe('agent stream chunk sanitization', () => {
   it('removes duplicate fileChanges from tool-output chunks when canonical file-change chunks exist', () => {
     const chunks = sanitizeAgentRunStreamChunks([
       {
@@ -63,25 +63,5 @@ describe('agent stream replay sanitization', () => {
 
     expect(text).not.toContain('fileChanges');
     expect(text).toContain('"path": "file.ts"');
-  });
-
-  it('drops redundant top-level finishReason when the finish chunk already records it', () => {
-    const streamState = sanitizeAgentRunStreamState({
-      finishReason: 'stop',
-      chunks: [
-        {
-          type: 'finish',
-          finishReason: 'stop',
-        },
-      ],
-    });
-
-    expect(streamState.finishReason).toBeUndefined();
-    expect(streamState.chunks).toEqual([
-      {
-        type: 'finish',
-        finishReason: 'stop',
-      },
-    ]);
   });
 });

@@ -29,6 +29,7 @@ jest.mock('ioredis', () => {
     info = jest.fn().mockResolvedValue('redis_version:6.0.5');
     hgetall = jest.fn().mockResolvedValue(null);
     hset = jest.fn().mockResolvedValue(1);
+    del = jest.fn().mockResolvedValue(1);
     expire = jest.fn().mockResolvedValue(1);
     hmset = jest.fn().mockResolvedValue('OK');
     disconnect = jest.fn();

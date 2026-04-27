@@ -274,15 +274,15 @@ export class McpConfigService {
     });
   }
 
-  async resolveServersForRepo(
-    repoFullName: string,
+  async resolveServers(
+    repoFullName?: string,
     disabledSlugs?: string[],
     userIdentity?: RequestUserIdentity | null
   ): Promise<ResolvedMcpServer[]> {
     const configs = await this.listEffectiveConfigs(repoFullName);
     const disabled = new Set(disabledSlugs ?? []);
     const filteredConfigs = configs.filter((config) => !disabled.has(config.slug));
-    const sharedScopes = ['global', repoFullName];
+    const sharedScopes = ['global', ...(repoFullName ? [repoFullName] : [])];
     const definitionFingerprints = buildDefinitionFingerprintMap(filteredConfigs);
 
     const userConnections = userIdentity
@@ -393,6 +393,14 @@ export class McpConfigService {
         },
       ];
     });
+  }
+
+  async resolveServersForRepo(
+    repoFullName: string,
+    disabledSlugs?: string[],
+    userIdentity?: RequestUserIdentity | null
+  ): Promise<ResolvedMcpServer[]> {
+    return this.resolveServers(repoFullName, disabledSlugs, userIdentity);
   }
 
   async resolveSessionPodServersForRepo(

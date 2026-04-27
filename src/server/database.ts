@@ -17,7 +17,7 @@
 import knex, { Knex } from 'knex';
 import { merge } from 'lodash';
 import * as models from './models';
-import { IServices } from 'server/services/types';
+import type { IServices } from 'server/services/types';
 import Model from 'server/models/_Model';
 import knexfile from '../../knexfile';
 

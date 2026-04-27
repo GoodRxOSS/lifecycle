@@ -54,7 +54,7 @@ describe('AgentSessionConfigService', () => {
     mockGlobalConfigSetConfig.mockResolvedValue(undefined);
   });
 
-  it('lists only admin-visible sandbox tools in tool inventory', async () => {
+  it('lists admin-visible built-in tools in tool inventory', async () => {
     const service = makeService();
 
     jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({});
@@ -80,9 +80,24 @@ describe('AgentSessionConfigService', () => {
       'git.add',
       'git.commit',
       'git.branch',
+      'publish_http',
     ]);
     expect(entries.find((entry) => entry.toolName === 'skills.list')).toBeUndefined();
     expect(entries.find((entry) => entry.toolName === 'session.get_workspace_state')).toBeUndefined();
+    expect(entries.find((entry) => entry.toolName === 'publish_http')).toEqual(
+      expect.objectContaining({
+        toolKey: 'mcp__lifecycle__publish_http',
+        serverSlug: 'lifecycle',
+        serverName: 'Lifecycle',
+        sourceType: 'builtin',
+        sourceScope: 'session',
+        capabilityKey: 'deploy_k8s_mutation',
+        approvalMode: 'require_approval',
+        scopeRuleMode: 'inherit',
+        effectiveRuleMode: 'inherit',
+        availability: 'available',
+      })
+    );
   });
 
   it('merges repo control-plane numeric overrides over global defaults', async () => {
@@ -218,6 +233,27 @@ describe('AgentSessionConfigService', () => {
             },
           },
         },
+        workspaceStorage: {
+          defaultSize: '20Gi',
+          allowedSizes: ['10Gi', '20Gi'],
+          allowClientOverride: true,
+          accessMode: 'ReadWriteMany',
+        },
+        cleanup: {
+          activeIdleSuspendMs: 60000,
+          startingTimeoutMs: 120000,
+          hibernatedRetentionMs: 180000,
+          intervalMs: 30000,
+          redisTtlSeconds: 900,
+        },
+        durability: {
+          runExecutionLeaseMs: 45000,
+          queuedRunDispatchStaleMs: 5000,
+          dispatchRecoveryLimit: 12,
+          maxDurablePayloadBytes: 4096,
+          payloadPreviewBytes: 512,
+          fileChangePreviewChars: 600,
+        },
       })
     ).resolves.toEqual({
       workspaceImage: 'workspace-image:v2',
@@ -239,6 +275,27 @@ describe('AgentSessionConfigService', () => {
             cpu: '1',
           },
         },
+      },
+      workspaceStorage: {
+        defaultSize: '20Gi',
+        allowedSizes: ['10Gi', '20Gi'],
+        allowClientOverride: true,
+        accessMode: 'ReadWriteMany',
+      },
+      cleanup: {
+        activeIdleSuspendMs: 60000,
+        startingTimeoutMs: 120000,
+        hibernatedRetentionMs: 180000,
+        intervalMs: 30000,
+        redisTtlSeconds: 900,
+      },
+      durability: {
+        runExecutionLeaseMs: 45000,
+        queuedRunDispatchStaleMs: 5000,
+        dispatchRecoveryLimit: 12,
+        maxDurablePayloadBytes: 4096,
+        payloadPreviewBytes: 512,
+        fileChangePreviewChars: 600,
       },
     });
 
@@ -265,6 +322,27 @@ describe('AgentSessionConfigService', () => {
             cpu: '1',
           },
         },
+      },
+      workspaceStorage: {
+        defaultSize: '20Gi',
+        allowedSizes: ['10Gi', '20Gi'],
+        allowClientOverride: true,
+        accessMode: 'ReadWriteMany',
+      },
+      cleanup: {
+        activeIdleSuspendMs: 60000,
+        startingTimeoutMs: 120000,
+        hibernatedRetentionMs: 180000,
+        intervalMs: 30000,
+        redisTtlSeconds: 900,
+      },
+      durability: {
+        runExecutionLeaseMs: 45000,
+        queuedRunDispatchStaleMs: 5000,
+        dispatchRecoveryLimit: 12,
+        maxDurablePayloadBytes: 4096,
+        payloadPreviewBytes: 512,
+        fileChangePreviewChars: 600,
       },
     });
   });

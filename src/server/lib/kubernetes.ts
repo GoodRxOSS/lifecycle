@@ -592,7 +592,9 @@ export async function deleteBuild(build: Build) {
  * @param name namespace to delete
  */
 export async function deleteNamespace(name: string) {
-  if (!name.startsWith('env-') && !name.startsWith('sbx-')) return;
+  if (!name.startsWith('env-') && !name.startsWith('sbx-') && !name.startsWith('prj-') && !name.startsWith('chat-')) {
+    return;
+  }
 
   try {
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
