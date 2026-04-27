@@ -17,9 +17,10 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 import Github from '../github';
 import RepositoryService from '../repository';
-import { DeployStatus, PullRequestStatus } from 'shared/constants';
+import { BuildStatus, DeployStatus, PullRequestStatus } from 'shared/constants';
 import { PushEvent } from '@octokit/webhooks-types';
 import * as githubLib from 'server/lib/github';
+import * as YamlService from 'server/models/yaml';
 
 mockRedisClient();
 
@@ -30,6 +31,10 @@ const mockIsLifecycleLabel = jest.fn();
 const mockHasDeployLabel = jest.fn();
 const mockEnableKillSwitch = jest.fn();
 const mockIsStaging = jest.fn().mockReturnValue(false);
+const mockLoggerError = jest.fn();
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+const mockLoggerDebug = jest.fn();
 
 jest.mock('server/lib/utils', () => ({
   ...jest.requireActual('server/lib/utils'),
@@ -41,10 +46,10 @@ jest.mock('server/lib/utils', () => ({
 
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
-    error: jest.fn(),
-    info: jest.fn(),
-    warn: jest.fn(),
-    debug: jest.fn(),
+    error: mockLoggerError,
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
+    debug: mockLoggerDebug,
     child: jest.fn().mockReturnThis(),
   })),
   withLogContext: jest.fn((_ctx, fn) => fn()),
@@ -53,8 +58,15 @@ jest.mock('server/lib/logger', () => ({
 }));
 
 jest.mock('server/lib/github', () => ({
+  ...jest.requireActual('server/lib/github'),
   getYamlFileContent: jest.fn(),
+  getChangedFilesForPush: jest.fn(),
   verifyWebhookSignature: jest.fn(() => true),
+}));
+
+jest.mock('server/models/yaml', () => ({
+  ...jest.requireActual('server/models/yaml'),
+  fetchLifecycleConfig: jest.fn(),
 }));
 
 const createDedupeAwareResolveEnqueue = (queueAdd: jest.Mock) => {
@@ -387,6 +399,7 @@ describe('Github Service - handlePushWebhook', () => {
   let mockRedis: any;
   let mockRedlock: any;
   let mockQueueManager: any;
+  const mockGetChangedFilesForPush = githubLib.getChangedFilesForPush as jest.Mock;
 
   const createMockPushEvent = (
     repoId: number = 12345,
@@ -406,6 +419,7 @@ describe('Github Service - handlePushWebhook', () => {
   const createMockBuild = (buildId: number, buildUuid: string = 'test-uuid-123') => ({
     id: buildId,
     uuid: buildUuid,
+    status: BuildStatus.DEPLOYED,
     enableFullYaml: false,
     trackDefaultBranches: true,
     pullRequest: {
@@ -423,15 +437,30 @@ describe('Github Service - handlePushWebhook', () => {
     githubRepositoryId: 12345,
     build: createMockBuild(buildId),
     service: {
+      name: 'api',
       branchName: 'main',
     },
     deployable: {
+      name: 'api',
       defaultBranchName: 'main',
     },
   });
 
+  const createAllDeploysQuery = (deploys: any[]) => ({
+    where: jest.fn().mockReturnThis(),
+    whereNot: jest.fn().mockReturnThis(),
+    withGraphFetched: jest.fn().mockResolvedValue(deploys),
+  });
+
+  const createFailedDeploysQuery = (deploys: any[]) => ({
+    where: jest.fn().mockReturnThis(),
+    whereIn: jest.fn().mockResolvedValue(deploys),
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGetChangedFilesForPush.mockReset();
+    (YamlService.fetchLifecycleConfig as jest.Mock).mockReset();
     const mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
     const mockEnqueueResolveAndDeployBuild = createDedupeAwareResolveEnqueue(mockResolveQueueAdd);
 
@@ -450,6 +479,18 @@ describe('Github Service - handlePushWebhook', () => {
           resolveAndDeployBuildQueue: {
             add: mockResolveQueueAdd,
           },
+        },
+        Webhook: {
+          webhookQueue: {
+            add: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        GlobalConfig: {
+          getAllConfigs: jest.fn().mockResolvedValue({
+            features: {
+              ignoreFiles: true,
+            },
+          }),
         },
       },
     };
@@ -609,6 +650,343 @@ describe('Github Service - handlePushWebhook', () => {
 
       expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenNthCalledWith(2, 'resolve-deploy', {
         buildId: buildId2,
+      });
+    });
+
+    test('updates latestCommit for a matching previous commit', async () => {
+      const patch = jest.fn().mockResolvedValue(undefined);
+      const buildId = 100;
+      const mockBuild = {
+        ...createMockBuild(buildId),
+        pullRequest: {
+          status: PullRequestStatus.CLOSED,
+          deployOnUpdate: true,
+        },
+      };
+      const mockDeploy = { ...createMockDeploy(buildId), build: mockBuild };
+
+      mockDb.models.PullRequest.findOne.mockResolvedValue({
+        $query: jest.fn().mockReturnValue({ patch }),
+      });
+      mockDb.models.Deploy.query.mockReturnValue(createAllDeploysQuery([mockDeploy]));
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.models.PullRequest.findOne).toHaveBeenCalledWith({ latestCommit: 'previous-commit' });
+      expect(patch).toHaveBeenCalledWith({ latestCommit: 'latest-commit' });
+      expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
+    });
+
+    test('skips deploys when every changed file matches ignoreFiles and queues deployed webhooks', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      mockGetChangedFilesForPush.mockResolvedValue({ canSkip: true, files: ['docs/readme.md'] });
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        version: '1.0.0',
+        environment: { ignoreFiles: ['docs/**'] },
+        services: [{ name: 'api' }],
+      } as any);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+        commits: [
+          {
+            added: [],
+            removed: [],
+            modified: ['docs/readme.md'],
+          },
+        ],
+        distinct_size: 1,
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
+      expect(YamlService.fetchLifecycleConfig).toHaveBeenCalledWith('test/repo', 'main');
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenCalledWith('webhook', { buildId });
+    });
+
+    test('dry-runs ignoreFiles skips when the feature flag is false', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      mockDb.services.GlobalConfig.getAllConfigs.mockResolvedValue({ features: { ignoreFiles: false } });
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        version: '1.0.0',
+        environment: { ignoreFiles: ['docs/**'] },
+        services: [{ name: 'api' }],
+      } as any);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+        commits: [
+          {
+            added: [],
+            removed: [],
+            modified: ['docs/readme.md'],
+          },
+        ],
+        distinct_size: 1,
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.services.GlobalConfig.getAllConfigs).toHaveBeenCalled();
+      expect(mockLoggerInfo).toHaveBeenCalledWith('Push: dry-run would skip deploy reason=ignoreFiles');
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
+        githubRepositoryId: 12345,
+      });
+      expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
+    });
+
+    test('dry-runs ignoreFiles skips when the feature flag is missing', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      mockDb.services.GlobalConfig.getAllConfigs.mockResolvedValue({ features: {} });
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        version: '1.0.0',
+        environment: { ignoreFiles: ['docs/**'] },
+        services: [{ name: 'api' }],
+      } as any);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+        commits: [
+          {
+            added: [],
+            removed: [],
+            modified: ['docs/readme.md'],
+          },
+        ],
+        distinct_size: 1,
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith('Push: dry-run would skip deploy reason=ignoreFiles');
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
+        githubRepositoryId: 12345,
+      });
+      expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
+    });
+
+    test('falls back to compare when push payload cannot safely provide changed files', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      mockGetChangedFilesForPush.mockResolvedValue({ canSkip: true, files: ['docs/readme.md'] });
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        version: '1.0.0',
+        environment: { ignoreFiles: ['docs/**'] },
+        services: [{ name: 'api' }],
+      } as any);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+        commits: [
+          {
+            added: [],
+            removed: ['src/old.ts'],
+            modified: [],
+          },
+        ],
+        distinct_size: 1,
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockGetChangedFilesForPush).toHaveBeenCalledWith({
+        fullName: 'test/repo',
+        before: 'previous-commit',
+        after: 'latest-commit',
+      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenCalledWith('webhook', { buildId });
+    });
+
+    test('redeploys when ignoreFiles config cannot be fetched', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      mockGetChangedFilesForPush.mockResolvedValue({ canSkip: true, files: ['docs/readme.md'] });
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockRejectedValue(new Error('fetch failed'));
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
+        githubRepositoryId: 12345,
+      });
+      expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
+    });
+
+    test('redeploys when an affected service has no ignoreFiles policy', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+        version: '1.0.0',
+        environment: {},
+        services: [{ name: 'api' }],
+      } as any);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+        commits: [
+          {
+            added: [],
+            removed: [],
+            modified: ['docs/readme.md'],
+          },
+        ],
+        distinct_size: 1,
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
+        githubRepositoryId: 12345,
+      });
+      expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
+      expect(mockLoggerInfo).toHaveBeenCalledWith('Push: deploying reason=ignoreFiles_not_matched');
+    });
+
+    test('always redeploys failed deploys without fetching changed files', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+      const mockFailedDeploy = { id: 1, status: DeployStatus.ERROR, buildId };
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([mockFailedDeploy]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
+      });
+    });
+
+    test('queues skipped-push webhooks only for supported current build statuses', async () => {
+      await (githubService as any).queueWebhooksForSkippedPush({ id: 1, status: BuildStatus.DEPLOYED });
+      await (githubService as any).queueWebhooksForSkippedPush({ id: 2, status: BuildStatus.ERROR });
+      await (githubService as any).queueWebhooksForSkippedPush({ id: 3, status: BuildStatus.TORN_DOWN });
+      await (githubService as any).queueWebhooksForSkippedPush({ id: 4, status: BuildStatus.BUILT });
+
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenCalledTimes(3);
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenNthCalledWith(1, 'webhook', { buildId: 1 });
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenNthCalledWith(2, 'webhook', { buildId: 2 });
+      expect(mockDb.services.Webhook.webhookQueue.add).toHaveBeenNthCalledWith(3, 'webhook', { buildId: 3 });
+    });
+
+    test('redeploys static environments without fetching changed files', async () => {
+      const buildId = 701;
+      const repoBuilder = {
+        from: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+      };
+      const prBuilder = {
+        from: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((_column, callback) => {
+          callback(repoBuilder);
+          return prBuilder;
+        }),
+      };
+      const buildQuery = {
+        whereIn: jest.fn((_column, callback) => {
+          callback(prBuilder);
+          return buildQuery;
+        }),
+        andWhere: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: buildId }),
+      };
+
+      mockDb.models.Build = { query: jest.fn().mockReturnValue(buildQuery) };
+      mockDb.models.PullRequest.tableName = 'pull_requests';
+      mockDb.models.Repository = { tableName: 'repositories' };
+      mockDb.models.Deploy.query.mockReturnValue(createAllDeploysQuery([]));
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'latest-commit',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+        buildId,
       });
     });
 

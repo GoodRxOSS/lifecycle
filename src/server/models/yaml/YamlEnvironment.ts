@@ -33,6 +33,7 @@ export interface AgentSessionEnvironmentConfig {
 }
 
 export interface Environment {
+  readonly ignoreFiles?: string[];
   readonly defaultServices?: YamlService.DependencyService[];
   readonly optionalServices?: YamlService.DependencyService[];
   readonly webhooks?: YamlService.Webhook[];

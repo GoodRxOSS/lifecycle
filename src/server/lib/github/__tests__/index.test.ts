@@ -26,8 +26,11 @@ import {
   verifyWebhookSignature,
   getSHAForBranch,
   checkIfCommentExists,
+  getChangedFilesFromPushPayload,
+  getChangedFilesForPush,
 } from 'server/lib/github';
 import * as client from 'server/lib/github/client';
+import { cacheRequest } from 'server/lib/github/cacheRequest';
 
 jest.mock('server/services/globalConfig', () => {
   const RedisMock = {
@@ -43,6 +46,7 @@ jest.mock('server/services/globalConfig', () => {
 });
 
 jest.mock('server/lib/github/client');
+jest.mock('server/lib/github/cacheRequest');
 jest.mock('server/lib/github/utils');
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn().mockReturnValue({
@@ -52,7 +56,11 @@ jest.mock('server/lib/logger', () => ({
     warn: jest.fn(),
   }),
 }));
-import { getLogger, rootLogger as logger } from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
 test('createOrUpdatePullRequestComment success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
@@ -71,37 +79,32 @@ test('createOrUpdatePullRequestComment success', async () => {
 });
 
 test('getPullRequest success', async () => {
-  jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
-    request: jest.fn().mockResolvedValue({ data: 'foo' }),
-  });
-  const result = await getPullRequest('foo', 'bar', 1, 123, logger);
+  (cacheRequest as jest.Mock).mockResolvedValue({ data: 'foo' });
+  const result = await getPullRequest('foo', 'bar', 1, 123);
   expect(result.data).toEqual('foo');
 });
 
 test('getPullRequestByRepositoryFullName success', async () => {
-  jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
-    request: jest.fn().mockResolvedValue({ data: 'foo' }),
-  });
-  const result = await getPullRequestByRepositoryFullName('example-org/example-repo', 123, 1);
+  (cacheRequest as jest.Mock).mockResolvedValue({ data: 'foo' });
+  const result = await getPullRequestByRepositoryFullName('example-org/example-repo', 123);
   expect(result.data).toEqual('foo');
 });
 
 test('getPullRequestByRepositoryFullName failure', async () => {
-  jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
-    request: jest.fn().mockRejectedValue(new Error('error')),
-  });
-  await expect(getPullRequestByRepositoryFullName('example-org/example-repo', 123, 1)).rejects.toThrow();
+  (cacheRequest as jest.Mock).mockRejectedValue(new Error('error'));
+  await expect(getPullRequestByRepositoryFullName('example-org/example-repo', 123)).rejects.toThrow();
 });
 
 test('getPullRequestByRepositoryFullName invalid repository name', async () => {
-  await expect(getPullRequestByRepositoryFullName('foo', 123, 1)).rejects.toThrow();
+  (cacheRequest as jest.Mock).mockRejectedValue(new Error('error'));
+  await expect(getPullRequestByRepositoryFullName('foo', 123)).rejects.toThrow();
 });
 
 test('createDeploy success', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
     request: jest.fn().mockResolvedValue({ data: 'foo' }),
   });
-  const result = await createDeploy('foo', 'bar', 'main', 1);
+  const result = await createDeploy({ repositoryId: 1, owner: 'foo', name: 'bar', branch: 'main', installationId: 1 });
   expect(result.data).toEqual('foo');
 });
 
@@ -109,7 +112,9 @@ test('createDeploy failure', async () => {
   jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
     request: jest.fn().mockRejectedValue(new Error('error')),
   });
-  await expect(createDeploy('foo', 'bar', 'main', 1)).rejects.toThrow();
+  await expect(
+    createDeploy({ repositoryId: 1, owner: 'foo', name: 'bar', branch: 'main', installationId: 1 })
+  ).rejects.toThrow();
 });
 
 test('verifyWebhookSignature false', async () => {
@@ -119,7 +124,7 @@ test('verifyWebhookSignature false', async () => {
     },
     rawBody: 'foo',
   };
-  const result = await verifyWebhookSignature(req as unknown as client.WebhookRequest, '123');
+  const result = await verifyWebhookSignature(req as any);
   expect(result).toEqual(false);
 });
 
@@ -127,7 +132,7 @@ test('verifyWebhookSignature missing header', async () => {
   const req = {
     body: { foo: 'bar' },
   };
-  const result = await verifyWebhookSignature(req as unknown as NextApiRequest);
+  const result = await verifyWebhookSignature(req as any);
   expect(result).toEqual(false);
 });
 
@@ -150,9 +155,7 @@ test('getSHAForBranch failure', async () => {
 test('checkIfCommentExists to return true', async () => {
   const mockComments = [{ body: 'This is a test comment' }, { body: `This comment contains the uniqueIdentifier` }];
 
-  jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
-    request: jest.fn().mockResolvedValue({ data: mockComments }),
-  });
+  (cacheRequest as jest.Mock).mockResolvedValue({ data: mockComments });
   const result = await checkIfCommentExists({
     fullName: 'example-org/example-repo',
     pullRequestNumber: 123,
@@ -165,13 +168,105 @@ test('checkIfCommentExists to return true', async () => {
 test('checkIfCommentExists to return false', async () => {
   const mockComments = [{ body: 'This is a test comment' }, { body: `This comment contains the not` }];
 
-  jest.spyOn(client, 'createOctokitClient').mockResolvedValue({
-    request: jest.fn().mockResolvedValue({ data: mockComments }),
-  });
+  (cacheRequest as jest.Mock).mockResolvedValue({ data: mockComments });
   const result = await checkIfCommentExists({
     fullName: 'example-org/example-repo',
     pullRequestNumber: 123,
     commentIdentifier: 'uniqueIdentifier',
   });
   expect(result).toBe(false);
+});
+
+test('getChangedFilesForPush returns current filenames from compare responses', async () => {
+  (cacheRequest as jest.Mock).mockResolvedValue({
+    headers: {
+      'x-ratelimit-remaining': '4999',
+      'x-ratelimit-reset': '1770000000',
+    },
+    data: {
+      files: [
+        {
+          filename: 'src/new-name.ts',
+          previous_filename: 'src/old-name.ts',
+          status: 'renamed',
+        },
+      ],
+    },
+  });
+
+  const result = await getChangedFilesForPush({
+    fullName: 'example-org/example-repo',
+    before: 'before-sha',
+    after: 'after-sha',
+  });
+
+  expect(cacheRequest).toHaveBeenCalledWith('GET /repos/example-org/example-repo/compare/before-sha...after-sha');
+  expect(result).toEqual({ canSkip: true, files: ['src/new-name.ts'] });
+});
+
+test('getChangedFilesFromPushPayload returns unique added and modified files', () => {
+  expect(
+    getChangedFilesFromPushPayload({
+      commits: [
+        {
+          added: ['src/new.ts'],
+          modified: ['docs/readme.md'],
+        },
+        {
+          modified: ['docs/readme.md', 'src/app.ts'],
+        },
+      ],
+      commitCount: 2,
+    })
+  ).toEqual({ canSkip: true, files: ['src/new.ts', 'docs/readme.md', 'src/app.ts'] });
+});
+
+test('getChangedFilesFromPushPayload falls back for incomplete or removed-file payloads', () => {
+  expect(
+    getChangedFilesFromPushPayload({
+      commits: [{ modified: ['src/app.ts'] }],
+      commitCount: 2,
+    })
+  ).toEqual({ canSkip: false, files: [], reason: 'payload_commits_incomplete' });
+
+  expect(
+    getChangedFilesFromPushPayload({
+      commits: [{ removed: ['src/old.ts'] }],
+      commitCount: 1,
+    })
+  ).toEqual({ canSkip: false, files: [], reason: 'payload_has_removed_files' });
+});
+
+test('getChangedFilesForPush fails open for large compare file lists', async () => {
+  (cacheRequest as jest.Mock).mockResolvedValue({
+    data: {
+      files: Array.from({ length: 300 }, (_value, index) => ({
+        filename: `file-${index}.ts`,
+      })),
+    },
+  });
+
+  await expect(
+    getChangedFilesForPush({
+      fullName: 'example-org/example-repo',
+      before: 'before-sha',
+      after: 'after-sha',
+    })
+  ).resolves.toEqual({ canSkip: false, files: [], reason: 'large_or_incomplete_compare' });
+});
+
+test('getChangedFilesForPush fails open when compare cannot provide filenames', async () => {
+  (cacheRequest as jest.Mock).mockResolvedValue({
+    data: {
+      files: [{ filename: 'src/api.ts' }, { status: 'removed' }],
+    },
+  });
+
+  await expect(
+    getChangedFilesForPush({
+      fullName: 'example-org/example-repo',
+      before: 'before-sha',
+      after: 'after-sha',
+    })
+  ).resolves.toEqual({ canSkip: false, files: [], reason: 'missing_file_names' });
 });
