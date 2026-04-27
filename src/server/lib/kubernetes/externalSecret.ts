@@ -23,7 +23,7 @@ import { SecretProviderConfig } from 'server/services/types/globalConfig';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
 export const EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION = 'force-sync';
-export const TARGET_SECRET_SYNC_TOKEN_ANNOTATION = 'lifecycle.dev/secret-sync-token';
+export const TARGET_SECRET_SYNC_TOKEN_ANNOTATION = 'lfc/secret-sync-token';
 
 export interface ExternalSecretManifest {
   apiVersion: string;
