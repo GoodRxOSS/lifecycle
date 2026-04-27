@@ -21,9 +21,11 @@ import {
   generateExternalSecretManifest,
   groupSecretRefsByProvider,
   generateSecretName,
+  TARGET_SECRET_SYNC_TOKEN_ANNOTATION,
 } from 'server/lib/kubernetes/externalSecret';
 import { SecretProvidersConfig } from 'server/services/types/globalConfig';
 import { CoreV1Api, KubeConfig } from '@kubernetes/client-node';
+import { v4 as uuid } from 'uuid';
 
 const DEFAULT_SECRET_SYNC_TIMEOUT = 60000;
 
@@ -32,11 +34,13 @@ export interface ProcessEnvSecretsOptions {
   serviceName: string;
   namespace: string;
   buildUuid?: string;
+  syncToken?: string;
 }
 
 export interface ProcessEnvSecretsResult {
   secretRefs: SecretRefWithEnvKey[];
   expectedKeysPerSecret: Record<string, string[]>;
+  syncTokensPerSecret: Record<string, string>;
   warnings: string[];
 }
 
@@ -61,7 +65,8 @@ export class SecretProcessor {
   async waitForSecretSync(
     expectedKeysPerSecret: Record<string, string[]>,
     namespace: string,
-    timeoutMs?: number
+    timeoutMs?: number,
+    expectedSyncTokensPerSecret: Record<string, string> = {}
   ): Promise<void> {
     const timeout = timeoutMs ?? DEFAULT_SECRET_SYNC_TIMEOUT;
     const pollInterval = 1000;
@@ -72,24 +77,36 @@ export class SecretProcessor {
     for (const [secretName, expectedKeys] of Object.entries(expectedKeysPerSecret)) {
       let synced = false;
       let missingKeys = expectedKeys;
+      let syncedToken = false;
 
       while (!synced) {
         if (Date.now() - startTime > timeout) {
+          const tokenMessage =
+            expectedSyncTokensPerSecret[secretName] && !syncedToken ? ' sync token not observed' : '';
           throw new Error(
-            `Secret sync timeout: ${secretName} missing keys=[${missingKeys.join(', ')}] after ${timeout}ms`
+            `Secret sync timeout: ${secretName} missing keys=[${missingKeys.join(
+              ', '
+            )}]${tokenMessage} after ${timeout}ms`
           );
         }
 
         try {
           const response = await k8sClient.readNamespacedSecret(secretName, namespace);
           const data = response.body.data || {};
+          const annotations = response.body.metadata?.annotations || {};
+          const expectedSyncToken = expectedSyncTokensPerSecret[secretName];
           missingKeys = expectedKeys.filter((key) => !Object.prototype.hasOwnProperty.call(data, key));
+          syncedToken = !expectedSyncToken || annotations[TARGET_SECRET_SYNC_TOKEN_ANNOTATION] === expectedSyncToken;
 
-          if (missingKeys.length === 0) {
+          if (missingKeys.length === 0 && syncedToken) {
             getLogger().info(`Secret: synced name=${secretName} namespace=${namespace}`);
             synced = true;
           } else {
-            getLogger().debug(`Secret: waiting for keys name=${secretName} missing=[${missingKeys.join(', ')}]`);
+            getLogger().debug(
+              `Secret: waiting for keys name=${secretName} missing=[${missingKeys.join(
+                ', '
+              )}] syncedToken=${syncedToken}`
+            );
             await this.sleep(pollInterval);
           }
         } catch (error: any) {
@@ -110,6 +127,7 @@ export class SecretProcessor {
 
   async processEnvSecrets(options: ProcessEnvSecretsOptions): Promise<ProcessEnvSecretsResult> {
     const { env, serviceName, namespace, buildUuid } = options;
+    const syncToken = options.syncToken ?? uuid();
     const warnings: string[] = [];
     const validRefs: SecretRefWithEnvKey[] = [];
 
@@ -131,11 +149,12 @@ export class SecretProcessor {
     }
 
     if (validRefs.length === 0) {
-      return { secretRefs: [], expectedKeysPerSecret: {}, warnings };
+      return { secretRefs: [], expectedKeysPerSecret: {}, syncTokensPerSecret: {}, warnings };
     }
 
     const grouped = groupSecretRefsByProvider(validRefs);
     const expectedKeysPerSecret: Record<string, string[]> = {};
+    const syncTokensPerSecret: Record<string, string> = {};
 
     for (const [provider, refs] of Object.entries(grouped)) {
       const providerConfig = this.secretProviders![provider];
@@ -148,11 +167,13 @@ export class SecretProcessor {
         secretRefs: refs,
         providerConfig,
         buildUuid,
+        forceSyncToken: syncToken,
       });
 
       try {
         await applyExternalSecret(manifest, namespace);
         expectedKeysPerSecret[secretName] = [...new Set(refs.map((ref) => ref.envKey))];
+        syncTokensPerSecret[secretName] = syncToken;
       } catch (error) {
         const errorMsg = (error as any)?.message || (error as any)?.stderr || String(error);
         const warning = `Failed to apply ExternalSecret for ${serviceName}: ${errorMsg}`;
@@ -160,6 +181,6 @@ export class SecretProcessor {
       }
     }
 
-    return { secretRefs: validRefs, expectedKeysPerSecret, warnings };
+    return { secretRefs: validRefs, expectedKeysPerSecret, syncTokensPerSecret, warnings };
   }
 }

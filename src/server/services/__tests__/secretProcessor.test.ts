@@ -15,6 +15,7 @@
  */
 
 import { SecretProcessor } from '../secretProcessor';
+import { TARGET_SECRET_SYNC_TOKEN_ANNOTATION } from 'server/lib/kubernetes/externalSecret';
 import { SecretProvidersConfig } from 'server/services/types/globalConfig';
 
 jest.mock('server/lib/kubernetes/externalSecret', () => ({
@@ -23,6 +24,8 @@ jest.mock('server/lib/kubernetes/externalSecret', () => ({
     .generateExternalSecretManifest,
   generateSecretName: jest.requireActual('server/lib/kubernetes/externalSecret').generateSecretName,
   groupSecretRefsByProvider: jest.requireActual('server/lib/kubernetes/externalSecret').groupSecretRefsByProvider,
+  TARGET_SECRET_SYNC_TOKEN_ANNOTATION: jest.requireActual('server/lib/kubernetes/externalSecret')
+    .TARGET_SECRET_SYNC_TOKEN_ANNOTATION,
 }));
 
 jest.mock('server/lib/logger', () => ({
@@ -133,6 +136,44 @@ describe('SecretProcessor', () => {
 
       await expect(
         processor.waitForSecretSync({ 'sample-service-aws-secrets': ['EXISTING_TOKEN', 'NEW_TOKEN'] }, 'test-ns', 5000)
+      ).resolves.toBeUndefined();
+
+      expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits until the secret has the expected sync token', async () => {
+      const mockReadNamespacedSecret = jest
+        .fn()
+        .mockResolvedValueOnce({
+          body: {
+            data: { API_TOKEN: 'b2xk' },
+            metadata: {
+              annotations: {
+                [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: 'old-token',
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            data: { API_TOKEN: 'bmV3' },
+            metadata: {
+              annotations: {
+                [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: 'new-token',
+              },
+            },
+          },
+        });
+
+      jest.spyOn(processor as any, 'getK8sClient').mockReturnValue({
+        readNamespacedSecret: mockReadNamespacedSecret,
+      });
+      jest.spyOn(processor as any, 'sleep').mockResolvedValue(undefined);
+
+      await expect(
+        processor.waitForSecretSync({ 'my-secret': ['API_TOKEN'] }, 'test-ns', 5000, {
+          'my-secret': 'new-token',
+        })
       ).resolves.toBeUndefined();
 
       expect(mockReadNamespacedSecret).toHaveBeenCalledTimes(2);
@@ -286,6 +327,7 @@ describe('SecretProcessor', () => {
         serviceName: 'api-server',
         namespace: 'lfc-abc123',
         buildUuid: 'abc123',
+        syncToken: 'sync-123',
       });
 
       expect(applyExternalSecret).toHaveBeenCalledTimes(1);
@@ -293,6 +335,21 @@ describe('SecretProcessor', () => {
         expect.objectContaining({
           metadata: expect.objectContaining({
             name: 'api-server-aws-secrets',
+            annotations: {
+              'force-sync': 'sync-123',
+            },
+          }),
+          spec: expect.objectContaining({
+            target: expect.objectContaining({
+              deletionPolicy: 'Merge',
+              template: {
+                metadata: expect.objectContaining({
+                  annotations: {
+                    [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: 'sync-123',
+                  },
+                }),
+              },
+            }),
           }),
         }),
         'lfc-abc123'
@@ -373,6 +430,10 @@ describe('SecretProcessor', () => {
       expect(result.expectedKeysPerSecret).toEqual({
         'api-server-aws-secrets': ['AWS_SECRET'],
         'api-server-gcp-secrets': ['GCP_SECRET'],
+      });
+      expect(result.syncTokensPerSecret).toEqual({
+        'api-server-aws-secrets': expect.any(String),
+        'api-server-gcp-secrets': expect.any(String),
       });
     });
   });

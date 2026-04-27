@@ -157,7 +157,12 @@ export async function resolveForwardedAgentEnv(
       .map((provider) => provider.secretSyncTimeout)
       .filter((timeout): timeout is number => timeout !== undefined);
     const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
-    await secretProcessor.waitForSecretSync(secretResult.expectedKeysPerSecret, namespace, timeout);
+    await secretProcessor.waitForSecretSync(
+      secretResult.expectedKeysPerSecret,
+      namespace,
+      timeout,
+      secretResult.syncTokensPerSecret
+    );
   }
 
   return {

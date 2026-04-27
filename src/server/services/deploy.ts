@@ -1170,7 +1170,8 @@ export default class DeployService extends BaseService {
                   await secretProcessor.waitForSecretSync(
                     secretResult.expectedKeysPerSecret,
                     deploy.build.namespace,
-                    timeout
+                    timeout,
+                    secretResult.syncTokensPerSecret
                   );
                   buildSecretNames = secretNames;
                   getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
