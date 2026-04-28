@@ -21,6 +21,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import Build from '../Build';
 import { DomainDefaults, NativeHelmConfig } from 'server/services/types/globalConfig';
+import { BuilderEngine } from 'server/lib/buildEngines';
 
 export interface Service001 {
   readonly github: {
@@ -291,7 +292,7 @@ export interface ServiceDiskConfig {
 }
 
 export interface Builder {
-  readonly engine?: string;
+  readonly engine?: BuilderEngine;
   readonly resources?: {
     readonly requests?: Record<string, string>;
     readonly limits?: Record<string, string>;
@@ -411,6 +412,19 @@ export function hasLifecycleManagedDockerBuild(service: Service): boolean {
     default:
       return false;
   }
+}
+
+export function getEffectiveBuilder(service: Service, defaultEngine?: BuilderEngine): Builder {
+  const builder = getBuilder(service) ?? {};
+
+  if (builder.engine || !defaultEngine || !hasLifecycleManagedDockerBuild(service)) {
+    return builder;
+  }
+
+  return {
+    ...builder,
+    engine: defaultEngine,
+  };
 }
 
 /**

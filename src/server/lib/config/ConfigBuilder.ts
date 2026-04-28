@@ -20,6 +20,7 @@ import {
   NativeHelmConfig as GlobalNativeHelmConfig,
   NativeHelmPostRendererConfig as GlobalNativeHelmPostRendererConfig,
 } from 'server/services/types/globalConfig';
+import { BuilderEngine } from 'server/lib/buildEngines';
 
 export type HelmPostRendererConfig = GlobalNativeHelmPostRendererConfig;
 export type NativeHelmConfig = Partial<GlobalNativeHelmConfig>;
@@ -39,7 +40,7 @@ export interface HelmConfig {
 }
 
 export interface BuildConfig {
-  engine?: 'buildkit' | 'kaniko';
+  engine?: BuilderEngine;
   serviceAccount?: string;
   jobTimeout?: number;
   resources?: {
@@ -171,7 +172,7 @@ export class HelmConfigBuilder extends ConfigBuilder<HelmConfig> {
 }
 
 export class BuildConfigBuilder extends ConfigBuilder<BuildConfig> {
-  setEngine(engine: 'buildkit' | 'kaniko'): BuildConfigBuilder {
+  setEngine(engine: BuilderEngine): BuildConfigBuilder {
     this.set('engine', engine);
     return this;
   }

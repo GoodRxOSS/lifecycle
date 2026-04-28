@@ -290,7 +290,8 @@ export default class DeployableService extends BaseService {
             }
           }
         }
-        const { serviceDefaults, lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+        const { serviceDefaults, lifecycleDefaults, domainDefaults, buildDefaults } =
+          await GlobalConfigService.getInstance().getAllConfigs();
         //TODO check and throw error here?
         const defaultUUID = lifecycleDefaults.defaultUUID;
         const dockerBuildPipelineName =
@@ -373,7 +374,7 @@ export default class DeployableService extends BaseService {
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
           deploymentDependsOn: service.deploymentDependsOn || [],
-          builder: YamlService.getBuilder(service) ?? {},
+          builder: YamlService.getEffectiveBuilder(service, buildDefaults?.engine) ?? {},
           envLens: await YamlService.getEnvLens(service),
         };
       }

@@ -19,6 +19,7 @@ import { getLogger, withSpan, withLogContext } from '../logger';
 import { ensureNamespaceExists } from './utils';
 import { buildWithEngine, NativeBuildOptions } from './engines';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
+import { isNativeBuilderEngine } from '../buildEngines';
 
 export type { NativeBuildOptions } from './engines';
 
@@ -51,7 +52,7 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
 
           let result: NativeBuildResult;
 
-          if (builderEngine === 'buildkit' || builderEngine === 'kaniko') {
+          if (isNativeBuilderEngine(builderEngine)) {
             getLogger().debug(`Build: using ${builderEngine} engine`);
             result = await buildWithEngine(deploy, buildOptions, builderEngine);
           } else {

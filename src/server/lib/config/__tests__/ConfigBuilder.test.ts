@@ -142,6 +142,12 @@ describe('ConfigBuilder', () => {
         endpoint: 'tcp://buildkit-custom:1234',
       });
     });
+
+    it('sets ci as an explicit build engine', () => {
+      const config = new BuildConfigBuilder().setEngine('ci').build();
+
+      expect(config.engine).toBe('ci');
+    });
   });
 
   describe('GlobalConfigBuilder', () => {

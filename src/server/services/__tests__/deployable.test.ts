@@ -50,11 +50,13 @@ const domainDefaults = {
   grpc: 'lifecycle-grpc.example.com',
 };
 
-const mockedGetAllConfigs = jest.fn().mockResolvedValue({
+const globalConfigs = {
   lifecycleDefaults: lifecycleDefaults,
   serviceDefaults: serviceDefaults,
   domainDefaults: domainDefaults,
-});
+};
+
+const mockedGetAllConfigs = jest.fn().mockResolvedValue(globalConfigs);
 
 const mockedInstance = {
   getAllConfigs: mockedGetAllConfigs,
@@ -65,6 +67,11 @@ const mockedInstance = {
 describe('Deployable Service', () => {
   describe('generateAttributesFromYamlConfig', () => {
     const deployableService: DeployableService = new DeployableService(null, null, null);
+
+    beforeEach(() => {
+      mockedGetAllConfigs.mockResolvedValue(globalConfigs);
+      mockedInstance.isFeatureEnabled.mockResolvedValue(false);
+    });
 
     test('Generates from Github Service Type Configuration', async () => {
       const githubService: YamlService.GithubService = {
@@ -422,6 +429,151 @@ describe('Deployable Service', () => {
       expect(result.readinessTcpSocketPort).toBeNull();
       expect(result.readinessHttpGetPort).toBeUndefined();
       expect(result.readinessHttpGetPath).toBeUndefined();
+    });
+
+    test('inherits global buildkit engine for Github docker services', async () => {
+      mockedGetAllConfigs.mockResolvedValue({
+        ...globalConfigs,
+        buildDefaults: { engine: 'buildkit' },
+      });
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+              ports: [8080],
+            },
+          },
+        },
+      };
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        githubService
+      );
+
+      expect(result.builder).toEqual({ engine: 'buildkit' });
+    });
+
+    test('inherits global buildkit engine for Helm docker services', async () => {
+      mockedGetAllConfigs.mockResolvedValue({
+        ...globalConfigs,
+        buildDefaults: { engine: 'buildkit' },
+        'sample-chart': {
+          chart: {
+            name: 'sample-chart',
+            values: [],
+          },
+        },
+      });
+      const helmService = {
+        name: 'helm-app',
+        helm: {
+          cfStepType: 'helm',
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          chart: {
+            name: 'sample-chart',
+            values: [],
+          },
+          docker: {
+            defaultTag: 'main',
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+              ports: [8080],
+            },
+          },
+        },
+      } as unknown as YamlService.Service;
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        helmService
+      );
+
+      expect(result.builder).toEqual({ engine: 'buildkit' });
+    });
+
+    test('service builder engine ci overrides global buildkit and persists ci', async () => {
+      mockedGetAllConfigs.mockResolvedValue({
+        ...globalConfigs,
+        buildDefaults: { engine: 'buildkit' },
+      });
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            builder: {
+              engine: 'ci',
+            },
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+              ports: [8080],
+            },
+          },
+        },
+      };
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        githubService
+      );
+
+      expect(result.builder).toEqual({ engine: 'ci' });
+    });
+
+    test('service builder engine kaniko overrides global buildkit', async () => {
+      mockedGetAllConfigs.mockResolvedValue({
+        ...globalConfigs,
+        buildDefaults: { engine: 'buildkit' },
+      });
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            builder: {
+              engine: 'kaniko',
+            },
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+              ports: [8080],
+            },
+          },
+        },
+      };
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        '1234567890',
+        'unit-test',
+        githubService
+      );
+
+      expect(result.builder).toEqual({ engine: 'kaniko' });
     });
   });
 });
