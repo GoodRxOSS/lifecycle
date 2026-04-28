@@ -22,6 +22,9 @@ import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 import { SecretProviderConfig } from 'server/services/types/globalConfig';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
+export const EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION = 'force-sync';
+export const TARGET_SECRET_SYNC_TOKEN_ANNOTATION = 'lfc/secret-sync-token';
+
 export interface ExternalSecretManifest {
   apiVersion: string;
   kind: string;
@@ -29,6 +32,7 @@ export interface ExternalSecretManifest {
     name: string;
     namespace: string;
     labels: Record<string, string>;
+    annotations?: Record<string, string>;
   };
   spec: {
     refreshInterval: string;
@@ -38,6 +42,13 @@ export interface ExternalSecretManifest {
     };
     target: {
       name: string;
+      deletionPolicy: 'Merge';
+      template?: {
+        metadata: {
+          labels: Record<string, string>;
+          annotations: Record<string, string>;
+        };
+      };
     };
     data: Array<{
       secretKey: string;
@@ -56,6 +67,7 @@ export interface GenerateExternalSecretOptions {
   secretRefs: SecretRefWithEnvKey[];
   providerConfig: SecretProviderConfig;
   buildUuid?: string;
+  forceSyncToken?: string;
 }
 
 const MAX_NAME_LENGTH = 63;
@@ -87,7 +99,7 @@ export function groupSecretRefsByProvider(refs: SecretRefWithEnvKey[]): Record<s
 }
 
 export function generateExternalSecretManifest(options: GenerateExternalSecretOptions): ExternalSecretManifest {
-  const { name, namespace, provider, secretRefs, providerConfig, buildUuid } = options;
+  const { name, namespace, provider, secretRefs, providerConfig, buildUuid, forceSyncToken } = options;
 
   const secretName = generateSecretName(name, provider);
 
@@ -115,6 +127,22 @@ export function generateExternalSecretManifest(options: GenerateExternalSecretOp
     labels['lfc/uuid'] = buildUuid;
   }
 
+  const annotations = forceSyncToken
+    ? {
+        [EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION]: forceSyncToken,
+      }
+    : undefined;
+  const targetTemplate = forceSyncToken
+    ? {
+        metadata: {
+          labels,
+          annotations: {
+            [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: forceSyncToken,
+          },
+        },
+      }
+    : undefined;
+
   return {
     apiVersion: 'external-secrets.io/v1',
     kind: 'ExternalSecret',
@@ -122,6 +150,7 @@ export function generateExternalSecretManifest(options: GenerateExternalSecretOp
       name: secretName,
       namespace,
       labels,
+      ...(annotations ? { annotations } : {}),
     },
     spec: {
       refreshInterval: providerConfig.refreshInterval,
@@ -131,6 +160,8 @@ export function generateExternalSecretManifest(options: GenerateExternalSecretOp
       },
       target: {
         name: secretName,
+        deletionPolicy: 'Merge',
+        ...(targetTemplate ? { template: targetTemplate } : {}),
       },
       data,
     },

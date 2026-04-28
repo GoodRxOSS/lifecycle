@@ -14,7 +14,13 @@
  * limitations under the License.
  */
 
-import { generateExternalSecretManifest, generateSecretName, groupSecretRefsByProvider } from '../externalSecret';
+import {
+  EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION,
+  generateExternalSecretManifest,
+  generateSecretName,
+  groupSecretRefsByProvider,
+  TARGET_SECRET_SYNC_TOKEN_ANNOTATION,
+} from '../externalSecret';
 import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 
 describe('externalSecret', () => {
@@ -90,6 +96,7 @@ describe('externalSecret', () => {
       expect(manifest.spec.secretStoreRef.name).toBe('aws-secretsmanager');
       expect(manifest.spec.secretStoreRef.kind).toBe('ClusterSecretStore');
       expect(manifest.spec.target.name).toBe('api-server-aws-secrets');
+      expect(manifest.spec.target.deletionPolicy).toBe('Merge');
       expect(manifest.spec.data).toHaveLength(2);
     });
 
@@ -166,6 +173,27 @@ describe('externalSecret', () => {
 
       expect(manifest.metadata.labels['app.kubernetes.io/managed-by']).toBe('lifecycle');
       expect(manifest.metadata.labels['lfc/uuid']).toBe('abc123');
+    });
+
+    it('adds sync metadata when a force sync token is provided', () => {
+      const refs: SecretRefWithEnvKey[] = [{ envKey: 'SECRET', provider: 'aws', path: 'path', key: 'key' }];
+
+      const manifest = generateExternalSecretManifest({
+        name: 'api-server',
+        namespace: 'lfc-abc123',
+        provider: 'aws',
+        secretRefs: refs,
+        providerConfig,
+        forceSyncToken: 'sync-123',
+      });
+
+      expect(manifest.metadata.annotations).toEqual({
+        [EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION]: 'sync-123',
+      });
+      expect(manifest.spec.target.template?.metadata.annotations).toEqual({
+        [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: 'sync-123',
+      });
+      expect(manifest.spec.target.template?.metadata.labels).toEqual(manifest.metadata.labels);
     });
   });
 });

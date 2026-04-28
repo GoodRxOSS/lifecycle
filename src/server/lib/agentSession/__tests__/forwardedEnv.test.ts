@@ -84,6 +84,7 @@ describe('forwardedEnv', () => {
       processEnvSecrets: jest.fn().mockResolvedValue({
         secretRefs: [],
         expectedKeysPerSecret: {},
+        syncTokensPerSecret: {},
         warnings: [],
       }),
       waitForSecretSync: jest.fn().mockResolvedValue(undefined),
@@ -195,6 +196,9 @@ describe('forwardedEnv', () => {
       expectedKeysPerSecret: {
         'agent-env-session-123-aws-secrets': ['PRIVATE_REGISTRY_TOKEN'],
       },
+      syncTokensPerSecret: {
+        'agent-env-session-123-aws-secrets': 'sync-123',
+      },
       warnings: [],
     });
     const waitForSecretSync = jest.fn().mockResolvedValue(undefined);
@@ -241,7 +245,8 @@ describe('forwardedEnv', () => {
     expect(waitForSecretSync).toHaveBeenCalledWith(
       { 'agent-env-session-123-aws-secrets': ['PRIVATE_REGISTRY_TOKEN'] },
       'test-ns',
-      30000
+      30000,
+      { 'agent-env-session-123-aws-secrets': 'sync-123' }
     );
     expect(result.secretProviders).toEqual(['aws']);
   });
