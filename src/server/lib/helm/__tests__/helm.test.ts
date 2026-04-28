@@ -336,7 +336,7 @@ describe('Helm tests', () => {
           buildUUID: 'build-123',
           port: 8080,
           builder: {
-            engine: 'docker',
+            engine: 'ci',
           },
           helm: {
             chart: { name: 'lifecycle-app', values: [] },

@@ -15,6 +15,7 @@
  */
 
 import { Helm } from 'server/models/yaml';
+import { BuilderEngine } from 'server/lib/buildEngines';
 
 export type GlobalConfig = {
   lifecycleDefaults: LifecycleDefaults;
@@ -203,6 +204,7 @@ export type NativeHelmConfig = {
 };
 
 export type BuildDefaults = {
+  engine?: BuilderEngine;
   jobTimeout?: number;
   serviceAccount?: string;
   cacheRegistry?: string;

@@ -40,6 +40,7 @@ import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
 import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
+import { isNativeBuilderEngine } from 'server/lib/buildEngines';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -1088,7 +1089,7 @@ export default class DeployService extends BaseService {
           deployCluster: lifecycleDefaults.deployCluster,
         };
 
-        if (['buildkit', 'kaniko'].includes(deployable.builder?.engine)) {
+        if (isNativeBuilderEngine(deployable.builder?.engine)) {
           getLogger().info(`Image: building engine=${deployable.builder.engine}`);
 
           let buildSecretNames: string[] = [];

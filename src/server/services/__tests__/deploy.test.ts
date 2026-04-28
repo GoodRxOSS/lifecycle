@@ -23,6 +23,14 @@ import * as github from 'server/lib/github';
 mockRedisClient();
 
 const mockCliDeploy = jest.fn();
+const mockCodefreshBuildImage = jest.fn();
+const mockCodefreshGetLogs = jest.fn();
+const mockCodefreshGetRepositoryTag = jest.fn();
+const mockCodefreshTagExists = jest.fn();
+const mockCodefreshWaitForImage = jest.fn();
+const mockBuildWithNative = jest.fn();
+const mockGlobalConfigGetAllConfigs = jest.fn();
+const mockGlobalConfigGetOrgChartName = jest.fn();
 
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
@@ -41,9 +49,22 @@ jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
-      getOrgChartName: jest.fn().mockResolvedValue('org-chart'),
+      getAllConfigs: (...args: any[]) => mockGlobalConfigGetAllConfigs(...args),
+      getOrgChartName: (...args: any[]) => mockGlobalConfigGetOrgChartName(...args),
     })),
   },
+}));
+
+jest.mock('server/lib/codefresh', () => ({
+  buildImage: (...args: any[]) => mockCodefreshBuildImage(...args),
+  getLogs: (...args: any[]) => mockCodefreshGetLogs(...args),
+  getRepositoryTag: (...args: any[]) => mockCodefreshGetRepositoryTag(...args),
+  tagExists: (...args: any[]) => mockCodefreshTagExists(...args),
+  waitForImage: (...args: any[]) => mockCodefreshWaitForImage(...args),
+}));
+
+jest.mock('server/lib/nativeBuild', () => ({
+  buildWithNative: (...args: any[]) => mockBuildWithNative(...args),
 }));
 
 const mockDetermineChartType = jest.fn();
@@ -91,6 +112,25 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCliDeploy.mockReset();
+    mockCodefreshBuildImage.mockReset();
+    mockCodefreshGetLogs.mockReset();
+    mockCodefreshGetRepositoryTag.mockReset();
+    mockCodefreshTagExists.mockReset();
+    mockCodefreshWaitForImage.mockReset();
+    mockBuildWithNative.mockReset();
+    mockGlobalConfigGetOrgChartName.mockResolvedValue('org-chart');
+    mockGlobalConfigGetAllConfigs.mockResolvedValue({
+      lifecycleDefaults: {
+        buildPipeline: 'sample/build-image',
+        deployCluster: 'test-cluster',
+        ecrDomain: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+        ecrRegistry: 'sample-registry',
+      },
+      app_setup: {
+        org: 'example-org',
+      },
+      buildDefaults: {},
+    });
     mockDetermineChartType.mockResolvedValue(ChartType.PUBLIC);
 
     mockDb = {
@@ -350,6 +390,75 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         },
         'run-1'
       );
+    });
+
+    test('buildImageForHelmAndGithub uses Codefresh when builder engine is ci', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('abcdef1234567890');
+      mockCodefreshTagExists.mockResolvedValue(false);
+      mockCodefreshBuildImage.mockResolvedValue('codefresh-build-123');
+      mockCodefreshWaitForImage.mockResolvedValue(false);
+      mockCodefreshGetLogs.mockResolvedValue('codefresh logs');
+      const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deployPatch = jest.fn().mockResolvedValue(undefined);
+      const deploy = {
+        uuid: 'sample-service-build',
+        runUUID: 'run-1',
+        branchName: 'feature-branch',
+        env: {},
+        initEnv: {},
+        dockerImage: 'old-image',
+        service: {
+          name: 'sample-service',
+        },
+        build: {
+          id: 1,
+          uuid: 'sample-build',
+          namespace: 'env-sample',
+          enableFullYaml: true,
+          commentRuntimeEnv: {},
+          enabledFeatures: [],
+          pullRequest: {
+            githubLogin: 'sample-user',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        deployable: {
+          name: 'sample-service',
+          type: DeployTypes.GITHUB,
+          dockerfilePath: './Dockerfile',
+          initDockerfilePath: null,
+          env: {},
+          ecr: 'sample/app-images',
+          dockerBuildPipelineName: 'sample/build-image',
+          builder: {
+            engine: 'ci',
+          },
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({
+          patch: deployPatch,
+        })),
+      };
+
+      const result = await deployService.buildImageForHelmAndGithub(deploy as any, 'run-1');
+
+      expect(result).toBe(false);
+      expect(mockBuildWithNative).not.toHaveBeenCalled();
+      expect(mockCodefreshBuildImage).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshBuildImage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buildPipelineName: 'sample/build-image',
+          dockerfilePath: './Dockerfile',
+          repo: 'example-org/example-repo',
+        })
+      );
+      expect(deployPatch).toHaveBeenCalledWith({ buildPipelineId: 'codefresh-build-123' });
+      expect(deployPatch).toHaveBeenCalledWith({ buildOutput: 'codefresh logs' });
+      expect(patchSpy).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
     });
 
     test('deployAurora records failures with the newly assigned runUUID', async () => {

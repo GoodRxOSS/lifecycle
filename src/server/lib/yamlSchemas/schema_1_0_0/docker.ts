@@ -25,7 +25,7 @@ export const docker = {
       type: 'object',
       additionalProperties: true,
       properties: {
-        engine: { type: 'string' },
+        engine: { type: 'string', enum: ['buildkit', 'kaniko', 'ci'] },
         resources: {
           type: 'object',
           additionalProperties: false,
