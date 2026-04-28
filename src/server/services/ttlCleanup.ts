@@ -18,13 +18,13 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger';
+import { withLogContext, updateLogContext, getLogger, LogStage, extractContextForQueue } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel } from 'server/lib/utils';
 import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
-import { DEFAULT_TTL_INACTIVITY_DAYS, DEFAULT_TTL_CHECK_INTERVAL_MINUTES } from 'shared/constants';
+import { DEFAULT_TTL_INACTIVITY_DAYS, DEFAULT_TTL_CHECK_INTERVAL_MINUTES, PullRequestStatus } from 'shared/constants';
 import GlobalConfigService from './globalConfig';
 
 interface TTLCleanupJob {
@@ -94,8 +94,7 @@ export default class TTLCleanupService extends Service {
                 );
                 successCount++;
               } else {
-                getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
-                await this.cleanupStaleEnvironment(env, config.inactivityDays, config.commentTemplate, dryRun);
+                await this.cleanupEnvironment(env, config.inactivityDays, config.commentTemplate, dryRun);
                 successCount++;
               }
             } catch (error) {
@@ -223,13 +222,24 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
-        if (pullRequest.status !== 'open') {
-          getLogger().debug(`PR is ${pullRequest.status}, skipping`);
+        if (excludedRepositories.length > 0 && excludedRepositories.includes(pullRequest.fullName)) {
+          getLogger().debug(`Repository ${pullRequest.fullName} is excluded from TTL cleanup, skipping`);
           continue;
         }
 
-        if (excludedRepositories.length > 0 && excludedRepositories.includes(pullRequest.fullName)) {
-          getLogger().debug(`Repository ${pullRequest.fullName} is excluded from TTL cleanup, skipping`);
+        if (pullRequest.status !== PullRequestStatus.OPEN) {
+          getLogger().info(
+            `TTL: found expired closed PR namespace=${nsName} pr=${pullRequest.pullRequestNumber} status=${pullRequest.status}`
+          );
+          staleEnvironments.push({
+            namespace: nsName,
+            buildUUID,
+            build,
+            pullRequest,
+            daysExpired,
+            currentLabels: this.parseLabels(pullRequest.labels),
+            hadLabelDrift: false,
+          });
           continue;
         }
 
@@ -289,6 +299,40 @@ export default class TTLCleanupService extends Service {
     return staleEnvironments;
   }
 
+  private async cleanupEnvironment(
+    env: StaleEnvironment,
+    inactivityDays: number,
+    commentTemplate: string | undefined,
+    dryRun: boolean
+  ) {
+    if (env.pullRequest.status !== PullRequestStatus.OPEN) {
+      await this.enqueueClosedPullRequestCleanup(env);
+      return;
+    }
+
+    getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
+    await this.cleanupStaleEnvironment(env, inactivityDays, commentTemplate, dryRun);
+  }
+
+  private async enqueueClosedPullRequestCleanup(env: StaleEnvironment) {
+    const { build, pullRequest, namespace } = env;
+    const buildId = build.id;
+
+    if (!buildId) {
+      throw new Error(`TTL cleanup cannot enqueue closed PR cleanup without build id namespace=${namespace}`);
+    }
+
+    getLogger().info(
+      `TTL: enqueueing closed PR cleanup namespace=${namespace} pr=${pullRequest.pullRequestNumber} status=${pullRequest.status}`
+    );
+
+    await this.db.services.BuildService.deleteQueue.add('delete', {
+      buildId,
+      buildUuid: build.uuid,
+      ...extractContextForQueue(),
+    });
+  }
+
   /**
    * Cleanup a stale environment by updating labels and posting a comment
    */
@@ -331,8 +375,6 @@ export default class TTLCleanupService extends Service {
         pullRequestNumber: pullRequest.pullRequestNumber,
         fullName: pullRequest.fullName,
         message: commentMessage,
-        commentId: null,
-        etag: null,
       });
 
       getLogger().debug(`TTL: cleanup comment posted PR#${pullRequest.pullRequestNumber}`);
