@@ -26,8 +26,25 @@ update_settings(k8s_upsert_timeout_secs=180)
 dotenv()
 
 config.define_string("aws_role", usage='AWS role to use for deployment')
+config.define_string(
+    "keycloak_chart_source",
+    usage='Keycloak chart source: auto, published, or local. auto uses ../helm-charts when present and published charts otherwise.'
+)
+config.define_string(
+    "keycloak_operator_chart_version",
+    usage='Optional published keycloak-operator chart version. Empty uses the latest chart from the Helm repo.'
+)
+config.define_string(
+    "lifecycle_keycloak_chart_version",
+    usage='Optional published lifecycle-keycloak chart version. Empty uses the latest chart from the Helm repo.'
+)
 cfg = config.parse();
 aws_role = cfg.get("aws_role", "1")
+keycloak_chart_source = cfg.get("keycloak_chart_source", "auto")
+keycloak_operator_chart_version_override = cfg.get("keycloak_operator_chart_version", "")
+lifecycle_keycloak_chart_version_override = cfg.get("lifecycle_keycloak_chart_version", "")
+if keycloak_chart_source not in ["auto", "published", "local"]:
+    fail('keycloak_chart_source must be one of: auto, published, local')
 
 # set the aws role
 if aws_role:
@@ -39,6 +56,18 @@ if aws_role:
 lifecycle_app = 'lifecycle-app'
 app_namespace = 'lifecycle-app'
 kind_cluster_name = 'lfc'
+helm_charts_dir = '../helm-charts/charts'
+local_keycloak_operator_chart = '{}/keycloak-operator'.format(helm_charts_dir)
+local_lifecycle_keycloak_chart = '{}/lifecycle-keycloak'.format(helm_charts_dir)
+lifecycle_keycloak_values = 'sysops/tilt/lifecycle-keycloak-values.yaml'
+lifecycle_local_secrets = './helm/environments/local/secrets.yaml'
+has_local_keycloak_charts = os.path.exists(local_keycloak_operator_chart) and os.path.exists(local_lifecycle_keycloak_chart)
+use_local_keycloak_charts = keycloak_chart_source == "local" or (keycloak_chart_source == "auto" and has_local_keycloak_charts)
+if keycloak_chart_source == "local" and not has_local_keycloak_charts:
+    fail('keycloak_chart_source=local requires ../helm-charts/charts/keycloak-operator and ../helm-charts/charts/lifecycle-keycloak')
+
+keycloak_operator_chart = local_keycloak_operator_chart if use_local_keycloak_charts else 'goodrxoss/keycloak-operator'
+lifecycle_keycloak_chart = local_lifecycle_keycloak_chart if use_local_keycloak_charts else 'goodrxoss/lifecycle-keycloak'
 agent_session_workspace_image = 'lifecycle-workspace'
 agent_session_workspace_image_ref = '{}:latest'.format(agent_session_workspace_image)
 legacy_agent_session_workspace_image_ref = 'lifecycle-agent:latest'
@@ -60,7 +89,7 @@ keycloak_host = ngrok_keycloak_domain or "localhost:8081"
 app_host = ngrok_domain or "localhost:5001"
 ui_host = ngrok_ui_domain or "localhost:3000"
 company_idp_origin = "{}://{}".format(keycloak_scheme, keycloak_host)
-internal_keycloak_origin = "http://lifecycle-keycloak.{}.svc.cluster.local:8080".format(app_namespace)
+internal_keycloak_origin = "http://lifecycle-keycloak-service.{}.svc.cluster.local:8080".format(app_namespace)
 
 
 ##################################
@@ -86,6 +115,8 @@ secret_create_generic(
 ##################################
 helm_repo('bitnami', 'https://charts.bitnami.com/bitnami')
 helm_repo('ingress-nginx-chart', 'https://kubernetes.github.io/ingress-nginx')
+if not use_local_keycloak_charts:
+    helm_repo('goodrxoss', 'https://goodrxoss.github.io/helm-charts')
 
 helm_resource(
     name='redis',
@@ -186,6 +217,83 @@ k8s_resource(
 )
 
 ##################################
+# Keycloak Operator + Realm Chart (Helm)
+##################################
+keycloak_operator_deps = []
+keycloak_operator_resource_deps = []
+keycloak_operator_flags = []
+lifecycle_keycloak_deps = [
+    lifecycle_keycloak_values,
+    lifecycle_local_secrets,
+]
+lifecycle_keycloak_resource_deps = [
+    'keycloak-operator',
+    'legacy-keycloak-cleanup',
+]
+lifecycle_keycloak_flags = []
+
+if use_local_keycloak_charts:
+    keycloak_operator_deps.append(keycloak_operator_chart)
+    lifecycle_keycloak_deps.append(lifecycle_keycloak_chart)
+    lifecycle_keycloak_resource_deps.append('lifecycle-keycloak-chart-deps')
+
+    local_resource(
+        'lifecycle-keycloak-chart-deps',
+        cmd='helm dependency build {}'.format(lifecycle_keycloak_chart),
+        deps=[
+            '{}/Chart.yaml'.format(lifecycle_keycloak_chart),
+            '{}/values.yaml'.format(lifecycle_keycloak_chart),
+        ],
+        resource_deps=['bitnami'],
+        labels=['infra'],
+    )
+else:
+    if keycloak_operator_chart_version_override:
+        keycloak_operator_flags.extend(['--version', keycloak_operator_chart_version_override])
+    keycloak_operator_resource_deps.append('goodrxoss')
+    if lifecycle_keycloak_chart_version_override:
+        lifecycle_keycloak_flags.extend(['--version', lifecycle_keycloak_chart_version_override])
+    lifecycle_keycloak_resource_deps.append('goodrxoss')
+
+helm_resource(
+    name='keycloak-operator',
+    chart=keycloak_operator_chart,
+    namespace=app_namespace,
+    deps=keycloak_operator_deps,
+    resource_deps=keycloak_operator_resource_deps,
+    flags=keycloak_operator_flags,
+    labels=['infra'],
+)
+
+local_resource(
+    'legacy-keycloak-cleanup',
+    cmd='kubectl -n {namespace} delete deployment/lifecycle-keycloak service/lifecycle-keycloak configmap/lifecycle-keycloak-config deployment/lifecycle-keycloak-postgresql service/lifecycle-keycloak-postgresql --ignore-not-found=true'.format(
+        namespace=app_namespace,
+    ),
+    labels=['infra'],
+)
+
+helm_resource(
+    name='lifecycle-keycloak',
+    chart=lifecycle_keycloak_chart,
+    namespace=app_namespace,
+    deps=lifecycle_keycloak_deps,
+    resource_deps=lifecycle_keycloak_resource_deps,
+    flags=lifecycle_keycloak_flags + [
+        '-f', lifecycle_keycloak_values,
+        '-f', lifecycle_local_secrets,
+        '--set', 'hostname={}'.format(company_idp_origin),
+        '--set', 'clients.lifecycleUi.url={}://{}'.format(ui_scheme, ui_host),
+        '--set', 'companyIdp.tokenUrl={}/realms/internal/protocol/openid-connect/token'.format(internal_keycloak_origin),
+        '--set', 'companyIdp.authorizationUrl={}/realms/internal/protocol/openid-connect/auth'.format(company_idp_origin),
+        '--set', 'companyIdp.jwksUrl={}/realms/internal/protocol/openid-connect/certs'.format(internal_keycloak_origin),
+        '--set', 'companyIdp.logoutUrl={}/realms/internal/protocol/openid-connect/logout'.format(company_idp_origin),
+        '--set', 'companyIdp.issuer={}/realms/internal'.format(company_idp_origin),
+    ],
+    labels=['infra'],
+)
+
+##################################
 # Worker & Web (Helm, Single Deploy)
 ##################################
 
@@ -214,6 +322,7 @@ helm_set_args = [
     'namespace={}'.format(app_namespace),
     'image.repository={}'.format(lifecycle_app),
     'image.tag=dev',
+    'keycloak.enabled=false',
     'keycloak.scheme={}'.format(keycloak_scheme),
     'keycloak.url={}'.format(keycloak_host),
     'keycloak.appUrl={}'.format(app_host),
@@ -319,22 +428,16 @@ k8s_yaml('sysops/tilt/ngrok-keycloak.yaml')
 k8s_resource(
     'ngrok-keycloak',
     port_forwards=['4041:4040'],  # Different local port for Keycloak ngrok admin
-    labels=["infra"]
+    labels=["infra"],
+    resource_deps=['lifecycle-keycloak']
 )
 
 ##################################
-# Keycloak (deployed via Helm)
+# Keycloak (deployed via helm-charts lifecycle-keycloak)
 ##################################
-# Keycloak is deployed as part of the lifecycle helm release
-# We just need to configure the resources for Tilt UI
 k8s_resource(
     'lifecycle-keycloak',
     port_forwards=['8081:8080'],
-    labels=["infra"],
-    resource_deps=['lifecycle-keycloak-postgresql']
-)
-k8s_resource(
-    'lifecycle-keycloak-postgresql',
     labels=["infra"]
 )
 
