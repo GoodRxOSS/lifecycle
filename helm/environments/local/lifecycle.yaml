@@ -230,7 +230,7 @@ keycloak:
   image:
     registry: quay.io
     repository: keycloak/keycloak
-    tag: 26.3.4
+    tag: 26.4.7
 
   resources:
     requests:

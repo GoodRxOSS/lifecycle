@@ -36,7 +36,7 @@ spec:
             - '--authtoken=$(NGROK_AUTHTOKEN)'
             - '--hostname=$(NGROK_KEYCLOAK_DOMAIN)'
             - '--log=stdout'
-            - 'lifecycle-keycloak:8080' # point at the Keycloak Service's name & port
+            - 'lifecycle-keycloak-service:8080' # operator-managed Keycloak service
           envFrom:
             - secretRef:
                 name: ngrok-secret
