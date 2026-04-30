@@ -16,6 +16,7 @@
 
 import { NextRequest } from 'next/server';
 import {
+  fetchGitHubAuthenticatedUser,
   fetchGitHubBrokerToken,
   getGitHubUsernameFromKeycloakAccessToken,
   resolveRequestGitHubToken,
@@ -184,6 +185,36 @@ describe('githubToken', () => {
     });
 
     await expect(fetchGitHubBrokerToken('keycloak-access-token')).resolves.toBe('gho_query_token');
+  });
+
+  it('probes the fetched GitHub token with the authenticated user endpoint', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers([
+        ['x-oauth-scopes', 'read:user, repo'],
+        ['x-ratelimit-remaining', '42'],
+      ]),
+      json: jest.fn().mockResolvedValue({ id: 12_345, login: 'sample-user' }),
+    });
+
+    await expect(fetchGitHubAuthenticatedUser('gho_broker_token')).resolves.toEqual({
+      ok: true,
+      id: 12_345,
+      login: 'sample-user',
+      status: 200,
+      scopes: ['read:user', 'repo'],
+      rateLimitRemaining: '42',
+    });
+    expect(globalThis.fetch).toHaveBeenCalledWith('https://api.github.com/user', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: 'Bearer gho_broker_token',
+        'User-Agent': 'lifecycle-github-token-check',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
   });
 
   it('returns null when auth is enabled but no bearer token is present', async () => {

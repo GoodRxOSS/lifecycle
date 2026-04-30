@@ -21,6 +21,11 @@ import GlobalConfigService from 'server/services/globalConfig';
 
 const logger = () => getLogger();
 
+interface GitHubAuthenticatedUserResponse {
+  id?: unknown;
+  login?: unknown;
+}
+
 export interface RequestGitHubUserToken {
   // GitHub handle from the authenticated request, or from the Keycloak access
   // token claims when the request identity has not been hydrated yet.
@@ -30,6 +35,15 @@ export interface RequestGitHubUserToken {
   githubToken: string | null;
 }
 
+export interface GitHubAuthenticatedUserProbe {
+  ok: boolean;
+  id: number | null;
+  login: string | null;
+  status: number;
+  scopes: string[];
+  rateLimitRemaining: string | null;
+}
+
 function normalizeClaim(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -37,6 +51,14 @@ function normalizeClaim(value: unknown): string | null {
 
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizeGitHubUserId(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    return null;
+  }
+
+  return value;
 }
 
 function getBearerToken(req: NextRequest): string | null {
@@ -164,8 +186,8 @@ export async function resolveRequestGitHubToken(req: NextRequest): Promise<strin
  *   token lookup/refresh flow.
  *
  * What this does not do:
- * - It does not verify the token against GitHub. Call the GitHub endpoint you
- *   need from the server if you want to prove the token is usable.
+ * - It does not verify the token against GitHub. Use
+ *   `fetchGitHubAuthenticatedUser` when you need to prove the token is usable.
  * - It does not expose the token to the browser. Keep the token server-side.
  */
 export async function resolveRequestGitHubUserToken(req: NextRequest): Promise<RequestGitHubUserToken> {
@@ -176,5 +198,66 @@ export async function resolveRequestGitHubUserToken(req: NextRequest): Promise<R
   return {
     githubUsername,
     githubToken: await resolveRequestGitHubToken(req),
+  };
+}
+
+function splitHeaderValues(value: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function getResponseHeader(response: Response, name: string): string | null {
+  const headers = (response as Response & { headers?: Headers }).headers;
+  if (!headers || typeof headers.get !== 'function') {
+    return null;
+  }
+
+  return headers.get(name);
+}
+
+export async function fetchGitHubAuthenticatedUser(githubToken: string): Promise<GitHubAuthenticatedUserProbe> {
+  const response = await fetch('https://api.github.com/user', {
+    method: 'GET',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${githubToken}`,
+      'User-Agent': 'lifecycle-github-token-check',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+
+  const baseProbe = {
+    status: response.status,
+    scopes: splitHeaderValues(getResponseHeader(response, 'x-oauth-scopes')),
+    rateLimitRemaining: getResponseHeader(response, 'x-ratelimit-remaining'),
+  };
+
+  if (!response.ok) {
+    return {
+      ...baseProbe,
+      ok: false,
+      id: null,
+      login: null,
+    };
+  }
+
+  let body: GitHubAuthenticatedUserResponse | null = null;
+  try {
+    body = (await response.json()) as GitHubAuthenticatedUserResponse;
+  } catch {
+    body = null;
+  }
+
+  return {
+    ...baseProbe,
+    ok: Boolean(normalizeGitHubUserId(body?.id)),
+    id: normalizeGitHubUserId(body?.id),
+    login: normalizeClaim(body?.login),
   };
 }
