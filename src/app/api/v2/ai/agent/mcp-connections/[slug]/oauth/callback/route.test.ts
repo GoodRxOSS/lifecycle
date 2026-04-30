@@ -27,12 +27,17 @@ jest.mock('@ai-sdk/mcp', () => ({
   auth: (...args: unknown[]) => mockAuth(...args),
 }));
 
-jest.mock('server/services/ai/mcp/config', () => ({
-  McpConfigService: jest.fn().mockImplementation(() => ({
-    getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
-    discoverTools: (...args: unknown[]) => mockDiscoverTools(...args),
-  })),
-}));
+jest.mock('server/services/agentRuntime/mcp/config', () => {
+  const actual = jest.requireActual('server/services/agentRuntime/mcp/config');
+  return {
+    __esModule: true,
+    ...actual,
+    McpConfigService: jest.fn().mockImplementation(() => ({
+      getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
+      discoverTools: (...args: unknown[]) => mockDiscoverTools(...args),
+    })),
+  };
+});
 
 jest.mock('server/services/userMcpConnection', () => ({
   __esModule: true,
@@ -42,7 +47,7 @@ jest.mock('server/services/userMcpConnection', () => ({
   },
 }));
 
-jest.mock('server/services/ai/mcp/oauthFlow', () => ({
+jest.mock('server/services/agentRuntime/mcp/oauthFlow', () => ({
   __esModule: true,
   extractMcpOAuthFlowId: (state: string | null | undefined) => {
     if (!state) {
@@ -62,7 +67,7 @@ jest.mock('server/lib/logger', () => ({
 }));
 
 import { GET } from './route';
-import { buildMcpDefinitionFingerprint } from 'server/services/ai/mcp/connectionConfig';
+import { buildMcpDefinitionFingerprint } from 'server/services/agentRuntime/mcp/connectionConfig';
 
 function makeRequest(
   url = 'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?code=sample-code&state=flow-123.sample-state'
@@ -174,6 +179,35 @@ describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
     expect(html).toContain('Connection complete');
     expect(html).toContain('lfc-mcp-oauth-complete');
     expect(html).toContain('https://app.example.com');
+  });
+
+  it('redacts OAuth and token secrets from failed discovery output', async () => {
+    mockDiscoverTools.mockRejectedValueOnce(
+      new Error(
+        'Discovery failed for code sample-code token sample-access-token state flow-123.sample-state verifier sample-code-verifier'
+      )
+    );
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+    const persisted = mockUpsertConnection.mock.calls[mockUpsertConnection.mock.calls.length - 1]?.[0];
+
+    expect(response.status).toBe(422);
+    expect(persisted).toEqual(
+      expect.objectContaining({
+        slug: 'sample-oauth',
+        scope: 'global',
+        discoveredTools: [],
+        validationError: 'Discovery failed for code ****** token ****** state ****** verifier ******',
+      })
+    );
+    expect(html).toContain('Discovery failed for code ****** token ****** state ****** verifier ******');
+    expect(html).not.toContain('sample-code');
+    expect(html).not.toContain('sample-access-token');
+    expect(html).not.toContain('flow-123.sample-state');
+    expect(html).not.toContain('sample-code-verifier');
   });
 
   it('rejects expired or reused flows before completing OAuth', async () => {

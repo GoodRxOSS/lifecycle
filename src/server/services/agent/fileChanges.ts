@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash } from 'crypto';
 import { type DynamicToolUIPart, type ToolUIPart, type UITools } from 'ai';
 import type { AgentFileChangeArtifact, AgentFileChangeData, AgentFileChangeStage, AgentUIMessage } from './types';
 import { DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS } from 'server/lib/agentSession/runtimeConfig';

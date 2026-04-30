@@ -17,13 +17,13 @@
 import 'server/lib/dependencies';
 import UserMcpConnection from 'server/models/UserMcpConnection';
 import { decrypt, encrypt } from 'server/lib/encryption';
-import { normalizeUserConnectionValues } from 'server/services/ai/mcp/connectionConfig';
+import { normalizeUserConnectionValues } from 'server/services/agentRuntime/mcp/connectionConfig';
 import type {
   McpDiscoveredTool,
   McpStoredUserConnectionState,
   UserMcpConnectionMaskedUser,
   UserMcpConnectionState,
-} from 'server/services/ai/mcp/types';
+} from 'server/services/agentRuntime/mcp/types';
 
 type DecryptedUserMcpConnection = {
   state: McpStoredUserConnectionState | null;

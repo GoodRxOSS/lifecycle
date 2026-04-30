@@ -47,4 +47,233 @@ describe('AgentPolicyService', () => {
       'require_approval'
     );
   });
+
+  it('allows all user-owned definitions to use all-users capabilities', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'workspace_files',
+      definitionOwnerKind: 'user',
+      sourceKind: 'workspace_session',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        effectiveAvailability: 'all_users',
+        approvalMode: 'require_approval',
+      })
+    );
+  });
+
+  it('blocks disabled capabilities for every definition owner', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'read_context',
+      capabilityPolicy: {
+        availability: {
+          read_context: 'disabled',
+        },
+      },
+      definitionOwnerKind: 'system',
+      sourceKind: 'freeform_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'disabled',
+        effectiveAvailability: 'disabled',
+      })
+    );
+  });
+
+  it('blocks system-only capabilities for non-system definitions', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'diagnostics_database',
+      definitionOwnerKind: 'admin',
+      requesterIsAdmin: true,
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'system_only',
+        effectiveAvailability: 'system_only',
+      })
+    );
+  });
+
+  it('allows system-owned definitions to use system-only capabilities', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'diagnostics_kubernetes',
+      definitionOwnerKind: 'system',
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        effectiveAvailability: 'system_only',
+        approvalMode: 'allow',
+      })
+    );
+  });
+
+  it('blocks user-owned definitions from admin-only capabilities', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'external_mcp_write',
+      definitionOwnerKind: 'user',
+      sourceKind: 'freeform_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'admin_only',
+        effectiveAvailability: 'admin_only',
+      })
+    );
+  });
+
+  it('allows admin-owned definitions to use admin-only capabilities', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'external_mcp_write',
+      definitionOwnerKind: 'admin',
+      requesterIsAdmin: true,
+      sourceKind: 'workspace_session',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        effectiveAvailability: 'admin_only',
+      })
+    );
+  });
+
+  it('uses configured availability over catalog defaults', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'diagnostics_codefresh',
+      capabilityPolicy: {
+        availability: {
+          diagnostics_codefresh: 'all_users',
+        },
+      },
+      definitionOwnerKind: 'user',
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        configuredAvailability: 'all_users',
+        effectiveAvailability: 'all_users',
+      })
+    );
+  });
+
+  it('blocks user-owned definitions from creator-reserved capabilities even when runtime policy allows them', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'workspace_files',
+      capabilityPolicy: {
+        availability: {
+          workspace_files: 'all_users',
+        },
+      },
+      customAgentCreationPolicy: {
+        capabilityAvailability: {
+          workspace_files: 'reserved',
+        },
+      },
+      definitionOwnerKind: 'user',
+      sourceKind: 'workspace_session',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'creator_capability_reserved',
+        effectiveAvailability: 'all_users',
+      })
+    );
+  });
+
+  it('does not apply creator-reserved policy to system-owned definitions', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'diagnostics_kubernetes',
+      customAgentCreationPolicy: {
+        capabilityAvailability: {
+          diagnostics_kubernetes: 'reserved',
+        },
+      },
+      definitionOwnerKind: 'system',
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        effectiveAvailability: 'system_only',
+      })
+    );
+  });
+
+  it('derives approval mode from mapped runtime approval policy', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'workspace_shell',
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+          shell_exec: 'deny',
+        },
+      },
+      definitionOwnerKind: 'user',
+      sourceKind: 'workspace_session',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        approvalMode: 'deny',
+      })
+    );
+  });
+
+  it('blocks source-incompatible capabilities', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'workspace_shell',
+      definitionOwnerKind: 'user',
+      sourceKind: 'freeform_chat',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'source_incompatible',
+      })
+    );
+  });
+
+  it('blocks unknown capability ids', () => {
+    const result = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'sample_unknown',
+      definitionOwnerKind: 'system',
+    });
+
+    expect(result).toEqual({
+      capabilityId: 'sample_unknown',
+      allowed: false,
+      reason: 'unknown_capability',
+    });
+  });
+
+  it('resolves capability sets in input order', () => {
+    const result = AgentPolicyService.resolveCapabilitySetAccess(['read_context', 'external_mcp_write'], {
+      definitionOwnerKind: 'user',
+      sourceKind: 'freeform_chat',
+    });
+
+    expect(result.map((entry) => entry.capabilityId)).toEqual(['read_context', 'external_mcp_write']);
+    expect(result.map((entry) => entry.allowed)).toEqual([true, false]);
+  });
 });

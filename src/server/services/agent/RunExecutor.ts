@@ -33,6 +33,9 @@ import { AgentRunObservabilityTracker, buildMessageObservabilityMetadataPatch } 
 import AgentProviderRegistry from './ProviderRegistry';
 import AgentRunQueueService from './RunQueueService';
 import AgentRunService from './RunService';
+import AgentRunPlanResolver from './RunPlanResolver';
+import AgentSourceService from './SourceService';
+import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
 import type { AgentFileChangeData, AgentUIMessage } from './types';
 import { applyApprovalResponsesToFileChangeParts, buildResultFileChanges } from './fileChanges';
 import { AgentRunTerminalFailure, SessionWorkspaceGatewayUnavailableError } from './errors';
@@ -162,7 +165,8 @@ function classifyTerminalRunFailure({
 }
 
 function readRunMaxIterations(run?: AgentRun): number | null {
-  const runtimeOptions = run?.policySnapshot?.runtimeOptions;
+  const snapshot = isAgentRunPlanSnapshotV1(run?.runPlanSnapshot) ? run.runPlanSnapshot : null;
+  const runtimeOptions = snapshot?.runtime.runtimeOptions || run?.policySnapshot?.runtimeOptions;
   if (!runtimeOptions || typeof runtimeOptions !== 'object' || Array.isArray(runtimeOptions)) {
     return null;
   }
@@ -204,14 +208,34 @@ export default class AgentRunExecutor {
     dispatchAttemptId?: string;
     onFileChange?: (change: AgentFileChangeData) => Promise<void> | void;
   }) {
-    const { repoFullName, approvalPolicy } = await AgentCapabilityService.resolveSessionContext(
+    const { repoFullName, approvalPolicy: contextApprovalPolicy } = await AgentCapabilityService.resolveSessionContext(
       session.uuid,
       userIdentity
     );
+    const existingRunPlan = isAgentRunPlanSnapshotV1(existingRun?.runPlanSnapshot) ? existingRun.runPlanSnapshot : null;
+    let executionRunPlan = existingRunPlan;
+    let pendingRunPlan: Awaited<ReturnType<typeof AgentRunPlanResolver.resolveForRunAdmission>> | null = null;
+    if (!existingRun) {
+      const source = await AgentSourceService.getSessionSource(session.id);
+      if (!source || source.status !== 'ready') {
+        throw new Error('Session source is not ready yet.');
+      }
+      pendingRunPlan = await AgentRunPlanResolver.resolveForRunAdmission({
+        thread,
+        session,
+        source,
+        userIdentity,
+        requestedProvider,
+        requestedModel: requestedModelId,
+        runtimeOptions: {},
+      });
+      executionRunPlan = pendingRunPlan.runPlanSnapshot;
+    }
+    const approvalPolicy = executionRunPlan?.runtime.approvalPolicy || contextApprovalPolicy;
     const selection = await AgentProviderRegistry.resolveSelection({
       repoFullName,
-      requestedProvider,
-      requestedModelId,
+      requestedProvider: executionRunPlan?.model.resolvedProvider || requestedProvider,
+      requestedModelId: executionRunPlan?.model.resolvedModel || requestedModelId,
     });
     const model = await AgentProviderRegistry.createLanguageModel({
       repoFullName,
@@ -258,11 +282,17 @@ export default class AgentRunExecutor {
     };
 
     try {
+      if (existingRun && !existingRunPlan) {
+        throw new Error('Agent run plan snapshot is required for execution.');
+      }
+
       const tools = await AgentCapabilityService.buildToolSet({
         session,
         repoFullName,
         userIdentity,
         approvalPolicy,
+        resolvedCapabilityAccess: executionRunPlan?.capabilities.resolvedCapabilityAccess ?? [],
+        selectedRuntimeMcpConnectionRefs: executionRunPlan?.capabilities.selectedRuntimeMcpConnectionRefs,
         workspaceToolDiscoveryTimeoutMs: runControlPlaneConfig.workspaceToolDiscoveryTimeoutMs,
         workspaceToolExecutionTimeoutMs: runControlPlaneConfig.workspaceToolExecutionTimeoutMs,
         requestGitHubToken,
@@ -342,11 +372,12 @@ export default class AgentRunExecutor {
           throw new Error('Agent run execution owner is required.');
         }
 
+        const fallbackResolvedHarness = existingRun.resolvedHarness || session.defaultHarness || 'lifecycle_ai_sdk';
         run = await AgentRunService.startRunForExecutionOwner(
           existingRun.uuid,
           existingRun.executionOwner,
           {
-            resolvedHarness: existingRun.requestedHarness || session.defaultHarness || 'lifecycle_ai_sdk',
+            resolvedHarness: existingRunPlan?.runtime.resolvedHarness || fallbackResolvedHarness,
             provider: selection.provider,
             model: selection.modelId,
             sandboxGeneration: existingRun.sandboxGeneration,
@@ -354,16 +385,23 @@ export default class AgentRunExecutor {
           { dispatchAttemptId }
         );
       } else {
+        const runPlan = pendingRunPlan;
+        if (!runPlan) {
+          throw new Error('Agent run plan has not been initialized.');
+        }
+        executionRunPlan = runPlan.runPlanSnapshot;
         const queuedRun = await AgentRunService.createQueuedRun({
           thread,
           session,
-          policy: approvalPolicy,
-          requestedHarness: session.defaultHarness,
-          requestedProvider,
-          requestedModel: requestedModelId,
-          resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
-          resolvedProvider: selection.provider,
-          resolvedModel: selection.modelId,
+          policy: runPlan.approvalPolicy,
+          requestedHarness: runPlan.requestedHarness,
+          requestedProvider: runPlan.requestedProvider,
+          requestedModel: runPlan.requestedModel,
+          resolvedHarness: runPlan.resolvedHarness,
+          resolvedProvider: runPlan.resolvedProvider,
+          resolvedModel: runPlan.resolvedModel,
+          sandboxRequirement: runPlan.sandboxRequirement,
+          runPlanSnapshot: runPlan.runPlanSnapshot,
         });
         const executionOwner = buildDirectExecutionOwner();
         const claimedRun = await AgentRunService.claimQueuedRunForExecution(queuedRun.uuid, executionOwner);
@@ -374,9 +412,9 @@ export default class AgentRunExecutor {
           claimedRun.uuid,
           executionOwner,
           {
-            resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
-            provider: selection.provider,
-            model: selection.modelId,
+            resolvedHarness: runPlan.resolvedHarness,
+            provider: runPlan.resolvedProvider,
+            model: runPlan.resolvedModel,
             sandboxGeneration: claimedRun.sandboxGeneration,
           },
           { dispatchAttemptId }
@@ -412,7 +450,11 @@ export default class AgentRunExecutor {
       }
       const agent = new ToolLoopAgent({
         model,
-        instructions: buildSystemPrompt([runControlPlaneConfig.systemPrompt, sessionPrompt]),
+        instructions: buildSystemPrompt([
+          runControlPlaneConfig.systemPrompt,
+          executionRunPlan?.prompt.instructionAddendum || undefined,
+          sessionPrompt,
+        ]),
         tools,
         stopWhen: stepCountIs(runControlPlaneConfig.maxIterations),
         onStepFinish: async (step) => {

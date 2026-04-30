@@ -20,8 +20,10 @@ import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import AgentSource from 'server/models/AgentSource';
 import AgentThread from 'server/models/AgentThread';
 import type { PaginationMetadata } from 'server/lib/paginate';
+import { AgentChatStatus, AgentSessionKind } from 'shared/constants';
 import AgentThreadService from './ThreadService';
 import AgentSandboxService from './SandboxService';
+import AgentUsageService, { type AgentUsageAggregate } from './AgentUsageService';
 
 export const DEFAULT_AGENT_SESSION_LIST_LIMIT = 25;
 export const MAX_AGENT_SESSION_LIST_LIMIT = 100;
@@ -37,6 +39,7 @@ interface SessionRecordRelations {
   sandbox: AgentSandbox | null;
   exposures: AgentSandboxExposure[];
   defaultThread: AgentThread | null;
+  usage: AgentUsageAggregate;
 }
 
 function mapSessionStatus(session: AgentSession): 'ready' | 'ended' | 'error' {
@@ -44,7 +47,11 @@ function mapSessionStatus(session: AgentSession): 'ready' | 'ended' | 'error' {
     return 'ended';
   }
 
-  if (session.status === 'error' || session.workspaceStatus === 'failed') {
+  if (session.status === 'error' || session.chatStatus === AgentChatStatus.ERROR) {
+    return 'error';
+  }
+
+  if (session.workspaceStatus === 'failed' && session.sessionKind !== AgentSessionKind.CHAT) {
     return 'error';
   }
 
@@ -68,6 +75,16 @@ function buildDerivedSourceInput(session: AgentSession, source: AgentSource) {
     selectedServices: session.selectedServices ?? [],
     services: (session.selectedServices ?? []).map((service) => service.name),
   };
+}
+
+function readSourceDefaultProvider(source: AgentSource): string | null {
+  const defaults = source.input?.defaults;
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
+    return null;
+  }
+
+  const provider = (defaults as Record<string, unknown>).provider;
+  return typeof provider === 'string' && provider.trim() ? provider.trim() : null;
 }
 
 export default class AgentSessionReadService {
@@ -127,6 +144,7 @@ export default class AgentSessionReadService {
         userId: session.userId,
         ownerGithubUsername: session.ownerGithubUsername,
         defaults: {
+          provider: readSourceDefaultProvider(source),
           model: session.defaultModel || session.model,
           harness: session.defaultHarness,
         },
@@ -175,6 +193,7 @@ export default class AgentSessionReadService {
             createdAt: null,
             updatedAt: null,
           },
+      usage: relations.usage,
     };
   }
 
@@ -187,7 +206,7 @@ export default class AgentSessionReadService {
     const defaultThreadIds = sessions
       .map((session) => session.defaultThreadId)
       .filter((threadId): threadId is number => Number.isInteger(threadId));
-    const [sources, sandboxes, defaultThreads, fallbackThreads] = await Promise.all([
+    const [sources, sandboxes, defaultThreads, fallbackThreads, usageBySessionId] = await Promise.all([
       AgentSource.query().whereIn('sessionId', sessionIds),
       AgentSandbox.query().whereIn('sessionId', sessionIds).orderBy('generation', 'desc').orderBy('createdAt', 'desc'),
       defaultThreadIds.length ? AgentThread.query().whereIn('id', defaultThreadIds) : Promise.resolve([]),
@@ -196,6 +215,7 @@ export default class AgentSessionReadService {
         .where({ isDefault: true })
         .whereNull('archivedAt')
         .orderBy('createdAt', 'asc'),
+      AgentUsageService.aggregateSessionsUsage(sessionIds),
     ]);
     const sourceBySessionId = new Map<number, AgentSource>();
     for (const source of sources) {
@@ -249,6 +269,7 @@ export default class AgentSessionReadService {
         sandbox,
         defaultThread,
         exposures: sandbox ? exposuresBySandboxId.get(sandbox.id) || [] : [],
+        usage: usageBySessionId.get(session.id) || AgentUsageService.aggregateRuns([]),
       });
     });
   }

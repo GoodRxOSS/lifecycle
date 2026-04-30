@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-import type { McpDiscoveredTool } from 'server/services/ai/mcp/types';
+import type { McpDiscoveredTool } from 'server/services/agentRuntime/mcp/types';
 import type { AgentSessionToolRule } from 'server/services/types/agentSessionConfig';
+import type { AgentCapabilityCatalogId } from './capabilityCatalog';
 import type { AgentApprovalPolicy } from './types';
 import AgentPolicyService from './PolicyService';
 import {
@@ -36,6 +37,7 @@ type SessionWorkspaceToolCatalogRecord = {
   toolName: string;
   runtimeToolName: string;
   category: SessionWorkspaceToolCategory;
+  catalogCapabilityId: AgentCapabilityCatalogId;
   order: number;
   adminVisibility: SessionWorkspaceToolAdminVisibility;
   annotations?: McpDiscoveredTool['annotations'];
@@ -52,6 +54,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'skills.list',
     runtimeToolName: 'skills.list',
     category: 'skills',
+    catalogCapabilityId: 'read_context',
     order: 10,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -61,6 +64,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'skills.learn',
     runtimeToolName: 'skills.learn',
     category: 'skills',
+    catalogCapabilityId: 'read_context',
     order: 20,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -70,6 +74,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'workspace.read_file',
     runtimeToolName: 'workspace.read_file',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 30,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -79,6 +84,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'workspace.glob',
     runtimeToolName: 'workspace.glob',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 40,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -88,6 +94,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'workspace.grep',
     runtimeToolName: 'workspace.grep',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 50,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -97,6 +104,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: SESSION_WORKSPACE_READONLY_TOOL_NAME,
     runtimeToolName: 'workspace.exec',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 60,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -106,6 +114,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'session.get_workspace_state',
     runtimeToolName: 'session.get_workspace_state',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 70,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -115,6 +124,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'session.list_ports',
     runtimeToolName: 'session.list_ports',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 80,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -124,6 +134,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'session.list_processes',
     runtimeToolName: 'session.list_processes',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 90,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -133,6 +144,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'session.get_service_status',
     runtimeToolName: 'session.get_service_status',
     category: 'inspect',
+    catalogCapabilityId: 'read_context',
     order: 100,
     adminVisibility: 'hidden',
     annotations: { readOnlyHint: true },
@@ -142,6 +154,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'git.status',
     runtimeToolName: 'git.status',
     category: 'inspect',
+    catalogCapabilityId: 'workspace_git',
     order: 110,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -151,6 +164,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'git.diff',
     runtimeToolName: 'git.diff',
     category: 'inspect',
+    catalogCapabilityId: 'workspace_git',
     order: 120,
     adminVisibility: 'visible',
     annotations: { readOnlyHint: true },
@@ -160,6 +174,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'workspace.write_file',
     runtimeToolName: 'workspace.write_file',
     category: 'file_change',
+    catalogCapabilityId: 'workspace_files',
     order: 130,
     adminVisibility: 'visible',
     description: 'Write or overwrite a text file within the workspace.',
@@ -168,6 +183,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'workspace.edit_file',
     runtimeToolName: 'workspace.edit_file',
     category: 'file_change',
+    catalogCapabilityId: 'workspace_files',
     order: 140,
     adminVisibility: 'visible',
     description: 'Replace text inside a workspace file using an exact-match edit.',
@@ -176,6 +192,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: SESSION_WORKSPACE_MUTATION_TOOL_NAME,
     runtimeToolName: 'workspace.exec',
     category: 'command',
+    catalogCapabilityId: 'workspace_shell',
     order: 150,
     adminVisibility: 'visible',
     description: (serverName: string) => buildWorkspaceMutationExecDescription(serverName),
@@ -184,6 +201,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'git.add',
     runtimeToolName: 'git.add',
     category: 'git_change',
+    catalogCapabilityId: 'workspace_git',
     order: 160,
     adminVisibility: 'visible',
     description: 'Stage one or more paths in the workspace repository.',
@@ -192,6 +210,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'git.commit',
     runtimeToolName: 'git.commit',
     category: 'git_change',
+    catalogCapabilityId: 'workspace_git',
     order: 170,
     adminVisibility: 'visible',
     description: 'Create a commit from the current staged changes.',
@@ -200,6 +219,7 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     toolName: 'git.branch',
     runtimeToolName: 'git.branch',
     category: 'git_change',
+    catalogCapabilityId: 'workspace_git',
     order: 180,
     adminVisibility: 'visible',
     description: 'Inspect branches or create or switch a branch.',

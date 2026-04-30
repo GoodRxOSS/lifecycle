@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-jest.mock('server/services/ai/mcp/config', () => ({
+jest.mock('server/services/agentRuntime/mcp/config', () => ({
   McpConfigService: jest.fn().mockImplementation(() => ({
     listEffectiveDefinitions: jest.fn().mockResolvedValue([]),
   })),
@@ -22,6 +22,9 @@ jest.mock('server/services/ai/mcp/config', () => ({
 
 const mockGlobalConfigGetConfig = jest.fn();
 const mockGlobalConfigSetConfig = jest.fn();
+const mockAgentRuntimeGetGlobalConfig = jest.fn();
+const mockAgentRuntimeGetRepoConfig = jest.fn();
+const mockAgentRuntimeGetEffectiveConfig = jest.fn();
 
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
@@ -29,6 +32,17 @@ jest.mock('server/services/globalConfig', () => ({
     getInstance: jest.fn(() => ({
       getConfig: (...args: unknown[]) => mockGlobalConfigGetConfig(...args),
       setConfig: (...args: unknown[]) => mockGlobalConfigSetConfig(...args),
+    })),
+  },
+}));
+
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getGlobalConfig: (...args: unknown[]) => mockAgentRuntimeGetGlobalConfig(...args),
+      getRepoConfig: (...args: unknown[]) => mockAgentRuntimeGetRepoConfig(...args),
+      getEffectiveConfig: (...args: unknown[]) => mockAgentRuntimeGetEffectiveConfig(...args),
     })),
   },
 }));
@@ -52,6 +66,9 @@ describe('AgentSessionConfigService', () => {
     jest.clearAllMocks();
     mockGlobalConfigGetConfig.mockResolvedValue(undefined);
     mockGlobalConfigSetConfig.mockResolvedValue(undefined);
+    mockAgentRuntimeGetGlobalConfig.mockResolvedValue({});
+    mockAgentRuntimeGetRepoConfig.mockResolvedValue({});
+    mockAgentRuntimeGetEffectiveConfig.mockResolvedValue({});
   });
 
   it('lists admin-visible built-in tools in tool inventory', async () => {
@@ -61,6 +78,9 @@ describe('AgentSessionConfigService', () => {
     jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
       systemPrompt: 'base',
       appendSystemPrompt: 'append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
       toolRules: [],
     });
     jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue(DEFAULT_AGENT_APPROVAL_POLICY);
@@ -96,6 +116,108 @@ describe('AgentSessionConfigService', () => {
         scopeRuleMode: 'inherit',
         effectiveRuleMode: 'inherit',
         availability: 'available',
+      })
+    );
+  });
+
+  it('lists global capability inventory with grouped tools and policy availability', async () => {
+    const service = makeService();
+
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({});
+    jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
+      systemPrompt: 'base',
+      appendSystemPrompt: 'append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      toolRules: [],
+    });
+    jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue(DEFAULT_AGENT_APPROVAL_POLICY);
+    mockAgentRuntimeGetGlobalConfig.mockResolvedValue({
+      capabilityPolicy: {
+        availability: {
+          workspace_shell: 'admin_only',
+        },
+      },
+    });
+    mockAgentRuntimeGetEffectiveConfig.mockResolvedValue({
+      capabilityPolicy: {
+        availability: {
+          workspace_shell: 'admin_only',
+        },
+      },
+    });
+
+    const entries = await service.listCapabilityInventory('global');
+    const shell = entries.find((entry) => entry.capabilityId === 'workspace_shell');
+
+    expect(shell).toEqual(
+      expect.objectContaining({
+        capabilityId: 'workspace_shell',
+        configuredAvailability: 'admin_only',
+        effectiveAvailability: 'admin_only',
+        blockedReason: 'admin_only',
+        runtimeCapabilityKey: 'shell_exec',
+        resourceGrants: ['workspace_shell'],
+      })
+    );
+    expect(shell?.tools.map((tool) => tool.toolName)).toEqual(expect.arrayContaining(['workspace.exec_mutation']));
+  });
+
+  it('lists repo capability inventory with inherited and repo-specific availability', async () => {
+    const service = makeService();
+
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({});
+    jest.spyOn(service, 'getRepoConfig').mockResolvedValue({});
+    jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
+      systemPrompt: 'base',
+      appendSystemPrompt: 'append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      toolRules: [],
+    });
+    jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue(DEFAULT_AGENT_APPROVAL_POLICY);
+    mockAgentRuntimeGetGlobalConfig.mockResolvedValue({
+      capabilityPolicy: {
+        availability: {
+          external_mcp_write: 'admin_only',
+          workspace_shell: 'disabled',
+        },
+      },
+    });
+    mockAgentRuntimeGetRepoConfig.mockResolvedValue({
+      capabilityPolicy: {
+        availability: {
+          workspace_shell: 'all_users',
+        },
+      },
+    });
+    mockAgentRuntimeGetEffectiveConfig.mockResolvedValue({
+      capabilityPolicy: {
+        availability: {
+          external_mcp_write: 'admin_only',
+          workspace_shell: 'all_users',
+        },
+      },
+    });
+
+    const entries = await service.listCapabilityInventory('Example-Org/Example-Repo');
+    const shell = entries.find((entry) => entry.capabilityId === 'workspace_shell');
+    const externalWrite = entries.find((entry) => entry.capabilityId === 'external_mcp_write');
+
+    expect(shell).toEqual(
+      expect.objectContaining({
+        configuredAvailability: 'all_users',
+        inheritedAvailability: 'disabled',
+        effectiveAvailability: 'all_users',
+      })
+    );
+    expect(externalWrite).toEqual(
+      expect.objectContaining({
+        inheritedAvailability: 'admin_only',
+        effectiveAvailability: 'admin_only',
+        resourceGrants: ['mcp_write'],
       })
     );
   });
@@ -173,6 +295,9 @@ describe('AgentSessionConfigService', () => {
     jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
       systemPrompt: 'base',
       appendSystemPrompt: 'append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
       toolRules: [
         {
           toolKey: 'mcp__sandbox__workspace_read_file',

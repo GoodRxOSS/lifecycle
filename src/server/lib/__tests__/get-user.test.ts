@@ -82,6 +82,7 @@ describe('get-user helpers', () => {
         given_name: 'Sample',
         family_name: 'User',
         email: 'sample-user@example.com',
+        realm_access: { roles: ['user', 'admin', 'offline_access'] },
       })
     );
 
@@ -93,6 +94,7 @@ describe('get-user helpers', () => {
         displayName: 'Sample User',
         gitUserName: 'Sample User',
         gitUserEmail: 'sample-user@example.com',
+        roles: ['user', 'admin'],
       })
     );
   });
@@ -106,6 +108,7 @@ describe('get-user helpers', () => {
         displayName: 'local-dev-user',
         gitUserName: 'local-dev-user',
         gitUserEmail: 'local-dev-user@users.noreply.github.com',
+        roles: ['admin'],
       })
     );
   });

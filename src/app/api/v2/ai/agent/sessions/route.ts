@@ -28,6 +28,10 @@ import {
   DEFAULT_AGENT_SESSION_LIST_LIMIT,
   MAX_AGENT_SESSION_LIST_LIMIT,
 } from 'server/services/agent/SessionReadService';
+import {
+  AgentThreadRuntimeControlsError,
+  type AgentThreadRuntimeControlChoiceInput,
+} from 'server/services/agent/ThreadRuntimeControlsService';
 import { AgentSessionKind, BuildKind } from 'shared/constants';
 
 interface RequestedAgentSessionServiceRef {
@@ -50,6 +54,7 @@ interface ResolvedSessionService {
 
 interface CreateSessionBody {
   defaults?: {
+    provider?: string;
     model?: string;
     harness?: string;
   };
@@ -60,6 +65,11 @@ interface CreateSessionBody {
   workspace?: {
     storageSize?: string;
   };
+  runtimeControlChoices?: AgentThreadRuntimeControlChoiceInput;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function repoNameFromRepoUrl(repoUrl?: string | null) {
@@ -90,6 +100,78 @@ function parseRequestedWorkspaceStorageSize(body: CreateSessionBody): string | u
   }
 
   return workspace.storageSize.trim();
+}
+
+function parseRuntimeControlChoiceIds(value: unknown, fieldName: string): string[] | undefined | Error {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    return new Error(`${fieldName} must be an array of choice ids.`);
+  }
+
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) {
+      return new Error(`${fieldName} must contain only choice ids.`);
+    }
+  }
+
+  return value.map((item) => item.trim());
+}
+
+function parseRuntimeControlChoices(value: unknown): AgentThreadRuntimeControlChoiceInput | undefined | Error {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!isPlainObject(value)) {
+    return new Error('runtimeControlChoices must be an object');
+  }
+
+  const unknownKeys = Object.keys(value).filter(
+    (key) => key !== 'agentId' && key !== 'toolChoiceIds' && key !== 'mcpChoiceIds'
+  );
+  if (unknownKeys.length > 0) {
+    return new Error(`Unsupported runtime-control fields: ${unknownKeys.join(', ')}`);
+  }
+
+  const agentId =
+    value.agentId === undefined || value.agentId === null
+      ? undefined
+      : typeof value.agentId === 'string' && value.agentId.trim()
+      ? value.agentId.trim()
+      : new Error('runtimeControlChoices.agentId must be a non-empty string');
+  if (agentId instanceof Error) {
+    return agentId;
+  }
+
+  const toolChoiceIds = parseRuntimeControlChoiceIds(value.toolChoiceIds, 'runtimeControlChoices.toolChoiceIds');
+  if (toolChoiceIds instanceof Error) {
+    return toolChoiceIds;
+  }
+
+  const mcpChoiceIds = parseRuntimeControlChoiceIds(value.mcpChoiceIds, 'runtimeControlChoices.mcpChoiceIds');
+  if (mcpChoiceIds instanceof Error) {
+    return mcpChoiceIds;
+  }
+
+  return { agentId, toolChoiceIds, mcpChoiceIds };
+}
+
+function mapRuntimeControlsError(error: unknown, req: NextRequest) {
+  if (error instanceof AgentThreadRuntimeControlsError) {
+    const statusByCode: Record<AgentThreadRuntimeControlsError['code'], number> = {
+      invalid_input: 400,
+      unknown_choice: 400,
+      policy_denied: 403,
+      not_found: 404,
+      active_run: 409,
+    };
+    return errorResponse(error, { status: statusByCode[error.code] }, req);
+  }
+
+  return null;
 }
 
 async function resolveLifecycleConfigForSession({
@@ -201,7 +283,7 @@ async function resolveRequestedServices(
  *   get:
  *     summary: List agent sessions for the authenticated user
  *     tags:
- *       - Agent Sessions
+ *       - Agent Platform
  *     operationId: getAgentSessions
  *     parameters:
  *       - in: query
@@ -251,8 +333,9 @@ async function resolveRequestedServices(
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
  *     summary: Create a new agent session
+ *     description: Creates an agent session and accepts optional runtimeControlChoices for the first run's runtime-control choices.
  *     tags:
- *       - Agent Sessions
+ *       - Agent Platform
  *     operationId: createAgentSession
  *     requestBody:
  *       required: true
@@ -266,6 +349,8 @@ async function resolveRequestedServices(
  *                 type: object
  *                 properties:
  *                   model:
+ *                     type: string
+ *                   provider:
  *                     type: string
  *                   harness:
  *                     type: string
@@ -284,6 +369,8 @@ async function resolveRequestedServices(
  *                   storageSize:
  *                     type: string
  *                     description: Optional workspace PVC size. Accepted only when admin runtime settings allow client overrides.
+ *               runtimeControlChoices:
+ *                 $ref: '#/components/schemas/AgentRuntimeControlChoicesInput'
  *               sandbox:
  *                 type: object
  *                 properties:
@@ -372,8 +459,14 @@ const postHandler = async (req: NextRequest) => {
 
   const body = (await req.json()) as CreateSessionBody;
   let requestedWorkspaceStorageSize: string | undefined;
+  let runtimeControlChoices: AgentThreadRuntimeControlChoiceInput | undefined;
   try {
     requestedWorkspaceStorageSize = parseRequestedWorkspaceStorageSize(body);
+    const parsedRuntimeControlChoices = parseRuntimeControlChoices(body.runtimeControlChoices);
+    if (parsedRuntimeControlChoices instanceof Error) {
+      throw parsedRuntimeControlChoices;
+    }
+    runtimeControlChoices = parsedRuntimeControlChoices;
   } catch (err) {
     return errorResponse(err, { status: 400 }, req);
   }
@@ -389,6 +482,8 @@ const postHandler = async (req: NextRequest) => {
     ? (sourceInput as { services: unknown[] }).services
     : undefined;
   const requestedModel = body.defaults?.model;
+  const requestedProvider =
+    typeof body.defaults?.provider === 'string' ? body.defaults.provider.trim() || undefined : undefined;
   const sessionKind =
     body.source?.adapter === 'blank_workspace'
       ? AgentSessionKind.CHAT
@@ -418,8 +513,10 @@ const postHandler = async (req: NextRequest) => {
       const session = await AgentChatSessionService.createChatSession({
         userId: userIdentity.userId,
         userIdentity,
+        provider: requestedProvider,
         model: requestedModel,
         workspaceStorage,
+        runtimeControlChoices,
       });
 
       return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 201 }, req);
@@ -432,6 +529,10 @@ const postHandler = async (req: NextRequest) => {
       }
       if (err instanceof AgentSessionRuntimeConfigError || err instanceof AgentSessionWorkspaceStorageConfigError) {
         return errorResponse(err, { status: 400 }, req);
+      }
+      const runtimeControlsResponse = mapRuntimeControlsError(err, req);
+      if (runtimeControlsResponse) {
+        return runtimeControlsResponse;
       }
 
       return errorResponse(err, { status: 500 }, req);
@@ -520,6 +621,7 @@ const postHandler = async (req: NextRequest) => {
       buildUuid,
       buildKind,
       services: resolvedServices,
+      provider: requestedProvider,
       model: requestedModel,
       environmentSkillRefs: lifecycleConfig?.environment?.agentSession?.skills,
       repoUrl,

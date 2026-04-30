@@ -41,6 +41,11 @@ import {
 
 type ToolLikePart = ToolUIPart<UITools> | DynamicToolUIPart;
 const SESSION_WORKSPACE_TOOL_KEY_PREFIX = `mcp__${SESSION_WORKSPACE_SERVER_SLUG}__`;
+const FORCE_APPROVAL_TOOL_CAPABILITIES: Record<string, AgentCapabilityKey> = {
+  [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'update_file')]: 'git_write',
+  [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'update_pr_labels')]: 'git_write',
+  [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'patch_k8s_resource')]: 'deploy_k8s_mutation',
+};
 const ARGUMENT_PREVIEW_MAX_LENGTH = 160;
 const PENDING_ACTION_RESPONSE_FIELDS = new Set(['approved', 'reason']);
 
@@ -76,6 +81,24 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readFileChangeKind(value: unknown): AgentFileChangeData['kind'] | null {
+  return value === 'created' || value === 'edited' || value === 'deleted' ? value : null;
+}
+
+function readFileChangeStage(value: unknown): AgentFileChangeData['stage'] | null {
+  return value === 'awaiting-approval' ||
+    value === 'approved' ||
+    value === 'applied' ||
+    value === 'denied' ||
+    value === 'failed'
+    ? value
+    : null;
+}
+
 function truncatePreview(value: string): string {
   return value.length > ARGUMENT_PREVIEW_MAX_LENGTH ? `${value.slice(0, ARGUMENT_PREVIEW_MAX_LENGTH - 3)}...` : value;
 }
@@ -106,7 +129,7 @@ function summarizeArguments(input: unknown): Array<{ name: string; value: string
   }
 
   return Object.entries(input)
-    .filter(([name]) => !['content', 'oldText', 'newText', 'command', 'cmd'].includes(name))
+    .filter(([name]) => !['content', 'new_content', 'oldText', 'newText', 'command', 'cmd'].includes(name))
     .slice(0, 6)
     .map(([name, value]) => ({
       name,
@@ -134,14 +157,15 @@ function getCommandPreview(input: unknown): string | null {
   return null;
 }
 
-function summarizeFileChanges(value: unknown): Array<{
-  path: string;
-  action: string;
-  summary: string;
-  additions: number | null;
-  deletions: number | null;
-  truncated: boolean;
-}> {
+function summarizeFileChanges({
+  value,
+  fallbackToolCallId,
+  fallbackSourceTool,
+}: {
+  value: unknown;
+  fallbackToolCallId: string | null;
+  fallbackSourceTool: string | null;
+}): AgentFileChangeData[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -149,16 +173,38 @@ function summarizeFileChanges(value: unknown): Array<{
   return value
     .filter(isRecord)
     .slice(0, 10)
-    .map((change) => {
-      const path = readString(change.displayPath) || readString(change.path) || 'unknown';
-      const action = readString(change.kind) || readString(change.stage) || 'change';
+    .flatMap((change) => {
+      const path = readString(change.path);
+      const kind = readFileChangeKind(change.kind);
+      if (!path || !kind) {
+        return [];
+      }
+
+      const displayPath = readString(change.displayPath) || path;
+      const toolCallId = readString(change.toolCallId) || fallbackToolCallId || `${path}:file-change`;
+      const sourceTool = readString(change.sourceTool) || fallbackSourceTool || 'tool';
+      const stage = readFileChangeStage(change.stage) || 'awaiting-approval';
+
       return {
+        id: readString(change.id) || `${toolCallId}:${path}`,
+        toolCallId,
+        sourceTool,
         path,
-        action,
-        summary: readString(change.summary) || `${action} ${path}`,
-        additions: typeof change.additions === 'number' ? change.additions : null,
-        deletions: typeof change.deletions === 'number' ? change.deletions : null,
+        displayPath,
+        kind,
+        stage,
+        additions: readNumber(change.additions) ?? 0,
+        deletions: readNumber(change.deletions) ?? 0,
         truncated: change.truncated === true,
+        unifiedDiff: readString(change.unifiedDiff),
+        beforeTextPreview: readString(change.beforeTextPreview),
+        afterTextPreview: readString(change.afterTextPreview),
+        summary: readString(change.summary) || `${kind} ${displayPath}`,
+        encoding: readString(change.encoding),
+        oldSizeBytes: readNumber(change.oldSizeBytes),
+        newSizeBytes: readNumber(change.newSizeBytes),
+        oldSha256: readString(change.oldSha256),
+        newSha256: readString(change.newSha256),
       };
     });
 }
@@ -187,6 +233,11 @@ function getRiskLabels(capabilityKey: string | null | undefined): string[] {
 }
 
 function resolveApprovalCapabilityKey(toolName: string, fallback: AgentCapabilityKey): AgentCapabilityKey {
+  const forcedApprovalCapabilityKey = FORCE_APPROVAL_TOOL_CAPABILITIES[toolName];
+  if (forcedApprovalCapabilityKey) {
+    return forcedApprovalCapabilityKey;
+  }
+
   if (toolName === buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_PUBLISH_HTTP_TOOL_NAME)) {
     return 'deploy_k8s_mutation';
   }
@@ -217,7 +268,17 @@ function shouldPersistApprovalRequest({
 
   const capabilityKey = resolveApprovalCapabilityKey(toolName, fallbackCapabilityKey);
   const toolRule = toolRules?.find((rule) => rule.toolKey === toolName);
-  const mode = toolRule?.mode || AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
+  const capabilityMode = AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey);
+
+  if (toolRule?.mode === 'deny' || (!toolRule && capabilityMode === 'deny')) {
+    return false;
+  }
+
+  if (FORCE_APPROVAL_TOOL_CAPABILITIES[toolName]) {
+    return true;
+  }
+
+  const mode = toolRule?.mode || capabilityMode;
 
   return mode === 'require_approval';
 }
@@ -657,7 +718,11 @@ export default class ApprovalService {
       toolName,
       argumentsSummary: summarizeArguments(input),
       commandPreview: getCommandPreview(input),
-      fileChangePreview: summarizeFileChanges(payload.fileChanges),
+      fileChangePreview: summarizeFileChanges({
+        value: payload.fileChanges,
+        fallbackToolCallId: readString(payload.toolCallId),
+        fallbackSourceTool: toolName,
+      }),
       riskLabels: getRiskLabels(action.capabilityKey),
     };
   }

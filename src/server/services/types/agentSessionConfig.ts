@@ -15,6 +15,11 @@
  */
 
 import type { AgentApprovalMode, AgentCapabilityKey } from 'server/services/agent/types';
+import type {
+  AgentCapabilityAvailability,
+  AgentCapabilityCatalogId,
+  AgentCapabilityCategory,
+} from 'server/services/agent/capabilityCatalog';
 import type { AgentSessionWorkspaceStorageAccessMode } from './globalConfig';
 
 export type AgentSessionToolRuleMode = AgentApprovalMode;
@@ -109,4 +114,33 @@ export interface AgentSessionToolInventoryEntry {
   scopeRuleMode: AgentSessionToolRuleSelection;
   effectiveRuleMode: AgentSessionToolRuleSelection;
   availability: 'available' | 'blocked_by_tool_rule' | 'blocked_by_policy';
+}
+
+export interface AgentCapabilityInventoryToolEntry {
+  toolKey: string;
+  toolName: string;
+  description: string | null;
+  serverSlug: string;
+  serverName: string;
+  sourceType: 'builtin' | 'mcp';
+  sourceScope: string;
+}
+
+export interface AgentCapabilityInventoryEntry {
+  capabilityId: AgentCapabilityCatalogId;
+  label: string;
+  description: string;
+  category: AgentCapabilityCategory;
+  defaultAvailability: AgentCapabilityAvailability;
+  configuredAvailability?: AgentCapabilityAvailability;
+  inheritedAvailability?: AgentCapabilityAvailability;
+  effectiveAvailability: AgentCapabilityAvailability;
+  approvalMode: AgentApprovalMode;
+  runtimeCapabilityKey?: AgentCapabilityKey;
+  userSelectable: boolean;
+  toolCount: number;
+  resourceCount: number;
+  resourceGrants: string[];
+  tools: AgentCapabilityInventoryToolEntry[];
+  blockedReason?: 'admin_only' | 'system_only' | 'disabled';
 }

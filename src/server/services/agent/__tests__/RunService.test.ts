@@ -73,6 +73,72 @@ const mockAppendChunkEventsForRunInTransaction = AgentRunEventService.appendChun
 const mockNotifyRunEventsInserted = AgentRunEventService.notifyRunEventsInserted as jest.Mock;
 const mockResolveDurabilityConfig = resolveAgentSessionDurabilityConfig as jest.Mock;
 const VALID_RUN_UUID = '123e4567-e89b-12d3-a456-426614174000';
+const runPlanSnapshot = {
+  version: 1,
+  capturedAt: '2026-05-01T00:00:00.000Z',
+  agent: {
+    id: 'system.freeform',
+    label: 'Free-form',
+    sourceKind: 'freeform_chat',
+  },
+  source: {
+    id: 'source-1',
+    adapter: 'blank_workspace',
+    status: 'ready',
+    sessionKind: 'chat',
+    buildUuid: 'build-1',
+    repoFullName: 'example-org/example-repo',
+    branch: 'feature-branch',
+    namespace: 'sample-namespace',
+    freshness: {
+      capturedAt: '2026-05-01T00:00:00.000Z',
+      freshnessSource: 'source',
+    },
+  },
+  model: {
+    requestedProvider: null,
+    requestedModel: null,
+    resolvedProvider: 'openai',
+    resolvedModel: 'gpt-5.4',
+  },
+  runtime: {
+    requestedHarness: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: { maxIterations: 12 },
+    approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+  },
+  prompt: {
+    instructionRefs: [],
+    renderedSummary: 'Sample prompt summary',
+    renderedHash: 'sha256:sample-rendered-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: ['read_context', 'workspace_files'],
+    resolvedCapabilityAccess: [
+      {
+        capabilityId: 'read_context',
+        availability: 'all_users',
+        allowed: true,
+        runtimeCapabilityKey: 'read',
+        approvalMode: 'allow',
+      },
+      {
+        capabilityId: 'workspace_files',
+        availability: 'admin_only',
+        allowed: false,
+        reason: 'sample denied reason',
+        runtimeCapabilityKey: 'workspace_write',
+        approvalMode: 'require_approval',
+      },
+    ],
+    selectedRuntimeToolChoiceIds: ['choice-read-context'],
+    selectedRuntimeMcpChoiceIds: ['choice-sample-mcp'],
+    selectedRuntimeCapabilityIds: ['read_context'],
+    selectedRuntimeMcpConnectionRefs: ['user:sample-mcp'],
+  },
+  warnings: [{ code: 'sample_warning', message: 'Sample warning', detail: { hidden: true } }],
+} as const;
 
 describe('AgentRunService', () => {
   beforeEach(() => {
@@ -144,6 +210,152 @@ describe('AgentRunService', () => {
       });
 
       expect(findOne).toHaveBeenCalledWith({ uuid: VALID_RUN_UUID });
+    });
+  });
+
+  describe('serializeRun', () => {
+    const baseRun = {
+      uuid: VALID_RUN_UUID,
+      threadId: 7,
+      sessionId: 17,
+      status: 'queued',
+      requestedHarness: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      provider: 'openai',
+      model: 'gpt-5.4',
+      sandboxRequirement: {},
+      sandboxGeneration: null,
+      queuedAt: '2026-05-01T00:00:00.000Z',
+      startedAt: null,
+      completedAt: null,
+      cancelledAt: null,
+      usageSummary: {},
+      policySnapshot: { defaultMode: 'require_approval', rules: {} },
+      error: null,
+      createdAt: '2026-05-01T00:00:00.000Z',
+      updatedAt: '2026-05-01T00:00:00.000Z',
+    };
+
+    it('returns runPlan: null for historical runs without snapshots', () => {
+      expect(AgentRunService.serializeRun({ ...baseRun, runPlanSnapshot: null } as any)).toEqual(
+        expect.objectContaining({
+          runPlan: null,
+        })
+      );
+    });
+
+    it('returns a safe runPlan summary for versioned snapshots', () => {
+      const serialized = AgentRunService.serializeRun({ ...baseRun, runPlanSnapshot } as any);
+
+      expect(serialized).not.toHaveProperty('runPlanSnapshot');
+      expect(serialized.runPlan).toEqual({
+        version: 1,
+        agent: {
+          id: 'system.freeform',
+          label: 'Free-form',
+          sourceKind: 'freeform_chat',
+        },
+        source: {
+          kind: 'freeform_chat',
+          repoFullName: 'example-org/example-repo',
+          branch: 'feature-branch',
+          buildUuid: 'build-1',
+          namespace: 'sample-namespace',
+        },
+        model: {
+          provider: 'openai',
+          model: 'gpt-5.4',
+        },
+        runtime: {
+          harness: 'lifecycle_ai_sdk',
+          maxIterations: 12,
+        },
+        approval: {
+          defaultMode: 'require_approval',
+        },
+        capabilities: {
+          effective: [
+            {
+              capabilityId: 'read_context',
+              availability: 'all_users',
+              allowed: true,
+              approvalMode: 'allow',
+            },
+            {
+              capabilityId: 'workspace_files',
+              availability: 'admin_only',
+              allowed: false,
+              approvalMode: 'require_approval',
+            },
+          ],
+          selected: {
+            capabilityIds: ['read_context'],
+            toolChoiceIds: ['choice-read-context'],
+            mcpChoiceIds: ['choice-sample-mcp'],
+          },
+        },
+        warnings: [{ code: 'sample_warning', message: 'Sample warning' }],
+      });
+      const runPlanJson = JSON.stringify(serialized.runPlan);
+      for (const forbidden of [
+        'renderedHash',
+        'renderedSummary',
+        'sha256:sample-rendered-prompt',
+        'selectedRuntimeMcpConnectionRefs',
+        'runtimeCapabilityKey',
+        'workspace.read_file',
+        'sample denied reason',
+        'rules',
+      ]) {
+        expect(runPlanJson).not.toContain(forbidden);
+      }
+    });
+
+    it('defaults missing selected runtime choice arrays to empty arrays', () => {
+      const snapshotWithoutSelections = {
+        ...runPlanSnapshot,
+        capabilities: {
+          ...runPlanSnapshot.capabilities,
+          selectedRuntimeToolChoiceIds: undefined,
+          selectedRuntimeMcpChoiceIds: undefined,
+          selectedRuntimeCapabilityIds: undefined,
+          selectedRuntimeMcpConnectionRefs: undefined,
+        },
+      };
+
+      const serialized = AgentRunService.serializeRun({
+        ...baseRun,
+        runPlanSnapshot: snapshotWithoutSelections,
+      } as any);
+
+      expect(serialized.runPlan?.capabilities.selected).toEqual({
+        capabilityIds: [],
+        toolChoiceIds: [],
+        mcpChoiceIds: [],
+      });
+    });
+
+    it('returns runPlan: null for snapshots missing resolved capability access', () => {
+      const incompleteSnapshot = {
+        ...runPlanSnapshot,
+        capabilities: {
+          provisionalCapabilityIds: runPlanSnapshot.capabilities.provisionalCapabilityIds,
+          selectedRuntimeToolChoiceIds: ['choice-read-context'],
+          selectedRuntimeMcpChoiceIds: ['choice-sample-mcp'],
+          selectedRuntimeMcpConnectionRefs: ['user:sample-mcp'],
+        },
+      };
+
+      const serialized = AgentRunService.serializeRun({
+        ...baseRun,
+        runPlanSnapshot: incompleteSnapshot,
+      } as any);
+
+      expect(serialized.runPlan).toBeNull();
     });
   });
 

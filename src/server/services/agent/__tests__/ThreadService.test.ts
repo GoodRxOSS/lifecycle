@@ -95,4 +95,105 @@ describe('AgentThreadService', () => {
 
     await expect(AgentThreadService.listThreadsForSession('session-1', 'user-123')).resolves.toEqual(listedThreads);
   });
+
+  it.each(['ended', 'error'])('blocks new threads for %s sessions', async (status) => {
+    mockAgentSessionQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'session-1',
+        userId: 'user-123',
+        status,
+      }),
+    });
+
+    await expect(AgentThreadService.createThread('session-1', 'user-123', 'New chat')).rejects.toThrow(
+      'Cannot create a thread for an inactive session'
+    );
+    expect(mockAgentThreadQuery).not.toHaveBeenCalled();
+  });
+
+  it('blocks new threads when the session runtime cannot accept messages', async () => {
+    mockAgentSessionQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'session-1',
+        userId: 'user-123',
+        status: 'active',
+        sessionKind: 'environment',
+        chatStatus: 'ready',
+        workspaceStatus: 'failed',
+      }),
+    });
+
+    await expect(AgentThreadService.createThread('session-1', 'user-123', 'New chat')).rejects.toThrow(
+      'This session is no longer available for new messages.'
+    );
+    expect(mockAgentThreadQuery).not.toHaveBeenCalled();
+  });
+
+  it('creates new threads when the session can accept messages', async () => {
+    const createdThread = { uuid: 'thread-2', sessionId: 17, isDefault: false };
+    const insertAndFetch = jest.fn().mockResolvedValue(createdThread);
+
+    mockAgentSessionQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'session-1',
+        userId: 'user-123',
+        status: 'active',
+        sessionKind: 'chat',
+        chatStatus: 'ready',
+        workspaceStatus: 'none',
+      }),
+    });
+    mockAgentThreadQuery.mockReturnValueOnce({
+      insertAndFetch,
+    });
+
+    await expect(AgentThreadService.createThread('session-1', 'user-123', 'New chat')).resolves.toBe(createdThread);
+    expect(insertAndFetch).toHaveBeenCalledWith({
+      sessionId: 17,
+      title: 'New chat',
+      isDefault: false,
+      metadata: {
+        sessionUuid: 'session-1',
+      },
+    });
+  });
+
+  it('reads selected agent definition metadata without agent-definition fallback', () => {
+    expect(
+      AgentThreadService.getSelectedAgentDefinitionId({
+        metadata: { selectedAgentDefinitionId: 'system.debug' },
+      } as any)
+    ).toBe('system.debug');
+    expect(
+      AgentThreadService.getSelectedAgentDefinitionId({
+        metadata: {},
+      } as any)
+    ).toBeNull();
+  });
+
+  it('builds a scoped selected agent definition metadata patch', () => {
+    expect(AgentThreadService.buildSelectedAgentDefinitionMetadataPatch('custom.sample-agent')).toEqual({
+      selectedAgentDefinitionId: 'custom.sample-agent',
+    });
+  });
+
+  it('trims explicit selected agent definition metadata', () => {
+    expect(
+      AgentThreadService.getSelectedAgentDefinitionId({
+        metadata: {
+          selectedAgentDefinitionId: ' custom.sample-agent ',
+        },
+      } as any)
+    ).toBe('custom.sample-agent');
+    expect(
+      AgentThreadService.getSelectedAgentDefinitionId({
+        metadata: {
+          selectedAgentDefinitionId: ' ',
+        },
+      } as any)
+    ).toBeNull();
+  });
 });

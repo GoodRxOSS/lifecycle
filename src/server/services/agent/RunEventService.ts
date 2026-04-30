@@ -995,7 +995,7 @@ export default class AgentRunEventService {
         this.requireExecutionOwner(
           lockedRun.uuid || String(run.id),
           options.executionOwner,
-          lockedRun as Pick<AgentRun, 'status' | 'executionOwner'>
+          lockedRun as unknown as Pick<AgentRun, 'status' | 'executionOwner'>
         );
       }
 

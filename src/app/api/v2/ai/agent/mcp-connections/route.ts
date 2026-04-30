@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { McpConfigService } from 'server/services/ai/mcp/config';
+import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
 
 export const dynamic = 'force-dynamic';
 

@@ -90,12 +90,12 @@ import {
   toPublicAgentSessionStartupFailure,
 } from 'server/lib/agentSession/startupFailureState';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
-import { McpConfigService } from 'server/services/ai/mcp/config';
+import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
 import GlobalConfigService from './globalConfig';
 import {
   SESSION_POD_MCP_CONFIG_SECRET_KEY,
   serializeSessionWorkspaceGatewayServers,
-} from 'server/services/ai/mcp/sessionPod';
+} from 'server/services/agentRuntime/mcp/sessionPod';
 import AgentPrewarmService from './agentPrewarm';
 import AgentSessionConfigService from './agentSessionConfig';
 import AgentChatSessionService from './agent/ChatSessionService';
@@ -104,6 +104,7 @@ import AgentProviderRegistry from './agent/ProviderRegistry';
 import AgentSandboxService from './agent/SandboxService';
 import AgentSourceService from './agent/SourceService';
 import { buildSessionWorkspacePromptLines } from './agent/sandboxToolCatalog';
+import { canSessionAcceptMessages, getSessionMessageBlockReason } from './agent/sessionReadiness';
 import {
   loadAgentSessionServiceCandidates,
   resolveRequestedAgentSessionServices,
@@ -151,37 +152,6 @@ type ActiveEnvironmentSessionSummary = {
 
 function resolveSessionKindFromBuildKind(buildKind: BuildKind): AgentSessionKind {
   return buildKind === BuildKind.SANDBOX ? AgentSessionKind.SANDBOX : AgentSessionKind.ENVIRONMENT;
-}
-
-function canSessionAcceptMessages(
-  session: Pick<AgentSession, 'sessionKind' | 'chatStatus' | 'workspaceStatus'>
-): boolean {
-  if (session.chatStatus !== AgentChatStatus.READY) {
-    return false;
-  }
-
-  if (session.sessionKind === AgentSessionKind.CHAT) {
-    return true;
-  }
-
-  return session.workspaceStatus === AgentWorkspaceStatus.READY;
-}
-
-function getSessionMessageBlockReason(
-  session: Pick<AgentSession, 'sessionKind' | 'status' | 'chatStatus' | 'workspaceStatus'>
-): string {
-  if (canSessionAcceptMessages(session)) {
-    return '';
-  }
-
-  if (
-    session.sessionKind !== AgentSessionKind.CHAT &&
-    (session.workspaceStatus === AgentWorkspaceStatus.PROVISIONING || session.status === 'starting')
-  ) {
-    return 'Wait for the session to finish starting before sending a message.';
-  }
-
-  return 'This session is no longer available for new messages.';
 }
 
 function warmDefaultThread(sessionUuid: string, userId: string): void {
@@ -760,6 +730,7 @@ export interface CreateSessionOptions {
     workspacePath?: string;
     workDir?: string | null;
   }>;
+  provider?: string;
   model?: string;
   environmentSkillRefs?: AgentSessionSkillRef[];
   repoUrl?: string;
@@ -1021,6 +992,8 @@ export default class AgentSessionService {
     const pvcName = `agent-pvc-${session.uuid.slice(0, 8)}`;
     const apiKeySecretName = `agent-secret-${session.uuid.slice(0, 8)}`;
     const redis = RedisClient.getInstance().getRedis();
+    const workspaceRepos = session.workspaceRepos || [];
+    const selectedServices = session.selectedServices || [];
 
     if (session.namespace && session.namespace !== namespace) {
       await deleteNamespace(session.namespace).catch(() => {});
@@ -1041,8 +1014,8 @@ export default class AgentSessionService {
       status: 'active',
       chatStatus: AgentChatStatus.READY,
       workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
-      workspaceRepos: [],
-      selectedServices: [],
+      workspaceRepos,
+      selectedServices,
       devModeSnapshots: {},
       forwardedAgentSecretProviders: [],
       skillPlan: session.skillPlan || EMPTY_AGENT_SESSION_SKILL_PLAN,
@@ -1055,7 +1028,15 @@ export default class AgentSessionService {
     await AgentSandboxService.recordSessionSandboxState(provisioningSession, { workspaceStorage });
 
     try {
-      const sessionPodMcpConfigJson = serializeSessionWorkspaceGatewayServers([]);
+      const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
+      const sessionPodServers = primaryWorkspaceRepo?.repo
+        ? await new McpConfigService().resolveSessionPodServersForRepo(
+            primaryWorkspaceRepo.repo,
+            undefined,
+            opts.userIdentity || null
+          )
+        : [];
+      const sessionPodMcpConfigJson = serializeSessionWorkspaceGatewayServers(sessionPodServers);
       const [, , agentServiceAccountName, useGvisor] = await Promise.all([
         createAgentPvc(namespace, pvcName, workspaceStorage.storageSize, undefined, workspaceStorage.accessMode),
         createAgentApiKeySecret(
@@ -1085,7 +1066,7 @@ export default class AgentSessionService {
         apiKeySecretName,
         hasGitHubToken: Boolean(opts.githubToken),
         workspacePath: SESSION_WORKSPACE_ROOT,
-        workspaceRepos: [],
+        workspaceRepos,
         skillPlan: session.skillPlan || EMPTY_AGENT_SESSION_SKILL_PLAN,
         forwardedAgentEnv: {},
         forwardedAgentSecretRefs: [],
@@ -1158,8 +1139,6 @@ export default class AgentSessionService {
           namespace: null,
           podName: null,
           pvcName: null,
-          workspaceRepos: [],
-          selectedServices: [],
           devModeSnapshots: {},
         } as unknown as Partial<AgentSession>);
 
@@ -1274,6 +1253,7 @@ export default class AgentSessionService {
     const sessionKind = resolveSessionKindFromBuildKind(buildKind);
     const podName = buildAgentSessionPodName(sessionUuid, opts.buildUuid);
     const apiKeySecretName = `agent-secret-${sessionUuid.slice(0, 8)}`;
+    const requestedProvider = opts.provider?.trim() || undefined;
     const requestedModelId = opts.model?.trim() || undefined;
     const devModeSnapshots: SessionSnapshotMap = {};
     const enabledDevModeDeployIds: number[] = [];
@@ -1317,6 +1297,7 @@ export default class AgentSessionService {
     const preflightStartedAt = Date.now();
     const selection = await AgentProviderRegistry.resolveSelection({
       repoFullName: primaryWorkspaceRepo?.repo,
+      requestedProvider,
       requestedModelId,
     });
     resolvedModelId = selection.modelId;
@@ -1392,7 +1373,11 @@ export default class AgentSessionService {
           skillPlan,
         } as unknown as Partial<AgentSession>);
 
-        await AgentSourceService.createSessionSource(createdSession, { trx, workspaceStorage });
+        await AgentSourceService.createSessionSource(createdSession, {
+          trx,
+          workspaceStorage,
+          defaultProvider: selection.provider,
+        });
         await AgentSandboxService.recordSessionSandboxState(createdSession, { trx, workspaceStorage });
         return createdSession;
       });
@@ -1674,7 +1659,10 @@ export default class AgentSessionService {
           .catch(() => null);
         if (failedSession) {
           await Promise.all([
-            AgentSourceService.createSessionSource(failedSession, { workspaceStorage }).catch(() => {}),
+            AgentSourceService.createSessionSource(failedSession, {
+              workspaceStorage,
+              defaultProvider: selection.provider,
+            }).catch(() => {}),
             AgentSandboxService.recordSessionSandboxState(failedSession, { workspaceStorage }).catch(() => {}),
           ]);
         }
@@ -2083,14 +2071,14 @@ export default class AgentSessionService {
       return resolvedConfiguredPrompt;
     }
 
-    if (!session.namespace) {
+    if (!session.namespace && !session.buildUuid) {
       return resolvedConfiguredPrompt;
     }
 
     try {
       const context = await resolveAgentSessionPromptContext({
         sessionDbId: session.id,
-        namespace: session.namespace,
+        namespace: session.namespace || null,
         buildUuid: session.buildUuid,
       });
       const toolLines = session.namespace

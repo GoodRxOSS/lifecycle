@@ -32,6 +32,7 @@ jest.mock('../ThreadService', () => ({
   __esModule: true,
   default: {
     getOwnedThread: jest.fn(),
+    getOwnedThreadWithSession: jest.fn(),
   },
 }));
 
@@ -49,6 +50,8 @@ const mockGetOwnedThread = AgentThreadService.getOwnedThread as jest.Mock;
 describe('AgentMessageStore', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockMessageQuery.mockReset();
+    mockGetOwnedThread.mockReset();
   });
 
   describe('serializeCanonicalMessage', () => {
@@ -75,6 +78,99 @@ describe('AgentMessageStore', () => {
         parts: [{ type: 'text', text: 'Hello' }],
         createdAt: '2026-04-25T00:00:00.000Z',
       });
+    });
+
+    it('returns typed agent switch system messages but rejects unrelated system messages', () => {
+      const switchMessage = AgentMessageStore.serializeCanonicalMessage(
+        {
+          uuid: '22222222-2222-4222-8222-222222222222',
+          clientMessageId: null,
+          role: 'system',
+          parts: [{ type: 'text', text: 'You switched Debug -> Develop. Applies to future runs.' }],
+          metadata: {
+            kind: 'agent_switch',
+            beforeAgent: { id: 'system.debug', label: 'Debug' },
+            afterAgent: { id: 'system.develop', label: 'Develop' },
+          },
+          createdAt: '2026-04-25T00:00:00.000Z',
+        } as any,
+        'thread-uuid'
+      );
+
+      expect(switchMessage).toEqual(
+        expect.objectContaining({
+          role: 'system',
+          metadata: expect.objectContaining({ kind: 'agent_switch' }),
+        })
+      );
+      expect(() =>
+        AgentMessageStore.serializeCanonicalMessage(
+          {
+            uuid: '33333333-3333-4333-8333-333333333333',
+            role: 'system',
+            parts: [{ type: 'text', text: 'Hidden status' }],
+            metadata: { kind: 'internal_status' },
+          } as any,
+          'thread-uuid'
+        )
+      ).toThrow('Agent message is not a public canonical message');
+    });
+  });
+
+  describe('createAgentSwitchEvent', () => {
+    it('inserts a server-authored agent_switch system event with metadata fields and no run id', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createAgentSwitchEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user', label: 'You' },
+        beforeAgent: { id: 'system.debug', label: 'Debug' },
+        afterAgent: { id: 'system.develop', label: 'Develop' },
+        occurredAt: '2026-05-01T00:00:00.000Z',
+      });
+
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 17,
+          runId: null,
+          role: 'system',
+          parts: [{ type: 'text', text: 'You switched Debug -> Develop. Applies to future runs.' }],
+          metadata: expect.objectContaining({
+            kind: 'agent_switch',
+            actor: { userId: 'sample-user', label: 'You' },
+            beforeAgent: { id: 'system.debug', label: 'Debug' },
+            afterAgent: { id: 'system.develop', label: 'Develop' },
+            appliesTo: 'future_runs',
+            occurredAt: '2026-05-01T00:00:00.000Z',
+          }),
+        })
+      );
+    });
+
+    it('inserts a custom agent switch event with label-only visible copy and backend id metadata', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createAgentSwitchEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user', label: 'Sample User' },
+        beforeAgent: { id: 'system.debug', label: 'Debug' },
+        afterAgent: { id: 'custom.sample-agent', label: 'Custom helper' },
+        occurredAt: '2026-05-01T00:00:00.000Z',
+      });
+
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parts: [{ type: 'text', text: 'Sample User switched Debug -> Custom helper. Applies to future runs.' }],
+          metadata: expect.objectContaining({
+            kind: 'agent_switch',
+            beforeAgent: { id: 'system.debug', label: 'Debug' },
+            afterAgent: { id: 'custom.sample-agent', label: 'Custom helper' },
+          }),
+        })
+      );
+      expect(JSON.stringify(insertAndFetch.mock.calls[0][0].parts)).not.toContain('custom.sample-agent');
     });
   });
 
@@ -303,6 +399,70 @@ describe('AgentMessageStore', () => {
           role: 'user',
           clientMessageId: 'short-client-message-id',
           metadata: { clientMessageId: 'short-client-message-id' },
+        })
+      );
+    });
+
+    it('preserves existing assistant run ownership when saving a later run transcript', async () => {
+      const existingRow = {
+        id: 11,
+        uuid: '22222222-2222-4222-8222-222222222222',
+        threadId: 17,
+        runId: 101,
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Previous response' }],
+        clientMessageId: null,
+        metadata: { runId: 'run-old' },
+      };
+      const existingWhere = jest.fn().mockResolvedValue([existingRow]);
+      const patchAndFetchById = jest.fn().mockResolvedValue(existingRow);
+      const insert = jest.fn().mockResolvedValue({
+        id: 12,
+        uuid: '33333333-3333-4333-8333-333333333333',
+        threadId: 17,
+        runId: 202,
+        role: 'assistant',
+        clientMessageId: null,
+        metadata: { runId: 'run-new' },
+      });
+
+      mockMessageQuery
+        .mockReturnValueOnce({ where: existingWhere })
+        .mockReturnValueOnce({ patchAndFetchById })
+        .mockReturnValueOnce({ insert });
+
+      await AgentMessageStore.upsertCanonicalUiMessagesForThread(
+        { id: 17 },
+        [
+          {
+            id: '22222222-2222-4222-8222-222222222222',
+            role: 'assistant',
+            metadata: { runId: 'run-old' },
+            parts: [{ type: 'text', text: 'Previous response' }],
+          } as any,
+          {
+            id: '33333333-3333-4333-8333-333333333333',
+            role: 'assistant',
+            metadata: { runId: 'run-new' },
+            parts: [{ type: 'text', text: 'Current response' }],
+          } as any,
+        ],
+        { runId: 202 }
+      );
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        11,
+        expect.objectContaining({
+          runId: 101,
+          parts: [{ type: 'text', text: 'Previous response' }],
+        })
+      );
+      expect(insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 17,
+          role: 'assistant',
+          runId: 202,
+          parts: [{ type: 'text', text: 'Current response' }],
         })
       );
     });

@@ -40,8 +40,9 @@ export type CanonicalAgentMessage = {
   clientMessageId: string | null;
   threadId: string;
   runId: string | null;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   parts: CanonicalAgentMessagePart[];
+  metadata?: Record<string, unknown>;
   createdAt: string | null;
 };
 

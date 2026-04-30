@@ -33,8 +33,27 @@ import {
 
 const AGENT_MESSAGE_UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const CLIENT_MESSAGE_ID_METADATA_KEY = 'clientMessageId';
+export const AGENT_SWITCH_METADATA_KIND = 'agent_switch';
 export const DEFAULT_AGENT_MESSAGE_PAGE_LIMIT = 50;
 export const MAX_AGENT_MESSAGE_PAGE_LIMIT = 100;
+
+export type AgentSwitchEventMetadata = {
+  kind: typeof AGENT_SWITCH_METADATA_KIND;
+  actor: {
+    userId: string;
+    label: string;
+  };
+  beforeAgent: {
+    id: string;
+    label: string;
+  };
+  afterAgent: {
+    id: string;
+    label: string;
+  };
+  appliesTo: 'future_runs';
+  occurredAt: string;
+};
 
 function toAgentUiMessage(message: AgentMessage): AgentUIMessage {
   return toUiMessageFromCanonicalInput(
@@ -58,6 +77,10 @@ function toJsonRecord(value: unknown): Record<string, unknown> {
 
 function normalizeMessageId(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function isAgentSwitchMessage(message: AgentMessage): boolean {
+  return message.role === 'system' && message.metadata?.kind === AGENT_SWITCH_METADATA_KIND;
 }
 
 function getIncomingMessageId(message: Pick<CanonicalAgentInputMessage, 'id'>): string | null {
@@ -121,6 +144,18 @@ function buildStoredCanonicalMessage(
   };
 }
 
+function resolveStoredRunId(
+  role: CanonicalAgentInputMessage['role'],
+  row: AgentMessage | undefined,
+  runId?: number | null
+): number | null {
+  if (role !== 'assistant') {
+    return row?.runId ?? null;
+  }
+
+  return row?.runId ?? runId ?? null;
+}
+
 async function loadExistingMessagesForIncomingIds(
   threadId: number,
   messages: CanonicalAgentInputMessage[],
@@ -161,7 +196,7 @@ function serializeCanonicalAgentMessage(
   threadUuid: string,
   runUuid?: string | null
 ): CanonicalAgentMessage | null {
-  if (message.role !== 'user' && message.role !== 'assistant') {
+  if (message.role !== 'user' && message.role !== 'assistant' && !isAgentSwitchMessage(message)) {
     return null;
   }
 
@@ -182,8 +217,9 @@ function serializeCanonicalAgentMessage(
       normalizeMessageId(message.metadata?.[CLIENT_MESSAGE_ID_METADATA_KEY]),
     threadId: threadUuid,
     runId: runUuid || normalizeMessageId(enrichedMessage.runUuid),
-    role: message.role,
+    role: message.role as CanonicalAgentMessage['role'],
     parts,
+    ...(isAgentSwitchMessage(message) ? { metadata: message.metadata || {} } : {}),
     createdAt: enrichedMessage.createdAt || null,
   };
 }
@@ -252,7 +288,13 @@ export default class AgentMessageStore {
       .alias('message')
       .leftJoin('agent_runs as run', 'message.runId', 'run.id')
       .where('message.threadId', thread.id)
-      .whereIn('message.role', ['user', 'assistant'])
+      .where((builder) => {
+        builder.whereIn('message.role', ['user', 'assistant']).orWhere((systemBuilder) => {
+          systemBuilder
+            .where('message.role', 'system')
+            .whereRaw('"message"."metadata"->>? = ?', ['kind', AGENT_SWITCH_METADATA_KIND]);
+        });
+      })
       .select('message.*', 'run.uuid as runUuid')
       .orderBy('message.createdAt', 'desc')
       .orderBy('message.id', 'desc')
@@ -332,6 +374,47 @@ export default class AgentMessageStore {
     });
   }
 
+  static async createAgentSwitchEvent({
+    thread,
+    actor,
+    beforeAgent,
+    afterAgent,
+    occurredAt = new Date().toISOString(),
+    trx,
+  }: {
+    thread: Pick<AgentThread, 'id'>;
+    actor: { userId: string; label?: string | null };
+    beforeAgent: { id: string; label: string };
+    afterAgent: { id: string; label: string };
+    occurredAt?: string;
+    trx?: Transaction;
+  }): Promise<AgentMessage> {
+    const actorLabel = actor.label?.trim() || 'You';
+    const text = `${actorLabel} switched ${beforeAgent.label} -> ${afterAgent.label}. Applies to future runs.`;
+    const metadata: AgentSwitchEventMetadata = {
+      kind: AGENT_SWITCH_METADATA_KIND,
+      actor: {
+        userId: actor.userId,
+        label: actorLabel,
+      },
+      beforeAgent,
+      afterAgent,
+      appliesTo: 'future_runs',
+      occurredAt,
+    };
+
+    return AgentMessage.query(trx).insertAndFetch({
+      uuid: uuid(),
+      threadId: thread.id,
+      runId: null,
+      role: 'system',
+      parts: [{ type: 'text', text }] as unknown as Record<string, unknown>[],
+      uiMessage: null,
+      clientMessageId: null,
+      metadata: metadata as unknown as Record<string, unknown>,
+    });
+  }
+
   static async syncCanonicalMessages(
     threadUuid: string,
     userId: string,
@@ -364,7 +447,7 @@ export default class AgentMessageStore {
         uiMessage: null,
         clientMessageId: stored.clientMessageId,
         metadata,
-        runId: message.role === 'assistant' && runId ? runId : row?.runId ?? null,
+        runId: resolveStoredRunId(message.role, row, runId),
       };
 
       if (!row) {
@@ -422,7 +505,7 @@ export default class AgentMessageStore {
         uiMessage: null,
         clientMessageId: stored.clientMessageId,
         metadata: toJsonRecord(stored.metadata),
-        runId: message.role === 'assistant' && options?.runId ? options.runId : row?.runId ?? null,
+        runId: resolveStoredRunId(message.role, row, options?.runId),
       };
 
       if (!row) {
@@ -506,7 +589,7 @@ export default class AgentMessageStore {
         uiMessage: null,
         clientMessageId: stored.clientMessageId,
         metadata: toJsonRecord(stored.metadata),
-        runId: message.role === 'assistant' && options?.runId ? options.runId : row?.runId ?? null,
+        runId: resolveStoredRunId(message.role, row, options?.runId),
       };
 
       if (!row) {

@@ -18,16 +18,24 @@ import { dynamicTool, jsonSchema, type ToolSet } from 'ai';
 import AgentSession from 'server/models/AgentSession';
 import AgentSessionService from 'server/services/agentSession';
 import { SESSION_WORKSPACE_GATEWAY_PORT } from 'server/lib/agentSession/podFactory';
-import { McpConfigService } from 'server/services/ai/mcp/config';
-import { McpClientManager } from 'server/services/ai/mcp/client';
-import { applyMcpDefaultToolArgs } from 'server/services/ai/mcp/runtimeConfig';
-import { usesSessionWorkspaceGatewayExecution } from 'server/services/ai/mcp/sessionPod';
+import { McpConfigService, sanitizeMcpErrorMessage, sanitizeMcpResult } from 'server/services/agentRuntime/mcp/config';
+import { McpClientManager } from 'server/services/agentRuntime/mcp/client';
+import { applyMcpDefaultToolArgs } from 'server/services/agentRuntime/mcp/runtimeConfig';
+import { usesSessionWorkspaceGatewayExecution } from 'server/services/agentRuntime/mcp/sessionPod';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import type { AgentSessionToolRule } from 'server/services/types/agentSessionConfig';
+import type {
+  CapabilityPolicyConfig,
+  CustomAgentCreationPolicyConfig,
+  AgentRuntimeConfig,
+} from 'server/services/types/agentRuntimeConfig';
 import AgentPolicyService from './PolicyService';
+import type { ResolvedAgentCapabilityAccess } from './PolicyService';
 import type { AgentApprovalMode, AgentApprovalPolicy, AgentCapabilityKey, AgentToolAuditRecord } from './types';
-import type { ResolvedMcpServer } from 'server/services/ai/mcp/types';
+import type { AgentCapabilityCatalogId } from './capabilityCatalog';
+import type { ResolvedMcpServer } from 'server/services/agentRuntime/mcp/types';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import { assertSafeWorkspaceMutationCommand, isReadOnlyWorkspaceCommand } from './sandboxExecSafety';
 import { buildProposedFileChanges, buildResultFileChanges, didToolResultFail } from './fileChanges';
 import type { AgentFileChangeData } from './types';
@@ -46,6 +54,13 @@ import {
 import { getSessionWorkspaceCatalogEntriesForRuntimeTool } from './sandboxToolCatalog';
 import { SessionWorkspaceGatewayUnavailableError } from './errors';
 import AgentSandboxService from './SandboxService';
+import {
+  registerLifecycleDiagnosticFixTools,
+  registerLifecycleDiagnosticReadTools,
+  type LifecycleDiagnosticGithubSafety,
+} from './diagnosticTools';
+import { YamlConfigParser } from 'server/lib/yamlConfigParser';
+import type { LifecycleConfig } from 'server/models/yaml/Config';
 
 type ToolExecutionHooks = {
   onToolStarted?: (audit: AgentToolAuditRecord) => Promise<void>;
@@ -61,6 +76,7 @@ type SessionWorkspaceGatewayTimeouts = {
 const WORKSPACE_EXEC_RUNTIME_TOOL_NAME = 'workspace.exec';
 const WORKSPACE_WRITE_FILE_RUNTIME_TOOL_NAME = 'workspace.write_file';
 const WORKSPACE_EDIT_FILE_RUNTIME_TOOL_NAME = 'workspace.edit_file';
+const REDACTED_MCP_DEFAULT_ARG = '******';
 const WORKSPACE_EXEC_INPUT_SCHEMA = {
   type: 'object',
   required: ['command'],
@@ -119,6 +135,7 @@ const WORKSPACE_EDIT_FILE_INPUT_SCHEMA = {
     },
   },
 } as const;
+const LIFECYCLE_CONFIG_WRITE_PATTERNS = ['lifecycle.yaml', 'lifecycle.yml'];
 const PUBLISH_HTTP_INPUT_SCHEMA = {
   type: 'object',
   required: ['port'],
@@ -133,6 +150,14 @@ const PUBLISH_HTTP_INPUT_SCHEMA = {
   },
 } as const;
 
+function toAiJsonSchema(schema: unknown) {
+  return jsonSchema(schema as any);
+}
+
+function toAiDynamicTool(config: unknown) {
+  return dynamicTool(config as any);
+}
+
 function resolvePrimaryRepo(session: AgentSession): string | undefined {
   const primaryRepo = (session.workspaceRepos || []).find((repo) => repo.primary)?.repo;
   if (primaryRepo) {
@@ -140,6 +165,84 @@ function resolvePrimaryRepo(session: AgentSession): string | undefined {
   }
 
   return session.selectedServices?.[0]?.repo || undefined;
+}
+
+function resolvePrimaryBranch(session: AgentSession): string | null {
+  const primaryWorkspaceRepo =
+    (session.workspaceRepos || []).find((repo) => repo.primary) || session.workspaceRepos?.[0];
+  if (primaryWorkspaceRepo?.branch) {
+    return primaryWorkspaceRepo.branch;
+  }
+
+  return session.selectedServices?.[0]?.branch || null;
+}
+
+function addReferencedFile(files: Set<string>, value: unknown) {
+  if (typeof value !== 'string') {
+    return;
+  }
+
+  const normalized = value.trim().replace(/^\/+/, '').replace(/^\.\//, '');
+  if (normalized) {
+    files.add(normalized);
+  }
+}
+
+function collectLifecycleConfigReferencedFiles(config: LifecycleConfig | null | undefined): string[] {
+  const files = new Set<string>();
+
+  for (const service of config?.services || []) {
+    const candidate = service as Record<string, any>;
+    addReferencedFile(files, candidate.github?.docker?.app?.dockerfilePath);
+    addReferencedFile(files, candidate.github?.docker?.init?.dockerfilePath);
+    addReferencedFile(files, candidate.helm?.docker?.app?.dockerfilePath);
+    addReferencedFile(files, candidate.helm?.docker?.init?.dockerfilePath);
+    addReferencedFile(files, candidate.helm?.envMapping?.app?.path);
+    addReferencedFile(files, candidate.helm?.envMapping?.init?.path);
+
+    for (const valueFile of candidate.helm?.chart?.valueFiles || []) {
+      addReferencedFile(files, valueFile);
+    }
+  }
+
+  return [...files];
+}
+
+async function resolveLifecycleDiagnosticGithubSafety({
+  session,
+  repoFullName,
+  config,
+}: {
+  session: AgentSession;
+  repoFullName?: string;
+  config?: AgentRuntimeConfig | null;
+}): Promise<LifecycleDiagnosticGithubSafety> {
+  const allowedBranch = resolvePrimaryBranch(session);
+  const allowedWritePatterns = [
+    ...new Set([...LIFECYCLE_CONFIG_WRITE_PATTERNS, ...(config?.allowedWritePatterns || [])]),
+  ];
+  const safety: LifecycleDiagnosticGithubSafety = {
+    allowedBranch,
+    allowedWritePatterns,
+    excludedFilePatterns: config?.excludedFilePatterns || [],
+    referencedFiles: [],
+  };
+
+  if (!repoFullName || !allowedBranch) {
+    return safety;
+  }
+
+  try {
+    const lifecycleConfig = await new YamlConfigParser().parseYamlConfigFromBranch(repoFullName, allowedBranch);
+    safety.referencedFiles = collectLifecycleConfigReferencedFiles(lifecycleConfig);
+  } catch (error) {
+    getLogger().warn(
+      { error, repo: repoFullName, branch: allowedBranch },
+      `AgentExec: lifecycle config references unavailable repo=${repoFullName} branch=${allowedBranch}`
+    );
+  }
+
+  return safety;
 }
 
 function resolveToolApprovalMode({
@@ -153,6 +256,43 @@ function resolveToolApprovalMode({
 }): AgentApprovalMode {
   const rule = toolRules?.find((item) => item.toolKey === toolKey);
   return rule?.mode || capabilityMode;
+}
+
+function isCatalogCapabilityAllowed(
+  resolvedCapabilityAccess: ResolvedAgentCapabilityAccess[] | undefined,
+  capabilityId: AgentCapabilityCatalogId
+): boolean {
+  if (!resolvedCapabilityAccess) {
+    return false;
+  }
+
+  return resolvedCapabilityAccess.some((entry) => entry.capabilityId === capabilityId && entry.allowed);
+}
+
+function selectedMcpConnectionRefs(connectionRefs?: string[]): Set<string> | undefined {
+  if (connectionRefs === undefined) {
+    return undefined;
+  }
+
+  return new Set(connectionRefs.map((connectionRef) => connectionRef.trim()).filter(Boolean));
+}
+
+function redactMcpDefaultArgs(
+  args: Record<string, unknown>,
+  defaultArgs: Record<string, string> | undefined
+): Record<string, unknown> {
+  if (!defaultArgs || Object.keys(defaultArgs).length === 0) {
+    return args;
+  }
+
+  const redacted = { ...args };
+  for (const key of Object.keys(defaultArgs)) {
+    if (key in redacted) {
+      redacted[key] = REDACTED_MCP_DEFAULT_ARG;
+    }
+  }
+
+  return redacted;
 }
 
 function resolveSessionWorkspaceGatewayBaseUrl(session: AgentSession): string | null {
@@ -192,6 +332,7 @@ async function resolveSessionWorkspaceGatewayServer(
     const discoveredTools = await client.listTools(timeouts.discoveryTimeoutMs);
 
     return {
+      scope: 'session',
       slug: 'sandbox',
       name: 'Session Workspace',
       transport: { type: 'http', url },
@@ -360,6 +501,8 @@ function registerChatWorkspaceExecTool({
   capabilityKey,
   description,
   readOnly,
+  catalogCapabilityId,
+  resolvedCapabilityAccess,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -373,7 +516,13 @@ function registerChatWorkspaceExecTool({
   capabilityKey: AgentCapabilityKey;
   description: string;
   readOnly: boolean;
+  catalogCapabilityId: AgentCapabilityCatalogId;
+  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
 }) {
+  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
+    return;
+  }
+
   const toolKey = buildAgentToolKey(SESSION_WORKSPACE_SERVER_SLUG, toolName);
   const mode = resolveToolApprovalMode({
     toolRules,
@@ -385,9 +534,9 @@ function registerChatWorkspaceExecTool({
     return;
   }
 
-  tools[toolKey] = dynamicTool({
+  tools[toolKey] = toAiDynamicTool({
     description,
-    inputSchema: jsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA),
+    inputSchema: toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA),
     needsApproval: mode === 'require_approval',
     execute: async (input, context) => {
       const args = (input as Record<string, unknown>) || {};
@@ -467,6 +616,8 @@ function registerChatWorkspaceFileTool({
   toolName,
   inputSchema,
   description,
+  catalogCapabilityId,
+  resolvedCapabilityAccess,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -479,7 +630,13 @@ function registerChatWorkspaceFileTool({
   toolName: string;
   inputSchema: Record<string, unknown>;
   description: string;
+  catalogCapabilityId: AgentCapabilityCatalogId;
+  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
 }) {
+  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
+    return;
+  }
+
   const toolKey = buildAgentToolKey(SESSION_WORKSPACE_SERVER_SLUG, toolName);
   const capabilityKey: AgentCapabilityKey = 'workspace_write';
   const mode = resolveToolApprovalMode({
@@ -492,9 +649,9 @@ function registerChatWorkspaceFileTool({
     return;
   }
 
-  tools[toolKey] = dynamicTool({
+  tools[toolKey] = toAiDynamicTool({
     description,
-    inputSchema: jsonSchema(inputSchema),
+    inputSchema: toAiJsonSchema(inputSchema),
     needsApproval: mode === 'require_approval',
     onInputAvailable: async ({ input, toolCallId }) => {
       if (!toolCallId) {
@@ -599,6 +756,7 @@ function registerChatPublishHttpTool({
   requestGitHubToken,
   hooks,
   toolRules,
+  resolvedCapabilityAccess,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -607,8 +765,13 @@ function registerChatPublishHttpTool({
   requestGitHubToken?: string | null;
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
+  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
 }) {
   const toolKey = buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_PUBLISH_HTTP_TOOL_NAME);
+  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, 'preview_publish')) {
+    return;
+  }
+
   const capabilityKey: AgentCapabilityKey = 'deploy_k8s_mutation';
   const mode = resolveToolApprovalMode({
     toolRules,
@@ -620,10 +783,10 @@ function registerChatPublishHttpTool({
     return;
   }
 
-  tools[toolKey] = dynamicTool({
+  tools[toolKey] = toAiDynamicTool({
     description:
       'Expose a running HTTP app from the chat workspace through lifecycle-managed ingress and return the reachable URL.',
-    inputSchema: jsonSchema(PUBLISH_HTTP_INPUT_SCHEMA),
+    inputSchema: toAiJsonSchema(PUBLISH_HTTP_INPUT_SCHEMA),
     needsApproval: mode === 'require_approval',
     execute: async (input, context) => {
       const args = (input as Record<string, unknown>) || {};
@@ -685,6 +848,7 @@ function registerChatWorkspaceTools({
   requestGitHubToken,
   hooks,
   toolRules,
+  resolvedCapabilityAccess,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -694,6 +858,7 @@ function registerChatWorkspaceTools({
   requestGitHubToken?: string | null;
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
+  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
 }) {
   registerChatWorkspaceExecTool({
     tools,
@@ -708,6 +873,8 @@ function registerChatWorkspaceTools({
     capabilityKey: 'read',
     description: buildWorkspaceReadonlyExecDescription(SESSION_WORKSPACE_SERVER_NAME),
     readOnly: true,
+    catalogCapabilityId: 'read_context',
+    resolvedCapabilityAccess,
   });
   registerChatWorkspaceExecTool({
     tools,
@@ -722,6 +889,8 @@ function registerChatWorkspaceTools({
     capabilityKey: 'shell_exec',
     description: buildWorkspaceMutationExecDescription(SESSION_WORKSPACE_SERVER_NAME),
     readOnly: false,
+    catalogCapabilityId: 'workspace_shell',
+    resolvedCapabilityAccess,
   });
   registerChatWorkspaceFileTool({
     tools,
@@ -736,6 +905,8 @@ function registerChatWorkspaceTools({
     inputSchema: WORKSPACE_WRITE_FILE_INPUT_SCHEMA,
     description:
       'Write a file in the chat workspace. Use this when the user asks to create or replace file contents. This provisions the workspace only when the tool runs.',
+    catalogCapabilityId: 'workspace_files',
+    resolvedCapabilityAccess,
   });
   registerChatWorkspaceFileTool({
     tools,
@@ -750,6 +921,8 @@ function registerChatWorkspaceTools({
     inputSchema: WORKSPACE_EDIT_FILE_INPUT_SCHEMA,
     description:
       'Edit a file in the chat workspace by replacing exact text. Use this for targeted file modifications. This provisions the workspace only when the tool runs.',
+    catalogCapabilityId: 'workspace_files',
+    resolvedCapabilityAccess,
   });
 }
 
@@ -776,24 +949,25 @@ function registerGenericMcpTool({
 }) {
   const toolKey = buildAgentToolKey(server.slug, exposedToolName);
 
-  tools[toolKey] = dynamicTool({
+  tools[toolKey] = toAiDynamicTool({
     description,
-    inputSchema: jsonSchema(discoveredTool.inputSchema as Record<string, unknown>),
+    inputSchema: toAiJsonSchema(discoveredTool.inputSchema as Record<string, unknown>),
     needsApproval: mode === 'require_approval',
     onInputAvailable: async ({ input, toolCallId }) => {
       if (!toolCallId) {
         return;
       }
 
-      const args = applyMcpDefaultToolArgs(
+      const runtimeArgs = applyMcpDefaultToolArgs(
         discoveredTool.inputSchema as Record<string, unknown>,
         server.defaultArgs,
         (input as Record<string, unknown>) || {}
       );
+      const auditArgs = redactMcpDefaultArgs(runtimeArgs, server.defaultArgs);
       const changes = buildProposedFileChanges({
         toolCallId,
         sourceTool: exposedToolName,
-        input: args,
+        input: auditArgs,
         previewChars: await getFileChangePreviewChars(),
       });
 
@@ -803,32 +977,43 @@ function registerGenericMcpTool({
     },
     execute: async (input, context) => {
       const toolCallId = context?.toolCallId;
-      const args = applyMcpDefaultToolArgs(
+      const runtimeArgs = applyMcpDefaultToolArgs(
         discoveredTool.inputSchema as Record<string, unknown>,
         server.defaultArgs,
         (input as Record<string, unknown>) || {}
       );
+      const auditArgs = redactMcpDefaultArgs(runtimeArgs, server.defaultArgs);
       const audit: AgentToolAuditRecord = {
         source: 'mcp',
         serverSlug: server.slug,
         toolName: exposedToolName,
         toolCallId,
-        args,
+        args: auditArgs,
         capabilityKey,
       };
 
       await hooks?.onToolStarted?.(audit);
 
+      const mcpSecretSources = [
+        {
+          compiledConfig: {
+            env: server.env,
+            defaultArgs: server.defaultArgs,
+          },
+          transport: server.transport,
+        },
+      ];
       const client = new McpClientManager();
       try {
         await client.connect(server.transport, server.timeout);
-        const result = await client.callTool(discoveredTool.name, args, server.timeout);
-        const failed = result.isError || didToolResultFail(result);
+        const rawResult = await client.callTool(discoveredTool.name, runtimeArgs, server.timeout);
+        const failed = rawResult.isError || didToolResultFail(rawResult);
+        const result = failed ? sanitizeMcpResult(rawResult, mcpSecretSources) : rawResult;
         if (toolCallId) {
           const changes = buildResultFileChanges({
             toolCallId,
             sourceTool: exposedToolName,
-            input: args,
+            input: auditArgs,
             result,
             failed,
             previewChars: await getFileChangePreviewChars(),
@@ -845,17 +1030,18 @@ function registerGenericMcpTool({
         });
         return result;
       } catch (error) {
+        const errorMessage = sanitizeMcpErrorMessage(error, mcpSecretSources);
         getLogger().warn(
-          { error },
+          { error: errorMessage },
           `AgentExec: mcp tool failed sessionId=${session.uuid} server=${server.slug} tool=${exposedToolName}`
         );
         if (toolCallId) {
           const changes = buildResultFileChanges({
             toolCallId,
             sourceTool: exposedToolName,
-            input: args,
+            input: auditArgs,
             result: {
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage,
             },
             failed: true,
             previewChars: await getFileChangePreviewChars(),
@@ -868,11 +1054,11 @@ function registerGenericMcpTool({
         await hooks?.onToolFinished?.({
           ...audit,
           result: {
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage,
           },
           status: 'failed',
         });
-        throw error;
+        throw new Error(errorMessage);
       } finally {
         await client.close();
       }
@@ -897,15 +1083,22 @@ export default class AgentCapabilityService {
     session: AgentSession;
     repoFullName?: string;
     approvalPolicy: AgentApprovalPolicy;
+    capabilityPolicy?: CapabilityPolicyConfig;
+    customAgentCreationPolicy?: CustomAgentCreationPolicyConfig;
   }> {
     const session = await this.getOwnedSession(sessionUuid, userIdentity.userId);
     const repoFullName = resolvePrimaryRepo(session);
-    const approvalPolicy = await AgentPolicyService.getEffectivePolicy(repoFullName);
+    const [approvalPolicy, effectiveAgentConfig] = await Promise.all([
+      AgentPolicyService.getEffectivePolicy(repoFullName),
+      AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName),
+    ]);
 
     return {
       session,
       repoFullName,
       approvalPolicy,
+      capabilityPolicy: effectiveAgentConfig.capabilityPolicy,
+      customAgentCreationPolicy: effectiveAgentConfig.customAgentCreationPolicy,
     };
   }
 
@@ -919,6 +1112,8 @@ export default class AgentCapabilityService {
     requestGitHubToken,
     hooks,
     toolRules,
+    resolvedCapabilityAccess,
+    selectedRuntimeMcpConnectionRefs,
   }: {
     session: AgentSession;
     repoFullName?: string;
@@ -929,9 +1124,19 @@ export default class AgentCapabilityService {
     requestGitHubToken?: string | null;
     hooks?: ToolExecutionHooks;
     toolRules?: AgentSessionToolRule[];
+    resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+    selectedRuntimeMcpConnectionRefs?: string[];
   }): Promise<ToolSet> {
     const tools: ToolSet = {};
     const chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(session);
+    const effectiveAgentConfig = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const lifecycleDiagnosticGithubSafety = session.buildUuid
+      ? await resolveLifecycleDiagnosticGithubSafety({
+          session,
+          repoFullName,
+          config: effectiveAgentConfig,
+        })
+      : undefined;
 
     if (session.sessionKind === 'chat') {
       registerChatWorkspaceTools({
@@ -943,6 +1148,7 @@ export default class AgentCapabilityService {
         requestGitHubToken,
         hooks,
         toolRules,
+        resolvedCapabilityAccess,
       });
 
       registerChatPublishHttpTool({
@@ -953,8 +1159,28 @@ export default class AgentCapabilityService {
         requestGitHubToken,
         hooks,
         toolRules,
+        resolvedCapabilityAccess,
       });
     }
+
+    registerLifecycleDiagnosticReadTools({
+      tools,
+      session,
+      approvalPolicy,
+      hooks,
+      toolRules,
+      resolvedCapabilityAccess,
+      githubSafety: lifecycleDiagnosticGithubSafety,
+    });
+    registerLifecycleDiagnosticFixTools({
+      tools,
+      session,
+      approvalPolicy,
+      hooks,
+      toolRules,
+      resolvedCapabilityAccess,
+      githubSafety: lifecycleDiagnosticGithubSafety,
+    });
 
     const mcpConfigService = new McpConfigService();
     const [repoServers, workspaceGatewayServer] = await Promise.all([
@@ -966,7 +1192,11 @@ export default class AgentCapabilityService {
             executionTimeoutMs: workspaceToolExecutionTimeoutMs,
           }),
     ]);
-    const resolvedRepoServers = repoServers.flatMap((server) => {
+    const selectedRuntimeMcpRefs = selectedMcpConnectionRefs(selectedRuntimeMcpConnectionRefs);
+    const selectedRepoServers = selectedRuntimeMcpRefs
+      ? repoServers.filter((server) => selectedRuntimeMcpRefs.has(`${server.scope}:${server.slug}`))
+      : repoServers;
+    const resolvedRepoServers = selectedRepoServers.flatMap((server) => {
       if (!usesSessionWorkspaceGatewayExecution(server.transport)) {
         return [server];
       }
@@ -1000,6 +1230,10 @@ export default class AgentCapabilityService {
               entry.toolName,
               entry.annotations || discoveredTool.annotations
             );
+            if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, entry.catalogCapabilityId)) {
+              continue;
+            }
+
             const mode = resolveToolApprovalMode({
               toolRules,
               toolKey: entry.toolKey,
@@ -1011,9 +1245,9 @@ export default class AgentCapabilityService {
             }
 
             if (entry.toolName === SESSION_WORKSPACE_READONLY_TOOL_NAME) {
-              const inputSchema = jsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
+              const inputSchema = toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
 
-              tools[entry.toolKey] = dynamicTool({
+              tools[entry.toolKey] = toAiDynamicTool({
                 description: entry.description,
                 inputSchema,
                 needsApproval: mode === 'require_approval',
@@ -1072,9 +1306,9 @@ export default class AgentCapabilityService {
             }
 
             if (entry.toolName === SESSION_WORKSPACE_MUTATION_TOOL_NAME) {
-              const inputSchema = jsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
+              const inputSchema = toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
 
-              tools[entry.toolKey] = dynamicTool({
+              tools[entry.toolKey] = toAiDynamicTool({
                 description: entry.description,
                 inputSchema,
                 needsApproval: mode === 'require_approval',
@@ -1159,6 +1393,12 @@ export default class AgentCapabilityService {
           discoveredTool.name,
           discoveredTool.annotations
         );
+        const catalogCapabilityId: AgentCapabilityCatalogId =
+          capabilityKey === 'external_mcp_read' ? 'external_mcp_read' : 'external_mcp_write';
+        if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
+          continue;
+        }
+
         const toolName = buildAgentToolKey(server.slug, discoveredTool.name);
         const mode = resolveToolApprovalMode({
           toolRules,

@@ -40,6 +40,18 @@ function normalizeClaim(value: unknown): string | null {
   return normalized || null;
 }
 
+const REQUEST_USER_ROLES = ['user', 'admin'] as const;
+type RequestUserRole = (typeof REQUEST_USER_ROLES)[number];
+
+function normalizeRoles(value: unknown): RequestUserRole[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const allowed = new Set<string>(REQUEST_USER_ROLES);
+  return value.filter((role): role is RequestUserRole => typeof role === 'string' && allowed.has(role));
+}
+
 function getLocalDevUserId(): string {
   const configured = process.env.LOCAL_DEV_USER_ID?.trim();
   return configured || 'local-dev-user';
@@ -63,6 +75,7 @@ export interface RequestUserIdentity {
   displayName: string;
   gitUserName: string;
   gitUserEmail: string;
+  roles: RequestUserRole[];
 }
 
 function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestUserIdentity {
@@ -73,6 +86,10 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
   const firstName = normalizeClaim(claims.given_name) || normalizeClaim(claims.firstName);
   const lastName = normalizeClaim(claims.family_name) || normalizeClaim(claims.lastName);
   const explicitName = normalizeClaim(claims.name);
+  const realmAccess = claims.realm_access as { roles?: unknown } | undefined;
+  const tokenRoles = normalizeRoles(realmAccess?.roles);
+  const roles: RequestUserRole[] =
+    tokenRoles.length > 0 ? tokenRoles : !payload && process.env.ENABLE_AUTH !== 'true' ? ['admin'] : [];
   const displayName =
     explicitName ||
     [firstName, lastName].filter(Boolean).join(' ').trim() ||
@@ -92,6 +109,7 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
     displayName,
     gitUserName,
     gitUserEmail,
+    roles,
   };
 }
 

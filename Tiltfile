@@ -239,7 +239,7 @@ if use_local_keycloak_charts:
 
     local_resource(
         'lifecycle-keycloak-chart-deps',
-        cmd='helm dependency build {}'.format(lifecycle_keycloak_chart),
+        cmd='helm dependency update {}'.format(lifecycle_keycloak_chart),
         deps=[
             '{}/Chart.yaml'.format(lifecycle_keycloak_chart),
             '{}/values.yaml'.format(lifecycle_keycloak_chart),

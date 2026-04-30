@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import { McpConfigService, redactSharedConfigSecrets } from 'server/services/ai/mcp/config';
+import { McpConfigService, redactMcpConfigSecrets } from 'server/services/agentRuntime/mcp/config';
 import 'server/lib/dependencies';
 
 /**
@@ -64,7 +64,7 @@ const getHandler = async (req: NextRequest) => {
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
   const service = new McpConfigService();
   const configs = await service.listByScope(scope);
-  const redacted = configs.map((config) => redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config));
+  const redacted = configs.map((config) => redactMcpConfigSecrets(config.toJSON ? config.toJSON() : config));
   return successResponse(redacted, { status: 200 }, req);
 };
 
@@ -149,7 +149,7 @@ const postHandler = async (req: NextRequest) => {
 
   try {
     const config = await service.create(input);
-    const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
+    const result = redactMcpConfigSecrets(config.toJSON ? config.toJSON() : config);
     return successResponse(result, { status: 201 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

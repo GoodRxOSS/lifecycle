@@ -14,7 +14,16 @@
  * limitations under the License.
  */
 
-import AIAgentConfigService from 'server/services/aiAgentConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
+import type { AgentDefinitionOwnerKind } from './agentDefinitionTypes';
+import type { CapabilityPolicyConfig, CustomAgentCreationPolicyConfig } from 'server/services/types/agentRuntimeConfig';
+import {
+  getAgentCapabilityCatalogEntry,
+  isAgentCapabilityCatalogId,
+  type AgentCapabilityAvailability,
+  type AgentCapabilityCatalogEntry,
+  type AgentCapabilitySourceKind,
+} from './capabilityCatalog';
 import type { AgentApprovalMode, AgentApprovalPolicy, AgentCapabilityKey } from './types';
 import { DEFAULT_AGENT_APPROVAL_POLICY } from './types';
 
@@ -29,9 +38,37 @@ type ApprovalPolicyConfig = Partial<AgentApprovalPolicy> & {
   rules?: Partial<Record<AgentCapabilityKey, AgentApprovalMode>>;
 };
 
+export type AgentCapabilityAccessReason =
+  | 'admin_only'
+  | 'system_only'
+  | 'disabled'
+  | 'unknown_capability'
+  | 'source_incompatible'
+  | 'creator_capability_reserved';
+
+export type ResolveCapabilityAccessInput = {
+  capabilityId: string;
+  capabilityPolicy?: CapabilityPolicyConfig;
+  customAgentCreationPolicy?: CustomAgentCreationPolicyConfig;
+  approvalPolicy?: AgentApprovalPolicy;
+  definitionOwnerKind: AgentDefinitionOwnerKind;
+  requesterIsAdmin?: boolean;
+  sourceKind?: AgentCapabilitySourceKind;
+};
+
+export type ResolvedAgentCapabilityAccess = {
+  capabilityId: string;
+  entry?: AgentCapabilityCatalogEntry;
+  configuredAvailability?: AgentCapabilityAvailability;
+  effectiveAvailability?: AgentCapabilityAvailability;
+  allowed: boolean;
+  reason?: AgentCapabilityAccessReason;
+  approvalMode?: AgentApprovalMode;
+};
+
 export default class AgentPolicyService {
   static async getEffectivePolicy(repoFullName?: string): Promise<AgentApprovalPolicy> {
-    const config = await AIAgentConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     const configured = (config as { approvalPolicy?: ApprovalPolicyConfig }).approvalPolicy;
 
     return {
@@ -88,5 +125,103 @@ export default class AgentPolicyService {
 
   static modeForCapability(policy: AgentApprovalPolicy, capabilityKey: AgentCapabilityKey): AgentApprovalMode {
     return policy.rules[capabilityKey] || policy.defaultMode;
+  }
+
+  static resolveCapabilityAccess(input: ResolveCapabilityAccessInput): ResolvedAgentCapabilityAccess {
+    const { capabilityId } = input;
+    if (!isAgentCapabilityCatalogId(capabilityId)) {
+      return {
+        capabilityId,
+        allowed: false,
+        reason: 'unknown_capability',
+      };
+    }
+
+    const entry = getAgentCapabilityCatalogEntry(capabilityId);
+    const configuredAvailability = input.capabilityPolicy?.availability?.[capabilityId];
+    const effectiveAvailability = configuredAvailability || entry.defaultAvailability;
+    const approvalPolicy = input.approvalPolicy || DEFAULT_AGENT_APPROVAL_POLICY;
+    const approvalMode = entry.runtimeCapabilityKey
+      ? AgentPolicyService.modeForCapability(approvalPolicy, entry.runtimeCapabilityKey)
+      : entry.defaultApprovalMode;
+
+    if (input.sourceKind && entry.sourceKinds && !entry.sourceKinds.includes(input.sourceKind)) {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'source_incompatible',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'disabled') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'disabled',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'system_only' && input.definitionOwnerKind !== 'system') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'system_only',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'admin_only' && input.definitionOwnerKind === 'user') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'admin_only',
+        approvalMode,
+      };
+    }
+
+    if (
+      input.definitionOwnerKind === 'user' &&
+      input.customAgentCreationPolicy?.capabilityAvailability?.[capabilityId] === 'reserved'
+    ) {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'creator_capability_reserved',
+        approvalMode,
+      };
+    }
+
+    return {
+      capabilityId,
+      entry,
+      configuredAvailability,
+      effectiveAvailability,
+      allowed: true,
+      approvalMode,
+    };
+  }
+
+  static resolveCapabilitySetAccess(
+    capabilityIds: readonly string[],
+    input: Omit<ResolveCapabilityAccessInput, 'capabilityId'>
+  ): ResolvedAgentCapabilityAccess[] {
+    return capabilityIds.map((capabilityId) => AgentPolicyService.resolveCapabilityAccess({ ...input, capabilityId }));
   }
 }

@@ -26,8 +26,8 @@ import {
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
   normalizeUserConnectionValues,
-} from 'server/services/ai/mcp/connectionConfig';
-import { McpConfigService } from 'server/services/ai/mcp/config';
+} from 'server/services/agentRuntime/mcp/connectionConfig';
+import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 /**
@@ -211,7 +211,16 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
       validatedAt,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = sanitizeMcpErrorMessage(error, [
+      {
+        values,
+        compiledConfig: compiledUserConfig,
+      },
+      {
+        compiledConfig,
+        transport,
+      },
+    ]);
     await UserMcpConnectionService.upsertConnection({
       userId: userIdentity.userId,
       ownerGithubUsername: userIdentity.githubUsername,

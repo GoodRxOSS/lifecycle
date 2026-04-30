@@ -25,11 +25,11 @@ import {
   buildMcpDefinitionFingerprint,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
-} from 'server/services/ai/mcp/connectionConfig';
-import { McpConfigService } from 'server/services/ai/mcp/config';
-import McpOAuthFlowService from 'server/services/ai/mcp/oauthFlow';
-import { PersistentOAuthClientProvider } from 'server/services/ai/mcp/oauthProvider';
-import type { McpStoredUserConnectionState } from 'server/services/ai/mcp/types';
+} from 'server/services/agentRuntime/mcp/connectionConfig';
+import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
+import McpOAuthFlowService from 'server/services/agentRuntime/mcp/oauthFlow';
+import { PersistentOAuthClientProvider } from 'server/services/agentRuntime/mcp/oauthProvider';
+import type { McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 type OAuthConnectionState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
@@ -203,11 +203,10 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
     validatedAt: existing?.validatedAt,
     interactive: true,
   });
-  const transport = applyCompiledConnectionConfigToTransport(
-    config.transport,
-    mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined),
-    { authProvider: provider }
-  );
+  const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
+  const transport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig, {
+    authProvider: provider,
+  });
   if (transport.type === 'stdio') {
     return NextResponse.json(
       {
@@ -239,7 +238,18 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
     );
   } catch (error) {
     await McpOAuthFlowService.invalidate(flow.flowId);
-    throw error;
+    const message = sanitizeMcpErrorMessage(error, [
+      {
+        values: {
+          oauthState: provider.currentState.oauthState,
+          codeVerifier: provider.currentState.codeVerifier,
+        },
+        compiledConfig,
+        transport,
+        extraSecrets: [provider.currentState.tokens, provider.currentState.clientInformation],
+      },
+    ]);
+    return errorResponse(new Error(message), { status: 422 }, req);
   }
 };
 

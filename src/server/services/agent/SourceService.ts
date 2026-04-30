@@ -20,6 +20,7 @@ import { SESSION_WORKSPACE_ROOT } from 'server/lib/agentSession/workspace';
 import { AgentSessionKind } from 'shared/constants';
 import type { Transaction } from 'objection';
 import type { ResolvedAgentSessionWorkspaceStorageIntent } from 'server/lib/agentSession/runtimeConfig';
+import type { AgentBuildContextChatMetadata } from './ChatSessionService';
 
 function deriveAdapter(session: AgentSession): string {
   if (session.sessionKind === 'chat') {
@@ -56,7 +57,12 @@ export default class AgentSourceService {
 
   static async createSessionSource(
     session: AgentSession,
-    options: { trx?: Transaction; workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent } = {}
+    options: {
+      trx?: Transaction;
+      workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
+      buildContext?: AgentBuildContextChatMetadata;
+      defaultProvider?: string | null;
+    } = {}
   ): Promise<AgentSource> {
     const status = deriveStatus(session);
     const workspaceRepos = session.workspaceRepos ?? [];
@@ -71,15 +77,33 @@ export default class AgentSourceService {
             repos: workspaceRepos,
             primaryPath: primaryRepo?.mountPath || SESSION_WORKSPACE_ROOT,
           };
+    const metadata = options.buildContext
+      ? {
+          buildUuid: options.buildContext.buildUuid,
+          buildKind: options.buildContext.buildKind,
+          sessionKind: session.sessionKind,
+          namespace: options.buildContext.namespace,
+          baseBuildUuid: options.buildContext.baseBuildUuid,
+          revision: options.buildContext.revision,
+          pullRequest: options.buildContext.pullRequest,
+          contextFreshAt: options.buildContext.contextFreshAt,
+        }
+      : {
+          buildUuid: session.buildUuid,
+          buildKind: session.buildKind,
+          sessionKind: session.sessionKind,
+        };
 
     return AgentSource.query(options.trx).insertAndFetch({
       sessionId: session.id,
       adapter: deriveAdapter(session),
       status,
       input: {
-        buildUuid: session.buildUuid,
-        buildKind: session.buildKind,
-        sessionKind: session.sessionKind,
+        ...metadata,
+        defaults: {
+          provider: options.defaultProvider || null,
+          model: session.defaultModel || session.model || null,
+        },
         ...(options.workspaceStorage?.requestedSize
           ? {
               workspace: {
@@ -92,11 +116,7 @@ export default class AgentSourceService {
         kind: 'workspace_snapshot',
         workspaceLayout,
         artifactRefs: [],
-        metadata: {
-          buildUuid: session.buildUuid,
-          buildKind: session.buildKind,
-          sessionKind: session.sessionKind,
-        },
+        metadata,
       },
       sandboxRequirements: {
         filesystem: 'persistent',

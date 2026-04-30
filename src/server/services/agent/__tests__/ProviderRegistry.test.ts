@@ -18,7 +18,7 @@ import type { AgentModelSummary } from '../types';
 
 const mockGetEffectiveConfig = jest.fn();
 
-jest.mock('server/services/aiAgentConfig', () => ({
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({

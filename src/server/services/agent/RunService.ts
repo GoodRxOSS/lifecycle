@@ -22,6 +22,8 @@ import AgentSession from 'server/models/AgentSession';
 import type { AgentApprovalPolicy, AgentRunStatus, AgentRunUsageSummary } from './types';
 import type { AgentUiMessageChunk } from './streamChunks';
 import AgentRunEventService from './RunEventService';
+import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
+import { serializeRunPlanSummary } from './runPlanSummary';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
 import {
   DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
@@ -178,6 +180,7 @@ export default class AgentRunService {
     resolvedProvider,
     resolvedModel,
     sandboxRequirement,
+    runPlanSnapshot,
   }: {
     thread: AgentThread;
     session: AgentSession;
@@ -189,6 +192,7 @@ export default class AgentRunService {
     resolvedProvider: string;
     resolvedModel: string;
     sandboxRequirement?: Record<string, unknown>;
+    runPlanSnapshot: AgentRunPlanSnapshotV1;
   }): Promise<AgentRun> {
     if (!resolvedHarness?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run harness is required.');
@@ -198,6 +202,9 @@ export default class AgentRunService {
     }
     if (!resolvedModel?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run model is required.');
+    }
+    if (!isAgentRunPlanSnapshotV1(runPlanSnapshot)) {
+      throw new InvalidAgentRunDefaultsError('Agent run plan snapshot is required.');
     }
 
     const now = new Date().toISOString();
@@ -219,6 +226,7 @@ export default class AgentRunService {
       startedAt: null,
       usageSummary: {},
       policySnapshot: policy as unknown as Record<string, unknown>,
+      runPlanSnapshot: runPlanSnapshot as unknown as Record<string, unknown>,
       error: null,
     };
 
@@ -261,12 +269,14 @@ export default class AgentRunService {
     provider,
     model,
     policy,
+    runPlanSnapshot,
   }: {
     thread: AgentThread;
     session: AgentSession;
     provider: string;
     model: string;
     policy: AgentApprovalPolicy;
+    runPlanSnapshot: AgentRunPlanSnapshotV1;
   }): Promise<AgentRun> {
     const run = await this.createQueuedRun({
       thread,
@@ -278,6 +288,7 @@ export default class AgentRunService {
       resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
       resolvedProvider: provider,
       resolvedModel: model,
+      runPlanSnapshot,
     });
 
     return this.startRun(run.uuid, {
@@ -302,6 +313,12 @@ export default class AgentRunService {
 
     const run = await AgentRun.query().findOne({ uuid: runUuid });
     return run || undefined;
+  }
+
+  static async hasActiveRun(threadId: number, trx?: Transaction): Promise<boolean> {
+    const activeRun = await AgentRun.query(trx).where({ threadId }).whereNotIn('status', TERMINAL_RUN_STATUSES).first();
+
+    return Boolean(activeRun);
   }
 
   static async listRunsNeedingDispatch({
@@ -937,6 +954,7 @@ export default class AgentRunService {
       cancelledAt: run.cancelledAt,
       usageSummary: run.usageSummary || {},
       policySnapshot: run.policySnapshot || {},
+      runPlan: serializeRunPlanSummary(run.runPlanSnapshot),
       error: run.error,
       createdAt: run.createdAt || null,
       updatedAt: run.updatedAt || null,

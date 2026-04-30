@@ -28,7 +28,10 @@ import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { buildPodEnvWithSecrets } from 'server/lib/secretEnvBuilder';
 import type { SecretRefWithEnvKey } from 'server/lib/secretRefs';
-import { SESSION_POD_MCP_CONFIG_ENV, SESSION_POD_MCP_CONFIG_SECRET_KEY } from 'server/services/ai/mcp/sessionPod';
+import {
+  SESSION_POD_MCP_CONFIG_ENV,
+  SESSION_POD_MCP_CONFIG_SECRET_KEY,
+} from 'server/services/agentRuntime/mcp/sessionPod';
 import {
   SESSION_WORKSPACE_EDITOR_PROJECT_FILE,
   SESSION_WORKSPACE_SUBPATH,

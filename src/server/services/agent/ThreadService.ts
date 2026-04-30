@@ -16,13 +16,91 @@
 
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
+import type { Transaction } from 'objection';
+import { canSessionAcceptMessages, getSessionMessageBlockReason } from './sessionReadiness';
+
+export const AGENT_THREAD_SELECTED_AGENT_DEFINITION_METADATA_KEY = 'selectedAgentDefinitionId';
+export const AGENT_THREAD_RUNTIME_CONTROL_CHOICES_METADATA_KEY = 'runtimeControlChoices';
+
+export type AgentThreadRuntimeControlChoicesMetadata = {
+  version: 1;
+  toolChoiceIds: string[];
+  mcpChoiceIds: string[];
+};
 
 function normalizeTitle(title?: string | null): string | null {
   const trimmed = title?.trim();
   return trimmed ? trimmed : null;
 }
 
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+export function getSelectedAgentDefinitionId(thread: AgentThread): string | null {
+  const metadata = readRecord(thread.metadata);
+  const selectedDefinitionId = metadata[AGENT_THREAD_SELECTED_AGENT_DEFINITION_METADATA_KEY];
+  if (typeof selectedDefinitionId === 'string' && selectedDefinitionId.trim()) {
+    return selectedDefinitionId.trim();
+  }
+
+  return null;
+}
+
+export function buildSelectedAgentDefinitionMetadataPatch(agentId: string): Record<string, unknown> {
+  return {
+    [AGENT_THREAD_SELECTED_AGENT_DEFINITION_METADATA_KEY]: agentId,
+  };
+}
+
+function normalizeChoiceIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return Array.from(
+    new Set(value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()))
+  ).filter(Boolean);
+}
+
+export function getRuntimeControlChoices(thread: AgentThread): AgentThreadRuntimeControlChoicesMetadata | null {
+  const metadata = readRecord(thread.metadata)[AGENT_THREAD_RUNTIME_CONTROL_CHOICES_METADATA_KEY];
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return null;
+  }
+
+  const record = metadata as Record<string, unknown>;
+  const toolChoiceIds = normalizeChoiceIds(record.toolChoiceIds);
+  const mcpChoiceIds = normalizeChoiceIds(record.mcpChoiceIds);
+  if (record.version !== 1 || !toolChoiceIds || !mcpChoiceIds) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    toolChoiceIds,
+    mcpChoiceIds,
+  };
+}
+
+export function buildRuntimeControlChoicesMetadataPatch(
+  choices: AgentThreadRuntimeControlChoicesMetadata
+): Record<string, unknown> {
+  return {
+    [AGENT_THREAD_RUNTIME_CONTROL_CHOICES_METADATA_KEY]: {
+      version: 1,
+      toolChoiceIds: [...choices.toolChoiceIds],
+      mcpChoiceIds: [...choices.mcpChoiceIds],
+    },
+  };
+}
+
 export default class AgentThreadService {
+  static getSelectedAgentDefinitionId = getSelectedAgentDefinitionId;
+  static buildSelectedAgentDefinitionMetadataPatch = buildSelectedAgentDefinitionMetadataPatch;
+  static getRuntimeControlChoices = getRuntimeControlChoices;
+  static buildRuntimeControlChoicesMetadataPatch = buildRuntimeControlChoicesMetadataPatch;
+
   static async getOwnedSession(sessionUuid: string, userId: string): Promise<AgentSession> {
     const session = await AgentSession.query().findOne({ uuid: sessionUuid, userId });
     if (!session) {
@@ -120,6 +198,12 @@ export default class AgentThreadService {
 
   static async createThread(sessionUuid: string, userId: string, title?: string | null): Promise<AgentThread> {
     const session = await this.getOwnedSession(sessionUuid, userId);
+    if (session.status === 'ended' || session.status === 'error') {
+      throw new Error('Cannot create a thread for an inactive session');
+    }
+    if (!canSessionAcceptMessages(session)) {
+      throw new Error(getSessionMessageBlockReason(session));
+    }
 
     return AgentThread.query().insertAndFetch({
       sessionId: session.id,
@@ -127,6 +211,24 @@ export default class AgentThreadService {
       isDefault: false,
       metadata: {
         sessionUuid: session.uuid,
+      },
+    } as Partial<AgentThread>);
+  }
+
+  static async patchRuntimeControlChoices(
+    threadId: number,
+    choices: AgentThreadRuntimeControlChoicesMetadata,
+    trx?: Transaction
+  ): Promise<AgentThread> {
+    const thread = await AgentThread.query(trx).findById(threadId);
+    if (!thread) {
+      throw new Error('Agent thread not found');
+    }
+
+    return AgentThread.query(trx).patchAndFetchById(threadId, {
+      metadata: {
+        ...(thread.metadata || {}),
+        ...buildRuntimeControlChoicesMetadataPatch(choices),
       },
     } as Partial<AgentThread>);
   }

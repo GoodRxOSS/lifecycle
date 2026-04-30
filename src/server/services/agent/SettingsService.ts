@@ -15,10 +15,10 @@
  */
 
 import type { RequestUserIdentity } from 'server/lib/get-user';
-import AIAgentConfigService from 'server/services/aiAgentConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
-import { McpConfigService } from 'server/services/ai/mcp/config';
-import type { AgentMcpConnection } from 'server/services/ai/mcp/types';
+import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
+import type { AgentMcpConnection } from 'server/services/agentRuntime/mcp/types';
 import { normalizeStoredAgentProviderName, type StoredAgentProviderName } from './providerConfig';
 
 export type AgentProviderCredentialState = {
@@ -36,7 +36,7 @@ export type AgentSettingsSnapshot = {
 export default class AgentSettingsService {
   static async getConfiguredProviders(repoFullName?: string): Promise<StoredAgentProviderName[]> {
     try {
-      const config = await AIAgentConfigService.getInstance().getEffectiveConfig(repoFullName);
+      const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
       const configuredProviders = (config.providers || [])
         .map((provider: { name?: unknown; enabled?: unknown }) =>
           provider.enabled !== false && typeof provider.name === 'string'
