@@ -15,10 +15,29 @@
  */
 
 import type { NextRequest } from 'next/server';
+import { getRequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
 
 const logger = () => getLogger();
+
+export interface RequestGitHubUserToken {
+  // GitHub handle from the authenticated request, or from the Keycloak access
+  // token claims when the request identity has not been hydrated yet.
+  githubUsername: string | null;
+  // GitHub access token fetched through Keycloak's GitHub identity broker.
+  // Treat this as sensitive: never log it or return it to the client.
+  githubToken: string | null;
+}
+
+function normalizeClaim(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized || null;
+}
 
 function getBearerToken(req: NextRequest): string | null {
   const authHeader = req.headers.get('authorization') || req.headers.get('Authorization');
@@ -28,6 +47,30 @@ function getBearerToken(req: NextRequest): string | null {
 
   const token = authHeader.slice('Bearer '.length).trim();
   return token || null;
+}
+
+function decodeJwtPayload(token: string | null | undefined): Record<string, unknown> | null {
+  if (!token) {
+    return null;
+  }
+
+  const [, payload] = token.split('.');
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64url' as BufferEncoding).toString('utf8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export function getGitHubUsernameFromKeycloakAccessToken(
+  keycloakAccessToken: string | null | undefined
+): string | null {
+  const payload = decodeJwtPayload(keycloakAccessToken);
+  return normalizeClaim(payload?.github_username) || normalizeClaim(payload?.githubUsername);
 }
 
 function parseBrokerTokenResponse(body: string): string | null {
@@ -100,4 +143,38 @@ export async function resolveRequestGitHubToken(req: NextRequest): Promise<strin
     logger().warn({ error }, 'GitHub: broker token failed reason=unexpected_error');
     return null;
   }
+}
+
+/**
+ * Resolves the current request's GitHub identity and user token.
+ *
+ * Usage:
+ * - Call this from server/API request handlers that need to make GitHub API
+ *   calls as the signed-in user.
+ * - Pass the same NextRequest that contains the user's Keycloak bearer token.
+ * - Use the returned `githubToken` only on the server, then call GitHub with an
+ *   `Authorization: Bearer <token>` header.
+ *
+ * What this does:
+ * - Reads the user's GitHub handle from request identity when available.
+ * - Falls back to the `github_username` / `githubUsername` claim in the
+ *   Keycloak access token.
+ * - Fetches the GitHub broker token through Keycloak via
+ *   `resolveRequestGitHubToken`. With auth enabled, Keycloak owns the external
+ *   token lookup/refresh flow.
+ *
+ * What this does not do:
+ * - It does not verify the token against GitHub. Call the GitHub endpoint you
+ *   need from the server if you want to prove the token is usable.
+ * - It does not expose the token to the browser. Keep the token server-side.
+ */
+export async function resolveRequestGitHubUserToken(req: NextRequest): Promise<RequestGitHubUserToken> {
+  const keycloakAccessToken = getBearerToken(req);
+  const userIdentity = getRequestUserIdentity(req);
+  const githubUsername = userIdentity?.githubUsername || getGitHubUsernameFromKeycloakAccessToken(keycloakAccessToken);
+
+  return {
+    githubUsername,
+    githubToken: await resolveRequestGitHubToken(req),
+  };
 }

@@ -15,7 +15,12 @@
  */
 
 import { NextRequest } from 'next/server';
-import { fetchGitHubBrokerToken, resolveRequestGitHubToken } from '../githubToken';
+import {
+  fetchGitHubBrokerToken,
+  getGitHubUsernameFromKeycloakAccessToken,
+  resolveRequestGitHubToken,
+  resolveRequestGitHubUserToken,
+} from '../githubToken';
 
 const mockGetGithubClientToken = jest.fn();
 
@@ -34,24 +39,32 @@ jest.mock('server/services/globalConfig', () => ({
   },
 }));
 
+function makeJwt(claims: Record<string, unknown>): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'none' }), 'utf8').toString('base64url'),
+    Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url'),
+    'signature',
+  ].join('.');
+}
+
 describe('githubToken', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;
   const originalIssuer = process.env.KEYCLOAK_ISSUER;
   const originalInternalIssuer = process.env.KEYCLOAK_ISSUER_INTERNAL;
-  const originalFetch = global.fetch;
+  const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.KEYCLOAK_ISSUER = 'https://keycloak.example.com/realms/test';
     delete process.env.KEYCLOAK_ISSUER_INTERNAL;
-    global.fetch = jest.fn();
+    globalThis.fetch = jest.fn() as unknown as typeof fetch;
   });
 
   afterAll(() => {
     process.env.ENABLE_AUTH = originalEnableAuth;
     process.env.KEYCLOAK_ISSUER = originalIssuer;
     process.env.KEYCLOAK_ISSUER_INTERNAL = originalInternalIssuer;
-    global.fetch = originalFetch;
+    globalThis.fetch = originalFetch;
   });
 
   it('returns the cached GitHub app token when auth is disabled', async () => {
@@ -62,7 +75,7 @@ describe('githubToken', () => {
 
     expect(mockGetGithubClientToken).toHaveBeenCalledTimes(1);
     expect(token).toBe('ghs_cached_app_token');
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('returns null when auth is disabled and cached GitHub app token lookup fails', async () => {
@@ -73,12 +86,12 @@ describe('githubToken', () => {
 
     expect(mockGetGithubClientToken).toHaveBeenCalledTimes(1);
     expect(token).toBeNull();
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('fetches broker token from Keycloak when auth is enabled', async () => {
     process.env.ENABLE_AUTH = 'true';
-    (global.fetch as jest.Mock).mockResolvedValue({
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
       ok: true,
       text: jest.fn().mockResolvedValue(JSON.stringify({ access_token: 'gho_broker_token' })),
     });
@@ -91,7 +104,7 @@ describe('githubToken', () => {
       })
     );
 
-    expect(global.fetch).toHaveBeenCalledWith('https://keycloak.example.com/realms/test/broker/github/token', {
+    expect(globalThis.fetch).toHaveBeenCalledWith('https://keycloak.example.com/realms/test/broker/github/token', {
       method: 'GET',
       headers: {
         Authorization: 'Bearer keycloak-access-token',
@@ -100,10 +113,49 @@ describe('githubToken', () => {
     expect(token).toBe('gho_broker_token');
   });
 
+  it('extracts the GitHub username from a Keycloak access token', () => {
+    const keycloakAccessToken = makeJwt({
+      sub: 'user-123',
+      github_username: 'sample-user',
+    });
+
+    expect(getGitHubUsernameFromKeycloakAccessToken(keycloakAccessToken)).toBe('sample-user');
+  });
+
+  it('resolves the GitHub username and broker token for the request', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue(JSON.stringify({ access_token: 'gho_broker_token' })),
+    });
+
+    const keycloakAccessToken = makeJwt({
+      sub: 'user-123',
+      github_username: 'sample-user',
+    });
+    const req = new NextRequest('http://localhost/api', {
+      headers: {
+        authorization: `Bearer ${keycloakAccessToken}`,
+        'x-user': Buffer.from(
+          JSON.stringify({
+            sub: 'user-123',
+            github_username: 'sample-user',
+          }),
+          'utf8'
+        ).toString('base64url'),
+      },
+    });
+
+    await expect(resolveRequestGitHubUserToken(req)).resolves.toEqual({
+      githubUsername: 'sample-user',
+      githubToken: 'gho_broker_token',
+    });
+  });
+
   it('prefers the internal issuer when it is configured', async () => {
     process.env.ENABLE_AUTH = 'true';
     process.env.KEYCLOAK_ISSUER_INTERNAL = 'http://keycloak.internal/realms/test';
-    (global.fetch as jest.Mock).mockResolvedValue({
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
       ok: true,
       text: jest.fn().mockResolvedValue(JSON.stringify({ access_token: 'gho_internal_token' })),
     });
@@ -116,7 +168,7 @@ describe('githubToken', () => {
       })
     );
 
-    expect(global.fetch).toHaveBeenCalledWith('http://keycloak.internal/realms/test/broker/github/token', {
+    expect(globalThis.fetch).toHaveBeenCalledWith('http://keycloak.internal/realms/test/broker/github/token', {
       method: 'GET',
       headers: {
         Authorization: 'Bearer keycloak-access-token',
@@ -126,7 +178,7 @@ describe('githubToken', () => {
   });
 
   it('parses query string token responses from Keycloak', async () => {
-    (global.fetch as jest.Mock).mockResolvedValue({
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
       ok: true,
       text: jest.fn().mockResolvedValue('access_token=gho_query_token&expires_in=300'),
     });
@@ -138,6 +190,6 @@ describe('githubToken', () => {
     process.env.ENABLE_AUTH = 'true';
 
     await expect(resolveRequestGitHubToken(new NextRequest('http://localhost/api'))).resolves.toBeNull();
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });
