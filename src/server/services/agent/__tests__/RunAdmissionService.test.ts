@@ -68,6 +68,112 @@ const mockFindCanonicalMessageByClientMessageId = AgentMessageStore.findCanonica
 const mockInsertUserMessageForRun = AgentMessageStore.insertUserMessageForRun as jest.Mock;
 const mockAppendStatusEvent = AgentRunEventService.appendStatusEvent as jest.Mock;
 
+const runPlanSnapshot = {
+  version: 1,
+  capturedAt: '2026-05-01T00:00:00.000Z',
+  agent: {
+    id: 'system.freeform',
+    label: 'Free-form',
+    ownerKind: 'system',
+    version: 1,
+    sourceKind: 'freeform_chat',
+    resourcePolicy: {
+      sourceKinds: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+      workspaceRequired: false,
+      sandboxRequired: false,
+    },
+    modelPreference: null,
+  },
+  source: {
+    id: 'source-1',
+    adapter: 'blank_workspace',
+    status: 'ready',
+    sessionKind: 'chat',
+    repoFullName: 'example-org/example-repo',
+    freshness: {
+      capturedAt: '2026-05-01T00:00:00.000Z',
+      freshnessSource: 'source',
+    },
+  },
+  model: {
+    requestedProvider: null,
+    requestedModel: null,
+    resolvedProvider: 'openai',
+    resolvedModel: 'gpt-5.4',
+  },
+  runtime: {
+    requestedHarness: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: { maxIterations: 12 },
+    approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+  },
+  prompt: {
+    instructionRefs: [],
+    renderedSummary: 'Sample prompt summary',
+    renderedHash: 'sha256:sample-rendered-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: [],
+    resolvedCapabilityAccess: [],
+  },
+  warnings: [],
+} as const;
+
+const customRunPlanSnapshot = {
+  ...runPlanSnapshot,
+  agent: {
+    id: 'custom.sample-agent',
+    label: 'Sample custom agent',
+    ownerKind: 'user',
+    version: 3,
+    sourceKind: 'freeform_chat',
+    resourcePolicy: {
+      sourceKinds: ['freeform_chat'],
+      workspaceRequired: false,
+      sandboxRequired: false,
+    },
+    modelPreference: {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4.6',
+    },
+  },
+  model: {
+    requestedProvider: 'anthropic',
+    requestedModel: 'claude-sonnet-4.6',
+    resolvedProvider: 'anthropic',
+    resolvedModel: 'claude-sonnet-4.6',
+  },
+  runtime: {
+    requestedHarness: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: { maxIterations: 9 },
+    approvalPolicy: {
+      defaultMode: 'require_approval',
+      rules: { read: 'allow' },
+    },
+  },
+  prompt: {
+    instructionRefs: [],
+    instructionAddendum: 'Use the sample custom instructions.',
+    renderedSummary: 'Sample custom agent description',
+    renderedHash: 'sha256:sample-custom-agent-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: ['read_context'],
+    resolvedCapabilityAccess: [
+      {
+        capabilityId: 'read_context',
+        availability: 'all_users',
+        allowed: true,
+        runtimeCapabilityKey: 'read',
+        approvalMode: 'allow',
+      },
+    ],
+  },
+} as const;
+
 function buildActiveRunQuery(activeRun: unknown = null) {
   const query = {
     where: jest.fn(),
@@ -123,6 +229,7 @@ describe('AgentRunAdmissionService', () => {
       resolvedProvider: 'openai',
       resolvedModel: 'gpt-5.4',
       runtimeOptions: { maxIterations: 12 },
+      runPlanSnapshot,
     });
 
     expect(admission).toEqual({
@@ -147,6 +254,7 @@ describe('AgentRunAdmissionService', () => {
         policySnapshot: expect.objectContaining({
           runtimeOptions: { maxIterations: 12 },
         }),
+        runPlanSnapshot,
       })
     );
     expect(mockAppendStatusEvent).toHaveBeenCalledWith('run-1', 'run.queued', {
@@ -172,6 +280,7 @@ describe('AgentRunAdmissionService', () => {
         resolvedHarness: 'lifecycle_ai_sdk',
         resolvedProvider: 'openai',
         resolvedModel: 'gpt-5.4',
+        runPlanSnapshot,
       })
     ).rejects.toThrow('Wait for the current agent run to finish before starting another run.');
 
@@ -208,6 +317,7 @@ describe('AgentRunAdmissionService', () => {
       resolvedHarness: 'lifecycle_ai_sdk',
       resolvedProvider: 'openai',
       resolvedModel: 'gpt-5.4',
+      runPlanSnapshot: null as any,
     });
 
     expect(admission).toEqual({
@@ -215,6 +325,80 @@ describe('AgentRunAdmissionService', () => {
       message: existingMessage,
       created: false,
     });
+    expect(mockInsertUserMessageForRun).not.toHaveBeenCalled();
+    expect(mockAppendStatusEvent).not.toHaveBeenCalled();
+  });
+
+  it('persists custom-agent resolver fields without recomputing the snapshot', async () => {
+    const queuedRun = {
+      id: 23,
+      uuid: 'run-1',
+      status: 'queued',
+    };
+    const activeRunQuery = buildActiveRunQuery();
+    const insertRunQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue(queuedRun),
+    };
+    mockRunQuery.mockReturnValueOnce(activeRunQuery).mockReturnValueOnce(insertRunQuery);
+
+    await AgentRunAdmissionService.createQueuedRunWithMessage({
+      thread: { id: 7, uuid: 'thread-1', metadata: {} } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['thread'],
+      session: { id: 17, uuid: 'session-1' } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['session'],
+      policy: customRunPlanSnapshot.runtime.approvalPolicy as any,
+      message: { clientMessageId: 'client-message-1', parts: [{ type: 'text', text: 'Hi' }] },
+      requestedHarness: customRunPlanSnapshot.runtime.requestedHarness,
+      requestedProvider: customRunPlanSnapshot.model.requestedProvider,
+      requestedModel: customRunPlanSnapshot.model.requestedModel,
+      resolvedHarness: customRunPlanSnapshot.runtime.resolvedHarness,
+      resolvedProvider: customRunPlanSnapshot.model.resolvedProvider,
+      resolvedModel: customRunPlanSnapshot.model.resolvedModel,
+      sandboxRequirement: customRunPlanSnapshot.runtime.sandboxRequirement,
+      runtimeOptions: customRunPlanSnapshot.runtime.runtimeOptions,
+      runPlanSnapshot: customRunPlanSnapshot,
+    });
+
+    expect(insertRunQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-sonnet-4.6',
+        resolvedProvider: 'anthropic',
+        resolvedModel: 'claude-sonnet-4.6',
+        sandboxRequirement: { filesystem: 'persistent' },
+        policySnapshot: {
+          defaultMode: 'require_approval',
+          rules: { read: 'allow' },
+          runtimeOptions: { maxIterations: 9 },
+        },
+        runPlanSnapshot: customRunPlanSnapshot,
+      })
+    );
+  });
+
+  it('rejects missing run plan snapshots before insert', async () => {
+    const activeRunQuery = buildActiveRunQuery();
+    mockRunQuery.mockReturnValueOnce(activeRunQuery);
+
+    await expect(
+      AgentRunAdmissionService.createQueuedRunWithMessage({
+        thread: { id: 7, uuid: 'thread-1', metadata: {} } as Parameters<
+          typeof AgentRunAdmissionService.createQueuedRunWithMessage
+        >[0]['thread'],
+        session: { id: 17, uuid: 'session-1' } as Parameters<
+          typeof AgentRunAdmissionService.createQueuedRunWithMessage
+        >[0]['session'],
+        policy: { defaultMode: 'require_approval', rules: {} } as any,
+        message: { clientMessageId: 'client-message-1', parts: [{ type: 'text', text: 'Hi' }] },
+        resolvedHarness: 'lifecycle_ai_sdk',
+        resolvedProvider: 'openai',
+        resolvedModel: 'gpt-5.4',
+        runPlanSnapshot: null as any,
+      })
+    ).rejects.toThrow('Agent run plan snapshot is required.');
+
     expect(mockInsertUserMessageForRun).not.toHaveBeenCalled();
     expect(mockAppendStatusEvent).not.toHaveBeenCalled();
   });

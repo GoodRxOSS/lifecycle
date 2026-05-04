@@ -83,6 +83,18 @@ const agentRunEventPayloadMetadata = {
   additionalProperties: true,
 };
 
+const agentUsageSummaryProperties = {
+  totalTokens: { type: 'number' },
+  inputTokens: { type: 'number' },
+  outputTokens: { type: 'number' },
+  reasoningTokens: { type: 'number' },
+  cachedInputTokens: { type: 'number' },
+  cacheCreationInputTokens: { type: 'number' },
+  cacheReadInputTokens: { type: 'number' },
+  nonCachedInputTokens: { type: 'number' },
+  textOutputTokens: { type: 'number' },
+};
+
 export const openApiSpecificationForV2Api: OAS3Options = {
   definition: {
     openapi: '3.0.0',
@@ -516,11 +528,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             clientMessageId: { type: 'string', nullable: true },
             threadId: { type: 'string' },
             runId: { type: 'string', nullable: true },
-            role: { type: 'string', enum: ['user', 'assistant'] },
+            role: { type: 'string', enum: ['user', 'assistant', 'system'] },
             parts: {
               type: 'array',
               items: { $ref: '#/components/schemas/CanonicalAgentMessagePart' },
               minItems: 1,
+            },
+            metadata: {
+              oneOf: [{ $ref: '#/components/schemas/AgentSwitchEventMetadata' }, { type: 'object' }],
             },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
           },
@@ -535,6 +550,539 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             parts: [{ type: 'text', text: 'Check the sample service.' }],
             createdAt: '2026-04-25T00:00:00.000Z',
           },
+        },
+
+        SystemAgentDefinitionId: {
+          type: 'string',
+          enum: ['system.debug', 'system.develop', 'system.freeform'],
+        },
+
+        AgentSelectionSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            ownerKind: { type: 'string', enum: ['system', 'admin', 'user'] },
+            label: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            available: { type: 'boolean' },
+            unavailableReason: {
+              type: 'string',
+              nullable: true,
+              enum: [
+                'unknown_agent',
+                'active_run',
+                'disabled_agent',
+                'requires_workspace',
+                'source_incompatible',
+                'disabled_by_policy',
+                null,
+              ],
+            },
+            unavailableMessage: { type: 'string', nullable: true },
+            group: { type: 'string', enum: ['built_in', 'my_agents'] },
+          },
+          required: [
+            'id',
+            'ownerKind',
+            'label',
+            'description',
+            'available',
+            'unavailableReason',
+            'unavailableMessage',
+            'group',
+          ],
+          additionalProperties: false,
+        },
+
+        AgentSelectionGroup: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', enum: ['built_in', 'my_agents'] },
+            label: { type: 'string' },
+            agents: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentSelectionSummary' },
+            },
+          },
+          required: ['id', 'label', 'agents'],
+          additionalProperties: false,
+        },
+
+        AgentSelectionState: {
+          type: 'object',
+          properties: {
+            selectedId: { type: 'string', nullable: true },
+            defaultId: { $ref: '#/components/schemas/SystemAgentDefinitionId' },
+            currentId: { type: 'string' },
+            groups: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentSelectionGroup' },
+              minItems: 2,
+            },
+          },
+          required: ['selectedId', 'defaultId', 'currentId', 'groups'],
+          additionalProperties: false,
+        },
+
+        SwitchAgentSelectionRequest: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string' },
+          },
+          required: ['agentId'],
+          additionalProperties: false,
+        },
+
+        SwitchAgentSelectionResponse: {
+          type: 'object',
+          properties: {
+            previousAgent: { $ref: '#/components/schemas/AgentSelectionSummary' },
+            nextAgent: { $ref: '#/components/schemas/AgentSelectionSummary' },
+            switched: { type: 'boolean' },
+            state: { $ref: '#/components/schemas/AgentSelectionState' },
+          },
+          required: ['previousAgent', 'nextAgent', 'switched', 'state'],
+          additionalProperties: false,
+        },
+
+        AgentThreadRuntimeControlChoice: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            required: { type: 'boolean' },
+            selected: { type: 'boolean' },
+            available: { type: 'boolean' },
+          },
+          required: ['id', 'label', 'description', 'required', 'selected', 'available'],
+          additionalProperties: false,
+        },
+
+        AgentThreadRuntimeControlsState: {
+          type: 'object',
+          properties: {
+            tools: {
+              type: 'object',
+              properties: {
+                required: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentThreadRuntimeControlChoice' },
+                },
+                optional: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentThreadRuntimeControlChoice' },
+                },
+                selectedChoiceIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+              required: ['required', 'optional', 'selectedChoiceIds'],
+              additionalProperties: false,
+            },
+            mcp: {
+              type: 'object',
+              properties: {
+                connections: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/AgentThreadRuntimeControlChoice' },
+                },
+                selectedChoiceIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+              required: ['connections', 'selectedChoiceIds'],
+              additionalProperties: false,
+            },
+            canEdit: { type: 'boolean' },
+            disabledReason: { type: 'string', nullable: true },
+          },
+          required: ['tools', 'mcp', 'canEdit', 'disabledReason'],
+          additionalProperties: false,
+        },
+
+        AgentThreadRuntimeControlsPatchRequest: {
+          type: 'object',
+          properties: {
+            toolChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            mcpChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          additionalProperties: false,
+        },
+
+        AgentRuntimeControlChoicesInput: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string', nullable: true },
+            toolChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            mcpChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          additionalProperties: false,
+        },
+
+        AgentRuntimeControlsPreviewRequest: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string', nullable: true },
+            source: {
+              type: 'object',
+              properties: {
+                adapter: { type: 'string' },
+                input: {
+                  type: 'object',
+                  additionalProperties: true,
+                },
+              },
+              additionalProperties: true,
+            },
+            defaults: {
+              type: 'object',
+              properties: {
+                provider: { type: 'string', nullable: true },
+                model: { type: 'string', nullable: true },
+              },
+              additionalProperties: false,
+            },
+            runtimeControlChoices: { $ref: '#/components/schemas/AgentRuntimeControlChoicesInput' },
+          },
+          additionalProperties: false,
+        },
+
+        GetAgentThreadRuntimeControlsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentThreadRuntimeControlsState' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        PatchAgentThreadRuntimeControlsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentThreadRuntimeControlsState' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AgentRuntimeControlsPreviewSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/AgentThreadRuntimeControlsState' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AgentSwitchEventMetadata: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['agent_switch'] },
+            actor: {
+              type: 'object',
+              properties: {
+                userId: { type: 'string' },
+                label: { type: 'string' },
+              },
+              required: ['userId', 'label'],
+              additionalProperties: false,
+            },
+            beforeAgent: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                label: { type: 'string' },
+              },
+              required: ['id', 'label'],
+              additionalProperties: false,
+            },
+            afterAgent: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                label: { type: 'string' },
+              },
+              required: ['id', 'label'],
+              additionalProperties: false,
+            },
+            appliesTo: { type: 'string', enum: ['future_runs'] },
+            occurredAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['kind', 'actor', 'beforeAgent', 'afterAgent', 'appliesTo', 'occurredAt'],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionResourceBehavior: {
+          type: 'string',
+          enum: ['chat_only', 'current_workspace_when_available'],
+        },
+
+        UserAgentDefinitionModelPreference: {
+          type: 'object',
+          nullable: true,
+          properties: {
+            provider: { type: 'string', nullable: true },
+            model: { type: 'string', nullable: true },
+          },
+          additionalProperties: false,
+        },
+
+        UserAgentDefinition: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            instructions: { type: 'string' },
+            capabilityIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            modelPreference: { $ref: '#/components/schemas/UserAgentDefinitionModelPreference' },
+            resourceBehavior: { $ref: '#/components/schemas/UserAgentDefinitionResourceBehavior' },
+            status: { type: 'string', enum: ['active', 'archived'] },
+          },
+          required: [
+            'id',
+            'version',
+            'name',
+            'description',
+            'instructions',
+            'capabilityIds',
+            'modelPreference',
+            'resourceBehavior',
+            'status',
+          ],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            capabilityIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            modelPreference: { $ref: '#/components/schemas/UserAgentDefinitionModelPreference' },
+            resourceBehavior: { $ref: '#/components/schemas/UserAgentDefinitionResourceBehavior' },
+            status: { type: 'string', enum: ['active', 'archived'] },
+          },
+          required: [
+            'id',
+            'version',
+            'name',
+            'description',
+            'capabilityIds',
+            'modelPreference',
+            'resourceBehavior',
+            'status',
+          ],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionUpsertRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', minLength: 1 },
+            description: { type: 'string', nullable: true },
+            instructions: { type: 'string', minLength: 1 },
+            capabilityIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            modelPreference: { $ref: '#/components/schemas/UserAgentDefinitionModelPreference' },
+            resourceBehavior: { $ref: '#/components/schemas/UserAgentDefinitionResourceBehavior' },
+          },
+          required: ['name', 'instructions', 'resourceBehavior'],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionDisplaySummary: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+          },
+          required: ['name', 'description'],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionCapability: {
+          type: 'object',
+          properties: {
+            capabilityId: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            category: {
+              type: 'string',
+              enum: [
+                'read',
+                'diagnostics',
+                'workspace',
+                'source_control',
+                'mcp',
+                'deployment',
+                'network',
+                'preview',
+                'approval',
+              ],
+            },
+            toolCount: { type: 'integer', minimum: 0 },
+            resourceCount: { type: 'integer', minimum: 0 },
+            requiresWorkspace: { type: 'boolean' },
+            tools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserAgentDefinitionDisplaySummary' },
+            },
+            resources: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserAgentDefinitionDisplaySummary' },
+            },
+          },
+          required: [
+            'capabilityId',
+            'label',
+            'description',
+            'category',
+            'toolCount',
+            'resourceCount',
+            'requiresWorkspace',
+            'tools',
+            'resources',
+          ],
+          additionalProperties: false,
+        },
+
+        ListUserAgentDefinitionsResponse: {
+          type: 'object',
+          properties: {
+            definitions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserAgentDefinition' },
+            },
+          },
+          required: ['definitions'],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionResponse: {
+          type: 'object',
+          properties: {
+            definition: { $ref: '#/components/schemas/UserAgentDefinition' },
+          },
+          required: ['definition'],
+          additionalProperties: false,
+        },
+
+        DeleteUserAgentDefinitionResponse: {
+          type: 'object',
+          properties: {
+            archived: { type: 'boolean' },
+            definition: { $ref: '#/components/schemas/UserAgentDefinition' },
+          },
+          required: ['archived', 'definition'],
+          additionalProperties: false,
+        },
+
+        UserAgentDefinitionCapabilitiesResponse: {
+          type: 'object',
+          properties: {
+            resourceBehavior: { $ref: '#/components/schemas/UserAgentDefinitionResourceBehavior' },
+            canCreate: { type: 'boolean' },
+            creationUnavailableReason: {
+              $ref: '#/components/schemas/CustomAgentCreationUnavailableReason',
+            },
+            capabilities: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserAgentDefinitionCapability' },
+            },
+          },
+          required: ['resourceBehavior', 'canCreate', 'creationUnavailableReason', 'capabilities'],
+          additionalProperties: false,
+        },
+
+        ListUserAgentDefinitionsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: { $ref: '#/components/schemas/ListUserAgentDefinitionsResponse' },
+              },
+            },
+          ],
+        },
+
+        UserAgentDefinitionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: { $ref: '#/components/schemas/UserAgentDefinitionResponse' },
+              },
+            },
+          ],
+        },
+
+        DeleteUserAgentDefinitionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: { $ref: '#/components/schemas/DeleteUserAgentDefinitionResponse' },
+              },
+            },
+          ],
+        },
+
+        UserAgentDefinitionCapabilitiesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: { $ref: '#/components/schemas/UserAgentDefinitionCapabilitiesResponse' },
+              },
+            },
+          ],
         },
 
         AgentThreadMessagesResponse: {
@@ -559,6 +1107,82 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
+        AgentUsageSummary: {
+          type: 'object',
+          properties: agentUsageSummaryProperties,
+          required: ['totalTokens'],
+          additionalProperties: false,
+        },
+
+        AgentUsageByModel: {
+          type: 'object',
+          properties: {
+            provider: { type: 'string' },
+            model: { type: 'string' },
+            ...agentUsageSummaryProperties,
+            runCount: { type: 'integer' },
+            reportedRunCount: { type: 'integer' },
+            missingUsageRunCount: { type: 'integer' },
+          },
+          required: ['provider', 'model', 'totalTokens', 'runCount', 'reportedRunCount', 'missingUsageRunCount'],
+          additionalProperties: false,
+        },
+
+        AgentUsageCompleteness: {
+          type: 'object',
+          properties: {
+            runCount: { type: 'integer' },
+            reportedRunCount: { type: 'integer' },
+            missingUsageRunCount: { type: 'integer' },
+            complete: { type: 'boolean' },
+          },
+          required: ['runCount', 'reportedRunCount', 'missingUsageRunCount', 'complete'],
+          additionalProperties: false,
+        },
+
+        AgentUsageAggregate: {
+          type: 'object',
+          properties: {
+            usageSummary: { $ref: '#/components/schemas/AgentUsageSummary' },
+            usageByModel: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentUsageByModel' },
+            },
+            usageCompleteness: { $ref: '#/components/schemas/AgentUsageCompleteness' },
+          },
+          required: ['usageSummary', 'usageByModel', 'usageCompleteness'],
+          additionalProperties: false,
+        },
+
+        AgentThreadUsageResponse: {
+          type: 'object',
+          properties: {
+            threadId: { type: 'string' },
+            sessionId: { type: 'string' },
+            usageSummary: { $ref: '#/components/schemas/AgentUsageSummary' },
+            usageByModel: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentUsageByModel' },
+            },
+            usageCompleteness: { $ref: '#/components/schemas/AgentUsageCompleteness' },
+          },
+          required: ['threadId', 'sessionId', 'usageSummary', 'usageByModel', 'usageCompleteness'],
+          additionalProperties: false,
+        },
+
+        GetAgentThreadUsageSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: { $ref: '#/components/schemas/AgentThreadUsageResponse' },
+              },
+            },
+          ],
+        },
+
         AgentRunRuntimeOptions: {
           type: 'object',
           properties: {
@@ -570,37 +1194,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           },
           additionalProperties: false,
           example: {
-            workspaceImage: 'registry.example.test/lifecycle/workspace:sample',
-            workspaceEditorImage: 'registry.example.test/lifecycle/editor:sample',
-            workspaceGatewayImage: 'registry.example.test/lifecycle/gateway:sample',
-            scheduling: {
-              keepAttachedServicesOnSessionNode: true,
-            },
-            readiness: {
-              timeoutMs: 120000,
-              pollMs: 2000,
-            },
-            workspaceStorage: {
-              defaultSize: '10Gi',
-              allowedSizes: ['10Gi', '20Gi'],
-              allowClientOverride: true,
-              accessMode: 'ReadWriteOnce',
-            },
-            cleanup: {
-              activeIdleSuspendMs: 1800000,
-              startingTimeoutMs: 900000,
-              hibernatedRetentionMs: 86400000,
-              intervalMs: 300000,
-              redisTtlSeconds: 7200,
-            },
-            durability: {
-              runExecutionLeaseMs: 1800000,
-              queuedRunDispatchStaleMs: 30000,
-              dispatchRecoveryLimit: 50,
-              maxDurablePayloadBytes: 65536,
-              payloadPreviewBytes: 16384,
-              fileChangePreviewChars: 4000,
-            },
+            maxIterations: 12,
           },
         },
 
@@ -649,6 +1243,28 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           },
         },
 
+        CreateBuildContextAgentChatRequest: {
+          type: 'object',
+          properties: {
+            buildUuid: { type: 'string' },
+            defaults: {
+              type: 'object',
+              properties: {
+                model: { type: 'string' },
+              },
+              additionalProperties: false,
+            },
+          },
+          required: ['buildUuid'],
+          additionalProperties: false,
+          example: {
+            buildUuid: '00000000-0000-0000-0000-000000000000',
+            defaults: {
+              model: 'gpt-5.4',
+            },
+          },
+        },
+
         AgentThread: {
           type: 'object',
           properties: {
@@ -668,6 +1284,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentSessionDefaults: {
           type: 'object',
           properties: {
+            provider: { type: 'string', nullable: true },
             model: { type: 'string' },
             harness: { type: 'string', nullable: true },
           },
@@ -753,8 +1370,65 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             source: { $ref: '#/components/schemas/AgentSource' },
             sandbox: { $ref: '#/components/schemas/AgentSandbox' },
+            usage: { $ref: '#/components/schemas/AgentUsageAggregate' },
           },
-          required: ['session', 'source', 'sandbox'],
+          required: ['session', 'source', 'sandbox', 'usage'],
+        },
+
+        BuildContextAgentChatContext: {
+          type: 'object',
+          properties: {
+            buildUuid: { type: 'string' },
+            buildKind: {
+              type: 'string',
+              enum: Object.values(BuildKind),
+              nullable: true,
+            },
+            namespace: { type: 'string', nullable: true },
+            baseBuildUuid: { type: 'string', nullable: true },
+            repo: { type: 'string', nullable: true },
+            branch: { type: 'string', nullable: true },
+            pullRequestNumber: { type: 'integer', nullable: true },
+            contextFreshAt: { type: 'string', format: 'date-time' },
+          },
+          required: [
+            'buildUuid',
+            'buildKind',
+            'namespace',
+            'baseBuildUuid',
+            'repo',
+            'branch',
+            'pullRequestNumber',
+            'contextFreshAt',
+          ],
+          additionalProperties: false,
+        },
+
+        BuildContextAgentChatLinks: {
+          type: 'object',
+          properties: {
+            messages: { type: 'string' },
+            runs: { type: 'string' },
+            events: { type: 'string' },
+            eventStream: { type: 'string' },
+            pendingActions: { type: 'string' },
+          },
+          required: ['messages', 'runs', 'events', 'eventStream', 'pendingActions'],
+          additionalProperties: false,
+        },
+
+        BuildContextAgentChatResponse: {
+          type: 'object',
+          properties: {
+            session: { $ref: '#/components/schemas/AgentSessionSummary' },
+            thread: { $ref: '#/components/schemas/AgentThread' },
+            created: { type: 'boolean' },
+            reused: { type: 'boolean' },
+            buildContext: { $ref: '#/components/schemas/BuildContextAgentChatContext' },
+            links: { $ref: '#/components/schemas/BuildContextAgentChatLinks' },
+          },
+          required: ['session', 'thread', 'created', 'reused', 'buildContext', 'links'],
+          additionalProperties: false,
         },
 
         AgentAdminSessionSummary: {
@@ -868,6 +1542,135 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        AgentRunPlanRuntimeSummary: {
+          type: 'object',
+          properties: {
+            harness: { type: 'string', enum: ['lifecycle_ai_sdk'] },
+            maxIterations: { type: 'integer', nullable: true },
+          },
+          required: ['harness', 'maxIterations'],
+          additionalProperties: false,
+        },
+
+        AgentRunPlanApprovalSummary: {
+          type: 'object',
+          properties: {
+            defaultMode: { $ref: '#/components/schemas/AgentApprovalMode' },
+          },
+          required: ['defaultMode'],
+          additionalProperties: false,
+        },
+
+        AgentRunPlanCapabilitySummary: {
+          type: 'object',
+          properties: {
+            capabilityId: { type: 'string' },
+            availability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            allowed: { type: 'boolean' },
+            approvalMode: {
+              allOf: [{ $ref: '#/components/schemas/AgentApprovalMode' }],
+              nullable: true,
+            },
+          },
+          required: ['capabilityId', 'availability', 'allowed'],
+          additionalProperties: false,
+        },
+
+        AgentRunPlanSelectedRuntimeChoicesSummary: {
+          type: 'object',
+          properties: {
+            capabilityIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            toolChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            mcpChoiceIds: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+          },
+          required: ['capabilityIds', 'toolChoiceIds', 'mcpChoiceIds'],
+          additionalProperties: false,
+        },
+
+        AgentRunPlanCapabilitiesSummary: {
+          type: 'object',
+          properties: {
+            effective: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentRunPlanCapabilitySummary' },
+            },
+            selected: { $ref: '#/components/schemas/AgentRunPlanSelectedRuntimeChoicesSummary' },
+          },
+          required: ['effective', 'selected'],
+          additionalProperties: false,
+        },
+
+        AgentRunPlanSummary: {
+          type: 'object',
+          nullable: true,
+          properties: {
+            version: { type: 'integer', enum: [1] },
+            agent: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                label: { type: 'string' },
+                sourceKind: {
+                  type: 'string',
+                  enum: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+                },
+              },
+              required: ['id', 'label', 'sourceKind'],
+              additionalProperties: false,
+            },
+            source: {
+              type: 'object',
+              properties: {
+                kind: {
+                  type: 'string',
+                  enum: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+                },
+                repoFullName: { type: 'string', nullable: true },
+                branch: { type: 'string', nullable: true },
+                buildUuid: { type: 'string', nullable: true },
+                namespace: { type: 'string', nullable: true },
+              },
+              required: ['kind'],
+              additionalProperties: false,
+            },
+            model: {
+              type: 'object',
+              properties: {
+                provider: { type: 'string' },
+                model: { type: 'string' },
+              },
+              required: ['provider', 'model'],
+              additionalProperties: false,
+            },
+            runtime: { $ref: '#/components/schemas/AgentRunPlanRuntimeSummary' },
+            approval: { $ref: '#/components/schemas/AgentRunPlanApprovalSummary' },
+            capabilities: { $ref: '#/components/schemas/AgentRunPlanCapabilitiesSummary' },
+            warnings: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  code: { type: 'string' },
+                  message: { type: 'string' },
+                },
+                required: ['code', 'message'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['version', 'agent', 'source', 'model', 'runtime', 'approval', 'capabilities', 'warnings'],
+          additionalProperties: false,
+        },
+
         AgentRun: {
           type: 'object',
           properties: {
@@ -891,6 +1694,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             cancelledAt: { type: 'string', format: 'date-time', nullable: true },
             usageSummary: { type: 'object', additionalProperties: true },
             policySnapshot: { type: 'object', additionalProperties: true },
+            runPlan: { $ref: '#/components/schemas/AgentRunPlanSummary' },
             error: {
               allOf: [{ $ref: '#/components/schemas/AgentRunError' }],
               nullable: true,
@@ -913,6 +1717,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'sandboxGeneration',
             'usageSummary',
             'policySnapshot',
+            'runPlan',
           ],
         },
 
@@ -1109,7 +1914,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            data: { type: 'object', additionalProperties: true },
+            data: { $ref: '#/components/schemas/AgentFileChangeData' },
             transient: { type: 'boolean' },
           },
           required: ['data'],
@@ -1282,17 +2087,50 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
-        AgentPendingActionFileChangePreview: {
+        AgentFileChangeData: {
           type: 'object',
           properties: {
+            id: { type: 'string' },
+            toolCallId: { type: 'string' },
+            sourceTool: { type: 'string' },
             path: { type: 'string' },
-            action: { type: 'string' },
-            summary: { type: 'string' },
-            additions: { type: 'integer', nullable: true },
-            deletions: { type: 'integer', nullable: true },
+            displayPath: { type: 'string' },
+            kind: { type: 'string', enum: ['created', 'edited', 'deleted'] },
+            stage: { type: 'string', enum: ['awaiting-approval', 'approved', 'applied', 'denied', 'failed'] },
+            additions: { type: 'integer' },
+            deletions: { type: 'integer' },
             truncated: { type: 'boolean' },
+            unifiedDiff: { type: 'string', nullable: true },
+            beforeTextPreview: { type: 'string', nullable: true },
+            afterTextPreview: { type: 'string', nullable: true },
+            summary: { type: 'string', nullable: true },
+            encoding: { type: 'string', nullable: true },
+            oldSizeBytes: { type: 'integer', nullable: true },
+            newSizeBytes: { type: 'integer', nullable: true },
+            oldSha256: { type: 'string', nullable: true },
+            newSha256: { type: 'string', nullable: true },
           },
-          required: ['path', 'action', 'summary', 'additions', 'deletions', 'truncated'],
+          required: [
+            'id',
+            'toolCallId',
+            'sourceTool',
+            'path',
+            'displayPath',
+            'kind',
+            'stage',
+            'additions',
+            'deletions',
+            'truncated',
+            'unifiedDiff',
+            'beforeTextPreview',
+            'afterTextPreview',
+            'summary',
+            'encoding',
+            'oldSizeBytes',
+            'newSizeBytes',
+            'oldSha256',
+            'newSha256',
+          ],
           additionalProperties: false,
         },
 
@@ -1316,7 +2154,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             commandPreview: { type: 'string', nullable: true },
             fileChangePreview: {
               type: 'array',
-              items: { $ref: '#/components/schemas/AgentPendingActionFileChangePreview' },
+              items: { $ref: '#/components/schemas/AgentFileChangeData' },
             },
             riskLabels: {
               type: 'array',
@@ -1355,12 +2193,25 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             commandPreview: null,
             fileChangePreview: [
               {
+                id: 'tool-call-1:sample-file.txt',
+                toolCallId: 'tool-call-1',
+                sourceTool: 'workspace_edit_file',
                 path: 'sample-file.txt',
-                action: 'edited',
+                displayPath: 'sample-file.txt',
+                kind: 'edited',
+                stage: 'awaiting-approval',
                 summary: 'edited sample-file.txt',
                 additions: 1,
                 deletions: 0,
                 truncated: false,
+                unifiedDiff: null,
+                beforeTextPreview: null,
+                afterTextPreview: null,
+                encoding: null,
+                oldSizeBytes: null,
+                newSizeBytes: null,
+                oldSha256: null,
+                newSha256: null,
               },
             ],
             riskLabels: ['Workspace write'],
@@ -2327,10 +3178,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         // ===================================================================
-        // AI Agent Config Schemas
+        // Agent Runtime Config Schemas
         // ===================================================================
 
-        AIAgentModelConfig: {
+        AgentRuntimeModelConfig: {
           type: 'object',
           properties: {
             id: {
@@ -2354,7 +3205,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],
         },
 
-        AIAgentProviderConfig: {
+        AgentRuntimeProviderConfig: {
           type: 'object',
           properties: {
             name: { type: 'string' },
@@ -2366,20 +3217,106 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             models: {
               type: 'array',
-              items: { $ref: '#/components/schemas/AIAgentModelConfig' },
+              items: { $ref: '#/components/schemas/AgentRuntimeModelConfig' },
             },
           },
           required: ['name', 'enabled', 'apiKeyEnvVar', 'models'],
         },
 
-        AIAgentConfig: {
+        AgentCapabilityAvailability: {
+          type: 'string',
+          enum: ['all_users', 'admin_only', 'system_only', 'disabled'],
+        },
+
+        AgentCapabilityPolicyAvailability: {
+          type: 'object',
+          properties: {
+            read_context: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            diagnostics_logs: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            diagnostics_codefresh: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            diagnostics_kubernetes: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            diagnostics_database: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            github_read: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            github_write: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            workspace_files: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            workspace_shell: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            workspace_git: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            network_access: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            preview_publish: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            external_mcp_read: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            external_mcp_write: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            approval_controls: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+          },
+          additionalProperties: false,
+        },
+
+        AgentCapabilityPolicy: {
+          type: 'object',
+          properties: {
+            availability: { $ref: '#/components/schemas/AgentCapabilityPolicyAvailability' },
+          },
+          additionalProperties: false,
+        },
+
+        CustomAgentCreationMode: {
+          type: 'string',
+          enum: ['enabled', 'disabled', 'admins_only', 'allowlist'],
+        },
+
+        CustomAgentCreationUnavailableReason: {
+          type: 'string',
+          nullable: true,
+          enum: ['creation_disabled', 'creation_restricted', null],
+        },
+
+        CreatorCapabilityAvailability: {
+          type: 'string',
+          enum: ['available', 'reserved'],
+        },
+
+        CreatorCapabilityAvailabilityMap: {
+          type: 'object',
+          properties: {
+            read_context: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            diagnostics_logs: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            diagnostics_codefresh: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            diagnostics_kubernetes: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            diagnostics_database: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            github_read: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            github_write: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            workspace_files: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            workspace_shell: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            workspace_git: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            network_access: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            preview_publish: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            external_mcp_read: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            external_mcp_write: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+            approval_controls: { $ref: '#/components/schemas/CreatorCapabilityAvailability' },
+          },
+          additionalProperties: false,
+        },
+
+        CustomAgentCreationPolicy: {
+          type: 'object',
+          properties: {
+            mode: { $ref: '#/components/schemas/CustomAgentCreationMode' },
+            allowedUserIds: { type: 'array', items: { type: 'string' } },
+            allowedGithubUsernames: { type: 'array', items: { type: 'string' } },
+            capabilityAvailability: { $ref: '#/components/schemas/CreatorCapabilityAvailabilityMap' },
+          },
+          additionalProperties: false,
+        },
+
+        AgentRuntimeConfig: {
           type: 'object',
           properties: {
             enabled: { type: 'boolean' },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
+            capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
+            customAgentCreationPolicy: { $ref: '#/components/schemas/CustomAgentCreationPolicy' },
             providers: {
               type: 'array',
-              items: { $ref: '#/components/schemas/AIAgentProviderConfig' },
+              items: { $ref: '#/components/schemas/AgentRuntimeProviderConfig' },
             },
             maxMessagesPerSession: { type: 'integer' },
             sessionTTL: { type: 'integer' },
@@ -2413,13 +3350,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['enabled', 'providers', 'maxMessagesPerSession', 'sessionTTL'],
         },
 
-        AIAgentRepoOverride: {
+        AgentRuntimeRepoOverride: {
           type: 'object',
           properties: {
             enabled: { type: 'boolean' },
             maxMessagesPerSession: { type: 'integer' },
             sessionTTL: { type: 'integer' },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
+            capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
             additiveRules: { type: 'array', items: { type: 'string' } },
             systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
@@ -2428,7 +3366,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           },
         },
 
-        AIAgentAdditiveRulesUpdateRequest: {
+        AgentRuntimeAdditiveRulesUpdateRequest: {
           type: 'object',
           properties: {
             additiveRules: { type: 'array', items: { type: 'string' } },
@@ -2437,7 +3375,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
-        AIAgentApprovalPolicyUpdateRequest: {
+        AgentRuntimeApprovalPolicyUpdateRequest: {
           type: 'object',
           properties: {
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
@@ -2446,7 +3384,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
-        AIAgentConfigPatchRequest: {
+        AgentRuntimeConfigPatchRequest: {
           type: 'object',
           properties: {
             additiveRules: { type: 'array', items: { type: 'string' } },
@@ -2458,47 +3396,29 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           description: 'Provide exactly one patch target: additiveRules or approvalPolicy.',
         },
 
-        AIAgentRepoConfigEntry: {
+        AgentRuntimeRepoConfigEntry: {
           type: 'object',
           properties: {
             repositoryFullName: { type: 'string' },
-            config: { $ref: '#/components/schemas/AIAgentRepoOverride' },
+            config: { $ref: '#/components/schemas/AgentRuntimeRepoOverride' },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
           },
         },
 
-        GetGlobalAIAgentConfigSuccessResponse: {
+        GetGlobalAgentRuntimeConfigSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {
               type: 'object',
               properties: {
-                data: { $ref: '#/components/schemas/AIAgentConfig' },
+                data: { $ref: '#/components/schemas/AgentRuntimeConfig' },
               },
             },
           ],
         },
 
-        GetRepoAIAgentConfigSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: {
-                  type: 'object',
-                  properties: {
-                    repoFullName: { type: 'string' },
-                    config: { $ref: '#/components/schemas/AIAgentRepoOverride' },
-                  },
-                },
-              },
-            },
-          ],
-        },
-
-        GetEffectiveAIAgentConfigSuccessResponse: {
+        GetRepoAgentRuntimeConfigSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {
@@ -2508,7 +3428,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                   type: 'object',
                   properties: {
                     repoFullName: { type: 'string' },
-                    effectiveConfig: { $ref: '#/components/schemas/AIAgentConfig' },
+                    config: { $ref: '#/components/schemas/AgentRuntimeRepoOverride' },
                   },
                 },
               },
@@ -2516,7 +3436,25 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
-        ListRepoAIAgentConfigsSuccessResponse: {
+        GetEffectiveAgentRuntimeConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    repoFullName: { type: 'string' },
+                    effectiveConfig: { $ref: '#/components/schemas/AgentRuntimeConfig' },
+                  },
+                },
+              },
+            },
+          ],
+        },
+
+        ListRepoAgentRuntimeConfigsSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {
@@ -2524,7 +3462,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               properties: {
                 data: {
                   type: 'array',
-                  items: { $ref: '#/components/schemas/AIAgentRepoConfigEntry' },
+                  items: { $ref: '#/components/schemas/AgentRuntimeRepoConfigEntry' },
                 },
               },
             },
@@ -2731,6 +3669,188 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        AgentCapabilityCatalogEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            category: {
+              type: 'string',
+              enum: [
+                'read',
+                'diagnostics',
+                'workspace',
+                'source_control',
+                'mcp',
+                'deployment',
+                'network',
+                'preview',
+                'approval',
+              ],
+            },
+            defaultAvailability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            defaultApprovalMode: { $ref: '#/components/schemas/AgentApprovalMode' },
+            runtimeCapabilityKey: { type: 'string' },
+            toolKeys: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            resourceGrants: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            sourceKinds: {
+              type: 'array',
+              items: {
+                type: 'string',
+                enum: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+              },
+            },
+            userSelectable: { type: 'boolean' },
+          },
+          required: [
+            'id',
+            'label',
+            'description',
+            'category',
+            'defaultAvailability',
+            'defaultApprovalMode',
+            'userSelectable',
+          ],
+        },
+
+        AgentCapabilityInventoryToolEntry: {
+          type: 'object',
+          properties: {
+            toolKey: { type: 'string' },
+            toolName: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            serverSlug: { type: 'string' },
+            serverName: { type: 'string' },
+            sourceType: {
+              type: 'string',
+              enum: ['builtin', 'mcp'],
+            },
+            sourceScope: { type: 'string' },
+          },
+          required: ['toolKey', 'toolName', 'serverSlug', 'serverName', 'sourceType', 'sourceScope'],
+        },
+
+        AgentCapabilityInventoryEntry: {
+          type: 'object',
+          properties: {
+            capabilityId: { type: 'string' },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            category: {
+              type: 'string',
+              enum: [
+                'read',
+                'diagnostics',
+                'workspace',
+                'source_control',
+                'mcp',
+                'deployment',
+                'network',
+                'preview',
+                'approval',
+              ],
+            },
+            defaultAvailability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            configuredAvailability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            inheritedAvailability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            effectiveAvailability: { $ref: '#/components/schemas/AgentCapabilityAvailability' },
+            approvalMode: { $ref: '#/components/schemas/AgentApprovalMode' },
+            runtimeCapabilityKey: { type: 'string' },
+            userSelectable: { type: 'boolean' },
+            toolCount: { type: 'integer', minimum: 0 },
+            resourceCount: { type: 'integer', minimum: 0 },
+            resourceGrants: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            tools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentCapabilityInventoryToolEntry' },
+            },
+            blockedReason: {
+              type: 'string',
+              enum: ['admin_only', 'system_only', 'disabled'],
+            },
+          },
+          required: [
+            'capabilityId',
+            'label',
+            'description',
+            'category',
+            'defaultAvailability',
+            'effectiveAvailability',
+            'approvalMode',
+            'userSelectable',
+            'toolCount',
+            'resourceCount',
+            'resourceGrants',
+            'tools',
+          ],
+        },
+
+        AgentCapabilityGovernanceResponse: {
+          type: 'object',
+          properties: {
+            scope: { type: 'string' },
+            scopeType: {
+              type: 'string',
+              enum: ['global', 'repo'],
+            },
+            repoFullName: { type: 'string' },
+            capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
+            inheritedCapabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
+            effectiveCapabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
+            capabilities: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentCapabilityInventoryEntry' },
+            },
+          },
+          required: ['scope', 'scopeType', 'capabilityPolicy', 'effectiveCapabilityPolicy', 'capabilities'],
+        },
+
+        UpdateAdminAgentCapabilitiesRequest: {
+          type: 'object',
+          properties: {
+            capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
+          },
+          required: ['capabilityPolicy'],
+          additionalProperties: false,
+        },
+
+        GetAdminCustomAgentCreationPolicySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    customAgentCreationPolicy: { $ref: '#/components/schemas/CustomAgentCreationPolicy' },
+                  },
+                  required: ['customAgentCreationPolicy'],
+                },
+              },
+            },
+          ],
+        },
+
+        UpdateAdminCustomAgentCreationPolicyRequest: {
+          type: 'object',
+          properties: {
+            customAgentCreationPolicy: { $ref: '#/components/schemas/CustomAgentCreationPolicy' },
+          },
+          required: ['customAgentCreationPolicy'],
+          additionalProperties: false,
+        },
+
         GetGlobalAgentSessionConfigSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
@@ -2803,200 +3923,21 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
-        FeedbackEntry: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            feedbackType: {
-              type: 'string',
-              enum: ['message', 'conversation'],
-            },
-            buildUuid: { type: 'string' },
-            rating: {
-              type: 'string',
-              enum: ['up', 'down'],
-            },
-            text: { type: 'string', nullable: true },
-            userIdentifier: { type: 'string', nullable: true },
-            repo: { type: 'string' },
-            prNumber: { type: 'integer', nullable: true },
-            messageId: { type: 'integer', nullable: true },
-            messagePreview: { type: 'string', nullable: true },
-            costUsd: { type: 'number', nullable: true },
-            createdAt: { type: 'string', format: 'date-time' },
-          },
-          required: [
-            'id',
-            'feedbackType',
-            'buildUuid',
-            'rating',
-            'text',
-            'userIdentifier',
-            'repo',
-            'prNumber',
-            'messageId',
-            'messagePreview',
-            'costUsd',
-            'createdAt',
-          ],
-        },
-
-        FeedbackListPaginationMetadata: {
-          type: 'object',
-          properties: {
-            page: { type: 'integer' },
-            limit: { type: 'integer' },
-            totalCount: { type: 'integer' },
-            totalPages: { type: 'integer' },
-          },
-          required: ['page', 'limit', 'totalCount', 'totalPages'],
-        },
-
-        FeedbackListResponseMetadata: {
-          type: 'object',
-          properties: {
-            pagination: { $ref: '#/components/schemas/FeedbackListPaginationMetadata' },
-          },
-          required: ['pagination'],
-        },
-
-        GetAdminFeedbackListSuccessResponse: {
+        GetAdminAgentCapabilitiesSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {
               type: 'object',
               properties: {
-                data: {
-                  type: 'array',
-                  items: { $ref: '#/components/schemas/FeedbackEntry' },
-                },
-                metadata: { $ref: '#/components/schemas/FeedbackListResponseMetadata' },
+                data: { $ref: '#/components/schemas/AgentCapabilityGovernanceResponse' },
               },
-              required: ['data', 'metadata'],
-            },
-          ],
-        },
-
-        ConversationReplayMessage: {
-          type: 'object',
-          properties: {
-            id: { type: 'integer' },
-            role: {
-              type: 'string',
-              enum: ['user', 'assistant', 'system'],
-            },
-            content: { type: 'string' },
-            timestamp: { type: 'integer' },
-            metadata: {
-              type: 'object',
-              additionalProperties: true,
-            },
-          },
-          required: ['id', 'role', 'content', 'timestamp', 'metadata'],
-        },
-
-        FeedbackConversationReplayData: {
-          type: 'object',
-          properties: {
-            feedbackType: {
-              type: 'string',
-              enum: ['message', 'conversation'],
-            },
-            feedbackId: { type: 'integer' },
-            buildUuid: { type: 'string' },
-            repo: { type: 'string' },
-            ratedMessageId: { type: 'integer', nullable: true },
-            feedbackRating: {
-              type: 'string',
-              enum: ['up', 'down'],
-            },
-            feedbackText: { type: 'string', nullable: true },
-            feedbackUserIdentifier: { type: 'string', nullable: true },
-            feedbackCreatedAt: { type: 'string', format: 'date-time' },
-            conversation: {
-              type: 'object',
-              properties: {
-                messageCount: { type: 'integer' },
-                model: { type: 'string', nullable: true },
-                messages: {
-                  type: 'array',
-                  items: { $ref: '#/components/schemas/ConversationReplayMessage' },
-                },
-              },
-              required: ['messageCount', 'model', 'messages'],
-            },
-          },
-          required: [
-            'feedbackType',
-            'feedbackId',
-            'buildUuid',
-            'repo',
-            'ratedMessageId',
-            'feedbackRating',
-            'feedbackText',
-            'feedbackUserIdentifier',
-            'feedbackCreatedAt',
-            'conversation',
-          ],
-        },
-
-        GetAdminFeedbackConversationSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: { $ref: '#/components/schemas/FeedbackConversationReplayData' },
-              },
-              required: ['data'],
             },
           ],
         },
 
         // ===================================================================
-        // AI Chat Schemas
+        // AI Runtime Config Schemas
         // ===================================================================
-
-        AIModel: {
-          type: 'object',
-          description: 'An available AI model returned by the models endpoint.',
-          properties: {
-            provider: { type: 'string', description: 'The LLM provider name.', example: 'anthropic' },
-            modelId: {
-              type: 'string',
-              description: 'The model ID to pass to the chat endpoint.',
-              example: 'claude-sonnet-4-20250514',
-            },
-            displayName: { type: 'string', example: 'Claude Sonnet' },
-            default: { type: 'boolean', description: 'Whether this is the default model.' },
-            maxTokens: { type: 'integer', example: 8192 },
-            inputCostPerMillion: { type: 'number', description: 'Cost per million input tokens (USD).' },
-            outputCostPerMillion: { type: 'number', description: 'Cost per million output tokens (USD).' },
-          },
-          required: ['provider', 'modelId', 'displayName', 'default', 'maxTokens'],
-        },
-
-        GetAIModelsSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: {
-                  type: 'object',
-                  properties: {
-                    models: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/AIModel' },
-                    },
-                  },
-                  required: ['models'],
-                },
-              },
-              required: ['data'],
-            },
-          ],
-        },
 
         AIConfigStatus: {
           type: 'object',
@@ -3019,394 +3960,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               required: ['data'],
             },
           ],
-        },
-
-        ConversationMessage: {
-          type: 'object',
-          description: 'A single message in the conversation history.',
-          properties: {
-            role: { type: 'string', enum: ['user', 'assistant', 'system'] },
-            content: { type: 'string', description: 'The message text or JSON string for structured responses.' },
-            timestamp: { type: 'integer', description: 'Unix timestamp in milliseconds.' },
-            isSystemAction: {
-              type: 'boolean',
-              description: 'True when the message was initiated by a system action rather than a user.',
-            },
-            activityHistory: {
-              type: 'array',
-              description: 'Tool call activity recorded during the assistant response.',
-              items: { $ref: '#/components/schemas/ActivityHistoryEntry' },
-            },
-            evidenceItems: {
-              type: 'array',
-              description: 'Evidence references (files, commits, resources) found during investigation.',
-              items: { type: 'object' },
-            },
-            totalInvestigationTimeMs: {
-              type: 'number',
-              description: 'Total wall-clock time spent generating this response.',
-            },
-            debugContext: { $ref: '#/components/schemas/DebugContext' },
-            debugToolData: {
-              type: 'array',
-              description: 'Detailed tool call/result data for debugging.',
-              items: { $ref: '#/components/schemas/DebugToolData' },
-            },
-            debugMetrics: { $ref: '#/components/schemas/DebugMetrics' },
-          },
-          required: ['role', 'content', 'timestamp'],
-        },
-
-        ActivityHistoryEntry: {
-          type: 'object',
-          properties: {
-            type: { type: 'string', description: 'The activity type (tool_call, processing, thinking, error).' },
-            message: { type: 'string' },
-            status: { type: 'string', enum: ['pending', 'completed', 'failed'] },
-            details: {
-              type: 'object',
-              properties: {
-                toolDurationMs: { type: 'number' },
-                totalDurationMs: { type: 'number' },
-              },
-            },
-            toolCallId: { type: 'string' },
-            resultPreview: { type: 'string', description: 'Truncated preview of the tool result.' },
-          },
-          required: ['type', 'message'],
-        },
-
-        DebugContext: {
-          type: 'object',
-          description: 'Debug information about the system prompt and model used for a response.',
-          properties: {
-            systemPrompt: { type: 'string' },
-            maskingStats: {
-              type: 'object',
-              nullable: true,
-              properties: {
-                totalTokensBefore: { type: 'integer' },
-                totalTokensAfter: { type: 'integer' },
-                maskedParts: { type: 'integer' },
-                savedTokens: { type: 'integer' },
-              },
-            },
-            provider: { type: 'string', description: 'LLM provider name (e.g. anthropic, openai).' },
-            modelId: { type: 'string' },
-          },
-          required: ['systemPrompt', 'provider', 'modelId'],
-        },
-
-        DebugToolData: {
-          type: 'object',
-          properties: {
-            toolCallId: { type: 'string' },
-            toolName: { type: 'string' },
-            toolArgs: { type: 'object', description: 'Arguments passed to the tool. May be truncated for storage.' },
-            toolResult: { description: 'Result returned by the tool. May be truncated for storage.' },
-            toolDurationMs: { type: 'number' },
-          },
-          required: ['toolCallId', 'toolName', 'toolArgs'],
-        },
-
-        DebugMetrics: {
-          type: 'object',
-          description: 'Aggregate metrics for a single AI response.',
-          properties: {
-            iterations: { type: 'integer', description: 'Number of orchestration loop iterations.' },
-            totalToolCalls: { type: 'integer' },
-            totalDurationMs: { type: 'number' },
-            inputTokens: { type: 'integer' },
-            outputTokens: { type: 'integer' },
-            inputCostPerMillion: { type: 'number' },
-            outputCostPerMillion: { type: 'number' },
-          },
-          required: ['iterations', 'totalToolCalls', 'totalDurationMs'],
-        },
-
-        GetAIMessagesSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: {
-                  type: 'object',
-                  properties: {
-                    messages: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/ConversationMessage' },
-                    },
-                    lastActivity: { type: 'integer', nullable: true },
-                  },
-                  required: ['messages'],
-                },
-              },
-              required: ['data'],
-            },
-          ],
-        },
-
-        DeleteAISessionSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean' },
-                    messagesCleared: { type: 'integer' },
-                  },
-                  required: ['success', 'messagesCleared'],
-                },
-              },
-              required: ['data'],
-            },
-          ],
-        },
-
-        // ===================================================================
-        // AI Chat SSE Event Schemas
-        // ===================================================================
-
-        SSEChunkEvent: {
-          type: 'object',
-          description: 'Streamed text content fragment from the AI response.',
-          properties: {
-            type: { type: 'string', enum: ['chunk'] },
-            content: { type: 'string', description: 'A fragment of the AI response text.' },
-          },
-          required: ['type', 'content'],
-        },
-
-        SSEToolCallEvent: {
-          type: 'object',
-          description:
-            'Emitted when the AI invokes a tool. The toolCallId can be correlated with a later SSEProcessingEvent.',
-          properties: {
-            type: { type: 'string', enum: ['tool_call'] },
-            message: { type: 'string', description: 'Human-readable description of the tool being called.' },
-            toolCallId: { type: 'string' },
-          },
-          required: ['type', 'message'],
-        },
-
-        SSEProcessingEvent: {
-          type: 'object',
-          description: 'Emitted when a tool call completes. Messages starting with a checkmark indicate success.',
-          properties: {
-            type: { type: 'string', enum: ['processing'] },
-            message: { type: 'string' },
-            details: {
-              type: 'object',
-              properties: {
-                toolDurationMs: { type: 'number' },
-                totalDurationMs: { type: 'number' },
-              },
-            },
-            resultPreview: { type: 'string', description: 'Truncated preview of the tool result.' },
-            toolCallId: { type: 'string', description: 'Correlates with the original SSEToolCallEvent.' },
-          },
-          required: ['type', 'message'],
-        },
-
-        SSEThinkingEvent: {
-          type: 'object',
-          description: 'Emitted when the AI is reasoning before producing output.',
-          properties: {
-            type: { type: 'string', enum: ['thinking'] },
-            message: { type: 'string' },
-          },
-          required: ['type', 'message'],
-        },
-
-        SSEActivityErrorEvent: {
-          type: 'object',
-          description: 'Emitted for non-fatal processing errors during investigation.',
-          properties: {
-            type: { type: 'string', enum: ['error'] },
-            message: { type: 'string' },
-          },
-          required: ['type', 'message'],
-        },
-
-        SSEEvidenceFileEvent: {
-          type: 'object',
-          description: 'A source file referenced as evidence during investigation.',
-          properties: {
-            type: { type: 'string', enum: ['evidence_file'] },
-            toolCallId: { type: 'string' },
-            filePath: { type: 'string' },
-            repository: { type: 'string' },
-            branch: { type: 'string' },
-            lineStart: { type: 'integer' },
-            lineEnd: { type: 'integer' },
-            language: { type: 'string' },
-          },
-          required: ['type', 'toolCallId', 'filePath', 'repository'],
-        },
-
-        SSEEvidenceCommitEvent: {
-          type: 'object',
-          description: 'A git commit referenced as evidence during investigation.',
-          properties: {
-            type: { type: 'string', enum: ['evidence_commit'] },
-            toolCallId: { type: 'string' },
-            commitUrl: { type: 'string' },
-            commitMessage: { type: 'string' },
-            filePaths: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['type', 'toolCallId', 'commitUrl', 'commitMessage', 'filePaths'],
-        },
-
-        SSEEvidenceResourceEvent: {
-          type: 'object',
-          description: 'A Kubernetes resource referenced as evidence during investigation.',
-          properties: {
-            type: { type: 'string', enum: ['evidence_resource'] },
-            toolCallId: { type: 'string' },
-            resourceType: { type: 'string', description: 'Kubernetes resource kind (e.g. Pod, Deployment).' },
-            resourceName: { type: 'string' },
-            namespace: { type: 'string' },
-            status: { type: 'string' },
-          },
-          required: ['type', 'toolCallId', 'resourceType', 'resourceName', 'namespace'],
-        },
-
-        SSEDebugContextEvent: {
-          type: 'object',
-          description: 'Debug info about the system prompt and model selection for this response.',
-          properties: {
-            type: { type: 'string', enum: ['debug_context'] },
-            systemPrompt: { type: 'string' },
-            maskingStats: {
-              type: 'object',
-              nullable: true,
-              properties: {
-                totalTokensBefore: { type: 'integer' },
-                totalTokensAfter: { type: 'integer' },
-                maskedParts: { type: 'integer' },
-                savedTokens: { type: 'integer' },
-              },
-            },
-            provider: { type: 'string' },
-            modelId: { type: 'string' },
-          },
-          required: ['type', 'systemPrompt', 'provider', 'modelId'],
-        },
-
-        SSEDebugToolCallEvent: {
-          type: 'object',
-          description: 'Raw tool invocation data for debugging.',
-          properties: {
-            type: { type: 'string', enum: ['debug_tool_call'] },
-            toolCallId: { type: 'string' },
-            toolName: { type: 'string' },
-            toolArgs: { type: 'object' },
-          },
-          required: ['type', 'toolCallId', 'toolName', 'toolArgs'],
-        },
-
-        SSEDebugToolResultEvent: {
-          type: 'object',
-          description: 'Raw tool result data for debugging.',
-          properties: {
-            type: { type: 'string', enum: ['debug_tool_result'] },
-            toolCallId: { type: 'string' },
-            toolName: { type: 'string' },
-            toolResult: { description: 'The raw tool result value.' },
-            toolDurationMs: { type: 'number' },
-          },
-          required: ['type', 'toolCallId', 'toolName', 'toolResult'],
-        },
-
-        SSEDebugMetricsEvent: {
-          type: 'object',
-          description: 'Aggregate metrics emitted once per response.',
-          properties: {
-            type: { type: 'string', enum: ['debug_metrics'] },
-            iterations: { type: 'integer' },
-            totalToolCalls: { type: 'integer' },
-            totalDurationMs: { type: 'number' },
-            inputTokens: { type: 'integer' },
-            outputTokens: { type: 'integer' },
-            inputCostPerMillion: { type: 'number' },
-            outputCostPerMillion: { type: 'number' },
-          },
-          required: ['type', 'iterations', 'totalToolCalls', 'totalDurationMs'],
-        },
-
-        SSECompleteEvent: {
-          type: 'object',
-          description: 'Signals the end of a plain-text AI response. This is the final event in the stream.',
-          properties: {
-            type: { type: 'string', enum: ['complete'] },
-            totalInvestigationTimeMs: { type: 'number' },
-            assistantTimestamp: {
-              type: 'number',
-              description: 'Server-side timestamp (epoch ms) used for persisting the final assistant message.',
-            },
-          },
-          required: ['type', 'totalInvestigationTimeMs'],
-        },
-
-        SSECompleteJsonEvent: {
-          type: 'object',
-          description:
-            'Signals the end of a structured JSON AI response (e.g. investigation_complete). ' +
-            'The content field contains the full JSON string. Sent before SSECompleteEvent.',
-          properties: {
-            type: { type: 'string', enum: ['complete_json'] },
-            content: { type: 'string', description: 'The full JSON response as a string.' },
-            preamble: {
-              type: 'string',
-              description:
-                'Optional plain-text summary emitted before structured JSON when mixed text+JSON model output is split.',
-            },
-            totalInvestigationTimeMs: { type: 'number' },
-          },
-          required: ['type', 'content', 'totalInvestigationTimeMs'],
-        },
-
-        SSEErrorEvent: {
-          type: 'object',
-          description:
-            'Streamed error event. Errors during SSE streaming are sent as events (not HTTP errors) ' +
-            'because the HTTP 200 status has already been committed.',
-          properties: {
-            error: { type: 'boolean', enum: [true] },
-            userMessage: { type: 'string', description: 'Human-readable error description.' },
-            category: {
-              type: 'string',
-              enum: ['rate-limited', 'transient', 'deterministic', 'ambiguous'],
-              description:
-                'Error classification. rate-limited: provider rate limit hit (retryable). ' +
-                'transient: temporary provider outage (retryable). ' +
-                'deterministic: auth error, bad request, or config issue (not retryable). ' +
-                'ambiguous: unknown error state (retryable).',
-            },
-            suggestedAction: {
-              type: 'string',
-              enum: ['retry', 'switch-model', 'check-config'],
-              nullable: true,
-              description: 'Recommended client action.',
-            },
-            retryAfter: {
-              type: 'number',
-              nullable: true,
-              description: 'Seconds to wait before retrying (only for rate-limited errors).',
-            },
-            modelName: { type: 'string' },
-            code: {
-              type: 'string',
-              description:
-                'Machine-readable error code. Known codes: AI_AGENT_DISABLED, CONTEXT_ERROR, ' +
-                'LLM_INIT_ERROR, LLM_API_ERROR, CIRCUIT_BREAKER_OPEN.',
-            },
-          },
-          required: ['error', 'userMessage', 'category', 'suggestedAction', 'retryAfter', 'modelName'],
         },
 
         // ===================================================================

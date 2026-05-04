@@ -26,8 +26,9 @@ import AgentRunService from 'server/services/agent/RunService';
  * /api/v2/ai/agent/runs/{runId}:
  *   get:
  *     summary: Get an agent run
+ *     description: Returns run status and the public runPlan summary for an owned run.
  *     tags:
- *       - Agent Sessions
+ *       - Agent Platform
  *     operationId: getAgentRun
  *     parameters:
  *       - in: path

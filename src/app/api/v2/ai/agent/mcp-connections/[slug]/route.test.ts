@@ -23,12 +23,17 @@ const mockDeleteConnection = jest.fn();
 const mockGetMaskedState = jest.fn();
 const mockGetRequestUserIdentity = jest.fn();
 
-jest.mock('server/services/ai/mcp/config', () => ({
-  McpConfigService: jest.fn().mockImplementation(() => ({
-    getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
-    discoverTools: (...args: unknown[]) => mockDiscoverTools(...args),
-  })),
-}));
+jest.mock('server/services/agentRuntime/mcp/config', () => {
+  const actual = jest.requireActual('server/services/agentRuntime/mcp/config');
+  return {
+    __esModule: true,
+    ...actual,
+    McpConfigService: jest.fn().mockImplementation(() => ({
+      getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
+      discoverTools: (...args: unknown[]) => mockDiscoverTools(...args),
+    })),
+  };
+});
 
 jest.mock('server/services/userMcpConnection', () => ({
   __esModule: true,
@@ -48,8 +53,8 @@ jest.mock('server/lib/logger', () => ({
 }));
 
 import { DELETE, PUT } from './route';
-import { buildMcpDefinitionFingerprint } from 'server/services/ai/mcp/connectionConfig';
-import type { McpAuthConfig, McpTransportConfig } from 'server/services/ai/mcp/types';
+import { buildMcpDefinitionFingerprint } from 'server/services/agentRuntime/mcp/connectionConfig';
+import type { McpAuthConfig, McpTransportConfig } from 'server/services/agentRuntime/mcp/types';
 
 function makeRequest(
   body: unknown,
@@ -155,22 +160,24 @@ describe('MCP user connection route', () => {
   });
 
   it('stores validation errors on the user connection without mutating shared discovery', async () => {
-    mockDiscoverTools.mockRejectedValue(new Error('HTTP 401 Unauthorized'));
+    mockDiscoverTools.mockRejectedValue(
+      new Error('HTTP 401 Unauthorized for Authorization Bearer invalid-token and token invalid-token')
+    );
 
     const response = await PUT(makeRequest({ values: { apiToken: 'invalid-token' } }), {
       params: Promise.resolve({ slug: 'sample-connector' }),
     });
+    const body = await response.json();
 
     expect(response.status).toBe(422);
     expect(mockUpsertConnection).toHaveBeenCalledWith(
       expect.objectContaining({
         discoveredTools: [],
-        validationError: 'HTTP 401 Unauthorized',
+        validationError: 'HTTP 401 Unauthorized for Authorization ****** and token ******',
       })
     );
-    await expect(response.json()).resolves.toMatchObject({
-      error: { message: 'HTTP 401 Unauthorized' },
-    });
+    expect(body.error.message).toBe('HTTP 401 Unauthorized for Authorization ****** and token ******');
+    expect(body.error.message).not.toContain('invalid-token');
   });
 
   it('deletes the current user connection and returns the empty state', async () => {

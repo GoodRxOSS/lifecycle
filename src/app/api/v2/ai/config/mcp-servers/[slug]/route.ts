@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import { McpConfigService, redactSharedConfigSecrets } from 'server/services/ai/mcp/config';
+import { McpConfigService, redactMcpConfigSecrets } from 'server/services/agentRuntime/mcp/config';
 import 'server/lib/dependencies';
 
 /**
@@ -81,7 +81,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     );
   }
 
-  const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
+  const result = redactMcpConfigSecrets(config.toJSON ? config.toJSON() : config);
   return successResponse(result, { status: 200 }, req);
 };
 
@@ -151,7 +151,7 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
 
   try {
     const config = await service.update(slug, scope, body);
-    const result = redactSharedConfigSecrets(config.toJSON ? config.toJSON() : config);
+    const result = redactMcpConfigSecrets(config.toJSON ? config.toJSON() : config);
     return successResponse(result, { status: 200 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

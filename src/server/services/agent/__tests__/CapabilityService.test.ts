@@ -22,24 +22,56 @@ const mockListTools = jest.fn();
 const mockCallTool = jest.fn();
 const mockClose = jest.fn();
 const mockLoggerWarn = jest.fn();
-const mockModeForCapability = jest.fn(() => 'allow');
+const mockModeForCapability = jest.fn((_policy?: unknown, _capability?: unknown) => 'allow');
+const mockGetEffectivePolicy = jest.fn();
+const mockGetEffectiveAgentConfig = jest.fn();
+const mockCapabilityForExternalMcpTool = jest.fn((_toolName?: string) => 'external_mcp_read');
 const mockPublishChatHttpPort = jest.fn();
 const mockFindSession = jest.fn();
 const mockResolveWorkspaceGatewayBaseUrl = jest.fn();
 const mockEnsureChatSandbox = jest.fn();
+const mockDiagnosticToolExecute = jest.fn();
+const mockParseYamlConfigFromBranch = jest.fn();
+const mockGithubOctokitRequest = jest.fn();
+const mockGithubClientInstances: Array<{
+  setAllowedBranch: jest.Mock;
+  setReferencedFiles: jest.Mock;
+  setExcludedFilePatterns: jest.Mock;
+  setAllowedWritePatterns: jest.Mock;
+  isFilePathAllowed: jest.Mock;
+  validateBranch: jest.Mock;
+  getOctokit: jest.Mock;
+}> = [];
 
 let currentTransport: Record<string, unknown> | null = null;
 
+function mockMakeDiagnosticToolClass(name: string, description = `${name} description`) {
+  return jest.fn().mockImplementation(() => ({
+    name,
+    description,
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+    execute: (args: Record<string, unknown>, signal?: AbortSignal) => mockDiagnosticToolExecute(name, args, signal),
+  }));
+}
+
 jest.mock('ai', () => ({
-  dynamicTool: (...args: unknown[]) => mockDynamicTool(...args),
-  jsonSchema: (...args: unknown[]) => mockJsonSchema(...args),
+  dynamicTool: (config: unknown) => mockDynamicTool(config),
+  jsonSchema: (schema: unknown) => mockJsonSchema(schema),
 }));
 
-jest.mock('server/services/ai/mcp/config', () => ({
-  McpConfigService: jest.fn().mockImplementation(() => ({
-    resolveServers: (...args: unknown[]) => mockResolveServers(...args),
-  })),
-}));
+jest.mock('server/services/agentRuntime/mcp/config', () => {
+  const actual = jest.requireActual('server/services/agentRuntime/mcp/config');
+  return {
+    __esModule: true,
+    ...actual,
+    McpConfigService: jest.fn().mockImplementation(() => ({
+      resolveServers: (...args: unknown[]) => mockResolveServers(...args),
+    })),
+  };
+});
 
 jest.mock('server/models/AgentSession', () => ({
   __esModule: true,
@@ -65,13 +97,74 @@ jest.mock('../SandboxService', () => ({
   },
 }));
 
-jest.mock('server/services/ai/mcp/client', () => ({
+jest.mock('server/services/agentRuntime/mcp/client', () => ({
   McpClientManager: jest.fn().mockImplementation(() => ({
     connect: (...args: unknown[]) => mockConnect(...args),
     listTools: (...args: unknown[]) => mockListTools(...args),
     callTool: (...args: unknown[]) => mockCallTool(...args),
     close: (...args: unknown[]) => mockClose(...args),
   })),
+}));
+
+jest.mock('server/services/agent/tools/shared/k8sClient', () => ({
+  K8sClient: jest.fn(),
+}));
+jest.mock('server/services/agent/tools/shared/githubClient', () => ({
+  GitHubClient: jest.fn().mockImplementation(() => {
+    const client = {
+      setAllowedBranch: jest.fn(),
+      setReferencedFiles: jest.fn(),
+      setExcludedFilePatterns: jest.fn(),
+      setAllowedWritePatterns: jest.fn(),
+      isFilePathAllowed: jest.fn(),
+      validateBranch: jest.fn(),
+      getOctokit: jest.fn().mockResolvedValue({ request: mockGithubOctokitRequest }),
+    };
+    mockGithubClientInstances.push(client);
+    return client;
+  }),
+}));
+
+jest.mock('server/lib/yamlConfigParser', () => ({
+  YamlConfigParser: jest.fn().mockImplementation(() => ({
+    parseYamlConfigFromBranch: (...args: unknown[]) => mockParseYamlConfigFromBranch(...args),
+  })),
+}));
+jest.mock('server/services/agent/tools/shared/databaseClient', () => ({
+  DatabaseClient: jest.fn(),
+}));
+jest.mock('server/services/agent/tools/codefresh/getCodefreshLogs', () => ({
+  GetCodefreshLogsTool: mockMakeDiagnosticToolClass('get_codefresh_logs'),
+}));
+jest.mock('server/services/agent/tools/k8s/getK8sResources', () => ({
+  GetK8sResourcesTool: mockMakeDiagnosticToolClass('get_k8s_resources'),
+}));
+jest.mock('server/services/agent/tools/k8s/getPodLogs', () => ({
+  GetPodLogsTool: mockMakeDiagnosticToolClass('get_pod_logs'),
+}));
+jest.mock('server/services/agent/tools/k8s/getLifecycleLogs', () => ({
+  GetLifecycleLogsTool: mockMakeDiagnosticToolClass('get_lifecycle_logs'),
+}));
+jest.mock('server/services/agent/tools/k8s/queryDatabase', () => ({
+  QueryDatabaseTool: mockMakeDiagnosticToolClass('query_database'),
+}));
+jest.mock('server/services/agent/tools/github/getFile', () => ({
+  GetFileTool: mockMakeDiagnosticToolClass('get_file'),
+}));
+jest.mock('server/services/agent/tools/github/listDirectory', () => ({
+  ListDirectoryTool: mockMakeDiagnosticToolClass('list_directory'),
+}));
+jest.mock('server/services/agent/tools/github/getIssueComment', () => ({
+  GetIssueCommentTool: mockMakeDiagnosticToolClass('get_issue_comment'),
+}));
+jest.mock('server/services/agent/tools/github/updateFile', () => ({
+  UpdateFileTool: mockMakeDiagnosticToolClass('update_file'),
+}));
+jest.mock('server/services/agent/tools/github/updatePrLabels', () => ({
+  UpdatePrLabelsTool: mockMakeDiagnosticToolClass('update_pr_labels'),
+}));
+jest.mock('server/services/agent/tools/k8s/patchK8sResource', () => ({
+  PatchK8sResourceTool: mockMakeDiagnosticToolClass('patch_k8s_resource'),
 }));
 
 jest.mock('server/lib/logger', () => ({
@@ -101,14 +194,54 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 jest.mock('../PolicyService', () => ({
   __esModule: true,
   default: {
+    getEffectivePolicy: (...args: unknown[]) => (mockGetEffectivePolicy as any)(...args),
     capabilityForSessionWorkspaceTool: jest.fn(() => 'read'),
-    capabilityForExternalMcpTool: jest.fn(() => 'external_mcp_read'),
-    modeForCapability: (...args: unknown[]) => mockModeForCapability(...args),
+    capabilityForExternalMcpTool: (...args: unknown[]) => (mockCapabilityForExternalMcpTool as any)(...args),
+    modeForCapability: (...args: unknown[]) => (mockModeForCapability as any)(...args),
+  },
+}));
+
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getEffectiveConfig: (...args: unknown[]) => mockGetEffectiveAgentConfig(...args),
+    })),
   },
 }));
 
 import AgentCapabilityService from '../CapabilityService';
 import { SessionWorkspaceGatewayUnavailableError } from '../errors';
+
+const defaultResolvedCapabilityAccess = [
+  'read_context',
+  'diagnostics_logs',
+  'diagnostics_codefresh',
+  'diagnostics_kubernetes',
+  'diagnostics_database',
+  'github_read',
+  'github_write',
+  'workspace_files',
+  'workspace_shell',
+  'workspace_git',
+  'network_access',
+  'preview_publish',
+  'external_mcp_read',
+  'external_mcp_write',
+  'approval_controls',
+].map((capabilityId) => ({
+  capabilityId,
+  effectiveAvailability: 'all_users' as const,
+  allowed: true,
+  approvalMode: 'allow' as const,
+}));
+
+function buildToolSetForTest(args: Parameters<typeof AgentCapabilityService.buildToolSet>[0]) {
+  return AgentCapabilityService.buildToolSet({
+    resolvedCapabilityAccess: defaultResolvedCapabilityAccess,
+    ...args,
+  });
+}
 
 describe('AgentCapabilityService.buildToolSet', () => {
   const session = {
@@ -124,6 +257,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     githubUsername: 'sample-user',
   } as any;
   const stdioServer = {
+    scope: 'global',
     slug: 'figma',
     name: 'Figma',
     transport: {
@@ -156,7 +290,18 @@ describe('AgentCapabilityService.buildToolSet', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGithubClientInstances.length = 0;
+    mockGithubOctokitRequest.mockResolvedValue({
+      data: {
+        sha: 'existing-file-sha',
+        content: Buffer.from('services:\n  sample-service:\n    branch: main').toString('base64'),
+      },
+    });
     mockModeForCapability.mockReturnValue('allow');
+    mockGetEffectivePolicy.mockResolvedValue({ rules: {} });
+    mockGetEffectiveAgentConfig.mockResolvedValue({});
+    mockParseYamlConfigFromBranch.mockResolvedValue({ services: [] });
+    mockCapabilityForExternalMcpTool.mockReturnValue('external_mcp_read');
     currentTransport = null;
     mockResolveServers.mockResolvedValue([stdioServer]);
     mockFindSession.mockResolvedValue(session);
@@ -190,6 +335,10 @@ describe('AgentCapabilityService.buildToolSet', () => {
     mockConnect.mockImplementation(async (transport) => {
       currentTransport = transport as Record<string, unknown>;
     });
+    mockDiagnosticToolExecute.mockResolvedValue({
+      success: true,
+      agentContent: JSON.stringify({ ok: true }),
+    });
     mockListTools.mockImplementation(async () => {
       if (
         currentTransport &&
@@ -219,8 +368,46 @@ describe('AgentCapabilityService.buildToolSet', () => {
     mockClose.mockResolvedValue(undefined);
   });
 
+  it('resolves repo-scoped context from build-context chat workspaceRepos', async () => {
+    mockFindSession.mockResolvedValueOnce({
+      uuid: 'session-build-context',
+      userId: 'sample-user',
+      sessionKind: 'chat',
+      workspaceRepos: [
+        {
+          repo: 'example-org/example-repo',
+          repoUrl: 'https://github.com/example-org/example-repo.git',
+          branch: 'feature/sample',
+          revision: 'commit-sha-1',
+          mountPath: '/workspace',
+          primary: true,
+        },
+      ],
+      selectedServices: [],
+    });
+    const policy = { rules: { deploy_k8s_read: 'allow' } };
+    mockGetEffectivePolicy.mockResolvedValueOnce(policy);
+
+    const result = await AgentCapabilityService.resolveSessionContext('session-build-context', userIdentity);
+
+    expect(mockFindSession).toHaveBeenCalledWith({
+      uuid: 'session-build-context',
+      userId: 'sample-user',
+    });
+    expect(mockGetEffectivePolicy).toHaveBeenCalledWith('example-org/example-repo');
+    expect(result).toEqual({
+      session: expect.objectContaining({
+        uuid: 'session-build-context',
+      }),
+      repoFullName: 'example-org/example-repo',
+      approvalPolicy: policy,
+      capabilityPolicy: undefined,
+      customAgentCreationPolicy: undefined,
+    });
+  });
+
   it('routes stdio MCP execution through the session-pod proxy endpoint', async () => {
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session,
       repoFullName: 'example-org/example-repo',
       userIdentity,
@@ -238,7 +425,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     );
     expect(mockListTools).toHaveBeenCalledWith(4500);
 
-    const tool = tools.mcp__figma__get_design_context as {
+    const tool = tools.mcp__figma__get_design_context as unknown as {
       execute: (input: Record<string, unknown>) => Promise<unknown>;
     };
     expect(tool).toBeDefined();
@@ -255,8 +442,196 @@ describe('AgentCapabilityService.buildToolSet', () => {
     expect(mockCallTool).toHaveBeenCalledWith('get_design_context', {}, 30000);
   });
 
-  it('uses the configured workspace execution timeout for sandbox tools', async () => {
+  it('does not expose runtime tools without resolved run-plan capabilities', async () => {
     const tools = await AgentCapabilityService.buildToolSet({
+      session: {
+        ...session,
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__figma__get_design_context).toBeUndefined();
+    expect(tools.mcp__sandbox__workspace_exec).toBeUndefined();
+    expect(tools.mcp__sandbox__workspace_write_file).toBeUndefined();
+    expect(tools.mcp__lifecycle__publish_http).toBeUndefined();
+  });
+
+  it('omits external MCP tools whose resolved catalog capability is unavailable', async () => {
+    mockCapabilityForExternalMcpTool.mockImplementation((toolName: string) =>
+      toolName === 'update_design' ? 'external_mcp_write' : 'external_mcp_read'
+    );
+    mockResolveServers.mockResolvedValue([
+      {
+        ...stdioServer,
+        discoveredTools: [
+          {
+            name: 'get_design_context',
+            description: 'Read design context',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+          {
+            name: 'update_design',
+            description: 'Update design context',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+        ],
+      },
+    ]);
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      resolvedCapabilityAccess: [
+        {
+          capabilityId: 'external_mcp_read',
+          effectiveAvailability: 'all_users',
+          allowed: true,
+          approvalMode: 'allow',
+        },
+        {
+          capabilityId: 'external_mcp_write',
+          effectiveAvailability: 'admin_only',
+          allowed: false,
+          reason: 'admin_only',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__figma__get_design_context).toBeDefined();
+    expect(tools.mcp__figma__update_design).toBeUndefined();
+  });
+
+  it('skips optional external MCP tools for explicit empty runtime MCP selections', async () => {
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      selectedRuntimeMcpConnectionRefs: [],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__figma__get_design_context).toBeUndefined();
+    expect(tools.mcp__sandbox__workspace_read_file).toBeDefined();
+  });
+
+  it('registers only the selected runtime MCP connection tools', async () => {
+    mockResolveServers.mockResolvedValue([
+      stdioServer,
+      {
+        ...stdioServer,
+        slug: 'docs',
+        name: 'Docs',
+        discoveredTools: [
+          {
+            name: 'search_docs',
+            description: 'Search docs',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      selectedRuntimeMcpConnectionRefs: ['global:docs'],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__figma__get_design_context).toBeUndefined();
+    expect(tools.mcp__docs__search_docs).toBeDefined();
+    expect(tools.mcp__sandbox__workspace_read_file).toBeDefined();
+  });
+
+  it('filters selected runtime MCP connections by scope and slug', async () => {
+    mockResolveServers.mockResolvedValue([
+      {
+        ...stdioServer,
+        slug: 'docs',
+        name: 'Global Docs',
+        discoveredTools: [
+          {
+            name: 'search_global_docs',
+            description: 'Search global docs',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+      {
+        ...stdioServer,
+        scope: 'example-org/example-repo',
+        slug: 'docs',
+        name: 'Repo Docs',
+        discoveredTools: [
+          {
+            name: 'search_repo_docs',
+            description: 'Search repo docs',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      selectedRuntimeMcpConnectionRefs: ['example-org/example-repo:docs'],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__docs__search_global_docs).toBeUndefined();
+    expect(tools.mcp__docs__search_repo_docs).toBeDefined();
+  });
+
+  it('uses the configured workspace execution timeout for sandbox tools', async () => {
+    const tools = await buildToolSetForTest({
       session,
       repoFullName: 'example-org/example-repo',
       userIdentity,
@@ -265,7 +640,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       workspaceToolExecutionTimeoutMs: 22000,
     });
 
-    const tool = tools.mcp__sandbox__workspace_read_file as {
+    const tool = tools.mcp__sandbox__workspace_read_file as unknown as {
       execute: (input: Record<string, unknown>) => Promise<unknown>;
     };
     expect(tool).toBeDefined();
@@ -295,7 +670,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     });
 
     await expect(
-      AgentCapabilityService.buildToolSet({
+      buildToolSetForTest({
         session,
         repoFullName: 'example-org/example-repo',
         userIdentity,
@@ -311,7 +686,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
   it('lets session tool rules override the family approval mode for sandbox tools', async () => {
     mockModeForCapability.mockReturnValue('deny');
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session,
       repoFullName: 'example-org/example-repo',
       userIdentity,
@@ -364,7 +739,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       },
     ]);
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         ...session,
         sessionKind: 'chat',
@@ -396,15 +771,655 @@ describe('AgentCapabilityService.buildToolSet', () => {
         needsApproval: true,
       })
     );
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toBeUndefined();
     expect(Object.keys(tools).some((key) => key.includes('__source_'))).toBe(false);
     expect(tools.mcp__lifecycle__workspace_provision).toBeUndefined();
+  });
+
+  it('registers Lifecycle diagnostic read tools for build-context chat sessions', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    const onToolStarted = jest.fn();
+    const onToolFinished = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolStarted,
+        onToolFinished,
+      },
+    });
+
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toEqual(expect.objectContaining({ needsApproval: false }));
+    expect(tools.mcp__lifecycle__get_k8s_resources).toBeDefined();
+    expect(tools.mcp__lifecycle__get_pod_logs).toBeDefined();
+    expect(tools.mcp__lifecycle__get_lifecycle_logs).toBeDefined();
+    expect(tools.mcp__lifecycle__query_database).toBeDefined();
+    expect(tools.mcp__lifecycle__get_file).toBeDefined();
+    expect(tools.mcp__lifecycle__list_directory).toBeDefined();
+    expect(tools.mcp__lifecycle__get_issue_comment).toBeDefined();
+    expect(typeof (tools.mcp__lifecycle__update_file as { needsApproval?: unknown }).needsApproval).toBe('function');
+    expect(tools.mcp__lifecycle__update_pr_labels).toEqual(expect.objectContaining({ needsApproval: true }));
+    expect(tools.mcp__lifecycle__patch_k8s_resource).toEqual(expect.objectContaining({ needsApproval: true }));
+
+    const tool = tools.mcp__lifecycle__get_codefresh_logs as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+    await tool.execute({ pipeline_id: 'pipeline-1' }, { toolCallId: 'tool-codefresh' });
+
+    expect(mockDiagnosticToolExecute).toHaveBeenCalledWith(
+      'get_codefresh_logs',
+      { pipeline_id: 'pipeline-1' },
+      undefined
+    );
+    expect(onToolStarted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'mcp',
+        serverSlug: 'lifecycle',
+        toolName: 'get_codefresh_logs',
+        toolCallId: 'tool-codefresh',
+        capabilityKey: 'read',
+      })
+    );
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'get_codefresh_logs',
+        status: 'completed',
+      })
+    );
+  });
+
+  it('does not register Lifecycle diagnostic read tools for generic no-build chats', async () => {
+    mockResolveServers.mockResolvedValue([]);
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-chat',
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: undefined,
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toBeUndefined();
+    expect(tools.mcp__lifecycle__query_database).toBeUndefined();
+    expect(tools.mcp__lifecycle__get_file).toBeUndefined();
+    expect(tools.mcp__lifecycle__update_file).toBeUndefined();
+    expect(tools.mcp__lifecycle__patch_k8s_resource).toBeUndefined();
+  });
+
+  it('lets tool rules deny individual Lifecycle diagnostic read tools', async () => {
+    mockResolveServers.mockResolvedValue([]);
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      toolRules: [
+        {
+          toolKey: 'mcp__lifecycle__query_database',
+          mode: 'deny',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__lifecycle__query_database).toBeUndefined();
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toBeDefined();
+  });
+
+  it('omits Lifecycle diagnostic tools whose resolved catalog capability is unavailable', async () => {
+    mockResolveServers.mockResolvedValue([]);
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      resolvedCapabilityAccess: [
+        {
+          capabilityId: 'diagnostics_codefresh',
+          effectiveAvailability: 'system_only',
+          allowed: true,
+          approvalMode: 'allow',
+        },
+        {
+          capabilityId: 'diagnostics_database',
+          effectiveAvailability: 'system_only',
+          allowed: false,
+          reason: 'disabled',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toBeDefined();
+    expect(tools.mcp__lifecycle__query_database).toBeUndefined();
+  });
+
+  it('requires approval for Lifecycle diagnostic fix tools even when capability policy allows them', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockModeForCapability.mockReturnValue('allow');
+    const onToolStarted = jest.fn();
+    const onToolFinished = jest.fn();
+    const onFileChange = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolStarted,
+        onToolFinished,
+        onFileChange,
+      },
+    });
+
+    expect(typeof (tools.mcp__lifecycle__update_file as { needsApproval?: unknown }).needsApproval).toBe('function');
+    expect(tools.mcp__lifecycle__update_pr_labels).toEqual(expect.objectContaining({ needsApproval: true }));
+    expect(tools.mcp__lifecycle__patch_k8s_resource).toEqual(expect.objectContaining({ needsApproval: true }));
+
+    const updateFileTool = tools.mcp__lifecycle__update_file as unknown as {
+      onInputAvailable: (input: { input: Record<string, unknown>; toolCallId?: string }) => Promise<void>;
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+
+    await updateFileTool.onInputAvailable({
+      input: {
+        repository_owner: 'example-org',
+        repository_name: 'example-repo',
+        branch: 'feature/sample',
+        file_path: './lifecycle.yaml',
+        new_content: 'services:\\n  sample-service:\\n    branch: feature/sample',
+      },
+      toolCallId: 'tool-update-file',
+    });
+    await updateFileTool.execute(
+      {
+        repository_owner: 'example-org',
+        repository_name: 'example-repo',
+        branch: 'feature/sample',
+        file_path: './lifecycle.yaml',
+        new_content: 'services:\\n  sample-service:\\n    branch: feature/sample',
+      },
+      { toolCallId: 'tool-update-file' }
+    );
+
+    expect(onFileChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolCallId: 'tool-update-file',
+        sourceTool: 'update_file',
+        displayPath: 'lifecycle.yaml',
+        stage: 'awaiting-approval',
+        additions: 1,
+        deletions: 1,
+        beforeTextPreview: 'services:\n  sample-service:\n    branch: main',
+        afterTextPreview: 'services:\n  sample-service:\n    branch: feature/sample',
+        unifiedDiff: expect.stringContaining('-    branch: main'),
+      })
+    );
+    expect(onFileChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedDiff: expect.stringContaining('+    branch: feature/sample'),
+      })
+    );
+    const proposedFileChange = onFileChange.mock.calls[0]?.[0] as { unifiedDiff?: string | null };
+    expect(proposedFileChange.unifiedDiff?.match(/^\+\+\+ b\/lifecycle\.yaml$/gm)).toHaveLength(1);
+    expect(mockDiagnosticToolExecute).toHaveBeenCalledWith(
+      'update_file',
+      {
+        repository_owner: 'example-org',
+        repository_name: 'example-repo',
+        branch: 'feature/sample',
+        file_path: './lifecycle.yaml',
+        new_content: 'services:\\n  sample-service:\\n    branch: feature/sample',
+      },
+      undefined
+    );
+    expect(onToolStarted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'update_file',
+        toolCallId: 'tool-update-file',
+        capabilityKey: 'git_write',
+      })
+    );
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'update_file',
+        status: 'completed',
+      })
+    );
+  });
+
+  it('configures Lifecycle diagnostic GitHub writes with the session branch and allowed config files', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockGetEffectiveAgentConfig.mockResolvedValue({
+      allowedWritePatterns: ['sysops/dockerfiles/**'],
+      excludedFilePatterns: ['secrets/**'],
+    });
+    mockParseYamlConfigFromBranch.mockResolvedValue({
+      services: [
+        {
+          name: 'sample-service',
+          github: {
+            docker: {
+              app: {
+                dockerfilePath: 'services/sample/Dockerfile',
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/sample',
+            revision: null,
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(mockParseYamlConfigFromBranch).toHaveBeenCalledWith('example-org/example-repo', 'feature/sample');
+    const fixToolClient = mockGithubClientInstances.at(-1);
+    expect(fixToolClient?.setAllowedBranch).toHaveBeenCalledWith('feature/sample');
+    expect(fixToolClient?.setAllowedWritePatterns).toHaveBeenCalledWith(
+      expect.arrayContaining(['lifecycle.yaml', 'lifecycle.yml', 'sysops/dockerfiles/**'])
+    );
+    expect(fixToolClient?.setExcludedFilePatterns).toHaveBeenCalledWith(['secrets/**']);
+    expect(fixToolClient?.setReferencedFiles).toHaveBeenCalledWith(['services/sample/Dockerfile']);
+
+    const updateFileTool = tools.mcp__lifecycle__update_file as unknown as {
+      needsApproval: (input: Record<string, unknown>) => Promise<boolean>;
+    };
+    fixToolClient?.isFilePathAllowed.mockReturnValue(true);
+    fixToolClient?.validateBranch.mockReturnValue({ valid: true });
+    await expect(
+      updateFileTool.needsApproval({
+        branch: 'feature/sample',
+        file_path: 'services/sample/Dockerfile',
+      })
+    ).resolves.toBe(true);
+
+    fixToolClient?.isFilePathAllowed.mockReturnValue(false);
+    await expect(
+      updateFileTool.needsApproval({
+        branch: 'feature/sample',
+        file_path: 'secrets/token.txt',
+      })
+    ).resolves.toBe(false);
+  });
+
+  it('lets tool rules deny individual Lifecycle diagnostic fix tools', async () => {
+    mockResolveServers.mockResolvedValue([]);
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      toolRules: [
+        {
+          toolKey: 'mcp__lifecycle__update_file',
+          mode: 'deny',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__lifecycle__update_file).toBeUndefined();
+    expect(tools.mcp__lifecycle__update_pr_labels).toEqual(expect.objectContaining({ needsApproval: true }));
+    expect(tools.mcp__lifecycle__patch_k8s_resource).toEqual(expect.objectContaining({ needsApproval: true }));
+  });
+
+  it('redacts MCP default args from tool audit hooks while preserving runtime execution args', async () => {
+    mockResolveServers.mockResolvedValue([
+      {
+        slug: 'docs',
+        name: 'Docs',
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.test',
+        },
+        timeout: 30000,
+        defaultArgs: {
+          token: 'shared-secret-token',
+          project: 'secret-project',
+        },
+        env: {},
+        discoveredTools: [
+          {
+            name: 'lookup',
+            description: 'Lookup docs',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+                token: { type: 'string' },
+                project: { type: 'string' },
+              },
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+    const onToolStarted = jest.fn();
+    const onToolFinished = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolStarted,
+        onToolFinished,
+      },
+    });
+
+    const tool = tools.mcp__docs__lookup as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+    await tool.execute({ query: 'routing' }, { toolCallId: 'tool-defaults' });
+
+    expect(mockCallTool).toHaveBeenCalledWith(
+      'lookup',
+      {
+        query: 'routing',
+        token: 'shared-secret-token',
+        project: 'secret-project',
+      },
+      30000
+    );
+    expect(onToolStarted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: {
+          query: 'routing',
+          token: '******',
+          project: '******',
+        },
+      })
+    );
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: {
+          query: 'routing',
+          token: '******',
+          project: '******',
+        },
+      })
+    );
+  });
+
+  it('redacts transport and env secrets from MCP tool failure audit output', async () => {
+    mockResolveServers.mockResolvedValue([
+      {
+        slug: 'docs',
+        name: 'Docs',
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.test?api_key=query/secret+value',
+          headers: {
+            Authorization: 'Bearer transport-secret',
+          },
+        },
+        timeout: 30000,
+        defaultArgs: {
+          token: 'shared-secret-token',
+        },
+        env: {
+          SAMPLE_ENV_TOKEN: 'env-secret',
+        },
+        discoveredTools: [
+          {
+            name: 'lookup',
+            description: 'Lookup docs',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+                token: { type: 'string' },
+              },
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+    mockCallTool.mockRejectedValueOnce(
+      new Error(
+        'failed Authorization=Bearer transport-secret query=query/secret+value encoded=query%2Fsecret%2Bvalue env=env-secret token=shared-secret-token'
+      )
+    );
+    const onToolFinished = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolFinished,
+      },
+    });
+
+    const tool = tools.mcp__docs__lookup as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+    await expect(tool.execute({ query: 'routing' }, { toolCallId: 'tool-failed' })).rejects.toThrow(
+      'failed Authorization=****** query=****** encoded=****** env=****** token=******'
+    );
+
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'failed',
+        result: {
+          error: 'failed Authorization=****** query=****** encoded=****** env=****** token=******',
+        },
+      })
+    );
+  });
+
+  it('redacts transport and env secrets from non-throwing MCP error results', async () => {
+    mockResolveServers.mockResolvedValue([
+      {
+        slug: 'docs',
+        name: 'Docs',
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.test?api_key=query/secret+value',
+          headers: {
+            Authorization: 'Bearer transport-secret',
+          },
+        },
+        timeout: 30000,
+        defaultArgs: {
+          token: 'shared-secret-token',
+        },
+        env: {
+          SAMPLE_ENV_TOKEN: 'env-secret',
+        },
+        discoveredTools: [
+          {
+            name: 'lookup',
+            description: 'Lookup docs',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+                token: { type: 'string' },
+              },
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+    mockCallTool.mockResolvedValueOnce({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            ok: false,
+            error:
+              'failed Authorization=Bearer transport-secret query=query/secret+value encoded=query%2Fsecret%2Bvalue env=env-secret token=shared-secret-token',
+            fileChanges: [
+              {
+                path: 'docs-output.txt',
+                kind: 'created',
+                additions: 1,
+                deletions: 0,
+                afterTextPreview: 'query=query/secret+value env=env-secret token=shared-secret-token',
+                summary: 'Created with Authorization=Bearer transport-secret',
+              },
+            ],
+          }),
+        },
+      ],
+      isError: true,
+    });
+    const onToolFinished = jest.fn();
+    const onFileChange = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolFinished,
+        onFileChange,
+      },
+    });
+
+    const tool = tools.mcp__docs__lookup as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+    const result = await tool.execute({ query: 'routing' }, { toolCallId: 'tool-error-result' });
+    const serializedResult = JSON.stringify(result);
+
+    expect(serializedResult).toContain('Authorization=******');
+    expect(serializedResult).toContain('query=******');
+    expect(serializedResult).toContain('encoded=******');
+    expect(serializedResult).toContain('env=******');
+    expect(serializedResult).toContain('token=******');
+    expect(serializedResult).not.toContain('Bearer transport-secret');
+    expect(serializedResult).not.toContain('query/secret+value');
+    expect(serializedResult).not.toContain('query%2Fsecret%2Bvalue');
+    expect(serializedResult).not.toContain('env-secret');
+    expect(serializedResult).not.toContain('shared-secret-token');
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'failed',
+        result,
+      })
+    );
+    expect(onFileChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolCallId: 'tool-error-result',
+        sourceTool: 'lookup',
+        stage: 'failed',
+        afterTextPreview: 'query=****** env=****** token=******',
+        summary: 'Created with Authorization=******',
+      })
+    );
   });
 
   it('lets tool rules require approval for chat HTTP publishing', async () => {
     mockResolveServers.mockResolvedValue([]);
     mockModeForCapability.mockReturnValue('allow');
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         ...session,
         sessionKind: 'chat',
@@ -440,7 +1455,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       namespace: null,
     });
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         uuid: 'session-chat',
         sessionKind: 'chat',
@@ -522,7 +1537,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
   it('lets tool rules require approval for lazy chat workspace tools before runtime exists', async () => {
     mockResolveServers.mockResolvedValue([]);
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         uuid: 'session-chat',
         sessionKind: 'chat',
@@ -551,10 +1566,59 @@ describe('AgentCapabilityService.buildToolSet', () => {
     );
   });
 
+  it('omits lazy chat workspace tools whose resolved catalog capability is unavailable', async () => {
+    mockResolveServers.mockResolvedValue([]);
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-chat',
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: undefined,
+      userIdentity,
+      approvalPolicy: {} as any,
+      resolvedCapabilityAccess: [
+        {
+          capabilityId: 'read_context',
+          effectiveAvailability: 'all_users',
+          allowed: true,
+          approvalMode: 'allow',
+        },
+        {
+          capabilityId: 'workspace_files',
+          effectiveAvailability: 'all_users',
+          allowed: true,
+          approvalMode: 'allow',
+        },
+        {
+          capabilityId: 'workspace_shell',
+          effectiveAvailability: 'disabled',
+          allowed: false,
+          reason: 'disabled',
+        },
+        {
+          capabilityId: 'preview_publish',
+          effectiveAvailability: 'all_users',
+          allowed: true,
+          approvalMode: 'allow',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__sandbox__workspace_write_file).toBeDefined();
+    expect(tools.mcp__sandbox__workspace_exec_mutation).toBeUndefined();
+  });
+
   it('runs GitHub CLI commands through the generic workspace mutation tool with request GitHub auth', async () => {
     mockResolveServers.mockResolvedValue([]);
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         uuid: 'session-chat',
         sessionKind: 'chat',
@@ -571,7 +1635,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       requestGitHubToken: 'sample-gh-token',
     });
 
-    const tool = tools.mcp__sandbox__workspace_exec_mutation as {
+    const tool = tools.mcp__sandbox__workspace_exec_mutation as unknown as {
       execute: (input: Record<string, unknown>) => Promise<unknown>;
     };
     mockFindSession.mockResolvedValueOnce({
@@ -633,7 +1697,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     });
     const onFileChange = jest.fn();
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         uuid: 'session-chat',
         sessionKind: 'chat',
@@ -723,7 +1787,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     });
     const onFileChange = jest.fn();
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session,
       repoFullName: undefined,
       userIdentity,
@@ -769,7 +1833,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
   it('blocks unsafe broad process kill commands before they reach the workspace gateway', async () => {
     mockResolveServers.mockResolvedValue([]);
 
-    const tools = await AgentCapabilityService.buildToolSet({
+    const tools = await buildToolSetForTest({
       session: {
         uuid: 'session-chat',
         sessionKind: 'chat',
@@ -785,7 +1849,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       workspaceToolExecutionTimeoutMs: 22000,
     });
 
-    const tool = tools.mcp__sandbox__workspace_exec_mutation as {
+    const tool = tools.mcp__sandbox__workspace_exec_mutation as unknown as {
       execute: (input: Record<string, unknown>) => Promise<unknown>;
     };
 

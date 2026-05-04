@@ -38,6 +38,10 @@ export function getUserRoles(payload: JWTPayload): LifecycleRole[] {
 export function requireRole(...roles: LifecycleRole[]) {
   return (handler: RouteHandler): RouteHandler => {
     return async (req: NextRequest, ...args: any[]) => {
+      if (process.env.ENABLE_AUTH !== 'true') {
+        return handler(req, ...args);
+      }
+
       const user = getUser(req);
 
       if (!user) {

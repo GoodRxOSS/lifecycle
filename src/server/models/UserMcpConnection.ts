@@ -15,7 +15,7 @@
  */
 
 import Model from './_Model';
-import type { McpDiscoveredTool } from 'server/services/ai/mcp/types';
+import type { McpDiscoveredTool } from 'server/services/agentRuntime/mcp/types';
 
 export default class UserMcpConnection extends Model {
   userId!: string;

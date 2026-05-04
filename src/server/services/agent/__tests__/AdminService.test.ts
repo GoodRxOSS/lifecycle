@@ -22,6 +22,8 @@ const mockMessageQuery = jest.fn();
 const mockRunQuery = jest.fn();
 const mockRunEventQuery = jest.fn();
 const mockToolExecutionQuery = jest.fn();
+const mockMcpServerConfigQuery = jest.fn();
+const mockUserMcpConnectionQuery = jest.fn();
 const mockSerializeRun = jest.fn();
 const mockSerializeRunEvent = jest.fn();
 const mockSerializeThread = jest.fn();
@@ -80,6 +82,20 @@ jest.mock('server/models/AgentToolExecution', () => ({
   __esModule: true,
   default: {
     query: (...args: unknown[]) => mockToolExecutionQuery(...args),
+  },
+}));
+
+jest.mock('server/models/McpServerConfig', () => ({
+  __esModule: true,
+  default: {
+    query: (...args: unknown[]) => mockMcpServerConfigQuery(...args),
+  },
+}));
+
+jest.mock('server/models/UserMcpConnection', () => ({
+  __esModule: true,
+  default: {
+    query: (...args: unknown[]) => mockUserMcpConnectionQuery(...args),
   },
 }));
 
@@ -217,6 +233,132 @@ describe('AgentAdminService.listSessions', () => {
         threadCount: 1,
         pendingActionsCount: 1,
         lastRunAt: '2026-04-05T19:00:00.000Z',
+      }),
+    ]);
+  });
+});
+
+describe('AgentAdminService.listMcpServerCoverage', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('redacts transport and shared MCP secrets in admin coverage rows', async () => {
+    const configQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          slug: 'sample-connector',
+          name: 'Sample Connector',
+          description: 'A sample MCP connector.',
+          scope: 'global',
+          preset: null,
+          transport: {
+            type: 'http',
+            url: 'https://mcp.example.test?api_key=transport-query-secret',
+            headers: {
+              Authorization: 'Bearer shared-token',
+              'X-Api-Key': 'shared-api-key',
+            },
+          },
+          sharedConfig: {
+            headers: {
+              'X-Shared-Token': 'header-secret',
+            },
+            query: {
+              token: 'query-secret',
+            },
+            env: {
+              SAMPLE_TOKEN: 'env-secret',
+            },
+            defaultArgs: {
+              project: 'arg-secret',
+            },
+          },
+          authConfig: { mode: 'none' },
+          enabled: true,
+          timeout: 5000,
+          sharedDiscoveredTools: [],
+          createdAt: '2026-04-20T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+        },
+        {
+          slug: 'sample-cli',
+          name: 'Sample CLI',
+          description: null,
+          scope: 'global',
+          preset: null,
+          transport: {
+            type: 'stdio',
+            command: 'sample-mcp',
+            args: ['--mode', 'stdio'],
+            env: {
+              SAMPLE_API_TOKEN: 'stdio-secret',
+            },
+          },
+          sharedConfig: {},
+          authConfig: { mode: 'none' },
+          enabled: true,
+          timeout: 5000,
+          sharedDiscoveredTools: [],
+          createdAt: '2026-04-20T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+        },
+      ]),
+    };
+    mockMcpServerConfigQuery.mockReturnValue(configQueryBuilder);
+
+    const connectionQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([{ slug: 'sample-connector', validatedAt: '2026-04-22T00:00:00.000Z' }]),
+    };
+    mockUserMcpConnectionQuery.mockReturnValue(connectionQueryBuilder);
+
+    const result = await AgentAdminService.listMcpServerCoverage();
+
+    expect(configQueryBuilder.where).toHaveBeenCalledWith({ scope: 'global' });
+    expect(result).toEqual([
+      expect.objectContaining({
+        slug: 'sample-connector',
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.test?api_key=******',
+          headers: {
+            Authorization: '******',
+            'X-Api-Key': '******',
+          },
+        },
+        sharedConfig: {
+          headers: {
+            'X-Shared-Token': '******',
+          },
+          query: {
+            token: '******',
+          },
+          env: {
+            SAMPLE_TOKEN: '******',
+          },
+          defaultArgs: {
+            project: '******',
+          },
+        },
+        userConnectionCount: 1,
+        latestUserValidatedAt: '2026-04-22T00:00:00.000Z',
+      }),
+      expect.objectContaining({
+        slug: 'sample-cli',
+        transport: {
+          type: 'stdio',
+          command: 'sample-mcp',
+          args: ['--mode', 'stdio'],
+          env: {
+            SAMPLE_API_TOKEN: '******',
+          },
+        },
+        sharedConfig: {},
+        userConnectionCount: 0,
+        latestUserValidatedAt: null,
       }),
     ]);
   });

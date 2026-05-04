@@ -36,13 +36,13 @@ import type {
   McpDiscoveredTool,
   McpSharedConnectionConfig,
   McpTransportConfig,
-} from 'server/services/ai/mcp/types';
+} from 'server/services/agentRuntime/mcp/types';
 import {
   buildMcpDefinitionFingerprint,
   normalizeAuthConfig,
   requiresUserConnection,
-} from 'server/services/ai/mcp/connectionConfig';
-import { redactSharedConfigSecrets } from 'server/services/ai/mcp/config';
+} from 'server/services/agentRuntime/mcp/connectionConfig';
+import { redactMcpConfigSecrets } from 'server/services/agentRuntime/mcp/config';
 
 type SessionStatus = AgentSession['status'];
 
@@ -478,14 +478,18 @@ export default class AgentAdminService {
     return configs.map((config) => {
       const rows = connectionRowsBySlug.get(config.slug) || [];
       const connectionRequired = requiresUserConnection(normalizeAuthConfig(config.authConfig));
+      const redactedConfig = redactMcpConfigSecrets({
+        transport: config.transport,
+        sharedConfig: config.sharedConfig || {},
+      });
       return {
         slug: config.slug,
         name: config.name,
         description: config.description ?? null,
         scope: config.scope,
         preset: config.preset ?? null,
-        transport: config.transport,
-        sharedConfig: redactSharedConfigSecrets({ sharedConfig: config.sharedConfig || {} }).sharedConfig || {},
+        transport: redactedConfig.transport || config.transport,
+        sharedConfig: redactedConfig.sharedConfig || {},
         authConfig: normalizeAuthConfig(config.authConfig),
         enabled: config.enabled,
         timeout: config.timeout,

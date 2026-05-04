@@ -20,11 +20,10 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
-import AgentCapabilityService from 'server/services/agent/CapabilityService';
-import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
 import AgentRunService, { InvalidAgentRunDefaultsError } from 'server/services/agent/RunService';
+import AgentRunPlanResolver from 'server/services/agent/RunPlanResolver';
 import AgentThreadService from 'server/services/agent/ThreadService';
 import {
   normalizeCanonicalAgentMessagePart,
@@ -163,8 +162,9 @@ function normalizeRuntimeOptions(value: unknown): AgentRunRuntimeOptions | null 
  * /api/v2/ai/agent/threads/{threadId}/runs:
  *   post:
  *     summary: Create and enqueue a managed run for an agent thread
+ *     description: Creates a run and resolves its run plan server-side from the thread's selected agent, runtime-control choices, requested model, source, and policy. Request body supports only message, model, and runtimeOptions.
  *     tags:
- *       - Agent Sessions
+ *       - Agent Platform
  *     operationId: createAgentThreadRun
  *     parameters:
  *       - in: path
@@ -291,32 +291,16 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
     return errorResponse(new Error('Session source is not ready yet.'), { status: 409 }, req);
   }
 
-  const { approvalPolicy, repoFullName } = await AgentCapabilityService.resolveSessionContext(
-    session.uuid,
-    userIdentity
-  );
-  const requestedHarness = null;
-  const resolvedHarness = readString(session.defaultHarness);
-  if (!resolvedHarness) {
-    return errorResponse(new Error('Agent run harness is required'), { status: 400 }, req);
-  }
-  if (resolvedHarness !== 'lifecycle_ai_sdk') {
-    return errorResponse(new Error(`Unsupported agent run harness: ${resolvedHarness}`), { status: 400 }, req);
-  }
-
-  const requestedProvider = modelRequest.requestedProvider;
-  const requestedModel = modelRequest.requestedModel;
-  const resolvedModelRequest = requestedModel || readString(session.defaultModel);
-  if (!resolvedModelRequest) {
-    return errorResponse(new Error('Agent run model is required'), { status: 400 }, req);
-  }
-
-  let selection;
+  let runPlan;
   try {
-    selection = await AgentProviderRegistry.resolveSelection({
-      repoFullName,
-      requestedProvider: requestedProvider || undefined,
-      requestedModelId: resolvedModelRequest,
+    runPlan = await AgentRunPlanResolver.resolveForRunAdmission({
+      thread,
+      session,
+      source,
+      userIdentity,
+      requestedProvider: modelRequest.requestedProvider,
+      requestedModel: modelRequest.requestedModel,
+      runtimeOptions,
     });
   } catch (error) {
     return errorResponse(error instanceof Error ? error : new Error('Invalid agent run model'), { status: 400 }, req);
@@ -327,16 +311,17 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
     admission = await AgentRunAdmissionService.createQueuedRunWithMessage({
       thread,
       session,
-      policy: approvalPolicy,
+      policy: runPlan.approvalPolicy,
       message,
-      requestedHarness,
-      requestedProvider,
-      requestedModel,
-      resolvedHarness,
-      resolvedProvider: selection.provider,
-      resolvedModel: selection.modelId,
-      sandboxRequirement: source.sandboxRequirements || {},
-      runtimeOptions,
+      requestedHarness: runPlan.requestedHarness,
+      requestedProvider: runPlan.requestedProvider,
+      requestedModel: runPlan.requestedModel,
+      resolvedHarness: runPlan.resolvedHarness,
+      resolvedProvider: runPlan.resolvedProvider,
+      resolvedModel: runPlan.resolvedModel,
+      sandboxRequirement: runPlan.sandboxRequirement,
+      runtimeOptions: runPlan.runtimeOptions,
+      runPlanSnapshot: runPlan.runPlanSnapshot,
     });
   } catch (error) {
     if (AgentRunService.isActiveRunConflictError(error)) {

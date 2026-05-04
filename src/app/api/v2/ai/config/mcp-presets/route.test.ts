@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 
 const mockListMcpPresets = jest.fn();
 
-jest.mock('server/services/ai/mcp/presets', () => ({
+jest.mock('server/services/agentRuntime/mcp/presets', () => ({
   listMcpPresets: (...args: unknown[]) => mockListMcpPresets(...args),
 }));
 

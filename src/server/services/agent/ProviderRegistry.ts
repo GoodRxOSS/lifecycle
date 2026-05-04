@@ -18,9 +18,9 @@ import type { LanguageModel } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
-import AIAgentConfigService from 'server/services/aiAgentConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
-import { transformProviderModels } from 'server/services/ai/utils/modelTransformation';
+import { transformProviderModels } from 'server/services/agentRuntime/models/modelTransformation';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import type { AgentModelSummary, AgentResolvedModelSelection } from './types';
@@ -48,6 +48,13 @@ export class MissingAgentProviderApiKeyError extends Error {
   }
 }
 
+export class AgentModelSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentModelSelectionError';
+  }
+}
+
 function getProviderInstance(provider: AgentResolvedModelSelection['provider'], apiKey: string) {
   switch (provider) {
     case 'anthropic':
@@ -72,7 +79,7 @@ export function resolveRequestedModelSelection(
     : undefined;
 
   if (models.length === 0) {
-    throw new Error('No enabled agent models are configured');
+    throw new AgentModelSelectionError('No enabled agent models are configured');
   }
 
   if (normalizedRequestedProvider && requestedModelId) {
@@ -80,7 +87,7 @@ export function resolveRequestedModelSelection(
       (model) => model.provider === normalizedRequestedProvider && model.modelId === requestedModelId
     );
     if (!matched) {
-      throw new Error(`Model ${requestedProvider}:${requestedModelId} is not enabled`);
+      throw new AgentModelSelectionError(`Model ${requestedProvider}:${requestedModelId} is not enabled`);
     }
 
     return {
@@ -92,11 +99,11 @@ export function resolveRequestedModelSelection(
   if (requestedModelId) {
     const matches = models.filter((model) => model.modelId === requestedModelId);
     if (matches.length === 0) {
-      throw new Error(`Model ${requestedModelId} is not enabled`);
+      throw new AgentModelSelectionError(`Model ${requestedModelId} is not enabled`);
     }
 
     if (matches.length > 1) {
-      throw new Error(`Model id ${requestedModelId} is ambiguous; provider is required`);
+      throw new AgentModelSelectionError(`Model id ${requestedModelId} is ambiguous; provider is required`);
     }
 
     return {
@@ -108,7 +115,7 @@ export function resolveRequestedModelSelection(
   if (normalizedRequestedProvider) {
     const providerModels = models.filter((model) => model.provider === normalizedRequestedProvider);
     if (providerModels.length === 0) {
-      throw new Error(`Provider ${requestedProvider} has no enabled models`);
+      throw new AgentModelSelectionError(`Provider ${requestedProvider} has no enabled models`);
     }
 
     const defaultProviderModel = providerModels.find((model) => model.default) || providerModels[0];
@@ -131,7 +138,7 @@ export default class AgentProviderRegistry {
   }
 
   static async listAvailableModels(repoFullName?: string): Promise<AgentModelSummary[]> {
-    const config = await AIAgentConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     return transformProviderModels(config.providers || []).flatMap((model) => {
       const provider = normalizeModelProvider(model.provider);
       if (!provider) {
@@ -184,7 +191,7 @@ export default class AgentProviderRegistry {
   }): Promise<Record<string, string>> {
     let config;
     try {
-      config = await AIAgentConfigService.getInstance().getEffectiveConfig(repoFullName);
+      config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     } catch (error) {
       getLogger().warn(
         { error, repoFullName },

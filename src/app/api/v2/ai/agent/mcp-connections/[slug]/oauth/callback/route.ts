@@ -23,11 +23,14 @@ import {
   buildMcpDefinitionFingerprint,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
-} from 'server/services/ai/mcp/connectionConfig';
-import { McpConfigService } from 'server/services/ai/mcp/config';
-import McpOAuthFlowService, { extractMcpOAuthFlowId, type McpOAuthFlowRecord } from 'server/services/ai/mcp/oauthFlow';
-import { PersistentOAuthClientProvider } from 'server/services/ai/mcp/oauthProvider';
-import type { McpDiscoveredTool, McpStoredUserConnectionState } from 'server/services/ai/mcp/types';
+} from 'server/services/agentRuntime/mcp/connectionConfig';
+import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
+import McpOAuthFlowService, {
+  extractMcpOAuthFlowId,
+  type McpOAuthFlowRecord,
+} from 'server/services/agentRuntime/mcp/oauthFlow';
+import { PersistentOAuthClientProvider } from 'server/services/agentRuntime/mcp/oauthProvider';
+import type { McpDiscoveredTool, McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 type OAuthConnectionState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
@@ -418,11 +421,10 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     validatedAt: existing?.validatedAt,
     interactive: false,
   });
-  const transport = applyCompiledConnectionConfigToTransport(
-    config.transport,
-    mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined),
-    { authProvider: provider }
-  );
+  const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
+  const transport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig, {
+    authProvider: provider,
+  });
   if (transport.type === 'stdio') {
     const invalidTransportMessage = `OAuth MCP connection '${flow.slug}' must use HTTP or SSE transport.`;
     await clearPendingFlowState(flow, invalidTransportMessage);
@@ -482,7 +484,19 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
       }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = sanitizeMcpErrorMessage(error, [
+      {
+        values: {
+          code,
+          callbackState,
+          codeVerifier: provider.currentState.codeVerifier,
+          oauthState: provider.currentState.oauthState,
+        },
+        compiledConfig,
+        transport,
+        extraSecrets: [provider.currentState.tokens, provider.currentState.clientInformation],
+      },
+    ]);
     await persistOAuthConnectionState({
       flow,
       state: provider.currentState,

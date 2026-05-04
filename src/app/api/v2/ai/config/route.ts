@@ -17,16 +17,16 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import AIAgentConfigService from 'server/services/aiAgentConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from 'server/services/agent/providerConfig';
 
 /**
  * @openapi
  * /api/v2/ai/config:
  *   get:
- *     summary: Check AI agent configuration status
+ *     summary: Check Agent runtime configuration status
  *     description: >
- *       Lightweight status check that returns whether the AI agent is enabled,
+ *       Lightweight status check that returns whether the agent runtime is enabled,
  *       which LLM provider is active, and whether the provider API key is set.
  *       Use this endpoint to gate UI features before making heavier API calls.
  *       When `enabled` is false, the chat endpoint will reject messages.
@@ -48,14 +48,14 @@ import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from 's
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const aiAgentConfigService = AIAgentConfigService.getInstance();
-  const aiAgentConfig = await aiAgentConfigService.getEffectiveConfig();
+  const agentRuntimeConfigService = AgentRuntimeConfigService.getInstance();
+  const agentRuntimeConfig = await agentRuntimeConfigService.getEffectiveConfig();
 
-  if (!aiAgentConfig?.enabled) {
+  if (!agentRuntimeConfig?.enabled) {
     return successResponse({ enabled: false }, { status: 200 }, req);
   }
 
-  const enabledProvider = aiAgentConfig.providers?.find((p: any) => p.enabled !== false);
+  const enabledProvider = agentRuntimeConfig.providers?.find((p: any) => p.enabled !== false);
   const provider = normalizeStoredAgentProviderName(enabledProvider?.name) || 'anthropic';
   const apiKeySet = getProviderEnvVarCandidates(provider, enabledProvider?.apiKeyEnvVar).some((envVar) =>
     Boolean(process.env[envVar])

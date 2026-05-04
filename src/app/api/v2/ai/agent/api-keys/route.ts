@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import AIAgentConfigService from 'server/services/aiAgentConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
 import {
   STORED_AGENT_PROVIDER_NAMES,
@@ -45,7 +45,7 @@ function getSearchParam(req: NextRequest, key: string): string | null {
 
 async function getConfiguredProviders(): Promise<SupportedProvider[]> {
   try {
-    const config = await AIAgentConfigService.getInstance().getEffectiveConfig();
+    const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig();
     const configuredProviders = (config.providers || [])
       .map((provider: { name?: unknown; enabled?: unknown }) =>
         provider.enabled !== false && typeof provider.name === 'string' ? normalizeProvider(provider.name) : null

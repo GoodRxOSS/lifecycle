@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse } from 'server/lib/response';
-import { listMcpPresets } from 'server/services/ai/mcp/presets';
+import { listMcpPresets } from 'server/services/agentRuntime/mcp/presets';
 
 /**
  * @openapi

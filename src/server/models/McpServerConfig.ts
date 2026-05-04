@@ -20,7 +20,7 @@ import type {
   McpDiscoveredTool,
   McpSharedConnectionConfig,
   McpTransportConfig,
-} from 'server/services/ai/mcp/types';
+} from 'server/services/agentRuntime/mcp/types';
 
 export default class McpServerConfig extends Model {
   slug!: string;

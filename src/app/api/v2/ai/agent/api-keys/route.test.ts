@@ -30,7 +30,7 @@ jest.mock('server/services/userApiKey', () => ({
   },
 }));
 
-jest.mock('server/services/aiAgentConfig', () => ({
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({

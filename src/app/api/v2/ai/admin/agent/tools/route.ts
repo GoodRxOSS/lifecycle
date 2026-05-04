@@ -49,6 +49,12 @@ export const dynamic = 'force-dynamic';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '403':
+ *         description: Forbidden
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -61,4 +67,4 @@ const getHandler = async (req: NextRequest) => {
   return successResponse(data, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { roles: ['admin'] });

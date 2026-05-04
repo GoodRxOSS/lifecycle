@@ -43,8 +43,11 @@ function makeRequest(): NextRequest {
 }
 
 describe('GET /api/v2/ai/agent/github-token', () => {
+  const originalEnableAuth = process.env.ENABLE_AUTH;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.ENABLE_AUTH = 'true';
     mockGetUser.mockReturnValue({
       sub: 'user-123',
       realm_access: {
@@ -55,6 +58,14 @@ describe('GET /api/v2/ai/agent/github-token', () => {
       userId: 'user-123',
       githubUsername: 'sample-user',
     });
+  });
+
+  afterEach(() => {
+    if (originalEnableAuth === undefined) {
+      delete process.env.ENABLE_AUTH;
+    } else {
+      process.env.ENABLE_AUTH = originalEnableAuth;
+    }
   });
 
   it('returns 401 when no user is available', async () => {

@@ -165,13 +165,25 @@ describe('ApprovalService', () => {
         },
         fileChanges: [
           {
+            id: 'tool-call-1:/workspace/sample-file.txt',
+            toolCallId: 'tool-call-1',
+            sourceTool: 'workspace_edit_file',
             path: '/workspace/sample-file.txt',
             displayPath: 'sample-file.txt',
             kind: 'edited',
+            stage: 'awaiting-approval',
             summary: 'Updated sample-file.txt',
             additions: 1,
             deletions: 1,
             truncated: false,
+            unifiedDiff: 'diff --git a/sample-file.txt b/sample-file.txt',
+            beforeTextPreview: 'before',
+            afterTextPreview: 'after',
+            encoding: 'utf-8',
+            oldSizeBytes: 6,
+            newSizeBytes: 5,
+            oldSha256: 'old-hash',
+            newSha256: 'new-hash',
           },
         ],
       },
@@ -202,16 +214,156 @@ describe('ApprovalService', () => {
       commandPreview: null,
       fileChangePreview: [
         {
-          path: 'sample-file.txt',
-          action: 'edited',
+          id: 'tool-call-1:/workspace/sample-file.txt',
+          toolCallId: 'tool-call-1',
+          sourceTool: 'workspace_edit_file',
+          path: '/workspace/sample-file.txt',
+          displayPath: 'sample-file.txt',
+          kind: 'edited',
+          stage: 'awaiting-approval',
           summary: 'Updated sample-file.txt',
           additions: 1,
           deletions: 1,
           truncated: false,
+          unifiedDiff: 'diff --git a/sample-file.txt b/sample-file.txt',
+          beforeTextPreview: 'before',
+          afterTextPreview: 'after',
+          encoding: 'utf-8',
+          oldSizeBytes: 6,
+          newSizeBytes: 5,
+          oldSha256: 'old-hash',
+          newSha256: 'new-hash',
         },
       ],
       riskLabels: ['Workspace write'],
     });
+  });
+
+  it('serializes Lifecycle fix approval data without exposing raw file content as an argument', () => {
+    const serialized = ApprovalService.serializePendingAction({
+      uuid: 'action-update-file',
+      threadId: 3,
+      runId: 4,
+      kind: 'tool_approval',
+      status: 'pending',
+      capabilityKey: 'git_write',
+      title: 'Approve update_file',
+      description: 'update_file requires approval before it can run.',
+      payload: {
+        approvalId: 'approval-update-file',
+        toolCallId: 'tool-update-file',
+        toolName: 'mcp__lifecycle__update_file',
+        input: {
+          repository_owner: 'example-org',
+          repository_name: 'example-repo',
+          branch: 'feature/sample',
+          file_path: 'lifecycle.yaml',
+          new_content: 'services:\n  sample-service:\n    branch: feature/sample',
+          commit_message: 'Update sample service config',
+        },
+        fileChanges: [
+          {
+            id: 'tool-update-file:lifecycle.yaml',
+            toolCallId: 'tool-update-file',
+            sourceTool: 'update_file',
+            path: 'lifecycle.yaml',
+            displayPath: 'lifecycle.yaml',
+            kind: 'edited',
+            stage: 'awaiting-approval',
+            summary: 'Proposed update to lifecycle.yaml',
+            additions: 3,
+            deletions: 0,
+            truncated: false,
+            unifiedDiff: 'diff --git a/lifecycle.yaml b/lifecycle.yaml',
+            beforeTextPreview: 'services:\n  sample-service:\n    branch: main',
+            afterTextPreview: 'services:\n  sample-service:\n    branch: feature/sample',
+            encoding: 'utf-8',
+            oldSizeBytes: 43,
+            newSizeBytes: 54,
+            oldSha256: 'old-lifecycle-hash',
+            newSha256: 'new-lifecycle-hash',
+          },
+        ],
+      },
+      resolution: null,
+      resolvedAt: null,
+      createdAt: '2026-04-11T00:00:00.000Z',
+      updatedAt: '2026-04-11T00:00:00.000Z',
+    } as any);
+
+    expect(serialized.argumentsSummary).toEqual(
+      expect.arrayContaining([
+        { name: 'repository_owner', value: 'example-org' },
+        { name: 'repository_name', value: 'example-repo' },
+        { name: 'branch', value: 'feature/sample' },
+        { name: 'file_path', value: 'lifecycle.yaml' },
+      ])
+    );
+    expect(serialized.argumentsSummary).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'new_content' })])
+    );
+    expect(serialized.fileChangePreview).toEqual([
+      {
+        id: 'tool-update-file:lifecycle.yaml',
+        toolCallId: 'tool-update-file',
+        sourceTool: 'update_file',
+        path: 'lifecycle.yaml',
+        displayPath: 'lifecycle.yaml',
+        kind: 'edited',
+        stage: 'awaiting-approval',
+        summary: 'Proposed update to lifecycle.yaml',
+        additions: 3,
+        deletions: 0,
+        truncated: false,
+        unifiedDiff: 'diff --git a/lifecycle.yaml b/lifecycle.yaml',
+        beforeTextPreview: 'services:\n  sample-service:\n    branch: main',
+        afterTextPreview: 'services:\n  sample-service:\n    branch: feature/sample',
+        encoding: 'utf-8',
+        oldSizeBytes: 43,
+        newSizeBytes: 54,
+        oldSha256: 'old-lifecycle-hash',
+        newSha256: 'new-lifecycle-hash',
+      },
+    ]);
+    expect(serialized.riskLabels).toEqual(['Git write']);
+  });
+
+  it('serializes Lifecycle Kubernetes fix approvals with deployment risk labeling', () => {
+    const serialized = ApprovalService.serializePendingAction({
+      uuid: 'action-k8s',
+      threadId: 3,
+      runId: 4,
+      kind: 'tool_approval',
+      status: 'pending',
+      capabilityKey: 'deploy_k8s_mutation',
+      title: 'Approve patch_k8s_resource',
+      description: 'patch_k8s_resource requires approval before it can run.',
+      payload: {
+        approvalId: 'approval-k8s',
+        toolCallId: 'tool-k8s',
+        toolName: 'mcp__lifecycle__patch_k8s_resource',
+        input: {
+          namespace: 'env-sample',
+          resource_type: 'deployment',
+          name: 'sample-service',
+          operation: 'restart',
+        },
+      },
+      resolution: null,
+      resolvedAt: null,
+      createdAt: '2026-04-11T00:00:00.000Z',
+      updatedAt: '2026-04-11T00:00:00.000Z',
+    } as any);
+
+    expect(serialized.argumentsSummary).toEqual(
+      expect.arrayContaining([
+        { name: 'namespace', value: 'env-sample' },
+        { name: 'resource_type', value: 'deployment' },
+        { name: 'operation', value: 'restart' },
+      ])
+    );
+    expect(serialized.fileChangePreview).toEqual([]);
+    expect(serialized.riskLabels).toEqual(['Deployment change']);
   });
 
   it('lists only pending actions for the owned thread', async () => {
@@ -308,6 +460,64 @@ describe('ApprovalService', () => {
     });
 
     expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('persists forced Lifecycle fix approval requests even when the policy allows the capability', async () => {
+    mockGetToolName.mockReturnValue('mcp__lifecycle__update_file');
+
+    const existingLookupQuery: any = {};
+    existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.first = jest.fn().mockResolvedValue(null);
+
+    const insertQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue({ id: 1 }),
+    };
+
+    mockPendingActionQuery.mockImplementationOnce(() => existingLookupQuery).mockImplementationOnce(() => insertQuery);
+
+    await ApprovalService.syncApprovalRequestsFromMessages({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      messages: [
+        {
+          role: 'assistant',
+          parts: [
+            {
+              approval: { id: 'approval-1' },
+              input: {
+                repository_owner: 'example-org',
+                repository_name: 'example-repo',
+                branch: 'feature/sample',
+                file_path: 'lifecycle.yaml',
+                new_content: 'services: []',
+              },
+              state: 'approval-requested',
+              toolCallId: 'tool-call-1',
+            },
+          ],
+        } as any,
+      ],
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          git_write: 'allow',
+          external_mcp_write: 'allow',
+        },
+      } as any,
+      toolRules: [],
+    });
+
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityKey: 'git_write',
+        payload: expect.objectContaining({
+          approvalId: 'approval-1',
+          toolCallId: 'tool-call-1',
+          toolName: 'mcp__lifecycle__update_file',
+        }),
+      })
+    );
   });
 
   it('persists approval requests when a tool rule requires approval', async () => {
@@ -425,6 +635,29 @@ describe('ApprovalService', () => {
         }),
       })
     );
+  });
+
+  it('does not persist stream approval requests when the current policy allows the tool', async () => {
+    await ApprovalService.upsertApprovalRequestFromStream({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      approvalId: 'approval-1',
+      toolCallId: 'tool-call-1',
+      toolName: 'mcp__sandbox__workspace_write_file',
+      input: {
+        path: 'sample-file.txt',
+        content: 'hello',
+      },
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          workspace_write: 'allow',
+        },
+      } as any,
+      toolRules: [],
+    });
+
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
   });
 
   it('does not reset resolved approval requests during final message sync', async () => {

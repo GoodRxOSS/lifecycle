@@ -34,6 +34,130 @@ jest.mock('server/services/agent/ProviderRegistry', () => ({
   },
 }));
 
+const runPlanSnapshot = {
+  version: 1,
+  capturedAt: '2026-05-01T00:00:00.000Z',
+  agent: {
+    id: 'system.freeform',
+    label: 'Free-form',
+    sourceKind: 'freeform_chat',
+  },
+  source: {
+    id: 'source-1',
+    adapter: 'blank_workspace',
+    status: 'ready',
+    sessionKind: 'chat',
+    freshness: {
+      capturedAt: '2026-05-01T00:00:00.000Z',
+      freshnessSource: 'source',
+    },
+  },
+  model: {
+    requestedProvider: null,
+    requestedModel: null,
+    resolvedProvider: 'openai',
+    resolvedModel: 'gpt-5.4',
+  },
+  runtime: {
+    requestedHarness: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: {},
+    approvalPolicy: 'on-request',
+  },
+  prompt: {
+    instructionRefs: [],
+    renderedSummary: 'Sample prompt summary',
+    renderedHash: 'sha256:sample-rendered-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: [],
+    resolvedCapabilityAccess: [],
+  },
+  warnings: [],
+} as const;
+
+const customAgentRunPlanSnapshot = {
+  ...runPlanSnapshot,
+  agent: {
+    id: 'custom.sample-agent',
+    label: 'Sample custom agent',
+    ownerKind: 'user',
+    version: 4,
+    sourceKind: 'freeform_chat',
+    modelPreference: {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4.6',
+    },
+  },
+  model: {
+    requestedProvider: 'anthropic',
+    requestedModel: 'claude-sonnet-4.6',
+    resolvedProvider: 'anthropic',
+    resolvedModel: 'claude-sonnet-4.6',
+  },
+  runtime: {
+    ...runPlanSnapshot.runtime,
+    runtimeOptions: { maxIterations: 6 },
+    approvalPolicy: {
+      defaultMode: 'require_approval',
+      rules: { read: 'allow' },
+    },
+  },
+  prompt: {
+    instructionRefs: [],
+    instructionAddendum: 'Use the sample custom instructions.',
+    renderedSummary: 'Sample custom agent description',
+    renderedHash: 'sha256:sample-custom-agent-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: ['read_context'],
+    resolvedCapabilityAccess: [
+      {
+        capabilityId: 'read_context',
+        availability: 'all_users',
+        allowed: true,
+        runtimeCapabilityKey: 'read',
+        approvalMode: 'allow',
+      },
+    ],
+  },
+} as const;
+
+const mockResolveForRunAdmission = jest.fn().mockResolvedValue({
+  approvalPolicy: 'on-request',
+  requestedHarness: null,
+  requestedProvider: null,
+  requestedModel: null,
+  resolvedHarness: 'lifecycle_ai_sdk',
+  resolvedProvider: 'openai',
+  resolvedModel: 'gpt-5.4',
+  sandboxRequirement: { filesystem: 'persistent' },
+  runtimeOptions: {},
+  runPlanSnapshot,
+});
+
+jest.mock('server/services/agent/RunPlanResolver', () => ({
+  __esModule: true,
+  default: {
+    resolveForRunAdmission: (...args: unknown[]) => mockResolveForRunAdmission(...args),
+  },
+}));
+
+const mockGetSessionSource = jest.fn().mockResolvedValue({
+  id: 3,
+  uuid: 'source-1',
+  status: 'ready',
+  sandboxRequirements: { filesystem: 'persistent' },
+});
+
+jest.mock('server/services/agent/SourceService', () => ({
+  __esModule: true,
+  default: {
+    getSessionSource: (...args: unknown[]) => mockGetSessionSource(...args),
+  },
+}));
+
 const mockResolveSessionContext = jest.fn().mockResolvedValue({
   repoFullName: 'example-org/example-repo',
   approvalPolicy: 'on-request',
@@ -213,6 +337,24 @@ describe('AgentRunExecutor', () => {
     jest.clearAllMocks();
     mockResolveSelection.mockResolvedValue({ provider: 'openai', modelId: 'gpt-5.4' });
     mockCreateLanguageModel.mockResolvedValue({ id: 'model-instance' });
+    mockGetSessionSource.mockResolvedValue({
+      id: 3,
+      uuid: 'source-1',
+      status: 'ready',
+      sandboxRequirements: { filesystem: 'persistent' },
+    });
+    mockResolveForRunAdmission.mockResolvedValue({
+      approvalPolicy: 'on-request',
+      requestedHarness: null,
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: {},
+      runPlanSnapshot,
+    });
     mockResolveSessionContext.mockResolvedValue({
       repoFullName: 'example-org/example-repo',
       approvalPolicy: 'on-request',
@@ -383,6 +525,367 @@ describe('AgentRunExecutor', () => {
     );
   });
 
+  it('prefers snapshot runtime maxIterations before policySnapshot runtime options', async () => {
+    await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        policySnapshot: { runtimeOptions: { maxIterations: 3 } },
+        runPlanSnapshot: {
+          ...runPlanSnapshot,
+          runtime: {
+            ...runPlanSnapshot.runtime,
+            runtimeOptions: { maxIterations: 21 },
+          },
+        },
+      } as any,
+    });
+
+    expect(mockStepCountIs).toHaveBeenCalledWith(21);
+  });
+
+  it('prefers snapshot model and approval policy for existing queued runs', async () => {
+    const snapshotApprovalPolicy = { defaultMode: 'require_approval', rules: { read: 'allow' } };
+
+    await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      requestedProvider: 'openai',
+      requestedModelId: 'gpt-5.4',
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        resolvedHarness: 'lifecycle_ai_sdk',
+        runPlanSnapshot: {
+          ...runPlanSnapshot,
+          model: {
+            requestedProvider: 'openai',
+            requestedModel: 'gpt-5.4',
+            resolvedProvider: 'anthropic',
+            resolvedModel: 'claude-sonnet-4.6',
+          },
+          runtime: {
+            ...runPlanSnapshot.runtime,
+            approvalPolicy: snapshotApprovalPolicy,
+          },
+        },
+      } as any,
+    });
+
+    expect(mockResolveSelection).toHaveBeenCalledWith({
+      repoFullName: 'example-org/example-repo',
+      requestedProvider: 'anthropic',
+      requestedModelId: 'claude-sonnet-4.6',
+    });
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalPolicy: snapshotApprovalPolicy,
+      })
+    );
+  });
+
+  it('passes immutable snapshot MCP filters into tool setup for existing queued runs', async () => {
+    const snapshotCapabilities = {
+      ...customAgentRunPlanSnapshot.capabilities,
+      selectedRuntimeMcpConnectionRefs: ['global:docs'],
+    };
+
+    await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        resolvedHarness: 'lifecycle_ai_sdk',
+        runPlanSnapshot: {
+          ...customAgentRunPlanSnapshot,
+          capabilities: snapshotCapabilities,
+        },
+      } as any,
+    });
+
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolvedCapabilityAccess: snapshotCapabilities.resolvedCapabilityAccess,
+        selectedRuntimeMcpConnectionRefs: ['global:docs'],
+      })
+    );
+  });
+
+  it('passes explicit empty snapshot capability access into tool setup for existing queued runs', async () => {
+    const snapshotApprovalPolicy = {
+      defaultMode: 'require_approval',
+      rules: {
+        read: 'allow',
+      },
+    };
+    const snapshotCapabilities = {
+      ...runPlanSnapshot.capabilities,
+      resolvedCapabilityAccess: [],
+    };
+
+    mockResolveSessionContext.mockResolvedValueOnce({
+      repoFullName: 'example-org/example-repo',
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          workspace_write: 'allow',
+          shell_exec: 'allow',
+        },
+      },
+      binding: null,
+    });
+
+    await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        resolvedHarness: 'lifecycle_ai_sdk',
+        runPlanSnapshot: {
+          ...runPlanSnapshot,
+          runtime: {
+            ...runPlanSnapshot.runtime,
+            approvalPolicy: snapshotApprovalPolicy,
+          },
+          capabilities: snapshotCapabilities,
+        },
+      } as any,
+    });
+
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalPolicy: snapshotApprovalPolicy,
+        resolvedCapabilityAccess: [],
+      })
+    );
+  });
+
+  it('executes queued custom-agent snapshots through normal model, approval, message, and tool audit paths', async () => {
+    mockResolveSelection.mockResolvedValueOnce({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4.6',
+    });
+
+    const execution = await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      existingRun: {
+        id: 11,
+        uuid: 'queued-custom-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        resolvedHarness: 'lifecycle_ai_sdk',
+        runPlanSnapshot: customAgentRunPlanSnapshot,
+      } as any,
+      requestGitHubToken: 'sample-gh-token',
+    });
+
+    expect(mockResolveSelection).toHaveBeenCalledWith({
+      repoFullName: 'example-org/example-repo',
+      requestedProvider: 'anthropic',
+      requestedModelId: 'claude-sonnet-4.6',
+    });
+    expect(mockCreateLanguageModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selection: { provider: 'anthropic', modelId: 'claude-sonnet-4.6' },
+      })
+    );
+    expect(mockStartRunForExecutionOwner).toHaveBeenCalledWith(
+      'queued-custom-run-1',
+      'worker-1',
+      expect.objectContaining({
+        resolvedHarness: 'lifecycle_ai_sdk',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4.6',
+      }),
+      { dispatchAttemptId: undefined }
+    );
+    expect(mockStepCountIs).toHaveBeenCalledWith(6);
+    expect(mockToolLoopAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instructions: 'DB prompt as stored\n\nUse the sample custom instructions.\n\nAppend prompt',
+      })
+    );
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalPolicy: customAgentRunPlanSnapshot.runtime.approvalPolicy,
+        resolvedCapabilityAccess: customAgentRunPlanSnapshot.capabilities.resolvedCapabilityAccess,
+        toolRules: [],
+      })
+    );
+
+    const toolSetArgs = mockBuildToolSet.mock.calls[0]?.[0];
+    mockPendingActionFirst.mockResolvedValue({
+      id: 55,
+      status: 'approved',
+    });
+
+    await toolSetArgs.hooks.onToolStarted({
+      source: 'mcp',
+      serverSlug: 'sandbox',
+      toolName: 'workspace.read_file',
+      toolCallId: 'tool-call-1',
+      args: { path: 'sample-file.ts' },
+      capabilityKey: 'read',
+    });
+
+    expect(mockToolExecutionInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 11,
+        toolName: 'workspace.read_file',
+        toolCallId: 'tool-call-1',
+        pendingActionId: 55,
+        approved: true,
+        safetyLevel: 'read',
+      })
+    );
+
+    mockToolExecutionFirst.mockResolvedValue({
+      id: 99,
+      startedAt: '2026-04-08T00:00:00.000Z',
+    });
+
+    await toolSetArgs.hooks.onToolFinished({
+      source: 'mcp',
+      serverSlug: 'sandbox',
+      toolName: 'workspace.read_file',
+      toolCallId: 'tool-call-1',
+      args: { path: 'sample-file.ts' },
+      capabilityKey: 'read',
+      result: { ok: true },
+      status: 'completed',
+    });
+
+    expect(mockToolExecutionPatchAndFetchById).toHaveBeenCalledWith(
+      99,
+      expect.objectContaining({
+        status: 'completed',
+        durationMs: expect.any(Number),
+      })
+    );
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Done' }],
+          metadata: { runId: 'queued-custom-run-1' },
+        } as any,
+      ],
+      finishReason: 'stop',
+      isAborted: false,
+    });
+
+    expect(mockUpsertCanonicalUiMessagesForThread).toHaveBeenCalledWith(
+      { id: 7, uuid: 'thread-1' },
+      expect.any(Array),
+      expect.objectContaining({
+        runId: 11,
+      })
+    );
+    expect(mockSyncApprovalRequestState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalPolicy: customAgentRunPlanSnapshot.runtime.approvalPolicy,
+        toolRules: [],
+      })
+    );
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+      })
+    );
+    expect(mockEnqueueRun).not.toHaveBeenCalledWith('queued-custom-run-1', 'approval_resolved', {
+      githubToken: 'sample-gh-token',
+    });
+  });
+
+  it('uses resolver-built run plans when creating direct queued runs', async () => {
+    const directRunPlanSnapshot = {
+      ...runPlanSnapshot,
+      capabilities: {
+        ...customAgentRunPlanSnapshot.capabilities,
+        selectedRuntimeMcpConnectionRefs: ['global:docs'],
+      },
+    };
+    mockResolveForRunAdmission.mockResolvedValueOnce({
+      approvalPolicy: directRunPlanSnapshot.runtime.approvalPolicy,
+      requestedHarness: null,
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: {},
+      runPlanSnapshot: directRunPlanSnapshot,
+    });
+
+    await AgentRunExecutor.execute({
+      session: { id: 17, uuid: 'sess-1' } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+      requestedProvider: 'openai',
+      requestedModelId: 'gpt-5.4',
+    });
+
+    expect(mockGetSessionSource).toHaveBeenCalledWith(17);
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thread: expect.objectContaining({ id: 7, uuid: 'thread-1' }),
+        session: expect.objectContaining({ id: 17, uuid: 'sess-1' }),
+        source: expect.objectContaining({ uuid: 'source-1', status: 'ready' }),
+        userIdentity: { userId: 'sample-user' },
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-5.4',
+        runtimeOptions: {},
+      })
+    );
+    expect(mockCreateQueuedRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runPlanSnapshot: directRunPlanSnapshot,
+        sandboxRequirement: { filesystem: 'persistent' },
+      })
+    );
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolvedCapabilityAccess: directRunPlanSnapshot.capabilities.resolvedCapabilityAccess,
+        selectedRuntimeMcpConnectionRefs: ['global:docs'],
+      })
+    );
+    expect(mockStartRunForExecutionOwner).toHaveBeenCalledWith(
+      'run-1',
+      expect.stringMatching(/^direct:/),
+      expect.objectContaining({
+        resolvedHarness: 'lifecycle_ai_sdk',
+      }),
+      { dispatchAttemptId: undefined }
+    );
+  });
+
   it('does not create a run when tool setup fails before execution starts', async () => {
     mockBuildToolSet.mockRejectedValueOnce(new Error('tool setup failed'));
 
@@ -408,7 +911,13 @@ describe('AgentRunExecutor', () => {
         thread: { id: 7, uuid: 'thread-1' } as any,
         userIdentity: { userId: 'sample-user' } as any,
         messages: [],
-        existingRun: { id: 11, uuid: 'queued-run-1', status: 'queued', executionOwner: 'worker-1' } as any,
+        existingRun: {
+          id: 11,
+          uuid: 'queued-run-1',
+          status: 'queued',
+          executionOwner: 'worker-1',
+          runPlanSnapshot,
+        } as any,
       })
     ).rejects.toThrow('tool setup failed');
 
@@ -417,6 +926,27 @@ describe('AgentRunExecutor', () => {
       'queued-run-1',
       'worker-1',
       expect.objectContaining({ message: 'tool setup failed' }),
+      expect.any(Object),
+      { dispatchAttemptId: undefined }
+    );
+  });
+
+  it('rejects existing queued runs that do not have an immutable run plan snapshot', async () => {
+    await expect(
+      AgentRunExecutor.execute({
+        session: { uuid: 'sess-1' } as any,
+        thread: { id: 7, uuid: 'thread-1' } as any,
+        userIdentity: { userId: 'sample-user' } as any,
+        messages: [],
+        existingRun: { id: 11, uuid: 'queued-run-1', status: 'queued', executionOwner: 'worker-1' } as any,
+      })
+    ).rejects.toThrow('Agent run plan snapshot is required for execution.');
+
+    expect(mockBuildToolSet).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).toHaveBeenCalledWith(
+      'queued-run-1',
+      'worker-1',
+      expect.objectContaining({ message: 'Agent run plan snapshot is required for execution.' }),
       expect.any(Object),
       { dispatchAttemptId: undefined }
     );

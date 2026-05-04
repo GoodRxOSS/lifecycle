@@ -24,13 +24,6 @@ jest.mock('server/lib/agentSession/githubToken', () => ({
   resolveRequestGitHubToken: jest.fn(),
 }));
 
-jest.mock('server/services/agent/CapabilityService', () => ({
-  __esModule: true,
-  default: {
-    resolveSessionContext: jest.fn(),
-  },
-}));
-
 jest.mock('server/services/agent/RunAdmissionService', () => ({
   __esModule: true,
   default: {
@@ -53,10 +46,10 @@ jest.mock('server/services/agent/MessageStore', () => ({
   },
 }));
 
-jest.mock('server/services/agent/ProviderRegistry', () => ({
+jest.mock('server/services/agent/RunPlanResolver', () => ({
   __esModule: true,
   default: {
-    resolveSelection: jest.fn(),
+    resolveForRunAdmission: jest.fn(),
   },
 }));
 
@@ -104,9 +97,8 @@ jest.mock('server/services/agentSession', () => ({
 import { POST } from './route';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
-import AgentCapabilityService from 'server/services/agent/CapabilityService';
-import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
+import AgentRunPlanResolver from 'server/services/agent/RunPlanResolver';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
 import AgentRunService from 'server/services/agent/RunService';
 import AgentSourceService from 'server/services/agent/SourceService';
@@ -115,15 +107,75 @@ import AgentSessionService from 'server/services/agentSession';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
 const mockResolveRequestGitHubToken = resolveRequestGitHubToken as jest.Mock;
-const mockResolveSessionContext = AgentCapabilityService.resolveSessionContext as jest.Mock;
-const mockResolveSelection = AgentProviderRegistry.resolveSelection as jest.Mock;
 const mockCreateQueuedRunWithMessage = AgentRunAdmissionService.createQueuedRunWithMessage as jest.Mock;
+const mockResolveForRunAdmission = AgentRunPlanResolver.resolveForRunAdmission as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
 const mockMarkQueuedRunDispatchFailed = AgentRunService.markQueuedRunDispatchFailed as jest.Mock;
 const mockGetSessionSource = AgentSourceService.getSessionSource as jest.Mock;
 const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
 const mockCanAcceptMessages = AgentSessionService.canAcceptMessages as jest.Mock;
 const mockTouchActivity = AgentSessionService.touchActivity as jest.Mock;
+
+const customAgentRunPlanSnapshot = {
+  version: 1,
+  capturedAt: '2026-05-01T00:00:00.000Z',
+  agent: {
+    id: 'custom.sample-agent',
+    label: 'Sample custom agent',
+    ownerKind: 'user',
+    version: 3,
+    sourceKind: 'freeform_chat',
+    modelPreference: {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4.6',
+    },
+  },
+  source: {
+    id: 'source-1',
+    adapter: 'blank_workspace',
+    status: 'ready',
+    sessionKind: 'chat',
+    freshness: {
+      capturedAt: '2026-05-01T00:00:00.000Z',
+      freshnessSource: 'source',
+    },
+  },
+  model: {
+    requestedProvider: 'anthropic',
+    requestedModel: 'claude-sonnet-4.6',
+    resolvedProvider: 'anthropic',
+    resolvedModel: 'claude-sonnet-4.6',
+  },
+  runtime: {
+    requestedHarness: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: { maxIterations: 9 },
+    approvalPolicy: {
+      defaultMode: 'require_approval',
+      rules: { read: 'allow' },
+    },
+  },
+  prompt: {
+    instructionRefs: [],
+    instructionAddendum: 'Use the sample custom instructions.',
+    renderedSummary: 'Sample custom agent description',
+    renderedHash: 'sha256:sample-custom-agent-prompt',
+  },
+  capabilities: {
+    provisionalCapabilityIds: ['read_context'],
+    resolvedCapabilityAccess: [
+      {
+        capabilityId: 'read_context',
+        availability: 'all_users',
+        allowed: true,
+        runtimeCapabilityKey: 'read',
+        approvalMode: 'allow',
+      },
+    ],
+  },
+  warnings: [],
+} as const;
 
 function makeRequest(body: Record<string, unknown>): NextRequest {
   return {
@@ -152,16 +204,71 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     });
     mockCanAcceptMessages.mockReturnValue(true);
     mockGetSessionSource.mockResolvedValue({
+      uuid: 'source-1',
+      adapter: 'blank_workspace',
       status: 'ready',
       sandboxRequirements: { filesystem: 'persistent' },
     });
-    mockResolveSessionContext.mockResolvedValue({
-      repoFullName: 'example-org/example-repo',
-      approvalPolicy: 'on-request',
-    });
-    mockResolveSelection.mockResolvedValue({
-      provider: 'openai',
-      modelId: 'gpt-5.4',
+    mockResolveForRunAdmission.mockResolvedValue({
+      approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+      requestedHarness: null,
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: { maxIterations: 12 },
+      runPlanSnapshot: {
+        version: 1,
+        capturedAt: '2026-05-01T00:00:00.000Z',
+        agent: {
+          id: 'system.freeform',
+          label: 'Free-form',
+          ownerKind: 'system',
+          version: 1,
+          sourceKind: 'freeform_chat',
+          resourcePolicy: {
+            sourceKinds: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+            workspaceRequired: false,
+            sandboxRequired: false,
+          },
+          modelPreference: null,
+        },
+        source: {
+          id: 'source-1',
+          adapter: 'blank_workspace',
+          status: 'ready',
+          sessionKind: 'chat',
+          freshness: {
+            capturedAt: '2026-05-01T00:00:00.000Z',
+            freshnessSource: 'source',
+          },
+        },
+        model: {
+          requestedProvider: null,
+          requestedModel: null,
+          resolvedProvider: 'openai',
+          resolvedModel: 'gpt-5.4',
+        },
+        runtime: {
+          requestedHarness: null,
+          resolvedHarness: 'lifecycle_ai_sdk',
+          sandboxRequirement: { filesystem: 'persistent' },
+          runtimeOptions: { maxIterations: 12 },
+          approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+        },
+        prompt: {
+          instructionRefs: [],
+          renderedSummary: 'Sample prompt summary',
+          renderedHash: 'sha256:sample-rendered-prompt',
+        },
+        capabilities: {
+          provisionalCapabilityIds: [],
+          resolvedCapabilityAccess: [],
+        },
+        warnings: [],
+      },
     });
     mockCreateQueuedRunWithMessage.mockResolvedValue({
       run: {
@@ -181,6 +288,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
   });
 
   it('rejects run admission when no explicit or session model exists', async () => {
+    mockResolveForRunAdmission.mockRejectedValueOnce(new Error('Agent run model is required'));
     mockGetOwnedThreadWithSession.mockResolvedValueOnce({
       thread: { id: 7, uuid: 'thread-1' },
       session: {
@@ -207,6 +315,28 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
   });
 
+  it('rejects run admission policy failures without queueing a run', async () => {
+    mockResolveForRunAdmission.mockRejectedValueOnce(
+      new Error('Agent capability "read_context" is unavailable: creator_capability_reserved.')
+    );
+
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Agent capability "read_context" is unavailable: creator_capability_reserved.');
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
   it('resolves explicit-or-default values before queueing', async () => {
     const response = await POST(
       makeRequest({
@@ -220,11 +350,17 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     );
 
     expect(response.status).toBe(201);
-    expect(mockResolveSelection).toHaveBeenCalledWith({
-      repoFullName: 'example-org/example-repo',
-      requestedProvider: undefined,
-      requestedModelId: 'gpt-5.4',
-    });
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thread: expect.objectContaining({ id: 7, uuid: 'thread-1' }),
+        session: expect.objectContaining({ id: 17, uuid: 'session-1' }),
+        source: expect.objectContaining({ uuid: 'source-1', status: 'ready' }),
+        userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+        requestedProvider: null,
+        requestedModel: null,
+        runtimeOptions: { maxIterations: 12 },
+      })
+    );
     expect(mockCreateQueuedRunWithMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         message: {
@@ -238,10 +374,68 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         resolvedProvider: 'openai',
         resolvedModel: 'gpt-5.4',
         runtimeOptions: { maxIterations: 12 },
+        runPlanSnapshot: expect.objectContaining({
+          version: 1,
+          agent: expect.objectContaining({ id: 'system.freeform' }),
+        }),
       })
+    );
+    expect(mockResolveForRunAdmission.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateQueuedRunWithMessage.mock.invocationCallOrder[0]
     );
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
     const body = await response.json();
+    expect(body.data).toEqual(
+      expect.objectContaining({
+        run: expect.objectContaining({ id: 'run-1', threadId: 'thread-1', sessionId: 'session-1' }),
+        message: expect.objectContaining({ id: 'message-1', clientMessageId: 'client-message-1' }),
+        links: {
+          events: '/api/v2/ai/agent/runs/run-1/events',
+          eventStream: '/api/v2/ai/agent/runs/run-1/events/stream',
+          pendingActions: '/api/v2/ai/agent/threads/thread-1/pending-actions',
+        },
+      })
+    );
+  });
+
+  it('passes a custom-agent runPlanSnapshot through queued run admission and response links', async () => {
+    mockResolveForRunAdmission.mockResolvedValueOnce({
+      approvalPolicy: customAgentRunPlanSnapshot.runtime.approvalPolicy,
+      requestedHarness: null,
+      requestedProvider: 'anthropic',
+      requestedModel: 'claude-sonnet-4.6',
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'anthropic',
+      resolvedModel: 'claude-sonnet-4.6',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: { maxIterations: 9 },
+      runPlanSnapshot: customAgentRunPlanSnapshot,
+    });
+
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(mockCreateQueuedRunWithMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        policy: customAgentRunPlanSnapshot.runtime.approvalPolicy,
+        requestedProvider: 'anthropic',
+        requestedModel: 'claude-sonnet-4.6',
+        resolvedProvider: 'anthropic',
+        resolvedModel: 'claude-sonnet-4.6',
+        runtimeOptions: { maxIterations: 9 },
+        runPlanSnapshot: customAgentRunPlanSnapshot,
+      })
+    );
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
     expect(body.data).toEqual(
       expect.objectContaining({
         run: expect.objectContaining({ id: 'run-1', threadId: 'thread-1', sessionId: 'session-1' }),
@@ -366,7 +560,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
 
     expect(response.status).toBe(400);
     expect(body.error.message).toBe('model must contain only provider and id fields');
-    expect(mockResolveSelection).not.toHaveBeenCalled();
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
     expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
   });
 
@@ -384,6 +578,58 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
 
     expect(response.status).toBe(400);
     expect(body.error.message).toBe('Unsupported run request fields: harness');
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects public agent selection', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+        agent: { id: 'system.freeform' },
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Unsupported run request fields: agent');
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects public agentId selection', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+        agentId: 'system.freeform',
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Unsupported run request fields: agentId');
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects public run plan snapshots', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+        runPlanSnapshot: customAgentRunPlanSnapshot,
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Unsupported run request fields: runPlanSnapshot');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
     expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
   });
 

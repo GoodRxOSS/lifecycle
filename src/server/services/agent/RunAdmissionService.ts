@@ -24,6 +24,7 @@ import type { AgentRunRuntimeOptions, CanonicalAgentRunMessageInput } from './ca
 import AgentMessageStore from './MessageStore';
 import AgentRunEventService from './RunEventService';
 import { ActiveAgentRunError, InvalidAgentRunDefaultsError, TERMINAL_RUN_STATUSES } from './RunService';
+import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
 
 function buildPolicySnapshot(
   policy: AgentApprovalPolicy,
@@ -37,6 +38,12 @@ function buildPolicySnapshot(
     ...(policy as unknown as Record<string, unknown>),
     runtimeOptions,
   };
+}
+
+export function assertRunPlanSnapshot(value: unknown): asserts value is AgentRunPlanSnapshotV1 {
+  if (!isAgentRunPlanSnapshotV1(value)) {
+    throw new InvalidAgentRunDefaultsError('Agent run plan snapshot is required.');
+  }
 }
 
 export default class AgentRunAdmissionService {
@@ -53,6 +60,7 @@ export default class AgentRunAdmissionService {
     resolvedModel,
     sandboxRequirement,
     runtimeOptions,
+    runPlanSnapshot,
   }: {
     thread: AgentThread;
     session: AgentSession;
@@ -66,6 +74,7 @@ export default class AgentRunAdmissionService {
     resolvedModel: string;
     sandboxRequirement?: Record<string, unknown>;
     runtimeOptions?: AgentRunRuntimeOptions;
+    runPlanSnapshot: AgentRunPlanSnapshotV1;
   }): Promise<{ run: AgentRun; message: AgentMessage; created: boolean }> {
     if (!resolvedHarness?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run harness is required.');
@@ -78,26 +87,6 @@ export default class AgentRunAdmissionService {
     }
 
     const now = new Date().toISOString();
-    const record: PartialModelObject<AgentRun> = {
-      threadId: thread.id,
-      sessionId: session.id,
-      status: 'queued',
-      provider: resolvedProvider,
-      model: resolvedModel,
-      requestedHarness: requestedHarness || null,
-      resolvedHarness,
-      requestedProvider: requestedProvider || null,
-      requestedModel: requestedModel || null,
-      resolvedProvider,
-      resolvedModel,
-      sandboxRequirement: sandboxRequirement || {},
-      sandboxGeneration: null,
-      queuedAt: now,
-      startedAt: null,
-      usageSummary: {},
-      policySnapshot: buildPolicySnapshot(policy, runtimeOptions),
-      error: null,
-    };
 
     const admitted = await AgentRun.transaction(async (trx) => {
       await AgentSession.query(trx).findById(session.id).forUpdate();
@@ -124,6 +113,8 @@ export default class AgentRunAdmissionService {
         }
       }
 
+      assertRunPlanSnapshot(runPlanSnapshot);
+
       const activeRun = await AgentRun.query(trx)
         .where({ sessionId: session.id })
         .whereNotIn('status', TERMINAL_RUN_STATUSES)
@@ -134,6 +125,27 @@ export default class AgentRunAdmissionService {
         throw new ActiveAgentRunError();
       }
 
+      const record: PartialModelObject<AgentRun> = {
+        threadId: thread.id,
+        sessionId: session.id,
+        status: 'queued',
+        provider: resolvedProvider,
+        model: resolvedModel,
+        requestedHarness: requestedHarness || null,
+        resolvedHarness,
+        requestedProvider: requestedProvider || null,
+        requestedModel: requestedModel || null,
+        resolvedProvider,
+        resolvedModel,
+        sandboxRequirement: sandboxRequirement || {},
+        sandboxGeneration: null,
+        queuedAt: now,
+        startedAt: null,
+        usageSummary: {},
+        policySnapshot: buildPolicySnapshot(policy, runtimeOptions),
+        runPlanSnapshot,
+        error: null,
+      };
       const queuedRun = await AgentRun.query(trx).insertAndFetch(record);
       const storedMessage = await AgentMessageStore.insertUserMessageForRun(thread, queuedRun, message, trx);
       await AgentThread.query(trx).patchAndFetchById(thread.id, {

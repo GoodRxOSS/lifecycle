@@ -25,6 +25,7 @@ import {
   validateAgentSessionRuntimeSettings,
 } from 'server/lib/validation/agentSessionConfigValidator';
 import type {
+  AgentCapabilityInventoryEntry,
   AgentSessionControlPlaneConfigValue,
   AgentSessionRuntimeSettingsValue,
   AgentSessionToolInventoryEntry,
@@ -32,6 +33,8 @@ import type {
   AgentSessionToolRuleSelection,
   EffectiveAgentSessionControlPlaneConfig,
 } from './types/agentSessionConfig';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
+import type { CapabilityPolicyConfig } from './types/agentRuntimeConfig';
 import type { GlobalConfig, AgentSessionDefaults } from './types/globalConfig';
 import {
   DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT,
@@ -40,9 +43,10 @@ import {
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
 } from 'server/lib/agentSession/runtimeConfig';
-import { McpConfigService } from 'server/services/ai/mcp/config';
-import { normalizeAuthConfig, requiresUserConnection } from 'server/services/ai/mcp/connectionConfig';
+import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
+import { normalizeAuthConfig, requiresUserConnection } from 'server/services/agentRuntime/mcp/connectionConfig';
 import AgentPolicyService from './agent/PolicyService';
+import { listAgentCapabilityCatalogEntries, type AgentCapabilityCatalogId } from './agent/capabilityCatalog';
 import {
   buildAgentToolKey,
   CHAT_PUBLISH_HTTP_TOOL_NAME,
@@ -51,7 +55,7 @@ import {
   SESSION_WORKSPACE_SERVER_NAME,
   SESSION_WORKSPACE_SERVER_SLUG,
 } from './agent/toolKeys';
-import type { McpDiscoveredTool } from 'server/services/ai/mcp/types';
+import type { McpDiscoveredTool } from 'server/services/agentRuntime/mcp/types';
 import {
   getSessionWorkspaceToolSortKey,
   listAdminVisibleSessionWorkspaceToolCatalog,
@@ -409,6 +413,30 @@ function toRuleSelection(toolRules: AgentSessionToolRule[], toolKey: string): Ag
   return toolRules.find((rule) => rule.toolKey === toolKey)?.mode || 'inherit';
 }
 
+function catalogCapabilityForTool(entry: AgentSessionToolInventoryEntry): AgentCapabilityCatalogId {
+  if (entry.sourceType === 'mcp') {
+    return entry.capabilityKey === 'external_mcp_read' ? 'external_mcp_read' : 'external_mcp_write';
+  }
+
+  if (entry.toolName === CHAT_PUBLISH_HTTP_TOOL_NAME) {
+    return 'preview_publish';
+  }
+
+  if (entry.toolName === 'workspace.write_file' || entry.toolName === 'workspace.edit_file') {
+    return 'workspace_files';
+  }
+
+  if (entry.toolName === 'workspace.exec_mutation') {
+    return 'workspace_shell';
+  }
+
+  if (entry.toolName.startsWith('git.')) {
+    return 'workspace_git';
+  }
+
+  return 'read_context';
+}
+
 function hasConfigValues(config: Partial<AgentSessionControlPlaneConfigValue>): boolean {
   return Boolean(
     normalizeOptionalString(config.systemPrompt) ||
@@ -728,6 +756,80 @@ export default class AgentSessionConfigService extends BaseService {
         return serverCompare;
       }
       return left.toolName.localeCompare(right.toolName);
+    });
+  }
+
+  async listCapabilityInventory(scope: string): Promise<AgentCapabilityInventoryEntry[]> {
+    const repoFullName = scope === 'global' ? undefined : normalizeRepoFullName(scope);
+    const agentRuntimeConfigService = AgentRuntimeConfigService.getInstance();
+    const [globalAgentConfig, repoAgentConfig, effectiveAgentConfig, approvalPolicy, toolInventory] = await Promise.all(
+      [
+        agentRuntimeConfigService.getGlobalConfig(),
+        repoFullName ? agentRuntimeConfigService.getRepoConfig(repoFullName) : Promise.resolve(null),
+        agentRuntimeConfigService.getEffectiveConfig(repoFullName),
+        AgentPolicyService.getEffectivePolicy(repoFullName),
+        this.listToolInventory(scope),
+      ]
+    );
+    const globalPolicy = globalAgentConfig.capabilityPolicy;
+    const repoPolicy = repoAgentConfig?.capabilityPolicy as CapabilityPolicyConfig | undefined;
+    const activePolicy = repoFullName ? repoPolicy : globalPolicy;
+    const effectivePolicy = effectiveAgentConfig.capabilityPolicy;
+    const toolsByCapability = new Map<AgentCapabilityCatalogId, AgentSessionToolInventoryEntry[]>();
+
+    for (const tool of toolInventory) {
+      const capabilityId = catalogCapabilityForTool(tool);
+      const existing = toolsByCapability.get(capabilityId) || [];
+      existing.push(tool);
+      toolsByCapability.set(capabilityId, existing);
+    }
+
+    return listAgentCapabilityCatalogEntries().map((entry) => {
+      const configuredAvailability = activePolicy?.availability?.[entry.id];
+      const inheritedAvailability = repoFullName
+        ? globalPolicy?.availability?.[entry.id] || entry.defaultAvailability
+        : undefined;
+      const effectiveAvailability =
+        effectivePolicy?.availability?.[entry.id] || inheritedAvailability || entry.defaultAvailability;
+      const resolvedAccess = AgentPolicyService.resolveCapabilityAccess({
+        capabilityId: entry.id,
+        capabilityPolicy: { availability: { [entry.id]: effectiveAvailability } },
+        approvalPolicy,
+        definitionOwnerKind: 'system',
+        sourceKind: entry.sourceKinds?.[0],
+      });
+      const mappedTools = toolsByCapability.get(entry.id) || [];
+
+      return {
+        capabilityId: entry.id,
+        label: entry.label,
+        description: entry.description,
+        category: entry.category,
+        defaultAvailability: entry.defaultAvailability,
+        ...(configuredAvailability ? { configuredAvailability } : {}),
+        ...(inheritedAvailability ? { inheritedAvailability } : {}),
+        effectiveAvailability,
+        approvalMode: resolvedAccess.approvalMode || entry.defaultApprovalMode,
+        ...(entry.runtimeCapabilityKey ? { runtimeCapabilityKey: entry.runtimeCapabilityKey } : {}),
+        userSelectable: entry.userSelectable,
+        toolCount: mappedTools.length || entry.toolKeys?.length || 0,
+        resourceCount: entry.resourceGrants?.length || 0,
+        resourceGrants: [...(entry.resourceGrants || [])],
+        tools: mappedTools.map((tool) => ({
+          toolKey: tool.toolKey,
+          toolName: tool.toolName,
+          description: tool.description,
+          serverSlug: tool.serverSlug,
+          serverName: tool.serverName,
+          sourceType: tool.sourceType,
+          sourceScope: tool.sourceScope,
+        })),
+        ...(effectiveAvailability === 'disabled' ||
+        effectiveAvailability === 'system_only' ||
+        effectiveAvailability === 'admin_only'
+          ? { blockedReason: effectiveAvailability }
+          : {}),
+      };
     });
   }
 

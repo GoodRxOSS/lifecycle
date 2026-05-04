@@ -59,7 +59,7 @@ jest.mock('server/lib/kubernetes', () => ({
   deleteNamespace: (...args: unknown[]) => mockDeleteNamespace(...args),
 }));
 jest.mock('server/lib/kubernetes/networkPolicyFactory');
-jest.mock('server/services/ai/mcp/config', () => ({
+jest.mock('server/services/agentRuntime/mcp/config', () => ({
   __esModule: true,
   McpConfigService: jest.fn().mockImplementation(() => ({
     resolveSessionPodServersForRepo: mockResolveSessionPodServersForRepo,
@@ -112,7 +112,7 @@ jest.mock('server/services/agentPrewarm', () => ({
 jest.mock('server/services/agent/ThreadService', () => ({
   __esModule: true,
   default: {
-    getDefaultThreadForSession: mockGetDefaultThreadForSession,
+    getDefaultThreadForSession: (...args: unknown[]) => mockGetDefaultThreadForSession(...args),
   },
 }));
 jest.mock('server/lib/nativeHelm/helm', () => ({
@@ -186,7 +186,7 @@ jest.mock('server/services/globalConfig', () => ({
   default: {
     getInstance: jest.fn(() => ({
       getConfig: jest.fn().mockImplementation(async (key: string) => {
-        if (key === 'aiAgent') {
+        if (key === 'agentRuntime') {
           return {
             enabled: true,
             providers: [
@@ -827,6 +827,237 @@ describe('AgentSessionService', () => {
     expect(session.workspaceStatus).toBe('ready');
     expect(session.namespace).toBe('chat-aaaaaaaa');
   });
+
+  it('preserves build-context repo metadata when chat runtime provisioning fails', async () => {
+    const workspaceRepos = [
+      {
+        repo: 'example-org/example-repo',
+        repoUrl: 'https://github.com/example-org/example-repo.git',
+        branch: 'feature/sample',
+        revision: 'commit-sha-1',
+        mountPath: '/workspace',
+        primary: true,
+      },
+    ];
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos,
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('pod creation failed'));
+
+    await expect(
+      AgentSessionService.provisionChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'user-123',
+        userIdentity: {
+          userId: 'user-123',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('pod creation failed');
+
+    expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceRepos,
+      })
+    );
+    expect(mockSessionQuery.patch).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        workspaceStatus: AgentWorkspaceStatus.FAILED,
+        namespace: null,
+        podName: null,
+        pvcName: null,
+      })
+    );
+    expect(mockSessionQuery.patch).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({
+        workspaceRepos: expect.any(Array),
+        selectedServices: expect.any(Array),
+      })
+    );
+  });
+
+  it('seeds repo-scoped stdio MCP servers when provisioning a build-context chat runtime', async () => {
+    const workspaceRepos = [
+      {
+        repo: 'example-org/example-repo',
+        repoUrl: 'https://github.com/example-org/example-repo.git',
+        branch: 'feature/sample',
+        revision: 'commit-sha-1',
+        mountPath: '/workspace',
+        primary: true,
+      },
+    ];
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos,
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: 'ready',
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockResolveSessionPodServersForRepo.mockResolvedValueOnce([
+      {
+        slug: 'sample-stdio',
+        name: 'Sample stdio',
+        transport: {
+          type: 'stdio',
+          command: 'sample-mcp',
+          args: ['--stdio'],
+          env: {
+            SAMPLE_TOKEN: 'sample-secret',
+          },
+        },
+        timeout: 30000,
+        defaultArgs: {},
+        env: {},
+        discoveredTools: [],
+      },
+    ]);
+
+    await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: {
+        userId: 'user-123',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(mockResolveSessionPodServersForRepo).toHaveBeenCalledWith(
+      'example-org/example-repo',
+      undefined,
+      expect.objectContaining({
+        userId: 'user-123',
+        githubUsername: 'sample-user',
+      })
+    );
+    expect(createAgentApiKeySecret).toHaveBeenCalledWith(
+      'chat-aaaaaaaa',
+      'agent-secret-aaaaaaaa',
+      {},
+      'sample-gh-token',
+      undefined,
+      {},
+      {
+        LIFECYCLE_SESSION_MCP_CONFIG_JSON: JSON.stringify([
+          {
+            slug: 'sample-stdio',
+            name: 'Sample stdio',
+            transport: {
+              type: 'stdio',
+              command: 'sample-mcp',
+              args: ['--stdio'],
+              env: {
+                SAMPLE_TOKEN: 'sample-secret',
+              },
+            },
+            timeout: 30000,
+          },
+        ]),
+      }
+    );
+  });
+
+  it.each([AgentSessionKind.ENVIRONMENT, AgentSessionKind.SANDBOX])(
+    'rejects %s sessions during chat runtime suspension',
+    async (sessionKind) => {
+      mockSessionQuery.findOne.mockResolvedValueOnce({
+        id: 321,
+        uuid: 'sample-session-id',
+        userId: 'sample-user',
+        sessionKind,
+        status: 'active',
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        namespace: 'sample-namespace',
+        podName: 'sample-pod',
+        pvcName: 'sample-pvc',
+      });
+
+      await expect(
+        AgentSessionService.suspendChatRuntime({
+          sessionId: 'sample-session-id',
+          userId: 'sample-user',
+        })
+      ).rejects.toThrow('Runtime suspension is only supported for chat sessions');
+
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([AgentSessionKind.ENVIRONMENT, AgentSessionKind.SANDBOX])(
+    'rejects %s sessions during chat runtime resume provisioning',
+    async (sessionKind) => {
+      mockSessionQuery.findOne.mockResolvedValueOnce({
+        id: 321,
+        uuid: 'sample-session-id',
+        userId: 'sample-user',
+        sessionKind,
+        status: 'active',
+        workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+        namespace: 'sample-namespace',
+        podName: null,
+        pvcName: 'sample-pvc',
+      });
+
+      await expect(
+        AgentSessionService.resumeChatRuntime({
+          sessionId: 'sample-session-id',
+          userId: 'sample-user',
+          userIdentity: {
+            userId: 'sample-user',
+            githubUsername: 'sample-user',
+          } as any,
+          githubToken: 'sample-gh-token',
+        })
+      ).rejects.toThrow('Runtime provisioning is only supported for chat sessions');
+
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    }
+  );
 
   it('publishes a chat session HTTP port through ingress', async () => {
     mockSessionQuery.findOne.mockResolvedValue({
@@ -3217,6 +3448,47 @@ describe('AgentSessionService', () => {
       expect(systemPrompt.combineAgentSessionAppendSystemPrompt).toHaveBeenCalledWith(
         'Use concise responses.',
         'Session context:\n- namespace: test-ns'
+      );
+    });
+
+    it('appends dynamic build context for chat sessions without a namespace', async () => {
+      mockGetEffectiveAgentSessionConfig.mockResolvedValue({
+        appendSystemPrompt: 'Use concise responses.',
+      });
+      (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockResolvedValue({
+        namespace: null,
+        buildUuid: 'build-123',
+        services: [],
+        build: { uuid: 'build-123', status: 'build_failed' },
+      });
+      (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mockReturnValue(
+        'Session context:\n- buildUuid: build-123\nBuild context:\n- buildUuid=build-123: status=build_failed'
+      );
+      (systemPrompt.combineAgentSessionAppendSystemPrompt as jest.Mock).mockReturnValue('combined build prompt');
+
+      (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          select: jest.fn().mockResolvedValue({
+            id: 123,
+            namespace: null,
+            buildUuid: 'build-123',
+            skillPlan: { skills: [] },
+          }),
+        }),
+      });
+
+      await expect(AgentSessionService.getSessionAppendSystemPrompt('sess-1')).resolves.toBe('combined build prompt');
+      expect(systemPrompt.resolveAgentSessionPromptContext).toHaveBeenCalledWith({
+        sessionDbId: 123,
+        namespace: null,
+        buildUuid: 'build-123',
+      });
+      expect(systemPrompt.buildAgentSessionDynamicSystemPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: null,
+          buildUuid: 'build-123',
+          toolLines: [],
+        })
       );
     });
 

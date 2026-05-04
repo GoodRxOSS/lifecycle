@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-jest.mock('server/services/aiAgentConfig', () => ({
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
@@ -40,7 +40,7 @@ jest.mock('server/services/userApiKey', () => ({
 
 const mockListEnabledConnectionsForUser = jest.fn();
 
-jest.mock('server/services/ai/mcp/config', () => ({
+jest.mock('server/services/agentRuntime/mcp/config', () => ({
   __esModule: true,
   McpConfigService: jest.fn().mockImplementation(() => ({
     listEnabledConnectionsForUser: (...args: unknown[]) => mockListEnabledConnectionsForUser(...args),

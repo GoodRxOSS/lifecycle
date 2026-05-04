@@ -48,6 +48,7 @@ export default class AgentRun extends Model {
   cancelledAt!: string | null;
   usageSummary!: Record<string, unknown>;
   policySnapshot!: Record<string, unknown>;
+  runPlanSnapshot!: Record<string, unknown> | null;
   error!: Record<string, unknown> | null;
 
   static tableName = 'agent_runs';
@@ -97,12 +98,13 @@ export default class AgentRun extends Model {
       cancelledAt: { type: ['string', 'null'] },
       usageSummary: { type: 'object', default: {} },
       policySnapshot: { type: 'object', default: {} },
+      runPlanSnapshot: { type: ['object', 'null'], default: null },
       error: { type: ['object', 'null'], default: null },
     },
   };
 
   static get jsonAttributes() {
-    return ['sandboxRequirement', 'usageSummary', 'policySnapshot', 'error'];
+    return ['sandboxRequirement', 'usageSummary', 'policySnapshot', 'runPlanSnapshot', 'error'];
   }
 
   static get relationMappings() {

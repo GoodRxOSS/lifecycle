@@ -37,18 +37,25 @@ describe('AgentSourceService', () => {
     const insertAndFetch = jest.fn().mockResolvedValue({ id: 1 });
     mockSourceQuery.mockReturnValueOnce({ insertAndFetch });
 
-    await AgentSourceService.createSessionSource({
-      id: 3,
-      buildUuid: 'build-1',
-      buildKind: 'environment',
-      sessionKind: 'environment',
-      status: 'starting',
-      workspaceStatus: 'provisioning',
-      workspaceRepos: [{ repo: 'example-org/example-repo', mountPath: '/workspace/example-repo', primary: true }],
-      selectedServices: [],
-      updatedAt: '2026-04-24T12:00:00.000Z',
-      endedAt: null,
-    } as Parameters<typeof AgentSourceService.createSessionSource>[0]);
+    await AgentSourceService.createSessionSource(
+      {
+        id: 3,
+        buildUuid: 'build-1',
+        buildKind: 'environment',
+        sessionKind: 'environment',
+        status: 'starting',
+        workspaceStatus: 'provisioning',
+        workspaceRepos: [{ repo: 'example-org/example-repo', mountPath: '/workspace/example-repo', primary: true }],
+        selectedServices: [],
+        updatedAt: '2026-04-24T12:00:00.000Z',
+        endedAt: null,
+        defaultModel: 'sample-model',
+        model: 'sample-model',
+      } as Parameters<typeof AgentSourceService.createSessionSource>[0],
+      {
+        defaultProvider: 'sample-provider',
+      }
+    );
 
     expect(insertAndFetch).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -59,6 +66,10 @@ describe('AgentSourceService', () => {
           buildUuid: 'build-1',
           buildKind: 'environment',
           sessionKind: 'environment',
+          defaults: {
+            provider: 'sample-provider',
+            model: 'sample-model',
+          },
         },
         sandboxRequirements: expect.objectContaining({
           filesystem: 'persistent',

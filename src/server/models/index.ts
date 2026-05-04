@@ -27,11 +27,7 @@ import Deployable from './Deployable';
 import BotUser from './BotUser';
 import GlobalConfig from './GlobalConfig';
 import WebhookInvocations from './WebhookInvocations';
-import AIAgentRepoConfig from './AIAgentRepoConfig';
-import Conversation from './Conversation';
-import ConversationMessage from './ConversationMessage';
-import MessageFeedback from './MessageFeedback';
-import ConversationFeedback from './ConversationFeedback';
+import AgentRuntimeRepoConfig from './AgentRuntimeRepoConfig';
 import AgentSession from './AgentSession';
 import AgentSource from './AgentSource';
 import AgentSandbox from './AgentSandbox';
@@ -60,11 +56,7 @@ export interface IModels {
   BotUser: typeof BotUser;
   GlobalConfig: typeof GlobalConfig;
   WebhookInvocations: typeof WebhookInvocations;
-  AIAgentRepoConfig: typeof AIAgentRepoConfig;
-  Conversation: typeof Conversation;
-  ConversationMessage: typeof ConversationMessage;
-  MessageFeedback: typeof MessageFeedback;
-  ConversationFeedback: typeof ConversationFeedback;
+  AgentRuntimeRepoConfig: typeof AgentRuntimeRepoConfig;
   AgentSession: typeof AgentSession;
   AgentSource: typeof AgentSource;
   AgentSandbox: typeof AgentSandbox;
@@ -94,11 +86,7 @@ export {
   BotUser,
   GlobalConfig,
   WebhookInvocations,
-  AIAgentRepoConfig,
-  Conversation,
-  ConversationMessage,
-  MessageFeedback,
-  ConversationFeedback,
+  AgentRuntimeRepoConfig,
   AgentSession,
   AgentSource,
   AgentSandbox,

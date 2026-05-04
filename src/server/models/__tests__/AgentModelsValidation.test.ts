@@ -15,6 +15,8 @@
  */
 
 import AgentMessage from 'server/models/AgentMessage';
+import AgentDefinition from 'server/models/AgentDefinition';
+import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 
 describe('Agent model validation', () => {
@@ -36,5 +38,86 @@ describe('Agent model validation', () => {
         metadata: {},
       })
     ).not.toThrow();
+  });
+
+  test('allows agent runs with a null run plan snapshot', () => {
+    expect(() =>
+      AgentRun.fromJson({
+        threadId: 42,
+        sessionId: 7,
+        provider: 'sample-provider',
+        model: 'sample-model',
+        runPlanSnapshot: null,
+      })
+    ).not.toThrow();
+  });
+
+  test('allows agent runs with an object run plan snapshot', () => {
+    expect(() =>
+      AgentRun.fromJson({
+        threadId: 42,
+        sessionId: 7,
+        provider: 'sample-provider',
+        model: 'sample-model',
+        runPlanSnapshot: {
+          version: 1,
+          agent: {
+            id: 'system.freeform',
+          },
+        },
+      })
+    ).not.toThrow();
+  });
+
+  test('allows agent definitions with first-party preset JSON fields', () => {
+    expect(() =>
+      AgentDefinition.fromJson({
+        definitionId: 'system.freeform',
+        version: 1,
+        ownerKind: 'system',
+        name: 'Free-form',
+        instructionRefs: ['system:freeform'],
+        capabilityRefs: ['read_context'],
+        requiredCapabilityRefs: ['read_context'],
+        optionalCapabilityRefs: [],
+        resourcePolicy: {
+          sourceKinds: ['freeform_chat'],
+          workspaceRequired: false,
+          sandboxRequired: false,
+        },
+        codeOwned: true,
+        readOnly: true,
+        status: 'active',
+      })
+    ).not.toThrow();
+  });
+
+  test('allows mutable user agent definitions to transition to archived', () => {
+    const userDefinition = {
+      definitionId: 'custom.sample-definition',
+      version: 1,
+      ownerKind: 'user',
+      ownerUserId: 'sample-user',
+      ownerOrganizationId: null,
+      name: 'Sample agent',
+      description: null,
+      instructionRefs: [],
+      instructionAddendum: 'Use a concise response style.',
+      capabilityRefs: ['read_context'],
+      requiredCapabilityRefs: [],
+      optionalCapabilityRefs: ['read_context'],
+      resourcePolicy: {
+        sourceKinds: ['freeform_chat'],
+        workspaceRequired: false,
+        sandboxRequired: false,
+      },
+      modelPreference: null,
+      codeOwned: false,
+      readOnly: false,
+      status: 'active',
+    };
+
+    expect(() => AgentDefinition.fromJson(userDefinition)).not.toThrow();
+    expect(() => AgentDefinition.fromJson({ ...userDefinition, status: 'archived' })).not.toThrow();
   });
 });

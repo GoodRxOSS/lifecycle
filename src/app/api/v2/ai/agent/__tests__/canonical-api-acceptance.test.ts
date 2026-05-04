@@ -83,18 +83,10 @@ jest.mock('server/services/agent/SourceService', () => ({
   },
 }));
 
-jest.mock('server/services/agent/CapabilityService', () => ({
+jest.mock('server/services/agent/RunPlanResolver', () => ({
   __esModule: true,
   default: {
-    resolveSessionContext: jest.fn(),
-  },
-}));
-
-jest.mock('server/services/agent/ProviderRegistry', () => ({
-  __esModule: true,
-  MissingAgentProviderApiKeyError: class MissingAgentProviderApiKeyError extends Error {},
-  default: {
-    resolveSelection: jest.fn(),
+    resolveForRunAdmission: jest.fn(),
   },
 }));
 
@@ -176,8 +168,7 @@ import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import AgentThreadService from 'server/services/agent/ThreadService';
 import AgentSessionService from 'server/services/agentSession';
 import AgentSourceService from 'server/services/agent/SourceService';
-import AgentCapabilityService from 'server/services/agent/CapabilityService';
-import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
+import AgentRunPlanResolver from 'server/services/agent/RunPlanResolver';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
 import AgentRunService from 'server/services/agent/RunService';
@@ -200,8 +191,7 @@ const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSessi
 const mockCanAcceptMessages = AgentSessionService.canAcceptMessages as jest.Mock;
 const mockTouchActivity = AgentSessionService.touchActivity as jest.Mock;
 const mockGetSessionSource = AgentSourceService.getSessionSource as jest.Mock;
-const mockResolveSessionContext = AgentCapabilityService.resolveSessionContext as jest.Mock;
-const mockResolveSelection = AgentProviderRegistry.resolveSelection as jest.Mock;
+const mockResolveForRunAdmission = AgentRunPlanResolver.resolveForRunAdmission as jest.Mock;
 const mockCreateQueuedRunWithMessage = AgentRunAdmissionService.createQueuedRunWithMessage as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
 const mockGetOwnedRun = AgentRunService.getOwnedRun as jest.Mock;
@@ -375,12 +365,25 @@ function simulateApprovalRequest() {
     commandPreview: null,
     fileChangePreview: [
       {
+        id: 'tool-call-1:sample-file.txt',
+        toolCallId: 'tool-call-1',
+        sourceTool: 'workspace_edit_file',
         path: 'sample-file.txt',
-        action: 'edited',
+        displayPath: 'sample-file.txt',
+        kind: 'edited',
+        stage: 'awaiting-approval',
         summary: 'Updated sample-file.txt',
         additions: 1,
         deletions: 1,
         truncated: false,
+        unifiedDiff: null,
+        beforeTextPreview: null,
+        afterTextPreview: null,
+        encoding: null,
+        oldSizeBytes: null,
+        newSizeBytes: null,
+        oldSha256: null,
+        newSha256: null,
       },
     ],
     riskLabels: ['Workspace write'],
@@ -464,16 +467,71 @@ describe('canonical agent session API acceptance flow', () => {
     });
     mockCanAcceptMessages.mockReturnValue(true);
     mockGetSessionSource.mockResolvedValue({
+      uuid: 'source-1',
+      adapter: 'blank_workspace',
       status: 'ready',
       sandboxRequirements: { filesystem: 'persistent' },
     });
-    mockResolveSessionContext.mockResolvedValue({
+    mockResolveForRunAdmission.mockResolvedValue({
       approvalPolicy: { defaultMode: 'require_approval', rules: {} },
-      repoFullName: 'example-org/example-repo',
-    });
-    mockResolveSelection.mockResolvedValue({
-      provider: 'openai',
-      modelId: 'gpt-5.4',
+      requestedHarness: null,
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: {},
+      runPlanSnapshot: {
+        version: 1,
+        capturedAt: '2026-05-03T00:00:00.000Z',
+        agent: {
+          id: 'system.freeform',
+          label: 'Free-form',
+          ownerKind: 'system',
+          version: 1,
+          sourceKind: 'freeform_chat',
+          resourcePolicy: {
+            sourceKinds: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+            workspaceRequired: false,
+            sandboxRequired: false,
+          },
+          modelPreference: null,
+        },
+        source: {
+          id: 'source-1',
+          adapter: 'blank_workspace',
+          status: 'ready',
+          sessionKind: 'chat',
+          freshness: {
+            capturedAt: '2026-05-03T00:00:00.000Z',
+            freshnessSource: 'source',
+          },
+        },
+        model: {
+          requestedProvider: null,
+          requestedModel: null,
+          resolvedProvider: 'openai',
+          resolvedModel: 'gpt-5.4',
+        },
+        runtime: {
+          requestedHarness: null,
+          resolvedHarness: 'lifecycle_ai_sdk',
+          sandboxRequirement: { filesystem: 'persistent' },
+          runtimeOptions: {},
+          approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+        },
+        prompt: {
+          instructionRefs: [],
+          renderedSummary: 'Sample prompt summary',
+          renderedHash: 'sha256:sample-rendered-prompt',
+        },
+        capabilities: {
+          provisionalCapabilityIds: [],
+          resolvedCapabilityAccess: [],
+        },
+        warnings: [],
+      },
     });
     mockCreateQueuedRunWithMessage.mockImplementation(async ({ message }) => {
       const storedMessage = {
@@ -591,6 +649,17 @@ describe('canonical agent session API acceptance flow', () => {
     const runId = runBody.data.run.id;
 
     expect(runResponse.status).toBe(201);
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thread: expect.objectContaining({ uuid: 'thread-1' }),
+        session: expect.objectContaining({ uuid: 'session-1' }),
+        source: expect.objectContaining({ uuid: 'source-1', adapter: 'blank_workspace', status: 'ready' }),
+        userIdentity: sampleUser,
+        requestedProvider: null,
+        requestedModel: null,
+        runtimeOptions: {},
+      })
+    );
     expect(runBody.data).toEqual(
       expect.objectContaining({
         run: {

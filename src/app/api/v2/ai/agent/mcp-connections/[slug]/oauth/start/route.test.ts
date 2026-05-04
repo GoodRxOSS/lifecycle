@@ -27,11 +27,16 @@ jest.mock('@ai-sdk/mcp', () => ({
   auth: (...args: unknown[]) => mockAuth(...args),
 }));
 
-jest.mock('server/services/ai/mcp/config', () => ({
-  McpConfigService: jest.fn().mockImplementation(() => ({
-    getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
-  })),
-}));
+jest.mock('server/services/agentRuntime/mcp/config', () => {
+  const actual = jest.requireActual('server/services/agentRuntime/mcp/config');
+  return {
+    __esModule: true,
+    ...actual,
+    McpConfigService: jest.fn().mockImplementation(() => ({
+      getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
+    })),
+  };
+});
 
 jest.mock('server/services/userMcpConnection', () => ({
   __esModule: true,
@@ -41,7 +46,7 @@ jest.mock('server/services/userMcpConnection', () => ({
   },
 }));
 
-jest.mock('server/services/ai/mcp/oauthFlow', () => ({
+jest.mock('server/services/agentRuntime/mcp/oauthFlow', () => ({
   __esModule: true,
   default: {
     create: (...args: unknown[]) => mockCreateFlow(...args),
@@ -164,6 +169,40 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
       authorizationUrl: null,
     });
     expect(mockInvalidateFlow).toHaveBeenCalledWith('flow-123');
+  });
+
+  it('redacts MCP secrets when OAuth authorization setup fails', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce({
+      id: 7,
+      slug: 'sample-oauth',
+      scope: 'global',
+      enabled: true,
+      timeout: 30000,
+      preset: 'oauth-http',
+      transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp?api_key=query/secret+value', headers: {} },
+      sharedConfig: {
+        headers: { Authorization: 'Bearer shared-header-secret' },
+      },
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+        scope: 'sample.read',
+      },
+    } as const);
+    mockAuth.mockRejectedValueOnce(
+      new Error(
+        'OAuth start failed Authorization=Bearer shared-header-secret query=query/secret+value encoded=query%2Fsecret%2Bvalue'
+      )
+    );
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(mockInvalidateFlow).toHaveBeenCalledWith('flow-123');
+    expect(body.error.message).toBe('OAuth start failed Authorization=****** query=****** encoded=******');
   });
 
   it('drops stale saved client metadata when the persisted redirect URI no longer matches', async () => {

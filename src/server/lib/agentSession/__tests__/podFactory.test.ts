@@ -15,7 +15,7 @@
  */
 
 import * as k8s from '@kubernetes/client-node';
-import { SESSION_POD_MCP_CONFIG_ENV } from 'server/services/ai/mcp/sessionPod';
+import { SESSION_POD_MCP_CONFIG_ENV } from 'server/services/agentRuntime/mcp/sessionPod';
 import { SESSION_WORKSPACE_HOME_VOLUME_NAME, SESSION_WORKSPACE_SHARED_HOME_DIR } from '../configSeeder';
 import { SESSION_WORKSPACE_EDITOR_PROJECT_FILE } from '../workspace';
 
