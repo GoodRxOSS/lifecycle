@@ -20,7 +20,6 @@ import Database from 'server/database';
 import { Deploy } from 'server/models';
 import Fastly from 'server/lib/fastly';
 import { Link, FeatureFlags } from 'shared/types';
-import { DD_URL, DD_LOG_URL } from 'shared/constants';
 import { getLogger } from 'server/lib/logger';
 import Model from 'server/models/_Model';
 
@@ -47,63 +46,6 @@ export const constructUrl = (url: string, params: Record<string, string>[]) => {
   if (params) params.forEach(({ name, value } = {}) => name && value && urlObj.searchParams.append(name, value));
   return urlObj.href;
 };
-
-/**
- * processLinks
- * @description processes links for a given build id
- * @param buildId
- * @returns
- */
-export const processLinks = (buildId: string = '') =>
-  buildId.length >= 1
-    ? [
-        {
-          name: 'Fastly Logs',
-          url: constructUrl(DD_LOG_URL, [
-            {
-              name: 'query',
-              value: `source:fastly @request.host:*${buildId}*`,
-            },
-            { name: 'paused', value: 'false' },
-          ]),
-        },
-        {
-          name: 'Lifecycle Env Logs',
-          url: constructUrl(DD_LOG_URL, [
-            { name: 'query', value: `env:lifecycle-${buildId}` },
-            { name: 'paused', value: 'false' },
-          ]),
-        },
-        {
-          name: 'Serverless',
-          url: constructUrl(`${DD_URL}/functions`, [
-            { name: 'text_search', value: `env:*${buildId}*` },
-            { name: 'paused', value: 'false' },
-          ]),
-        },
-        {
-          name: 'Tracing',
-          url: constructUrl(`${DD_URL}/apm/traces`, [
-            { name: 'query', value: `env:*${buildId}*` },
-            { name: 'paused', value: 'false' },
-          ]),
-        },
-        {
-          name: 'RUM (If Enabled)',
-          url: constructUrl(`${DD_URL}/rum/explorer`, [
-            { name: 'query', value: `env:*${buildId}*` },
-            { name: 'live', value: 'true' },
-          ]),
-        },
-        {
-          name: 'Containers',
-          url: constructUrl(`${DD_URL}/containers`, [
-            { name: 'query', value: `env:lifecycle-${buildId}` },
-            { name: 'paused', value: 'false' },
-          ]),
-        },
-      ]
-    : [];
 
 /**
  * constructLinkDictionary
@@ -152,14 +94,6 @@ export const constructFastlyBuildLink = async (
     return {};
   }
 };
-
-/**
- * constructBuildLinks
- * @param buildId
- * @returns a dictionary of dashboard links
- */
-export const constructBuildLinks = (buildId: string = '') =>
-  buildId.length >= 1 ? constructLinkDictionary(processLinks(buildId)) : {};
 
 /**
  * insertBuildLink

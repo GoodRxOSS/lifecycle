@@ -3007,6 +3007,65 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        BuildMetadataLink: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', example: 'example-environment-logs' },
+            text: { type: 'string', example: 'Environment logs' },
+            icon: { type: 'string', example: 'file-cog' },
+            link: { type: 'string', example: 'https://example.com/logs?build={{{buildUUID}}}' },
+            position: { type: 'integer', example: 0 },
+          },
+          required: ['id', 'text', 'icon', 'link', 'position'],
+        },
+
+        BuildMetadata: {
+          type: 'object',
+          properties: {
+            links: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/BuildMetadataLink' },
+            },
+          },
+          required: ['links'],
+        },
+
+        BuildMetadataLinkCreateRequest: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', example: 'Environment logs' },
+            icon: { type: 'string', example: 'file-cog' },
+            link: { type: 'string', example: 'https://example.com/logs?build={{{buildUUID}}}' },
+            position: { type: 'integer', example: 0 },
+          },
+          required: ['text', 'icon', 'link'],
+          additionalProperties: false,
+        },
+
+        BuildMetadataLinkPatchRequest: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', example: 'Environment logs' },
+            icon: { type: 'string', example: 'file-cog' },
+            link: { type: 'string', example: 'https://example.com/logs?build={{{buildUUID}}}' },
+            position: { type: 'integer', example: 0 },
+          },
+          additionalProperties: false,
+        },
+
+        BuildMetadataSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/BuildMetadata' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
         /**
          * @description The Deployable associated with a Deploy.
          */

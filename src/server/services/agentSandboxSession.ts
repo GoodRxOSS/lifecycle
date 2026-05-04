@@ -546,7 +546,6 @@ export default class AgentSandboxSessionService extends BaseService {
         status: BuildStatus.QUEUED,
         githubDeployments: false,
         isStatic: false,
-        dashboardLinks: {},
       } as unknown as Partial<Build>);
 
       const deployableIdByBaseId = new Map<number, number>();

@@ -58,8 +58,6 @@ export default class Build extends Model {
   enableFullYaml: boolean;
   webhooksYaml: string;
 
-  dashboardLinks: Record<string, string>;
-
   enabledFeatures: string[];
   isStatic: boolean;
   githubDeployments: boolean;

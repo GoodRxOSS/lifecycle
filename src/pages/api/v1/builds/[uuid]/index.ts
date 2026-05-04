@@ -17,7 +17,6 @@
 import { nanoid } from 'nanoid';
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
-import { Build } from 'server/models';
 import BuildService from 'server/services/build';
 import OverrideService from 'server/services/override';
 
@@ -41,7 +40,6 @@ async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
         'pullRequestId',
         'manifest',
         'webhooksYaml',
-        'dashboardLinks',
         'isStatic',
         'namespace'
       );
@@ -70,7 +68,7 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
   try {
     const override = new OverrideService();
 
-    const build: Build = await override.db.models.Build.query().findOne({ uuid }).withGraphFetched('pullRequest');
+    const build = await override.db.models.Build.query().findOne({ uuid }).withGraphFetched('pullRequest');
 
     if (!build) {
       getLogger().debug('Build not found, cannot patch uuid');
@@ -161,8 +159,6 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *                 manifest:
  *                   type: object
  *                 webhooksYaml:
- *                   type: object
- *                 dashboardLinks:
  *                   type: object
  *                 isStatic:
  *                   type: boolean
@@ -266,9 +262,6 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *                       type: object
  *                       example: {}
  *                     webhooksYaml:
- *                       type: object
- *                       example: {}
- *                     dashboardLinks:
  *                       type: object
  *                       example: {}
  *                     isStatic:

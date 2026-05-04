@@ -41,6 +41,19 @@ export type GlobalConfig = {
   ttl_cleanup?: TTLCleanupConfig;
   secretProviders?: SecretProvidersConfig;
   logArchival?: LogArchivalConfig;
+  metadata?: BuildMetadataConfig;
+};
+
+export type BuildMetadataLink = {
+  id: string;
+  text: string;
+  icon: string;
+  link: string;
+  position: number;
+};
+
+export type BuildMetadataConfig = {
+  links: BuildMetadataLink[];
 };
 
 export type AppSetup = {

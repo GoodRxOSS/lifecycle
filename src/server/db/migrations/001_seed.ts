@@ -120,7 +120,6 @@ export async function up(knex: Knex): Promise<any> {
       "capacityType" varchar(255),
       "enableFullYaml" boolean DEFAULT false,
       "webhooksYaml" varchar(4096),
-      "dashboardLinks" json DEFAULT '{}'::json,
       "enabledFeatures" json DEFAULT '[]'::json,
       "isStatic" boolean DEFAULT false,
       "githubDeployments" boolean DEFAULT false,
