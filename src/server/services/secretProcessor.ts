@@ -37,6 +37,15 @@ export interface ProcessEnvSecretsOptions {
   syncToken?: string;
 }
 
+export interface ProcessSecretRefsOptions {
+  secretRefs: SecretRefWithEnvKey[];
+  serviceName: string;
+  namespace: string;
+  buildUuid?: string;
+  syncToken?: string;
+  strict?: boolean;
+}
+
 export interface ProcessEnvSecretsResult {
   secretRefs: SecretRefWithEnvKey[];
   expectedKeysPerSecret: Record<string, string[]>;
@@ -125,26 +134,48 @@ export class SecretProcessor {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  async processEnvSecrets(options: ProcessEnvSecretsOptions): Promise<ProcessEnvSecretsResult> {
-    const { env, serviceName, namespace, buildUuid } = options;
+  async processSecretRefs(options: ProcessSecretRefsOptions): Promise<ProcessEnvSecretsResult> {
+    const { secretRefs, serviceName, namespace, buildUuid } = options;
     const syncToken = options.syncToken ?? uuid();
+    const strict = options.strict ?? false;
     const warnings: string[] = [];
     const validRefs: SecretRefWithEnvKey[] = [];
+    const refsBySecretKey = new Map<string, SecretRefWithEnvKey>();
 
-    const allRefs = parseSecretRefsFromEnv(env);
+    for (const ref of secretRefs) {
+      const existingRef = refsBySecretKey.get(ref.envKey);
+      if (
+        existingRef &&
+        (existingRef.provider !== ref.provider || existingRef.path !== ref.path || existingRef.key !== ref.key)
+      ) {
+        const warning = `Secret reference ${ref.envKey} has conflicting remote refs`;
+        if (strict) {
+          throw new Error(warning);
+        }
+        warnings.push(warning);
+        getLogger().warn(warning);
+        continue;
+      }
 
-    for (const ref of allRefs) {
+      if (existingRef) {
+        continue;
+      }
+
       const validation = validateSecretRef(ref, this.secretProviders);
 
       if (!validation.valid) {
         const warning = `Secret reference ${ref.envKey}={{${ref.provider}:${ref.path}:${ref.key || ''}}} skipped: ${
           validation.error
         }`;
+        if (strict) {
+          throw new Error(warning);
+        }
         warnings.push(warning);
         getLogger().warn(warning);
         continue;
       }
 
+      refsBySecretKey.set(ref.envKey, ref);
       validRefs.push(ref);
     }
 
@@ -177,10 +208,23 @@ export class SecretProcessor {
       } catch (error) {
         const errorMsg = (error as any)?.message || (error as any)?.stderr || String(error);
         const warning = `Failed to apply ExternalSecret for ${serviceName}: ${errorMsg}`;
+        if (strict) {
+          throw new Error(warning);
+        }
         warnings.push(warning);
       }
     }
 
     return { secretRefs: validRefs, expectedKeysPerSecret, syncTokensPerSecret, warnings };
+  }
+
+  async processEnvSecrets(options: ProcessEnvSecretsOptions): Promise<ProcessEnvSecretsResult> {
+    return this.processSecretRefs({
+      secretRefs: parseSecretRefsFromEnv(options.env),
+      serviceName: options.serviceName,
+      namespace: options.namespace,
+      buildUuid: options.buildUuid,
+      syncToken: options.syncToken,
+    });
   }
 }

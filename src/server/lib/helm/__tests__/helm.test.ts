@@ -358,5 +358,60 @@ describe('Helm tests', () => {
 
       expect(customValues).toContain('deployment.env.DB__URL="{{aws:myapp/rds-credentials:url}}"');
     });
+
+    test('rejects Helm chart value secret refs for Codefresh deploys', async () => {
+      const mockGetAllConfigs = jest.fn().mockResolvedValue({
+        lifecycleDefaults: {
+          deployCluster: 'test-cluster',
+          cfStepType: 'helm',
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+        },
+      });
+      const mockGetOrgChartName = jest.fn().mockResolvedValue('lifecycle-app');
+
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: mockGetAllConfigs,
+        getOrgChartName: mockGetOrgChartName,
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        deployable: {
+          name: 'sample-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: {
+              name: 'lifecycle-app',
+              values: ['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          namespace: 'env-test',
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn(),
+      } as unknown as Deploy;
+
+      await expect(helmOrgAppDeployStep(deploy)).rejects.toThrow(
+        'Codefresh Helm deploy path does not support helm.chart.values secret refs'
+      );
+    });
   });
 });

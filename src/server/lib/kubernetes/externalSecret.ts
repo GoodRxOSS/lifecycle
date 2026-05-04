@@ -21,6 +21,7 @@ import { getLogger } from 'server/lib/logger';
 import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 import { SecretProviderConfig } from 'server/services/types/globalConfig';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import { generateSecretName } from 'server/lib/kubernetes/secretNames';
 
 export const EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION = 'force-sync';
 export const TARGET_SECRET_SYNC_TOKEN_ANNOTATION = 'lfc/secret-sync-token';
@@ -70,20 +71,7 @@ export interface GenerateExternalSecretOptions {
   forceSyncToken?: string;
 }
 
-const MAX_NAME_LENGTH = 63;
-
-export function generateSecretName(serviceName: string, provider: string): string {
-  const suffix = `-${provider}-secrets`;
-  const maxServiceNameLength = MAX_NAME_LENGTH - suffix.length;
-
-  let truncatedName = serviceName.substring(0, maxServiceNameLength);
-
-  if (truncatedName.endsWith('-')) {
-    truncatedName = truncatedName.slice(0, -1);
-  }
-
-  return `${truncatedName}${suffix}`;
-}
+export { generateSecretName };
 
 export function groupSecretRefsByProvider(refs: SecretRefWithEnvKey[]): Record<string, SecretRefWithEnvKey[]> {
   const grouped: Record<string, SecretRefWithEnvKey[]> = {};

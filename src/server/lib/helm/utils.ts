@@ -21,8 +21,8 @@ import mustache from 'mustache';
 import { HYPHEN_REPLACEMENT, HYPHEN_REPLACEMENT_REGEX } from 'shared/constants';
 import { NodeAffinity, Toleration } from './types';
 import { LIFECYCLE_UI_URL, APP_HOST } from 'shared/config';
-import { generateSecretName } from 'server/lib/kubernetes/externalSecret';
-import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
+import { generateSecretName } from 'server/lib/kubernetes/secretNames';
+import { parseSecretRefsFromEnv, preserveSecretRefsInTemplate } from 'server/lib/secretRefs';
 
 export const renderTemplate = async (build: Build, values: string[] = []): Promise<string[]> => {
   const db = build.$knex();
@@ -31,7 +31,8 @@ export const renderTemplate = async (build: Build, values: string[] = []): Promi
 
   const joinedValues = values.join('%%SPLIT%%');
   const processedValues = joinedValues.replace(/-/g, HYPHEN_REPLACEMENT);
-  const renderedString = mustache.render(processedValues, availableEnvVars);
+  const secretPreservation = preserveSecretRefsInTemplate(processedValues);
+  const renderedString = secretPreservation.restore(mustache.render(secretPreservation.template, availableEnvVars));
 
   return renderedString.replace(HYPHEN_REPLACEMENT_REGEX, '-').split('%%SPLIT%%');
 };
