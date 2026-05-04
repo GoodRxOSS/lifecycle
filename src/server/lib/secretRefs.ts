@@ -31,7 +31,48 @@ export interface ValidationResult {
   error?: string;
 }
 
-const SECRET_REF_REGEX = /^\{\{(aws|gcp|barbican|vault|onepassword):([^:}]+)(?::([^}]+))?\}\}$/;
+const SECRET_REF_PROVIDERS = 'aws|gcp|barbican|vault|onepassword';
+const SECRET_REF_REGEX = new RegExp(`^\\{\\{(${SECRET_REF_PROVIDERS}):([^:}]+)(?::([^}]+))?\\}\\}$`);
+const SECRET_REF_TEMPLATE_REGEX = new RegExp(`\\{\\{(${SECRET_REF_PROVIDERS}):([^}]+)\\}\\}`, 'g');
+
+export interface SecretRefTemplatePreservation {
+  template: string;
+  restore(rendered: string): string;
+}
+
+export function preserveSecretRefsInTemplate(template: string): SecretRefTemplatePreservation {
+  const secretPlaceholders: Map<string, string> = new Map();
+  let placeholderIndex = 0;
+
+  const preservedTemplate = template.replace(SECRET_REF_TEMPLATE_REGEX, (match) => {
+    const placeholder = `__LFC_SECRET_REF_PLACEHOLDER_${placeholderIndex}__`;
+    secretPlaceholders.set(placeholder, match);
+    placeholderIndex++;
+    return placeholder;
+  });
+
+  return {
+    template: preservedTemplate,
+    restore(rendered: string): string {
+      let restored = rendered;
+
+      for (const [placeholder, original] of secretPlaceholders.entries()) {
+        restored = restored.replace(placeholder, original);
+      }
+
+      return restored;
+    },
+  };
+}
+
+export function containsSecretRefTemplate(value: string): boolean {
+  if (!value || typeof value !== 'string') {
+    return false;
+  }
+
+  SECRET_REF_TEMPLATE_REGEX.lastIndex = 0;
+  return SECRET_REF_TEMPLATE_REGEX.test(value);
+}
 
 export function isSecretRef(value: string): boolean {
   if (!value || typeof value !== 'string') {
@@ -65,7 +106,7 @@ export function parseSecretRef(value: string): SecretRef | null {
 
 export function validateSecretRef(
   ref: SecretRef,
-  secretProviders: SecretProvidersConfig | undefined,
+  secretProviders: SecretProvidersConfig | undefined
 ): ValidationResult {
   if (!secretProviders) {
     return { valid: false, error: `Secret provider '${ref.provider}' not configured` };

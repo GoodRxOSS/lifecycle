@@ -254,6 +254,40 @@ describe('SecretProcessor', () => {
   });
 
   describe('processEnvSecrets', () => {
+    it('processes explicit env, init, and Helm refs with one sync token', async () => {
+      const result = await processor.processSecretRefs({
+        secretRefs: [
+          { envKey: 'APP_TOKEN', provider: 'aws', path: 'myapp/app', key: 'APP_TOKEN' },
+          { envKey: 'INIT_TOKEN', provider: 'aws', path: 'myapp/init', key: 'INIT_TOKEN' },
+          { envKey: 'helm.auth.password.abc123', provider: 'aws', path: 'myapp/db', key: 'POSTGRES_PASSWORD' },
+        ],
+        serviceName: 'api-server',
+        namespace: 'lfc-abc123',
+        buildUuid: 'abc123',
+        syncToken: 'sync-123',
+        strict: true,
+      });
+
+      expect(result.expectedKeysPerSecret).toEqual({
+        'api-server-aws-secrets': ['APP_TOKEN', 'INIT_TOKEN', 'helm.auth.password.abc123'],
+      });
+      expect(result.syncTokensPerSecret).toEqual({
+        'api-server-aws-secrets': 'sync-123',
+      });
+      expect(result.warnings).toEqual([]);
+    });
+
+    it('throws for invalid refs in strict mode', async () => {
+      await expect(
+        processor.processSecretRefs({
+          secretRefs: [{ envKey: 'HELM_SECRET', provider: 'gcp', path: 'path', key: 'key' }],
+          serviceName: 'api-server',
+          namespace: 'lfc-abc123',
+          strict: true,
+        })
+      ).rejects.toThrow("Secret provider 'gcp' is disabled");
+    });
+
     it('extracts and validates secret references', async () => {
       const env = {
         DB_PASSWORD: '{{aws:myapp/db:password}}',

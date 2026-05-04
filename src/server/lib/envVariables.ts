@@ -30,6 +30,7 @@ import {
 import { getLogger } from 'server/lib/logger';
 import { LifecycleError } from './errors';
 import GlobalConfigService from 'server/services/globalConfig';
+import { preserveSecretRefsInTemplate } from 'server/lib/secretRefs';
 
 const ALLOWED_PROPERTIES = [
   'branchName',
@@ -306,16 +307,8 @@ export abstract class EnvironmentVariables {
    * @returns the rendered template
    */
   async customRender(template, data, useDefaultUUID = true, namespace: string) {
-    const secretPatternRegex = /\{\{(aws|gcp|barbican|vault|onepassword):([^}]+)\}\}/g;
-    const secretPlaceholders: Map<string, string> = new Map();
-    let placeholderIndex = 0;
-
-    template = template.replace(secretPatternRegex, (match) => {
-      const placeholder = `__SECRET_PLACEHOLDER_${placeholderIndex}__`;
-      secretPlaceholders.set(placeholder, match);
-      placeholderIndex++;
-      return placeholder;
-    });
+    const secretPreservation = preserveSecretRefsInTemplate(template);
+    template = secretPreservation.template;
 
     // Convert any remaining double-curly placeholders into triple-curly ones to render unescaped HTML
     template = template.replace(/{{{?([^{}]*?)}}}?/g, '{{{$1}}}');
@@ -400,13 +393,7 @@ export abstract class EnvironmentVariables {
       }
     }
 
-    let rendered = mustache.render(template, data);
-
-    for (const [placeholder, original] of secretPlaceholders.entries()) {
-      rendered = rendered.replace(placeholder, original);
-    }
-
-    return rendered;
+    return secretPreservation.restore(mustache.render(template, data));
   }
 
   public abstract resolve(

@@ -22,6 +22,7 @@ import {
   constructHelmCommand,
   ChartType,
   constructHelmCustomValues,
+  constructHelmCustomValueConfiguration,
   mergeHelmConfigWithGlobal,
   validateHelmConfiguration,
 } from '../utils';
@@ -295,6 +296,38 @@ describe('Native Helm', () => {
       expect(result).toContain('--set "key2=value2"');
       expect(result).toContain('-f values1.yaml');
       expect(result).toContain('-f values2.yaml');
+    });
+
+    it('should render secret-backed values with --set-file', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['auth.database=app_db'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            helmKey: 'auth.password',
+            secretName: 'example-db-aws-secrets',
+            secretKey: 'helm.auth.password.abc123',
+            provider: 'aws',
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123',
+          },
+        ]
+      );
+
+      expect(result).toContain('--set "auth.database=app_db"');
+      expect(result).toContain(
+        '--set-file "auth.password=/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123"'
+      );
+      expect(result).not.toContain('{{aws:');
     });
 
     it('should use custom args from global_config when provided', () => {
@@ -640,6 +673,48 @@ describe('Native Helm', () => {
       expect(result.args[0]).toContain("--post-renderer '/opt/bin/post-renderer'");
       expect(result.args[0]).toContain("--post-renderer-args '--mode=prod'");
     });
+
+    it('should mount Helm secret set-file volumes when configured', async () => {
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            helmKey: 'auth.password',
+            secretName: 'example-db-aws-secrets',
+            secretKey: 'helm.auth.password.abc123',
+            provider: 'aws',
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123',
+          },
+        ]
+      );
+
+      expect(result.volumeMounts).toEqual(
+        expect.arrayContaining([
+          {
+            name: expect.stringMatching(/^helm-secret-example-db-aws-secrets-[a-f0-9]{8}$/),
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets',
+            readOnly: true,
+          },
+        ])
+      );
+      expect(result.args[0]).toContain('--set-file "auth.password=');
+    });
   });
 
   describe('mergeHelmConfigWithGlobal', () => {
@@ -826,6 +901,160 @@ describe('Native Helm', () => {
       expect(customValues).toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
       expect(customValues).toContain('ingress.ipAllowlist[0]=1.1.1.1/32');
       expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
+    });
+
+    it('extracts secret-backed chart values after final value precedence is applied', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        postgresql: {
+          chart: {
+            values: ['auth.password=global-password', 'auth.database=app_db'],
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'postgresql',
+              values: ['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.PUBLIC);
+
+      expect(result.customValues).toContain('auth.database=app_db');
+      expect(result.customValues).not.toContain('auth.password=global-password');
+      expect(result.customValues).not.toEqual(
+        expect.arrayContaining(['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'])
+      );
+      expect(result.helmSecretRefs).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          provider: 'aws',
+          path: 'repo/example/database',
+          key: 'POSTGRES_PASSWORD',
+        }),
+      ]);
+      expect(result.secretSetFiles).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          secretName: 'example-db-aws-secrets',
+          provider: 'aws',
+        }),
+      ]);
+    });
+
+    it('lets later generated env values override earlier secret-backed chart values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          FOO: 'plain-from-lifecycle',
+        },
+        deployable: {
+          name: 'sample-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            disableIngressHost: true,
+            chart: {
+              name: 'lifecycle-app',
+              values: ['deployment.env.FOO={{aws:repo/example/app:FOO}}'],
+            },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.ORG_CHART);
+
+      expect(result.customValues).toContain('deployment.env.FOO="plain-from-lifecycle"');
+      expect(result.customValues).not.toContain('deployment.env.FOO={{aws:repo/example/app:FOO}}');
+      expect(result.helmSecretRefs).toEqual([]);
+      expect(result.secretSetFiles).toEqual([]);
+    });
+
+    it('lets later secret-backed chart values override earlier plain values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'local',
+              values: ['auth.password=dev-password', 'auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.LOCAL);
+
+      expect(result.customValues).not.toContain('auth.password=dev-password');
+      expect(result.helmSecretRefs).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          provider: 'aws',
+          path: 'repo/example/database',
+          key: 'POSTGRES_PASSWORD',
+        }),
+      ]);
+      expect(result.secretSetFiles).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          secretName: 'example-db-aws-secrets',
+          provider: 'aws',
+        }),
+      ]);
+    });
+
+    it('ignores losing partial secret interpolation when a later plain value wins', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'local',
+              values: [
+                'auth.url=postgres://user:{{aws:repo/example/database:POSTGRES_PASSWORD}}@host/db',
+                'auth.url=postgres://user:password@host/db',
+              ],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.LOCAL);
+
+      expect(result.customValues).toContain('auth.url=postgres://user:password@host/db');
+      expect(result.secretSetFiles).toEqual([]);
     });
 
     it('respects disableIngressHost for org charts', async () => {
@@ -1396,6 +1625,39 @@ describe('Native Helm', () => {
       const errors = await validateHelmConfiguration(deploy);
 
       expect(errors).toContain('Native Helm post-renderer command is required when post-renderer is enabled');
+    });
+
+    it('rejects debug and dry-run args when Helm secret set-files are present', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            defaultArgs: '--debug',
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'postgresql',
+              values: ['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toContain('Helm args --debug and --dry-run cannot be used with secret-backed Helm custom values');
     });
   });
 

@@ -31,6 +31,7 @@ import { ingressBannerSnippet } from 'server/lib/helm/utils';
 import { constructHelmDeploysBuildMetaData } from 'server/lib/helm/helm';
 import {
   HelmDeployOptions,
+  HelmConfiguration,
   ChartType,
   HelmPostRendererConfig,
   determineChartType,
@@ -51,6 +52,13 @@ import {
 import { createHelmJob as createHelmJobFromFactory } from 'server/lib/kubernetes/jobFactory';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
 import { getLogArchivalService } from 'server/services/logArchival';
+import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from 'server/lib/secretRefs';
+import { SecretProcessor } from 'server/services/secretProcessor';
+import {
+  buildHelmSecretVolumes,
+  buildHelmSecretVolumeMounts,
+  HelmSecretSetFile,
+} from 'server/lib/helm/secretValueRefs';
 
 export interface JobResult {
   completed: boolean;
@@ -83,7 +91,8 @@ export async function createHelmContainer(
   chartVersion?: string,
   registryAuth?: RegistryAuthConfig,
   helmImage?: string,
-  postRenderer?: HelmPostRendererConfig
+  postRenderer?: HelmPostRendererConfig,
+  secretSetFiles: HelmSecretSetFile[] = []
 ): Promise<any> {
   const script = generateHelmInstallScript(
     repoName,
@@ -98,7 +107,8 @@ export async function createHelmContainer(
     defaultArgs,
     chartVersion,
     registryAuth,
-    postRenderer
+    postRenderer,
+    secretSetFiles
   );
 
   return {
@@ -118,6 +128,7 @@ export async function createHelmContainer(
         name: 'helm-workspace',
         mountPath: '/workspace',
       },
+      ...buildHelmSecretVolumeMounts(secretSetFiles),
     ],
   };
 }
@@ -169,7 +180,8 @@ export function createWaitForPriorDeploysInitContainer(namespace: string, servic
 export async function generateHelmManifest(
   deploy: Deploy,
   jobName: string,
-  options: HelmDeployOptions
+  options: HelmDeployOptions,
+  helmConfigOverride?: HelmConfiguration
 ): Promise<string> {
   await deploy.$fetchGraph('deployable.repository');
   await deploy.$fetchGraph('build');
@@ -177,7 +189,8 @@ export async function generateHelmManifest(
   const deployable = requireDeployable(deploy);
   const { build } = deploy;
   const repository = deployable.repository;
-  const helmConfig = await getHelmConfiguration(deploy);
+  const helmConfig = helmConfigOverride || (await getHelmConfiguration(deploy));
+  const secretSetFiles = helmConfig.secretSetFiles || [];
 
   const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'deploy');
 
@@ -219,7 +232,8 @@ export async function generateHelmManifest(
     chartVersion,
     registryAuth,
     helmImage,
-    postRenderer
+    postRenderer,
+    secretSetFiles
   );
 
   const volumeConfig = {
@@ -229,6 +243,7 @@ export async function generateHelmManifest(
         name: 'helm-workspace',
         emptyDir: {},
       },
+      ...buildHelmSecretVolumes(secretSetFiles),
     ],
   };
 
@@ -260,6 +275,51 @@ export async function generateHelmManifest(
   return yaml.dump(job);
 }
 
+async function processNativeHelmSecrets(
+  deploy: Deploy,
+  namespace: string,
+  helmConfig: HelmConfiguration
+): Promise<void> {
+  const deployable = requireDeployable(deploy);
+  const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+  const secretRefs: SecretRefWithEnvKey[] = [
+    ...parseSecretRefsFromEnv((deploy.env || {}) as Record<string, string>),
+    ...parseSecretRefsFromEnv((deploy.initEnv || {}) as Record<string, string>),
+    ...(helmConfig.helmSecretRefs || []),
+  ];
+
+  if (secretRefs.length === 0) {
+    return;
+  }
+
+  const secretProcessor = new SecretProcessor(globalConfig.secretProviders);
+  const secretResult = await secretProcessor.processSecretRefs({
+    secretRefs,
+    serviceName: deployable.name,
+    namespace,
+    buildUuid: deploy.uuid,
+    strict: true,
+  });
+  const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
+
+  if (secretNames.length === 0) {
+    return;
+  }
+
+  const providerTimeouts = Object.values(globalConfig.secretProviders || {})
+    .map((provider) => provider.secretSyncTimeout)
+    .filter((timeout): timeout is number => timeout !== undefined);
+  const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+
+  getLogger().info(`Helm: waiting for secrets to sync secrets=[${secretNames.join(', ')}]`);
+  await secretProcessor.waitForSecretSync(
+    secretResult.expectedKeysPerSecret,
+    namespace,
+    timeout,
+    secretResult.syncTokensPerSecret
+  );
+}
+
 export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOptions): Promise<JobResult> {
   await deploy.$fetchGraph('build.pullRequest.repository');
   await deploy.$fetchGraph('deployable.repository');
@@ -278,7 +338,11 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
     jobId,
     shortSha,
   });
-  const manifest = await generateHelmManifest(deploy, jobName, options);
+  const helmConfig = await getHelmConfiguration(deploy);
+
+  await processNativeHelmSecrets(deploy, namespace, helmConfig);
+
+  const manifest = await generateHelmManifest(deploy, jobName, options, helmConfig);
 
   const localPath = `${MANIFEST_PATH}/helm/${deploy.uuid}-helm-${shortSha}`;
   await fs.promises.mkdir(`${MANIFEST_PATH}/helm/`, { recursive: true });
