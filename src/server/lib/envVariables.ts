@@ -43,6 +43,10 @@ const ALLOWED_PROPERTIES = [
   'namespace',
 ];
 
+type EnvironmentVariableDictionaryOptions = {
+  applyNoDefaultEnvResolveFeatureFlag?: boolean;
+};
+
 export abstract class EnvironmentVariables {
   db: Database;
 
@@ -68,9 +72,11 @@ export abstract class EnvironmentVariables {
     buildUUID: string,
     fullYamlSupport: boolean,
     build: Build,
-    additionalVariables?: Record<string, any>
+    additionalVariables?: Record<string, any>,
+    options: EnvironmentVariableDictionaryOptions = {}
   ): Promise<Record<string, any>> {
     let availableEnv: Record<string, any>;
+    const applyNoDefaultEnvResolveFeatureFlag = options.applyNoDefaultEnvResolveFeatureFlag ?? true;
 
     if (fullYamlSupport) {
       availableEnv = deploys
@@ -92,6 +98,7 @@ export abstract class EnvironmentVariables {
                 propValue = deploy.deployable.defaultPublicUrl;
               } else if (prop === 'internalHostname') {
                 if (
+                  applyNoDefaultEnvResolveFeatureFlag &&
                   Array.isArray(build?.enabledFeatures) &&
                   build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)
                 ) {
@@ -180,7 +187,10 @@ export abstract class EnvironmentVariables {
    * @param build The LC build
    * @returns A dictionary of available environment variables key/value pair
    */
-  async availableEnvironmentVariablesForBuild(build: Build): Promise<Record<string, any>> {
+  async availableEnvironmentVariablesForBuild(
+    build: Build,
+    options: EnvironmentVariableDictionaryOptions = {}
+  ): Promise<Record<string, any>> {
     let availableEnv: Record<string, any>;
 
     if (build == null) {
@@ -200,14 +210,21 @@ export abstract class EnvironmentVariables {
       );
     }
 
-    availableEnv = await this.buildEnvironmentVariableDictionary(deploys, build.uuid, build.enableFullYaml, build, {
-      buildUUID: build.uuid,
-      buildSHA: build.sha,
-      pullRequestNumber: build.pullRequest?.pullRequestNumber,
-      namespace: build.namespace,
-      branchName: build.pullRequest?.branchName,
-      repoName: build.pullRequest?.fullName,
-    });
+    availableEnv = await this.buildEnvironmentVariableDictionary(
+      deploys,
+      build.uuid,
+      build.enableFullYaml,
+      build,
+      {
+        buildUUID: build.uuid,
+        buildSHA: build.sha,
+        pullRequestNumber: build.pullRequest?.pullRequestNumber,
+        namespace: build.namespace,
+        branchName: build.pullRequest?.branchName,
+        repoName: build.pullRequest?.fullName,
+      },
+      options
+    );
 
     return availableEnv;
   }

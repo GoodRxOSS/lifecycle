@@ -177,7 +177,10 @@ describe('BuildMetadataService', () => {
 
     const metadata = await createService().renderMetadataForBuild({ uuid: 'sample-build' } as any);
 
-    expect(mockAvailableEnvironmentVariablesForBuild).toHaveBeenCalledWith({ uuid: 'sample-build' });
+    expect(mockAvailableEnvironmentVariablesForBuild).toHaveBeenCalledWith(
+      { uuid: 'sample-build' },
+      { applyNoDefaultEnvResolveFeatureFlag: false }
+    );
     expect(metadata.links).toEqual([
       {
         id: 'logs',
