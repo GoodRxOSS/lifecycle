@@ -54,7 +54,6 @@ export interface HelmConfiguration {
   customValues: string[];
   helmSecretRefs: HelmValueSecretRef[];
   secretSetFiles: HelmSecretSetFile[];
-  secretSetFileInsertIndex: number;
   valuesFiles: string[];
   chartPath: string;
   releaseName: string;
@@ -127,8 +126,7 @@ export function constructHelmCommand(
   defaultArgs?: string,
   chartVersion?: string,
   postRenderer?: NativeHelmPostRendererConfig,
-  secretSetFiles: HelmSecretSetFile[] = [],
-  secretSetFileInsertIndex = customValues.length
+  secretSetFiles: HelmSecretSetFile[] = []
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -177,23 +175,13 @@ export function constructHelmCommand(
     }
   };
 
-  const appendSecretSetFiles = () => {
-    secretSetFiles.forEach((file) => {
-      command += ` --set-file "${file.helmKey}=${file.mountPath}"`;
-    });
-  };
-
-  customValues.forEach((value, index) => {
-    if (index === secretSetFileInsertIndex) {
-      appendSecretSetFiles();
-    }
-
+  customValues.forEach((value) => {
     appendCustomValue(value);
   });
 
-  if (secretSetFileInsertIndex >= customValues.length) {
-    appendSecretSetFiles();
-  }
+  secretSetFiles.forEach((file) => {
+    command += ` --set-file "${file.helmKey}=${file.mountPath}"`;
+  });
 
   valuesFiles.forEach((file) => {
     if (chartType === ChartType.LOCAL) {
@@ -225,8 +213,7 @@ export function generateHelmInstallScript(
   chartVersion?: string,
   registryAuth?: RegistryAuthConfig,
   postRenderer?: NativeHelmPostRendererConfig,
-  secretSetFiles: HelmSecretSetFile[] = [],
-  secretSetFileInsertIndex?: number
+  secretSetFiles: HelmSecretSetFile[] = []
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -241,8 +228,7 @@ export function generateHelmInstallScript(
     defaultArgs,
     chartVersion,
     postRenderer,
-    secretSetFiles,
-    secretSetFileInsertIndex
+    secretSetFiles
   );
 
   let script = ['set -e', `echo "Starting helm deployment for ${releaseName}"`, ''].join('\n');
@@ -309,7 +295,6 @@ export async function getHelmConfiguration(deploy: Deploy): Promise<HelmConfigur
     customValues: customValueConfig.customValues,
     helmSecretRefs: customValueConfig.helmSecretRefs,
     secretSetFiles: customValueConfig.secretSetFiles,
-    secretSetFileInsertIndex: customValueConfig.secretSetFileInsertIndex,
     valuesFiles: mergedHelmConfig.chart?.valueFiles || [],
     chartPath: mergedHelmConfig.chart?.name || 'local',
     releaseName: deploy.uuid.toLowerCase(),
@@ -680,30 +665,71 @@ export interface HelmCustomValueConfiguration {
   customValues: string[];
   helmSecretRefs: HelmValueSecretRef[];
   secretSetFiles: HelmSecretSetFile[];
-  secretSetFileInsertIndex: number;
+}
+
+interface HelmCustomValueEntry {
+  value: string;
+  parseSecretRefs: boolean;
+}
+
+export function resolveHelmCustomValuePrecedence(values: string[]): string[] {
+  return resolveHelmCustomValueEntryPrecedence(
+    values.map((value) => ({
+      value,
+      parseSecretRefs: false,
+    }))
+  ).map((entry) => entry.value);
+}
+
+function chartValueEntries(values: string[]): HelmCustomValueEntry[] {
+  return values.map((value) => ({
+    value,
+    parseSecretRefs: true,
+  }));
+}
+
+function generatedValueEntries(values: string[]): HelmCustomValueEntry[] {
+  return values.map((value) => ({
+    value,
+    parseSecretRefs: false,
+  }));
+}
+
+function resolveHelmCustomValueEntryPrecedence(values: HelmCustomValueEntry[]): HelmCustomValueEntry[] {
+  const lastIndexByKey = new Map<string, number>();
+
+  values.forEach((entry, index) => {
+    const equalIndex = entry.value.indexOf('=');
+
+    if (equalIndex === -1) {
+      return;
+    }
+
+    lastIndexByKey.set(entry.value.substring(0, equalIndex), index);
+  });
+
+  return values.filter((entry, index) => {
+    const equalIndex = entry.value.indexOf('=');
+
+    if (equalIndex === -1) {
+      return true;
+    }
+
+    return lastIndexByKey.get(entry.value.substring(0, equalIndex)) === index;
+  });
 }
 
 export async function constructHelmCustomValueConfiguration(
   deploy: Deploy,
   chartType: ChartType
 ): Promise<HelmCustomValueConfiguration> {
-  let customValues: string[] = [];
-  const helmSecretRefs: HelmValueSecretRef[] = [];
-  const secretSetFiles: HelmSecretSetFile[] = [];
-  let secretSetFileInsertIndex = 0;
+  let customValues: HelmCustomValueEntry[] = [];
   const { deployable, build } = deploy;
 
   const helm = await mergeHelmConfigWithGlobal(deploy);
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
   const chartName = helm?.chart?.name;
   const serviceName = deployable?.name || deploy.uuid || 'service';
-  const parseChartValues = (values: string[]): string[] => {
-    const result = splitHelmSecretValueRefs(values, serviceName);
-    helmSecretRefs.push(...result.secretRefs);
-    secretSetFiles.push(...result.secretSetFiles);
-    secretSetFileInsertIndex = result.plainValues.length;
-    return result.plainValues;
-  };
 
   if (chartType === ChartType.ORG_CHART) {
     const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
@@ -725,52 +751,60 @@ export async function constructHelmCustomValueConfiguration(
       '='
     );
     const templateResolvedValues = await renderTemplate(deploy.build, partialCustomValues);
-    customValues = parseChartValues(templateResolvedValues);
+    customValues = chartValueEntries(templateResolvedValues);
 
     if (deploy.dockerImage) {
       const version = constructImageVersion(deploy.dockerImage);
-      customValues.push(`${resourceType}.appImage=${deploy.dockerImage}`, `version=${version}`);
+      customValues.push(
+        ...generatedValueEntries([`${resourceType}.appImage=${deploy.dockerImage}`, `version=${version}`])
+      );
     }
 
     if (deploy.initDockerImage) {
-      customValues.push(`${resourceType}.initImage=${deploy.initDockerImage}`);
-      customValues.push(...serializeHelmEnvMap(initEnvVars, `${resourceType}.initEnv`));
+      customValues.push(...generatedValueEntries([`${resourceType}.initImage=${deploy.initDockerImage}`]));
+      customValues.push(...generatedValueEntries(serializeHelmEnvMap(initEnvVars, `${resourceType}.initEnv`)));
     } else {
-      customValues.push(`${resourceType}.disableInit=true`);
+      customValues.push(...generatedValueEntries([`${resourceType}.disableInit=true`]));
     }
 
-    customValues.push(...serializeHelmEnvMap(appEnvVars, `${resourceType}.env`, { quoteStringValues: true }));
+    customValues.push(
+      ...generatedValueEntries(serializeHelmEnvMap(appEnvVars, `${resourceType}.env`, { quoteStringValues: true }))
+    );
 
     const isDisableIngressHost: boolean | undefined = helm?.disableIngressHost;
     const grpc: boolean | undefined = helm?.grpc;
     const ingressValues = await constructHttpIngressValues(deploy);
 
     if (grpc) {
-      customValues.push(...(await constructGrpcMappings(deploy)));
+      customValues.push(...generatedValueEntries(await constructGrpcMappings(deploy)));
       if (isDisableIngressHost === false) {
-        customValues.push(...ingressValues, ...addNativeHelmCustomValues());
+        customValues.push(...generatedValueEntries([...ingressValues, ...addNativeHelmCustomValues()]));
       }
     } else if (!isDisableIngressHost && resourceType === 'deployment') {
-      customValues.push(...ingressValues, ...addNativeHelmCustomValues());
+      customValues.push(...generatedValueEntries([...ingressValues, ...addNativeHelmCustomValues()]));
     }
 
     customValues.push(
-      `env=lifecycle-${deployable.buildUUID}`,
-      `${resourceType}.enableServiceLinks=disabled`,
-      `lc__uuid=${deployable.buildUUID}`
+      ...generatedValueEntries([
+        `env=lifecycle-${deployable.buildUUID}`,
+        `${resourceType}.enableServiceLinks=disabled`,
+        `lc__uuid=${deployable.buildUUID}`,
+      ])
     );
 
     if (build?.isStatic) {
       customValues.push(
-        `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=eks.amazonaws.com/capacityType`,
-        `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In`,
-        `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND`,
-        ...generateTolerationsCustomValues(`${resourceType}.tolerations`, staticEnvTolerations)
+        ...generatedValueEntries([
+          `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=eks.amazonaws.com/capacityType`,
+          `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In`,
+          `${resourceType}.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND`,
+          ...generateTolerationsCustomValues(`${resourceType}.tolerations`, staticEnvTolerations),
+        ])
       );
     }
   } else if (chartType === ChartType.PUBLIC) {
     const templateResolvedValues = await renderTemplate(deploy.build, helm?.chart?.values || []);
-    customValues = parseChartValues(
+    customValues = chartValueEntries(
       mergeKeyValueArrays(configs[chartName]?.chart?.values || [], templateResolvedValues, '=')
     );
 
@@ -783,29 +817,37 @@ export async function constructHelmCustomValueConfiguration(
     }
 
     customValues.push(
-      `fullnameOverride=${deploy.uuid}`,
-      `commonLabels.name=${deployable.buildUUID}`,
-      `commonLabels.lc__uuid=${deployable.buildUUID}`,
-      ...customLabels
+      ...generatedValueEntries([
+        `fullnameOverride=${deploy.uuid}`,
+        `commonLabels.name=${deployable.buildUUID}`,
+        `commonLabels.lc__uuid=${deployable.buildUUID}`,
+        ...customLabels,
+      ])
     );
 
     if (build?.isStatic) {
       const { tolerations, nodeSelector } = configs[chartName] || {};
       if (tolerations) {
-        customValues = customValues.concat(generateTolerationsCustomValues(tolerations, staticEnvTolerations));
+        customValues = customValues.concat(
+          generatedValueEntries(generateTolerationsCustomValues(tolerations, staticEnvTolerations))
+        );
       }
       if (nodeSelector) {
-        customValues = customValues.concat(generateNodeSelector(nodeSelector, 'lifecycle-static-env'));
+        customValues = customValues.concat(
+          generatedValueEntries([generateNodeSelector(nodeSelector, 'lifecycle-static-env')])
+        );
       }
     }
   } else if (chartType === ChartType.LOCAL) {
     const templateResolvedValues = await renderTemplate(deploy.build, helm?.chart?.values || []);
-    customValues = parseChartValues(templateResolvedValues);
+    customValues = chartValueEntries(templateResolvedValues);
 
     customValues.push(
-      `fullnameOverride=${deploy.uuid}`,
-      `commonLabels.name=${deployable.buildUUID}`,
-      `commonLabels.lc__uuid=${deployable.buildUUID}`
+      ...generatedValueEntries([
+        `fullnameOverride=${deploy.uuid}`,
+        `commonLabels.name=${deployable.buildUUID}`,
+        `commonLabels.lc__uuid=${deployable.buildUUID}`,
+      ])
     );
 
     // Handle environment variables for LOCAL charts with envMapping
@@ -820,7 +862,7 @@ export async function constructHelmCustomValueConfiguration(
           helm.envMapping.app.format,
           helm.envMapping.app.path
         );
-        customValues.push(...appEnvCustomValues);
+        customValues.push(...generatedValueEntries(appEnvCustomValues));
       }
 
       // Process init environment variables
@@ -830,12 +872,35 @@ export async function constructHelmCustomValueConfiguration(
           helm.envMapping.init.format,
           helm.envMapping.init.path
         );
-        customValues.push(...initEnvCustomValues);
+        customValues.push(...generatedValueEntries(initEnvCustomValues));
       }
     }
   }
 
-  return { customValues, helmSecretRefs, secretSetFiles, secretSetFileInsertIndex };
+  const finalCustomValues = resolveHelmCustomValueEntryPrecedence(customValues);
+  const secretValueRefs = finalCustomValues.reduce(
+    (result, entry) => {
+      if (!entry.parseSecretRefs) {
+        result.plainValues.push(entry.value);
+        return result;
+      }
+
+      const entrySecretValueRefs = splitHelmSecretValueRefs([entry.value], serviceName);
+
+      result.plainValues.push(...entrySecretValueRefs.plainValues);
+      result.secretRefs.push(...entrySecretValueRefs.secretRefs);
+      result.secretSetFiles.push(...entrySecretValueRefs.secretSetFiles);
+
+      return result;
+    },
+    { plainValues: [], secretRefs: [], secretSetFiles: [] } as ReturnType<typeof splitHelmSecretValueRefs>
+  );
+
+  return {
+    customValues: secretValueRefs.plainValues,
+    helmSecretRefs: secretValueRefs.secretRefs,
+    secretSetFiles: secretValueRefs.secretSetFiles,
+  };
 }
 
 export async function constructHelmCustomValues(deploy: Deploy, chartType: ChartType): Promise<string[]> {

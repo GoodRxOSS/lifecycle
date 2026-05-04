@@ -92,8 +92,7 @@ export async function createHelmContainer(
   registryAuth?: RegistryAuthConfig,
   helmImage?: string,
   postRenderer?: HelmPostRendererConfig,
-  secretSetFiles: HelmSecretSetFile[] = [],
-  secretSetFileInsertIndex?: number
+  secretSetFiles: HelmSecretSetFile[] = []
 ): Promise<any> {
   const script = generateHelmInstallScript(
     repoName,
@@ -109,8 +108,7 @@ export async function createHelmContainer(
     chartVersion,
     registryAuth,
     postRenderer,
-    secretSetFiles,
-    secretSetFileInsertIndex
+    secretSetFiles
   );
 
   return {
@@ -193,7 +191,6 @@ export async function generateHelmManifest(
   const repository = deployable.repository;
   const helmConfig = helmConfigOverride || (await getHelmConfiguration(deploy));
   const secretSetFiles = helmConfig.secretSetFiles || [];
-  const secretSetFileInsertIndex = helmConfig.secretSetFileInsertIndex;
 
   const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'deploy');
 
@@ -236,8 +233,7 @@ export async function generateHelmManifest(
     registryAuth,
     helmImage,
     postRenderer,
-    secretSetFiles,
-    secretSetFileInsertIndex
+    secretSetFiles
   );
 
   const volumeConfig = {
