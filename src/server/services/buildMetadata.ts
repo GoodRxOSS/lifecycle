@@ -273,7 +273,9 @@ export default class BuildMetadataService extends BaseService {
       return { links: [] };
     }
 
-    const context = await new BuildEnvironmentVariables(this.db).availableEnvironmentVariablesForBuild(build);
+    const context = await new BuildEnvironmentVariables(this.db).availableEnvironmentVariablesForBuild(build, {
+      applyNoDefaultEnvResolveFeatureFlag: false,
+    });
 
     return {
       links: this.sortLinks(config.links).map((link) => {

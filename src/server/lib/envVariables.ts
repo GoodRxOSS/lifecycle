@@ -43,6 +43,10 @@ const ALLOWED_PROPERTIES = [
   'namespace',
 ];
 
+type EnvironmentVariableDictionaryOptions = {
+  applyNoDefaultEnvResolveFeatureFlag?: boolean;
+};
+
 export abstract class EnvironmentVariables {
   db: Database;
 
@@ -68,9 +72,11 @@ export abstract class EnvironmentVariables {
     buildUUID: string,
     fullYamlSupport: boolean,
     build: Build,
-    additionalVariables?: Record<string, any>
+    additionalVariables?: Record<string, any>,
+    options: EnvironmentVariableDictionaryOptions = {}
   ): Promise<Record<string, any>> {
     let availableEnv: Record<string, any>;
+    const applyNoDefaultEnvResolveFeatureFlag = options.applyNoDefaultEnvResolveFeatureFlag ?? true;
 
     if (fullYamlSupport) {
       availableEnv = deploys
@@ -78,41 +84,44 @@ export abstract class EnvironmentVariables {
           return deploy.deployable?.type !== DeployTypes.CONFIGURATION;
         })
         .reduce((env, deploy) => {
-          const serviceEnv: Array<[string, string]> = ALLOWED_PROPERTIES.map((prop) => {
-            let propValue = null;
+          const deployable = deploy.deployable;
+          if (deployable == null) {
+            return env;
+          }
+
+          const serviceEnv: Array<[string, string | null | undefined]> = ALLOWED_PROPERTIES.map((prop) => {
+            let propValue: string | null | undefined = null;
             if (deploy.active) {
               propValue = deploy[prop];
               if (prop === 'UUID') {
-                propValue = deploy.deployable.buildUUID;
+                propValue = deployable.buildUUID;
               }
             } else {
               if (prop === 'UUID') {
-                propValue = deploy.deployable.defaultUUID;
+                propValue = deployable.defaultUUID;
               } else if (prop === 'publicUrl') {
-                propValue = deploy.deployable.defaultPublicUrl;
+                propValue = deployable.defaultPublicUrl;
               } else if (prop === 'internalHostname') {
                 if (
+                  applyNoDefaultEnvResolveFeatureFlag &&
                   Array.isArray(build?.enabledFeatures) &&
                   build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)
                 ) {
                   propValue = NO_DEFAULT_ENV_UUID;
                 } else {
-                  propValue = deploy.deployable.defaultInternalHostname;
+                  propValue = deployable.defaultInternalHostname;
                 }
               } else {
                 propValue = '';
               }
             }
-            return [`${deploy.deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
+            return [`${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
           });
 
-          if (deploy.deployable.hostPortMapping && Object.keys(deploy.deployable.hostPortMapping).length > 0) {
-            Object.keys(deploy.deployable.hostPortMapping).forEach((key) => {
-              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : deploy.deployable.defaultPublicUrl;
-              serviceEnv.push([
-                `${key}-${deploy.deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`,
-                propValue,
-              ]);
+          if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
+            Object.keys(deployable.hostPortMapping).forEach((key) => {
+              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : deployable.defaultPublicUrl;
+              serviceEnv.push([`${key}-${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
             });
           }
           return {
@@ -126,8 +135,13 @@ export abstract class EnvironmentVariables {
           return deploy.service?.type !== DeployTypes.CONFIGURATION;
         })
         .reduce((env, deploy) => {
-          const serviceEnv: Array<[string, string]> = ALLOWED_PROPERTIES.map((prop) => {
-            let propValue = null;
+          const service = deploy.service;
+          if (service == null) {
+            return env;
+          }
+
+          const serviceEnv: Array<[string, string | null | undefined]> = ALLOWED_PROPERTIES.map((prop) => {
+            let propValue: string | null | undefined = null;
             if (deploy.active) {
               propValue = deploy[prop];
               if (prop === 'UUID') {
@@ -135,22 +149,22 @@ export abstract class EnvironmentVariables {
               }
             } else {
               if (prop === 'UUID') {
-                propValue = deploy.service.defaultUUID;
+                propValue = service.defaultUUID;
               } else if (prop === 'publicUrl') {
-                propValue = deploy.service.defaultPublicUrl;
+                propValue = service.defaultPublicUrl;
               } else if (prop === 'internalHostname') {
-                propValue = deploy.service.defaultInternalHostname;
+                propValue = service.defaultInternalHostname;
               } else {
                 propValue = '';
               }
             }
-            return [`${deploy.service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
+            return [`${service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
           });
 
-          if (deploy.service.hostPortMapping && Object.keys(deploy.service.hostPortMapping).length > 0) {
-            Object.keys(deploy.service.hostPortMapping).forEach((key) => {
-              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : deploy.service.defaultPublicUrl;
-              serviceEnv.push([`${key}-${deploy.service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
+          if (service.hostPortMapping && Object.keys(service.hostPortMapping).length > 0) {
+            Object.keys(service.hostPortMapping).forEach((key) => {
+              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : service.defaultPublicUrl;
+              serviceEnv.push([`${key}-${service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
             });
           }
           return {
@@ -180,7 +194,10 @@ export abstract class EnvironmentVariables {
    * @param build The LC build
    * @returns A dictionary of available environment variables key/value pair
    */
-  async availableEnvironmentVariablesForBuild(build: Build): Promise<Record<string, any>> {
+  async availableEnvironmentVariablesForBuild(
+    build: Build,
+    options: EnvironmentVariableDictionaryOptions = {}
+  ): Promise<Record<string, any>> {
     let availableEnv: Record<string, any>;
 
     if (build == null) {
@@ -200,14 +217,21 @@ export abstract class EnvironmentVariables {
       );
     }
 
-    availableEnv = await this.buildEnvironmentVariableDictionary(deploys, build.uuid, build.enableFullYaml, build, {
-      buildUUID: build.uuid,
-      buildSHA: build.sha,
-      pullRequestNumber: build.pullRequest?.pullRequestNumber,
-      namespace: build.namespace,
-      branchName: build.pullRequest?.branchName,
-      repoName: build.pullRequest?.fullName,
-    });
+    availableEnv = await this.buildEnvironmentVariableDictionary(
+      deploys,
+      build.uuid,
+      build.enableFullYaml,
+      build,
+      {
+        buildUUID: build.uuid,
+        buildSHA: build.sha,
+        pullRequestNumber: build.pullRequest?.pullRequestNumber,
+        namespace: build.namespace,
+        branchName: build.pullRequest?.branchName,
+        repoName: build.pullRequest?.fullName,
+      },
+      options
+    );
 
     return availableEnv;
   }
@@ -222,7 +246,7 @@ export abstract class EnvironmentVariables {
     fullYamlSupport: boolean
   ): Promise<Array<Record<string, any>>> {
     const configurationDeploys = deploys.filter((deploy) => {
-      const serviceType: DeployTypes = fullYamlSupport ? deploy.deployable?.type : deploy.service?.type;
+      const serviceType = fullYamlSupport ? deploy.deployable?.type : deploy.service?.type;
 
       return serviceType === DeployTypes.CONFIGURATION;
     });

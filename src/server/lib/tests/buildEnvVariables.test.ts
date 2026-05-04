@@ -19,29 +19,37 @@ mockRedisClient();
 
 import Database from 'server/database';
 import * as models from 'server/models';
-import { DeployTypes } from 'shared/constants';
+import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import { QueryBuilder } from 'objection';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
 jest.mock('server/database');
 
-jest.mock('server/services/globalConfig');
-
-import GlobalConfigService from 'server/services/globalConfig';
-import { IServices } from 'server/services/types';
-
-const mockedGetAllConfigs = jest.fn().mockResolvedValue({
+const mockGetAllConfigs = jest.fn().mockResolvedValue({
   lifecycleDefaults: {
     defaultUUID: 'mockedUUID',
     defaultPublicUrl: 'mockedPublicUrl',
   },
 });
 
-const mockedInstance = {
-  getAllConfigs: mockedGetAllConfigs,
-};
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getAllConfigs: mockGetAllConfigs,
+    })),
+  },
+}));
 
-(GlobalConfigService.getInstance as jest.Mock).mockReturnValue(mockedInstance);
+jest.mock('server/models/yaml', () => ({
+  fetchLifecycleConfigByRepository: jest.fn(),
+  getDeployingServicesByName: jest.fn(),
+  getEnvironmentVariables: jest.fn(),
+  getInitEnvironmentVariables: jest.fn(),
+}));
+
+import GlobalConfigService from 'server/services/globalConfig';
+import { IServices } from 'server/services/types';
 
 function createTestingDeploy(
   service: {
@@ -67,11 +75,11 @@ function createTestingDeploy(
   },
   active: boolean,
   properties: {
-    branchName: string;
-    ipAddress: string;
-    publicUrl: string;
-    internalHostname: string;
-    dockerImage: string;
+    branchName: string | null;
+    ipAddress: string | null;
+    publicUrl: string | null;
+    internalHostname: string | null;
+    dockerImage: string | null;
     sha: string;
   }
 ): models.Deploy {
@@ -81,30 +89,29 @@ function createTestingDeploy(
   deploy.serviceId = 100;
   deploy.service.name = service.name;
   deploy.service.type = service.type;
-  deploy.service.defaultUUID = service.defaultUUID;
-  deploy.service.port = service.port;
+  deploy.service.defaultUUID = service.defaultUUID ?? '';
+  deploy.service.port = service.port ?? '';
   deploy.active = active;
-  deploy.deployableId = null;
 
   deploy.deployable = new models.Deployable();
   deploy.deployableId = 23000;
   deploy.deployable.name = deployable.name;
   deploy.deployable.type = deployable.type;
-  deploy.deployable.defaultUUID = deployable.defaultUUID;
-  deploy.deployable.port = deployable.port;
+  deploy.deployable.defaultUUID = deployable.defaultUUID ?? '';
+  deploy.deployable.port = deployable.port ?? '';
 
   if (active) {
-    deploy.branchName = properties.branchName;
-    deploy.ipAddress = properties.ipAddress;
-    deploy.publicUrl = properties.publicUrl;
-    deploy.internalHostname = properties.internalHostname;
-    deploy.dockerImage = properties.dockerImage;
+    deploy.branchName = properties.branchName as string;
+    deploy.ipAddress = properties.ipAddress as string;
+    deploy.publicUrl = properties.publicUrl as string;
+    deploy.internalHostname = properties.internalHostname as string;
+    deploy.dockerImage = properties.dockerImage as string;
     deploy.sha = properties.sha;
     deploy.build = new models.Build();
     deploy.build.uuid = build.uuid;
   } else {
-    deploy.service.defaultPublicUrl = properties.publicUrl;
-    deploy.service.defaultInternalHostname = properties.internalHostname;
+    deploy.service.defaultPublicUrl = properties.publicUrl as string;
+    deploy.service.defaultInternalHostname = properties.internalHostname as string;
   }
 
   return deploy;
@@ -535,6 +542,46 @@ describe('EnvironmentVariables', () => {
         namespace: 'testns',
         branchName: 'feat/my-feature',
         repoName: 'myorg/myrepo',
+      });
+    });
+
+    test('can skip no-default env resolve when building non-env-template contexts', async () => {
+      const inactiveDeploy = new models.Deploy();
+      inactiveDeploy.active = false;
+      inactiveDeploy.deployable = new models.Deployable();
+      inactiveDeploy.deployable.name = 'inactive-web';
+      inactiveDeploy.deployable.type = DeployTypes.GITHUB;
+      inactiveDeploy.deployable.defaultUUID = 'dev-0';
+      inactiveDeploy.deployable.defaultPublicUrl = 'inactive-web-dev-0.lifecycle.dev.example.com';
+      inactiveDeploy.deployable.defaultInternalHostname = 'inactive-web-dev-0';
+
+      const buildWithNoDefaultResolve = new models.Build();
+      buildWithNoDefaultResolve.uuid = 'mock-test-12345';
+      buildWithNoDefaultResolve.enableFullYaml = true;
+      buildWithNoDefaultResolve.enabledFeatures = [FeatureFlags.NO_DEFAULT_ENV_RESOLVE];
+
+      await expect(
+        envVariables.buildEnvironmentVariableDictionary(
+          [inactiveDeploy],
+          buildWithNoDefaultResolve.uuid,
+          true,
+          buildWithNoDefaultResolve
+        )
+      ).resolves.toMatchObject({
+        inactive______web_internalHostname: NO_DEFAULT_ENV_UUID,
+      });
+
+      await expect(
+        envVariables.buildEnvironmentVariableDictionary(
+          [inactiveDeploy],
+          buildWithNoDefaultResolve.uuid,
+          true,
+          buildWithNoDefaultResolve,
+          undefined,
+          { applyNoDefaultEnvResolveFeatureFlag: false }
+        )
+      ).resolves.toMatchObject({
+        inactive______web_internalHostname: 'inactive-web-dev-0',
       });
     });
   });
