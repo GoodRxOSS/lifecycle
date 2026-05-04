@@ -14,9 +14,26 @@
  * limitations under the License.
  */
 
-import { parseSecretRef, parseSecretRefsFromEnv, isSecretRef, validateSecretRef, SecretRef } from '../secretRefs';
+import {
+  parseSecretRef,
+  parseSecretRefsFromEnv,
+  isSecretRef,
+  validateSecretRef,
+  SecretRef,
+  preserveSecretRefsInTemplate,
+} from '../secretRefs';
 
 describe('secretRefs', () => {
+  describe('preserveSecretRefsInTemplate', () => {
+    it('preserves secret refs while allowing other template variables to render', () => {
+      const preservation = preserveSecretRefsInTemplate('{{aws:myapp/db:password}} and {{service_url}}');
+
+      expect(preservation.restore(preservation.template.replace('{{service_url}}', 'https://example.com'))).toBe(
+        '{{aws:myapp/db:password}} and https://example.com'
+      );
+    });
+  });
+
   describe('isSecretRef', () => {
     it('returns true for valid AWS secret reference', () => {
       expect(isSecretRef('{{aws:myapp/db:password}}')).toBe(true);

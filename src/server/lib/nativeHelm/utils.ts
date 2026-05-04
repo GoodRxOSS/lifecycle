@@ -40,6 +40,7 @@ import {
   NativeHelmConfig as GlobalNativeHelmConfig,
   NativeHelmPostRendererConfig,
 } from 'server/services/types/globalConfig';
+import { HelmSecretSetFile, HelmValueSecretRef, splitHelmSecretValueRefs } from 'server/lib/helm/secretValueRefs';
 
 export type HelmPostRendererConfig = NativeHelmPostRendererConfig;
 
@@ -51,6 +52,9 @@ export interface HelmDeployOptions {
 export interface HelmConfiguration {
   chartType: ChartType;
   customValues: string[];
+  helmSecretRefs: HelmValueSecretRef[];
+  secretSetFiles: HelmSecretSetFile[];
+  secretSetFileInsertIndex: number;
   valuesFiles: string[];
   chartPath: string;
   releaseName: string;
@@ -122,7 +126,9 @@ export function constructHelmCommand(
   chartRepoUrl?: string,
   defaultArgs?: string,
   chartVersion?: string,
-  postRenderer?: NativeHelmPostRendererConfig
+  postRenderer?: NativeHelmPostRendererConfig,
+  secretSetFiles: HelmSecretSetFile[] = [],
+  secretSetFileInsertIndex = customValues.length
 ): string {
   let command = `helm ${action} ${releaseName}`;
 
@@ -159,7 +165,7 @@ export function constructHelmCommand(
 
   command += buildPostRendererFlags(postRenderer);
 
-  customValues.forEach((value) => {
+  const appendCustomValue = (value: string) => {
     const equalIndex = value.indexOf('=');
     if (equalIndex > -1) {
       const key = value.substring(0, equalIndex);
@@ -169,7 +175,25 @@ export function constructHelmCommand(
     } else {
       command += ` --set "${value}"`;
     }
+  };
+
+  const appendSecretSetFiles = () => {
+    secretSetFiles.forEach((file) => {
+      command += ` --set-file "${file.helmKey}=${file.mountPath}"`;
+    });
+  };
+
+  customValues.forEach((value, index) => {
+    if (index === secretSetFileInsertIndex) {
+      appendSecretSetFiles();
+    }
+
+    appendCustomValue(value);
   });
+
+  if (secretSetFileInsertIndex >= customValues.length) {
+    appendSecretSetFiles();
+  }
 
   valuesFiles.forEach((file) => {
     if (chartType === ChartType.LOCAL) {
@@ -200,7 +224,9 @@ export function generateHelmInstallScript(
   defaultArgs?: string,
   chartVersion?: string,
   registryAuth?: RegistryAuthConfig,
-  postRenderer?: NativeHelmPostRendererConfig
+  postRenderer?: NativeHelmPostRendererConfig,
+  secretSetFiles: HelmSecretSetFile[] = [],
+  secretSetFileInsertIndex?: number
 ): string {
   const helmCommand = constructHelmCommand(
     'upgrade --install',
@@ -214,7 +240,9 @@ export function generateHelmInstallScript(
     chartRepoUrl,
     defaultArgs,
     chartVersion,
-    postRenderer
+    postRenderer,
+    secretSetFiles,
+    secretSetFileInsertIndex
   );
 
   let script = ['set -e', `echo "Starting helm deployment for ${releaseName}"`, ''].join('\n');
@@ -272,13 +300,16 @@ export async function getHelmConfiguration(deploy: Deploy): Promise<HelmConfigur
   const mergedHelmConfig = await mergeHelmConfigWithGlobal(deploy);
 
   const chartType = await determineChartType(deploy);
-  const customValues = await constructHelmCustomValues(deploy, chartType);
+  const customValueConfig = await constructHelmCustomValueConfiguration(deploy, chartType);
 
   const helmVersion = mergedHelmConfig.version || mergedHelmConfig.nativeHelm?.defaultHelmVersion || '3.12.0';
 
   return {
     chartType,
-    customValues,
+    customValues: customValueConfig.customValues,
+    helmSecretRefs: customValueConfig.helmSecretRefs,
+    secretSetFiles: customValueConfig.secretSetFiles,
+    secretSetFileInsertIndex: customValueConfig.secretSetFileInsertIndex,
     valuesFiles: mergedHelmConfig.chart?.valueFiles || [],
     chartPath: mergedHelmConfig.chart?.name || 'local',
     releaseName: deploy.uuid.toLowerCase(),
@@ -645,13 +676,34 @@ async function constructHttpIngressValues(deploy: Deploy): Promise<string[]> {
   return ingressValues;
 }
 
-export async function constructHelmCustomValues(deploy: Deploy, chartType: ChartType): Promise<string[]> {
+export interface HelmCustomValueConfiguration {
+  customValues: string[];
+  helmSecretRefs: HelmValueSecretRef[];
+  secretSetFiles: HelmSecretSetFile[];
+  secretSetFileInsertIndex: number;
+}
+
+export async function constructHelmCustomValueConfiguration(
+  deploy: Deploy,
+  chartType: ChartType
+): Promise<HelmCustomValueConfiguration> {
   let customValues: string[] = [];
+  const helmSecretRefs: HelmValueSecretRef[] = [];
+  const secretSetFiles: HelmSecretSetFile[] = [];
+  let secretSetFileInsertIndex = 0;
   const { deployable, build } = deploy;
 
   const helm = await mergeHelmConfigWithGlobal(deploy);
   const configs = await GlobalConfigService.getInstance().getAllConfigs();
   const chartName = helm?.chart?.name;
+  const serviceName = deployable?.name || deploy.uuid || 'service';
+  const parseChartValues = (values: string[]): string[] => {
+    const result = splitHelmSecretValueRefs(values, serviceName);
+    helmSecretRefs.push(...result.secretRefs);
+    secretSetFiles.push(...result.secretSetFiles);
+    secretSetFileInsertIndex = result.plainValues.length;
+    return result.plainValues;
+  };
 
   if (chartType === ChartType.ORG_CHART) {
     const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
@@ -673,7 +725,7 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
       '='
     );
     const templateResolvedValues = await renderTemplate(deploy.build, partialCustomValues);
-    customValues = templateResolvedValues;
+    customValues = parseChartValues(templateResolvedValues);
 
     if (deploy.dockerImage) {
       const version = constructImageVersion(deploy.dockerImage);
@@ -718,9 +770,11 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     }
   } else if (chartType === ChartType.PUBLIC) {
     const templateResolvedValues = await renderTemplate(deploy.build, helm?.chart?.values || []);
-    customValues = mergeKeyValueArrays(configs[chartName]?.chart?.values || [], templateResolvedValues, '=');
+    customValues = parseChartValues(
+      mergeKeyValueArrays(configs[chartName]?.chart?.values || [], templateResolvedValues, '=')
+    );
 
-    const customLabels = [];
+    const customLabels: string[] = [];
     if (configs[chartName]?.label) {
       customLabels.push(
         `${configs[chartName].label}.name=${deployable.buildUUID}`,
@@ -746,7 +800,7 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
     }
   } else if (chartType === ChartType.LOCAL) {
     const templateResolvedValues = await renderTemplate(deploy.build, helm?.chart?.values || []);
-    customValues = templateResolvedValues;
+    customValues = parseChartValues(templateResolvedValues);
 
     customValues.push(
       `fullnameOverride=${deploy.uuid}`,
@@ -780,6 +834,12 @@ export async function constructHelmCustomValues(deploy: Deploy, chartType: Chart
       }
     }
   }
+
+  return { customValues, helmSecretRefs, secretSetFiles, secretSetFileInsertIndex };
+}
+
+export async function constructHelmCustomValues(deploy: Deploy, chartType: ChartType): Promise<string[]> {
+  const { customValues } = await constructHelmCustomValueConfiguration(deploy, chartType);
 
   return customValues;
 }
@@ -826,6 +886,14 @@ export function escapeHelmValue(value: string): string {
   return value.replace(/\//g, '\\/').replace(/,/g, '\\,');
 }
 
+function includesUnsafeSecretHelmArg(args?: string): boolean {
+  if (!args) {
+    return false;
+  }
+
+  return /(^|\s)--(?:debug|dry-run)(?:[=\s]|$)/.test(args);
+}
+
 export async function validateHelmConfiguration(deploy: Deploy): Promise<string[]> {
   const errors: string[] = [];
   const helm = await mergeHelmConfigWithGlobal(deploy);
@@ -856,6 +924,18 @@ export async function validateHelmConfiguration(deploy: Deploy): Promise<string[
   const chartType = await determineChartType(deploy);
   if (chartType === ChartType.ORG_CHART && !deploy.dockerImage) {
     errors.push('Docker image is required for org chart deployments');
+  }
+
+  try {
+    const customValueConfig = await constructHelmCustomValueConfiguration(deploy, chartType);
+    if (
+      customValueConfig.secretSetFiles.length > 0 &&
+      (includesUnsafeSecretHelmArg(helm.args) || includesUnsafeSecretHelmArg(helm.nativeHelm?.defaultArgs))
+    ) {
+      errors.push('Helm args --debug and --dry-run cannot be used with secret-backed Helm custom values');
+    }
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
   }
 
   return errors;

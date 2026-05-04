@@ -40,6 +40,7 @@ import {
   waitForInProgressDeploys,
 } from 'server/lib/codefresh/utils/generateCodefreshCmd';
 import { randomAlphanumeric } from '../random';
+import { assertNoHelmSecretValueRefs } from 'server/lib/helm/secretValueRefs';
 
 const CODEFRESH_PATH = `${TMP_PATH}/codefresh`;
 const escapeCodefreshEnvKey = (key: string) => key.replace(/_/g, '__');
@@ -61,6 +62,7 @@ export async function helmPublicDeployStep(deploy: Deploy): Promise<Record<strin
 
   const templateResolvedValues = await renderTemplate(deploy.build, chart.values);
   let customValues = mergeKeyValueArrays(configs[chart?.name]?.chart?.values, templateResolvedValues, '=');
+  assertNoHelmSecretValueRefs(customValues, 'Codefresh Helm deploy path');
   const chartName = helm?.chart?.name;
   const customLabels = [];
   if (configs[chartName]?.label) {
@@ -134,6 +136,7 @@ export async function helmOrgAppDeployStep(deploy: Deploy): Promise<Record<strin
 
   const partialCustomValues = mergeKeyValueArrays(configs[orgChartName].chart?.values, chart?.values, '=');
   const customValues = mergeKeyValueArrays(partialCustomValues, templateResolvedValues, '=');
+  assertNoHelmSecretValueRefs(customValues, 'Codefresh Helm deploy path');
   if (build?.isStatic) {
     // add node affinity for static env deploys, so they are scheduled on static env nodes
     // Note: this assumes we always have a eks.amazonaws.com/capacityType IN 'ON_DEMAND' affinity in the custom values file for each service
