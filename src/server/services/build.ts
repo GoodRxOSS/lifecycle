@@ -36,8 +36,6 @@ import { withLogContext, getLogger, extractContextForQueue, LogStage, updateLogC
 import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 
-import Fastly from 'server/lib/fastly';
-import { constructBuildLinks, determineIfFastlyIsUsed, insertBuildLink } from 'shared/utils';
 import { type LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
 import { Tracer } from 'server/lib/tracer';
@@ -66,7 +64,6 @@ export interface IngressConfiguration {
 }
 
 export default class BuildService extends BaseService {
-  fastly = new Fastly(this.redis);
   ingressService = new IngressService(this.db, this.redis, this.redlock, this.queueManager);
   /**
    * For every build that is not closed
@@ -1148,21 +1145,6 @@ export default class BuildService extends BaseService {
             status,
             statusMessage,
           });
-
-          // add dashboard links to build database
-          let dashboardLinks = constructBuildLinks(build.uuid);
-          const hasFastly = determineIfFastlyIsUsed(deploys);
-          if (hasFastly) {
-            try {
-              const fastlyDashboardUrl = await this.fastly.getServiceDashboardUrl(build.uuid, 'fastly');
-              if (fastlyDashboardUrl) {
-                dashboardLinks = insertBuildLink(dashboardLinks, 'Fastly Dashboard', fastlyDashboardUrl.href);
-              }
-            } catch (err) {
-              getLogger().error({ error: err }, 'Fastly: dashboard URL fetch failed');
-            }
-          }
-          await build.$query().patch({ dashboardLinks });
 
           if (!isSandboxBuild && pullRequest && repository) {
             await this.db.services.ActivityStream.updatePullRequestActivityStream(

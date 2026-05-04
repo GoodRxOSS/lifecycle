@@ -20,16 +20,20 @@ import {
   determineFeatureFlagStatus,
   determineIfFastlyIsUsed,
   enableService,
-  processLinks,
   constructLinkDictionary,
   constructLinkRow,
   constructLinkTable,
   constructFastlyBuildLink,
-  constructBuildLinks,
   insertBuildLink,
   mergeKeyValueArrays,
   extractEnvVarsWithBuildDependencies,
 } from 'shared/utils';
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({
+    error: jest.fn(),
+  })),
+}));
 
 import { FEATURE_FLAG, MALFORMED_FEATURE_FLAG_BOOLEAN_STRING } from 'shared/__fixtures__/utils';
 
@@ -56,17 +60,6 @@ describe('utils', () => {
       const url = 'https://example.com';
       const params = [{ name: 'query', value: 'test' }];
       expect(constructUrl(url, params)).toEqual('https://example.com/?query=test');
-    });
-  });
-
-  describe('#processLinks', () => {
-    test('returns empty array if buildId is empty', () => {
-      expect(processLinks()).toEqual([]);
-    });
-
-    test('returns array of links if buildId is provided', () => {
-      const links = processLinks('abc123');
-      expect(links).toHaveLength(6);
     });
   });
 
@@ -176,25 +169,6 @@ describe('utils', () => {
     });
   });
 
-  describe('#constructBuildLinks', () => {
-    test('returns empty object if buildId is empty', () => {
-      expect(constructBuildLinks()).toEqual({});
-    });
-
-    test('returns object with link names and urls', () => {
-      const buildId = 'abc123';
-      const result = Object.keys(constructBuildLinks(buildId));
-      expect(result).toEqual([
-        'Fastly Logs',
-        'Lifecycle Env Logs',
-        'Serverless',
-        'Tracing',
-        'RUM (If Enabled)',
-        'Containers',
-      ]);
-    });
-  });
-
   describe('#insertBuildLink', () => {
     test('inserts link into empty object', () => {
       const buildLinks = {};
@@ -275,7 +249,7 @@ describe('determineFeatureFlagValue', () => {
   });
 
   test('returns false if the featureFlags item value is not a boolean', () => {
-    const result = determineFeatureFlagValue('hasTest', MALFORMED_FEATURE_FLAG_BOOLEAN_STRING);
+    const result = determineFeatureFlagValue('hasTest', MALFORMED_FEATURE_FLAG_BOOLEAN_STRING as any);
     expect(result).toEqual(false);
   });
 });
@@ -374,7 +348,7 @@ describe('extractEnvVarsWithBuildDependencies', () => {
 
     const expected = {};
 
-    expect(extractEnvVarsWithBuildDependencies(env)).toEqual(expected);
+    expect(extractEnvVarsWithBuildDependencies(env as any)).toEqual(expected);
   });
 
   test('should handle triple curly braces correctly', () => {
