@@ -84,11 +84,7 @@ export default class DeployCleanupService extends BaseService {
   deployCleanupQueue: Queue<DeployCleanupQueueJob> = this.queueManager.registerQueue(QUEUE_NAMES.DEPLOY_CLEANUP, {
     connection: redisClient.getConnection(),
     defaultJobOptions: {
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 2000,
-      },
+      attempts: 1,
       removeOnComplete: 100,
       removeOnFail: 100,
     },
@@ -106,7 +102,10 @@ export default class DeployCleanupService extends BaseService {
     const { deployId, mode, sender, correlationId, _ddTraceContext } = job.data;
 
     return withLogContext({ sender, correlationId, _ddTraceContext }, async () => {
-      await this.cleanupDeploy(deployId, { mode });
+      const success = await this.cleanupDeploy(deployId, { mode });
+      if (!success) {
+        throw new Error(`Deploy cleanup failed deployId=${deployId} mode=${mode}`);
+      }
     });
   };
 

@@ -155,6 +155,24 @@ describe('DeployCleanupService', () => {
     expect(mockDeleteDeploy).not.toHaveBeenCalled();
   });
 
+  test('registers infra cleanup queue without automatic retries', () => {
+    const queueManager = createQueueManager();
+
+    new DeployCleanupService({} as any, {} as any, {} as any, queueManager as any);
+
+    expect(queueManager.registerQueue).toHaveBeenCalledWith(
+      'deploy_cleanup_test',
+      expect.objectContaining({
+        defaultJobOptions: expect.objectContaining({
+          attempts: 1,
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        }),
+      })
+    );
+    expect(queueManager.registerQueue.mock.calls[0][1].defaultJobOptions).not.toHaveProperty('backoff');
+  });
+
   test('runs the existing codefresh destroy for stale codefresh deploys', async () => {
     const deploy = createDeploy({
       deployable: {
@@ -220,6 +238,38 @@ describe('DeployCleanupService', () => {
         status: DeployStatus.TORN_DOWN,
       })
     );
+  });
+
+  test('infra queue job fails when cleanup is incomplete and leaves deploy status unchanged', async () => {
+    mockShellPromise.mockImplementation((command: string) => {
+      if (command.includes('kubectl delete deployment')) {
+        return Promise.reject(new Error('deployment delete failed'));
+      }
+      return Promise.resolve('');
+    });
+    const deploy = createDeploy();
+    const query = {
+      findById: jest.fn(() => query),
+      withGraphFetched: jest.fn().mockResolvedValue(deploy),
+    };
+    const service = createService({
+      models: {
+        Deploy: {
+          query: jest.fn(() => query),
+        },
+      },
+    });
+
+    await expect(
+      service.processCleanupQueue({
+        data: {
+          deployId: 77,
+          mode: 'infra',
+        },
+      } as any)
+    ).rejects.toThrow('Deploy cleanup failed deployId=77 mode=infra');
+
+    expect(deploy.patch).not.toHaveBeenCalled();
   });
 
   test('infra partial failure leaves deploy status unchanged', async () => {
