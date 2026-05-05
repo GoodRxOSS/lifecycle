@@ -387,6 +387,7 @@ export default class BuildService extends BaseService {
     await this.enqueueResolveAndDeployBuild({
       buildId,
       githubRepositoryId,
+      skipDeletedServiceReconciliation: true,
       runUUID,
       ...extractContextForQueue(),
     });
@@ -776,7 +777,12 @@ export default class BuildService extends BaseService {
     }
   }
 
-  private async importYamlConfigFile(environment: Environment, build: Build, filterGithubRepositoryId?: number) {
+  private async importYamlConfigFile(
+    environment: Environment,
+    build: Build,
+    filterGithubRepositoryId?: number,
+    options: { skipDeletedServiceReconciliation?: boolean } = {}
+  ) {
     // Write the deployables here for now and not going to use them yet.
     try {
       const buildId = build?.id;
@@ -789,7 +795,14 @@ export default class BuildService extends BaseService {
         filterGithubRepositoryId
       );
 
-      await this.reconcileDeletedDeployables(build, reconciliationResult, filterGithubRepositoryId);
+      if (options.skipDeletedServiceReconciliation) {
+        getLogger({
+          buildUuid: build.uuid,
+          filterGithubRepositoryId,
+        }).info('Stale deploy reconciliation: skipped for service redeploy');
+      } else {
+        await this.reconcileDeletedDeployables(build, reconciliationResult, filterGithubRepositoryId);
+      }
     } catch (error) {
       if (error instanceof ParsingError) {
         getLogger().error({ error }, 'Config: parsing failed');
@@ -1796,7 +1809,8 @@ export default class BuildService extends BaseService {
    * @param job the BullMQ job with the buildID
    */
   processBuildQueue = async (job) => {
-    const { buildId, githubRepositoryId, sender, correlationId, _ddTraceContext } = job.data;
+    const { buildId, githubRepositoryId, sender, correlationId, skipDeletedServiceReconciliation, _ddTraceContext } =
+      job.data;
 
     return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
       let build;
@@ -1814,7 +1828,9 @@ export default class BuildService extends BaseService {
         await build?.$fetchGraph('[pullRequest, environment]');
         await build.pullRequest.$fetchGraph('[repository]');
 
-        await this.importYamlConfigFile(build?.environment, build, githubRepositoryId);
+        await this.importYamlConfigFile(build?.environment, build, githubRepositoryId, {
+          skipDeletedServiceReconciliation,
+        });
 
         await this.db.services.BuildService.resolveAndDeployBuild(
           build,
@@ -1855,7 +1871,7 @@ export default class BuildService extends BaseService {
    * @param done the Bull callback to invoke when we're done
    */
   processResolveAndDeployBuildQueue = async (job) => {
-    const { sender, correlationId, _ddTraceContext } = job.data;
+    const { sender, correlationId, skipDeletedServiceReconciliation, _ddTraceContext } = job.data;
 
     return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
       let jobId;
@@ -1887,6 +1903,7 @@ export default class BuildService extends BaseService {
         await this.enqueueBuildJob({
           buildId,
           githubRepositoryId,
+          skipDeletedServiceReconciliation,
           ...extractContextForQueue(),
         });
       } catch (error) {
