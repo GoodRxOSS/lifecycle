@@ -13,6 +13,18 @@ function getOperation(path: string, method: string) {
 }
 
 describe('OpenAPI v2 agent session contract', () => {
+  it('documents build metadata routes and link schemas', () => {
+    expect(getOperation('/api/v2/builds/{uuid}/metadata', 'get')?.tags).toEqual(['Builds']);
+    expect(getOperation('/api/v2/config/metadata', 'get')?.tags).toEqual(['Config']);
+    expect(getOperation('/api/v2/config/metadata', 'post')?.tags).toEqual(['Config']);
+    expect(getOperation('/api/v2/config/metadata/{id}', 'patch')?.tags).toEqual(['Config']);
+    expect(getOperation('/api/v2/config/metadata/{id}', 'delete')?.tags).toEqual(['Config']);
+    expect(schemas.BuildMetadata.required).toEqual(['links']);
+    expect(schemas.BuildMetadataLink.required).toEqual(['id', 'text', 'icon', 'link', 'position']);
+    expect(schemas.BuildMetadataLinkCreateRequest.additionalProperties).toBe(false);
+    expect(schemas.BuildMetadataLinkPatchRequest.additionalProperties).toBe(false);
+  });
+
   it('documents canonical run events with public context and a version', () => {
     const eventSchema = schemas.AgentRunMessagePartEvent;
 

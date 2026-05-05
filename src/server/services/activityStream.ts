@@ -49,6 +49,7 @@ import { nanoid } from 'nanoid';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import BuildMetadataService from './buildMetadata';
 
 const createDeployMessage = async () => {
   const deployLabel = await getDeployLabel();
@@ -810,7 +811,7 @@ export default class ActivityStream extends BaseService {
         getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
-      message += await this.dashboardBlock(build, deploys).catch((e) => {
+      message += await this.dashboardBlock(build).catch((e) => {
         getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
         return '';
       });
@@ -839,7 +840,7 @@ export default class ActivityStream extends BaseService {
           getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
-        message += await this.dashboardBlock(build, deploys).catch((e) => {
+        message += await this.dashboardBlock(build).catch((e) => {
           getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
@@ -858,7 +859,7 @@ export default class ActivityStream extends BaseService {
           getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
-        message += await this.dashboardBlock(build, deploys).catch((e) => {
+        message += await this.dashboardBlock(build).catch((e) => {
           getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
           return '';
         });
@@ -994,46 +995,10 @@ export default class ActivityStream extends BaseService {
     return message + '\n';
   }
 
-  private async dashboardBlock(build: Build, deploys: Deploy[]) {
-    const datadogLogFastlyUrl = new URL('https://app.datadoghq.com/logs');
-    const datadogLogUrl = new URL('https://app.datadoghq.com/logs');
-    const datadogServerlessUrl = new URL('https://app.datadoghq.com/functions');
-    const datadogTraceUrl = new URL('https://app.datadoghq.com/apm/traces');
-    const datadogRumSessionsUrl = new URL('https://app.datadoghq.com/rum/explorer');
-    const datadogContainersUrl = new URL('https://app.datadoghq.com/containers');
-
-    datadogLogFastlyUrl.searchParams.append('query', `source:fastly @request.host:*${build.uuid}*`);
-    datadogLogFastlyUrl.searchParams.append('paused', 'false');
-    datadogLogUrl.searchParams.append('query', `env:lifecycle-${build.uuid}`);
-    datadogLogUrl.searchParams.append('paused', 'false');
-    datadogServerlessUrl.searchParams.append('text_search', `env:*${build.uuid}*`);
-    datadogServerlessUrl.searchParams.append('paused', 'false');
-    datadogTraceUrl.searchParams.append('query', `env:*${build.uuid}*`);
-    datadogTraceUrl.searchParams.append('paused', 'false');
-    datadogRumSessionsUrl.searchParams.append('query', `env:*${build.uuid}*`);
-    datadogRumSessionsUrl.searchParams.append('live', 'true');
-    datadogContainersUrl.searchParams.append('query', `env:lifecycle-${build.uuid}`);
-    datadogContainersUrl.searchParams.append('paused', 'false');
-
-    let message = '<details>\n';
-    message += '<summary>Dashboards</summary>\n\n';
-    message += '|| Links |\n';
-    message += '| ------------- | ------------- |\n';
-    message += `| Fastly Logs | ${datadogLogFastlyUrl.href} |\n`;
-    message += `| Containers | ${datadogContainersUrl.href} |\n`;
-    message += `| Lifecycle Env Logs | ${datadogLogUrl.href} |\n`;
-    message += `| Tracing | ${datadogTraceUrl.href} |\n`;
-    message += `| Serverless | ${datadogServerlessUrl.href} |\n`;
-    message += `| RUM (If Enabled) | ${datadogRumSessionsUrl.href} |\n`;
-    if (await this.containsFastlyDeployment(deploys)) {
-      const fastlyServiceDashboardUrl: URL = await this.fastly.getServiceDashboardUrl(build.uuid, 'fastly');
-      if (fastlyServiceDashboardUrl) {
-        message += `| Fastly Dashboard | ${fastlyServiceDashboardUrl.href} |\n`;
-      }
-    }
-    message += '</details>\n';
-
-    return message;
+  private async dashboardBlock(build: Build) {
+    return new BuildMetadataService(this.db, this.redis, this.redlock, this.queueManager).renderDashboardMarkdown(
+      build
+    );
   }
 
   private async purgeFastlyServiceCache(uuid: string) {

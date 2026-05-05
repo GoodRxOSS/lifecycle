@@ -74,8 +74,6 @@ import PullRequestService from 'server/services/pullRequest';
  *                     type: object
  *                   webhooksYaml:
  *                     type: object
- *                   dashboardLinks:
- *                     type: object
  *                   isStatic:
  *                     type: boolean
  *       400:
@@ -149,7 +147,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         'pullRequestId',
         'manifest',
         'webhooksYaml',
-        'dashboardLinks',
         'isStatic'
       );
 

@@ -52,6 +52,20 @@ jest.mock('server/lib/logger', () => ({
   LogStage: {},
 }));
 
+jest.mock('shared/config', () => ({
+  TMP_PATH: '/tmp',
+  QUEUE_NAMES: {
+    BUILD_QUEUE: 'build',
+    RESOLVE_DEPLOY_BUILD_QUEUE: 'resolve-deploy',
+    BUILD_CLEANUP_QUEUE: 'build-cleanup',
+    BUILD_REQUEST_QUEUE: 'build-request',
+    GLOBAL_CONFIG_CACHE_REFRESH: 'global-config-refresh',
+    GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github-client-token-refresh',
+    INGRESS_MANIFEST_QUEUE: 'ingress-manifest',
+    AGENT_PREWARM_QUEUE: 'agent-prewarm',
+  },
+}));
+
 jest.mock('server/models', () => ({
   Build: class {},
   Deploy: {
@@ -70,6 +84,36 @@ jest.mock('server/lib/kubernetes', () => ({
   createOrUpdateServiceAccount: jest.fn(),
 }));
 
+jest.mock('server/lib/github', () => ({
+  createGitDeployment: jest.fn(),
+  updateGitDeploymentStatus: jest.fn(),
+  getPullRequest: jest.fn(),
+}));
+
+jest.mock('server/lib/helm', () => ({
+  uninstallHelmReleases: jest.fn(),
+}));
+
+jest.mock('server/lib/helm/utils', () => ({
+  ingressBannerSnippet: jest.fn(() => ''),
+}));
+
+jest.mock('server/lib/buildEnvVariables', () => ({
+  BuildEnvironmentVariables: jest.fn().mockImplementation(() => ({
+    resolve: jest.fn().mockResolvedValue({}),
+  })),
+}));
+
+jest.mock('server/services/deploy', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({})),
+}));
+
+jest.mock('server/services/webhook', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({})),
+}));
+
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
   default: {
@@ -86,7 +130,7 @@ jest.mock('server/lib/fastly', () =>
 );
 
 import BuildService from '../build';
-import { DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
 
 describe('BuildService failure boundaries', () => {
   let buildService: BuildService;
@@ -167,6 +211,50 @@ describe('BuildService failure boundaries', () => {
     ).rejects.toThrow(rolloutError);
 
     expect(recordDeployFailure).not.toHaveBeenCalled();
+  });
+});
+
+describe('BuildService status updates', () => {
+  test('updates only build status fields', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const buildService = new BuildService(
+      {
+        services: {
+          Webhook: {
+            webhookQueue: {
+              add: jest.fn(),
+            },
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({
+          add: mockQueueAdd,
+          process: jest.fn(),
+          on: jest.fn(),
+        })),
+      } as any
+    );
+    const build = {
+      id: 1,
+      uuid: 'sample-build',
+      runUUID: 'run-1',
+      kind: BuildKind.SANDBOX,
+      deploys: [],
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      $query: jest.fn(() => ({ patch })),
+    };
+
+    await buildService.updateStatusAndComment(build as any, BuildStatus.DEPLOYED, 'run-1', true, true);
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith({
+      status: BuildStatus.DEPLOYED,
+      statusMessage: '',
+    });
   });
 });
 
