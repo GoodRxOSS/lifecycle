@@ -17,6 +17,7 @@
 import Model from './_Model';
 import { Environment, Repository, Service, ServiceDisk } from '.';
 import { Builder, Helm } from './yaml/YamlService';
+import type { DeployableConfigSource } from 'server/services/deployable';
 
 export default class Deployable extends Service {
   static tableName = 'deployables';
@@ -37,6 +38,9 @@ export default class Deployable extends Service {
   deploymentDependsOn: string[];
   builder: Builder;
   envLens?: boolean;
+  source?: DeployableConfigSource;
+  reconcileEligible?: boolean;
+  resolvedFromRepositoryId?: number | null;
 
   static relationMappings = {
     environment: {

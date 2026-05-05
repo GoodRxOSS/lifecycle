@@ -37,6 +37,7 @@ import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 
 import { type LifecycleYamlConfigOptions } from 'server/models/yaml/types';
+import type { DeployableReconciliationResult } from 'server/services/deployable';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
 import { Tracer } from 'server/lib/tracer';
 import { redisClient } from 'server/lib/dependencies';
@@ -44,6 +45,7 @@ import { generateGraph } from 'server/lib/dependencyGraph';
 import GlobalConfigService from './globalConfig';
 import IngressService from './ingress';
 import AgentPrewarmService from './agentPrewarm';
+import DeployCleanupService from './deployCleanup';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
@@ -778,7 +780,7 @@ export default class BuildService extends BaseService {
     // Write the deployables here for now and not going to use them yet.
     try {
       const buildId = build?.id;
-      await this.db.services.Deployable.upsertDeployables(
+      const reconciliationResult = await this.db.services.Deployable.upsertDeployables(
         buildId,
         build.uuid,
         build.pullRequest,
@@ -787,7 +789,7 @@ export default class BuildService extends BaseService {
         filterGithubRepositoryId
       );
 
-      await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest);
+      await this.reconcileDeletedDeployables(build, reconciliationResult, filterGithubRepositoryId);
     } catch (error) {
       if (error instanceof ParsingError) {
         getLogger().error({ error }, 'Config: parsing failed');
@@ -799,8 +801,110 @@ export default class BuildService extends BaseService {
         throw error;
       } else {
         getLogger().warn({ error }, 'Config: import warning');
+        throw error;
       }
     }
+
+    await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest).catch((error) => {
+      getLogger().warn({ error }, 'Config: webhook import warning');
+    });
+  }
+
+  private async reconcileDeletedDeployables(
+    build: Build,
+    reconciliationResult: DeployableReconciliationResult,
+    filterGithubRepositoryId?: number
+  ) {
+    if (!build?.enableFullYaml || !reconciliationResult?.canReconcile) {
+      return;
+    }
+
+    const reconcileEnabled = await GlobalConfigService.getInstance().isFeatureEnabled('reconcileDeletedServices');
+    if (!reconcileEnabled) {
+      getLogger({ buildUuid: build.uuid }).debug('Stale deploy reconciliation: disabled');
+      return;
+    }
+
+    const buildId = build.id;
+    const expectedDeployables = reconciliationResult.reconcileEligibleDeployables.filter((deployable) => {
+      if (!deployable.reconcileEligible || deployable.source !== 'yaml') {
+        return false;
+      }
+
+      if (filterGithubRepositoryId) {
+        return deployable.resolvedFromRepositoryId === filterGithubRepositoryId;
+      }
+
+      return true;
+    });
+    const expectedNames = new Set(expectedDeployables.map((deployable) => deployable.name));
+
+    let existingQuery = this.db.models.Deployable.query()
+      .where({
+        buildId,
+        buildUUID: build.uuid,
+        reconcileEligible: true,
+        source: 'yaml',
+      })
+      .whereNot('type', DeployTypes.CONFIGURATION);
+
+    if (filterGithubRepositoryId) {
+      existingQuery = existingQuery
+        .where('resolvedFromRepositoryId', filterGithubRepositoryId)
+        .whereNotNull('resolvedFromRepositoryId');
+    }
+
+    const existingDeployables = await existingQuery;
+    const staleDeployables = existingDeployables.filter((deployable) => !expectedNames.has(deployable.name));
+
+    if (staleDeployables.length === 0) {
+      getLogger({
+        buildUuid: build.uuid,
+        filterGithubRepositoryId,
+        expectedCount: expectedNames.size,
+      }).debug('Stale deploy reconciliation: no stale deployables');
+      return;
+    }
+
+    const staleDeployableIds = staleDeployables.map((deployable) => deployable.id);
+    const staleDeploys = await this.db.models.Deploy.query()
+      .where({ buildId })
+      .whereIn('deployableId', staleDeployableIds)
+      .withGraphFetched('[build, service, deployable]');
+    const cleanupService =
+      this.db.services?.DeployCleanupService ||
+      new DeployCleanupService(this.db, this.redis, this.redlock, this.queueManager);
+
+    getLogger({
+      buildUuid: build.uuid,
+      filterGithubRepositoryId,
+      staleDeployableNames: staleDeployables.map((deployable) => deployable.name),
+      staleDeployCount: staleDeploys.length,
+    }).warn('Stale deploy reconciliation: cleaning deleted deployables');
+
+    await Promise.all(
+      staleDeploys.map(async (deploy) => {
+        try {
+          await cleanupService.cleanupDeploy(deploy, { mode: 'service' });
+        } catch (error) {
+          getLogger({
+            error,
+            buildUuid: build.uuid,
+            deployUuid: deploy.uuid,
+            deployableId: deploy.deployableId,
+          }).error('Stale deploy reconciliation: cleanup failed continuing=true');
+        }
+      })
+    );
+
+    await cleanupService.deleteServiceRows({ buildId, deployableIds: staleDeployableIds });
+    await build.$fetchGraph('[deployables, deploys]');
+
+    getLogger({
+      buildUuid: build.uuid,
+      filterGithubRepositoryId,
+      staleDeployableNames: staleDeployables.map((deployable) => deployable.name),
+    }).warn('Stale deploy reconciliation: deleted stale deploy database rows');
   }
 
   public async createBuild(
