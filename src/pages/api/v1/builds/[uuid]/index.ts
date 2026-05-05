@@ -18,7 +18,7 @@ import { nanoid } from 'nanoid';
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BuildService from 'server/services/build';
-import OverrideService from 'server/services/override';
+import OverrideService, { BuildUuidValidationError } from 'server/services/override';
 
 async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -80,7 +80,7 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
       return res.status(400).json({ error: 'UUID must be different' });
     }
 
-    const validation = await override.validateUuid(newUuid);
+    const validation = await override.validateUuid(newUuid, build.id);
     if (!validation.valid) {
       getLogger().debug(`UUID validation failed: error=${validation.error}`);
       return res.status(400).json({ error: validation.error });
@@ -103,6 +103,11 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
       },
     });
   } catch (error) {
+    if (error instanceof BuildUuidValidationError) {
+      getLogger().debug(`UUID validation failed: error=${error.message}`);
+      return res.status(400).json({ error: error.message });
+    }
+
     getLogger({ error }).error(`API: UUID update failed newUuid=${newUuid}`);
     return res.status(500).json({ error: 'An unexpected error occurred' });
   }
