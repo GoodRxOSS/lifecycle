@@ -3007,6 +3007,19 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        UpdateBuildUUIDRequest: {
+          type: 'object',
+          properties: {
+            uuid: {
+              type: 'string',
+              example: 'curly-meadow-171613',
+              description: 'The new UUID to assign to the build.',
+            },
+          },
+          required: ['uuid'],
+          additionalProperties: false,
+        },
+
         BuildMetadataLink: {
           type: 'object',
           properties: {
@@ -3202,6 +3215,22 @@ export const openApiSpecificationForV2Api: OAS3Options = {
          * @description The specific success response for the GET /builds/{uuid} endpoint.
          */
         GetBuildByUUIDSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/Build' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for the PATCH /builds/{uuid} endpoint.
+         */
+        UpdateBuildUUIDSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {

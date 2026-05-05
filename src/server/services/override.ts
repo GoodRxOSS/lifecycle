@@ -20,14 +20,21 @@ import { Build } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
 
-interface ValidationResult {
+export interface ValidationResult {
   valid: boolean;
   error?: string;
 }
 
-interface UpdateResult {
+export interface UpdateResult {
   build: Build;
   deploysUpdated: number;
+}
+
+export class BuildUuidValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BuildUuidValidationError';
+  }
 }
 
 export default class OverrideService extends BaseService {
@@ -36,7 +43,7 @@ export default class OverrideService extends BaseService {
    * @param uuid The UUID to validate
    * @returns ValidationResult with validation status and error details
    */
-  async validateUuid(uuid: string): Promise<ValidationResult> {
+  async validateUuid(uuid: string, currentBuildId?: number): Promise<ValidationResult> {
     if (uuid.length < 3 || uuid.length > 50) {
       return { valid: false, error: 'UUID must be between 3 and 50 characters' };
     }
@@ -52,7 +59,7 @@ export default class OverrideService extends BaseService {
     try {
       const existingBuild = await this.db.models.Build.query().findOne({ uuid });
 
-      if (existingBuild) {
+      if (existingBuild && existingBuild.id !== currentBuildId) {
         return { valid: false, error: 'UUID is not available' };
       }
     } catch (error) {
@@ -77,6 +84,11 @@ export default class OverrideService extends BaseService {
     getLogger().info(`Override: updating newUuid=${newUuid}`);
 
     try {
+      const validation = await this.validateUuid(newUuid, build.id);
+      if (!validation.valid) {
+        throw new BuildUuidValidationError(validation.error || 'Invalid UUID');
+      }
+
       return await this.db.models.Build.transact(async (trx) => {
         await build.$query(trx).patch({
           uuid: newUuid,
@@ -93,14 +105,28 @@ export default class OverrideService extends BaseService {
         // this will not work for database configured services
         const deployService = new DeployService();
         const updateDeploys = deploys.map(async (deploy) => {
-          const newDeployUuid = `${deploy.deployable.name}-${newUuid}`;
-          return deploy.$query(trx).patch({
+          const deployName = deploy.deployable?.name ?? deploy.service?.name;
+          if (!deployName) {
+            getLogger().warn(`Deploy: missing service name while updating build UUID deployId=${deploy.id}`);
+            return;
+          }
+
+          const newDeployUuid = `${deployName}-${newUuid}`;
+          deploy.uuid = newDeployUuid;
+          const patchFields: Record<string, string> = {
             uuid: newDeployUuid,
             internalHostname: newDeployUuid,
-            publicUrl: build.enableFullYaml
+          };
+
+          const publicUrl =
+            build.enableFullYaml && deploy.deployable
               ? deployService.hostForDeployableDeploy(deploy, deploy.deployable)
-              : deployService.hostForServiceDeploy(deploy, deploy.service),
-          });
+              : deployService.hostForServiceDeploy(deploy, deploy.service);
+          if (publicUrl) {
+            patchFields.publicUrl = publicUrl;
+          }
+
+          return deploy.$query(trx).patch(patchFields);
         });
 
         await Promise.all(updateDeploys);

@@ -203,6 +203,16 @@ export default class ActivityStream extends BaseService {
     const vanityUrl = CommentHelper.parseVanityUrl(commentBody);
     const envOverrides = CommentHelper.parseEnvironmentOverrides(commentBody);
     const redeployOnPush = CommentHelper.parseRedeployOnPushes(commentBody);
+    const requestedUuid = vanityUrl && vanityUrl !== build.uuid ? vanityUrl : null;
+    const override = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
+
+    if (requestedUuid) {
+      const validation = await override.validateUuid(requestedUuid, build.id);
+      if (!validation.valid) {
+        getLogger().warn(`UUID: comment override rejected newUuid=${requestedUuid} error=${validation.error}`);
+        return;
+      }
+    }
 
     getLogger().debug(`Parsed environment overrides: ${JSON.stringify(envOverrides)}`);
 
@@ -217,9 +227,8 @@ export default class ActivityStream extends BaseService {
     await Promise.all(serviceOverrides.map((override) => this.patchServiceOverride(build, deploys, override)));
 
     // handle build uuid updates here
-    if (vanityUrl && vanityUrl !== build.uuid) {
-      const override = new OverrideService();
-      await override.updateBuildUuid(build, vanityUrl);
+    if (requestedUuid) {
+      await override.updateBuildUuid(build, requestedUuid);
     }
 
     // if pull request should be built and deployed again, add it to build queue
