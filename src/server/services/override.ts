@@ -55,14 +55,14 @@ export interface BuildConfigPatchInput {
 export interface ApplyBuildOverridesArgs {
   build: Build;
   deploys: Deploy[];
-  pullRequest: PullRequest;
+  pullRequest?: PullRequest | null;
   overrides: BuildOverrideInput;
   runUuid: string;
 }
 
 export interface ApplyBuildConfigPatchArgs {
   build: Build;
-  pullRequest: PullRequest;
+  pullRequest?: PullRequest | null;
   patch: BuildConfigPatchInput;
   runUuid: string;
 }
@@ -76,7 +76,7 @@ export interface ServiceOverridePatchInput {
 export interface ApplyServiceOverridesArgs {
   build: Build;
   deploys: Deploy[];
-  pullRequest: PullRequest;
+  pullRequest?: PullRequest | null;
   serviceOverrides: ServiceOverridePatchInput[];
   runUuid: string;
 }
@@ -344,8 +344,12 @@ export default class OverrideService extends BaseService {
       : deploys.find((deploy) => deploy.service.name === serviceName);
   }
 
-  private async enqueueRedeployIfEnabled(build: Build, pullRequest: PullRequest, runUuid: string): Promise<boolean> {
-    if (!pullRequest.deployOnUpdate) {
+  private async enqueueRedeployIfEnabled(
+    build: Build,
+    pullRequest: PullRequest | null | undefined,
+    runUuid: string
+  ): Promise<boolean> {
+    if (!pullRequest?.deployOnUpdate) {
       return false;
     }
 

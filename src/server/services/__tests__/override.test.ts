@@ -385,7 +385,9 @@ describe('OverrideService.applyBuildOverrides', () => {
   it('does not queue redeploy when deployOnUpdate is false', async () => {
     const { service, enqueueResolveAndDeployBuild } = createService();
     const args = createFullYamlArgs();
-    args.pullRequest.deployOnUpdate = false;
+    args.pullRequest = {
+      deployOnUpdate: false,
+    } as any;
 
     await service.applyBuildOverrides(args);
 
@@ -448,6 +450,37 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(result).toEqual({
       buildUuid: 'current-build',
       queued: true,
+      status: 'success',
+    });
+  });
+
+  it('applies service overrides without queueing when the build has no pull request', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createFullYamlArgs();
+
+    const result = await service.applyServiceOverrides({
+      build: args.build,
+      deploys: args.deploys,
+      pullRequest: undefined,
+      serviceOverrides: [
+        {
+          serviceName: 'api',
+          active: false,
+        },
+      ],
+      runUuid: 'run-uuid',
+    });
+
+    expect(args.deploys[0]!.$query().patch).toHaveBeenCalledWith({
+      active: false,
+    });
+    expect(args.deploys[1]!.$query().patch).toHaveBeenCalledWith({
+      active: false,
+    });
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      buildUuid: 'current-build',
+      queued: false,
       status: 'success',
     });
   });
@@ -702,6 +735,28 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     jest.clearAllMocks();
   });
 
+  it('patches static mode by itself and queues redeploy', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createBuildConfigPatchArgs({
+      isStatic: true,
+    });
+
+    const result = await service.applyBuildConfigPatch(args);
+
+    expect(args.build.$query().patch).toHaveBeenCalledWith({
+      isStatic: true,
+    });
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
+      buildId: 42,
+      runUUID: 'run-uuid',
+      correlationId: 'test-correlation',
+    });
+    expect(result).toMatchObject({
+      uuid: 'current-build',
+      isStatic: true,
+    });
+  });
+
   it('patches only provided build config fields and queues redeploy once', async () => {
     const { service, enqueueResolveAndDeployBuild } = createService();
     const args = createBuildConfigPatchArgs({
@@ -847,6 +902,25 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     await service.applyBuildConfigPatch(args);
 
     expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+  });
+
+  it('patches build config without queueing when the build has no pull request', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createBuildConfigPatchArgs({
+      isStatic: true,
+    });
+    args.pullRequest = undefined;
+
+    const result = await service.applyBuildConfigPatch(args);
+
+    expect(args.build.$query().patch).toHaveBeenCalledWith({
+      isStatic: true,
+    });
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      uuid: 'current-build',
+      isStatic: true,
+    });
   });
 
   it('falls back to a BuildService instance when the service registry is not wired', async () => {

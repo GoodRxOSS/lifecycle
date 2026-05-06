@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 Lifecycle contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -134,6 +134,7 @@ export default class BuildService extends BaseService {
       commentRuntimeEnv: build.commentRuntimeEnv || {},
       commentInitEnv: build.commentInitEnv || {},
       enableFullYaml: build.enableFullYaml ?? false,
+      isStatic: build.isStatic ?? false,
       deploys: _.sortBy(deploys, 'key'),
     };
   }
