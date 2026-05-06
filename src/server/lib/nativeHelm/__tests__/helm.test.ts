@@ -903,6 +903,45 @@ describe('Native Helm', () => {
       expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
     });
 
+    it('adds static node affinity and tolerations for static org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {},
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: true,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=eks.amazonaws.com/capacityType'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].key=app-long'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].values[0]=lifecycle-static-env'
+      );
+      expect(customValues).toContain('deployment.tolerations[0].key=static_env');
+      expect(customValues).toContain('deployment.tolerations[0].value=yes');
+    });
+
     it('extracts secret-backed chart values after final value precedence is applied', async () => {
       mockGetAllConfigs.mockResolvedValue({
         postgresql: {
