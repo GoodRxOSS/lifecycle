@@ -115,6 +115,7 @@ export const QUEUE_NAMES = {
   RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
+  DEPLOY_CLEANUP: `deploy_cleanup_${JOB_VERSION}`,
   LABEL: `label_${JOB_VERSION}`,
   AGENT_SESSION_CLEANUP: 'agent_session_cleanup',
   AGENT_SESSION_PREWARM: 'agent_session_prewarm',

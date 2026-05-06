@@ -24,6 +24,22 @@ import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 import { Builder, Helm } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
 
+export type DeployableConfigSource = 'yaml' | 'db' | 'db-yaml-merged';
+
+export interface DeployableReconciliationEntry {
+  name: string;
+  source: DeployableConfigSource;
+  reconcileEligible: boolean;
+  resolvedFromRepositoryId?: number | null;
+}
+
+export interface DeployableReconciliationResult {
+  deployables: Deployable[];
+  canReconcile: boolean;
+  reconcileEligibleDeployables: DeployableReconciliationEntry[];
+  filterGithubRepositoryId?: number | null;
+}
+
 export interface DeployableAttributes {
   appShort?: string;
   ecr?: string;
@@ -96,9 +112,16 @@ export interface DeployableAttributes {
   envLens?: boolean;
   nodeSelector?: Record<string, string>;
   nodeAffinity?: Record<string, unknown>;
+  source?: DeployableConfigSource;
+  reconcileEligible?: boolean;
+  resolvedFromRepositoryId?: number | null;
 }
 
 export default class DeployableService extends BaseService {
+  private isYamlReconcileEligible(type: string): boolean {
+    return type !== DeployTypes.CONFIGURATION;
+  }
+
   /**
    *
    * @param buildId
@@ -127,6 +150,7 @@ export default class DeployableService extends BaseService {
         type: service.type,
         dockerImage: service.dockerImage,
         repositoryId: service.repositoryId,
+        resolvedFromRepositoryId: service.repositoryId != null ? Number(service.repositoryId) : null,
         defaultTag: service.defaultTag,
         dockerfilePath: service.dockerfilePath,
         // buildArgs: NOT IN USE
@@ -179,6 +203,8 @@ export default class DeployableService extends BaseService {
         defaultBranchName: service.branchName,
         nodeSelector: service.nodeSelector ?? null,
         nodeAffinity: service.nodeAffinity ?? null,
+        source: 'db',
+        reconcileEligible: false,
       };
 
       if (branch != null) {
@@ -307,6 +333,7 @@ export default class DeployableService extends BaseService {
           type: YamlService.getDeployType(service),
           dockerImage: YamlService.getDockerImage(service),
           repositoryId: repositoryId ?? null,
+          resolvedFromRepositoryId: repositoryId != null ? Number(repositoryId) : null,
           branchName,
           defaultBranchName,
           defaultTag: await YamlService.getDefaultTag(service),
@@ -376,6 +403,8 @@ export default class DeployableService extends BaseService {
           deploymentDependsOn: service.deploymentDependsOn || [],
           builder: YamlService.getEffectiveBuilder(service, buildDefaults?.engine) ?? {},
           envLens: await YamlService.getEnvLens(service),
+          source: 'yaml',
+          reconcileEligible: this.isYamlReconcileEligible(YamlService.getDeployType(service)),
         };
       }
     } catch (error) {
@@ -449,24 +478,26 @@ export default class DeployableService extends BaseService {
           const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(yamlConfig, service.name);
           if (yamlService != null) {
             const serviceRepositoryId = await this.determineRepositoryId(service, build);
-            deployableServices.set(
-              service.name,
-              this.mergeDeployableAttributes(
-                buildUUID,
-                service,
-                await this.generateAttributesFromYamlConfig(
-                  buildId,
-                  buildUUID,
-                  serviceRepositoryId,
-                  branchName,
-                  yamlService,
-                  true,
-                  null,
-                  build
-                ),
-                deployableServices.get(service.name)
-              )
+            const yamlAttributes = await this.generateAttributesFromYamlConfig(
+              buildId,
+              buildUUID,
+              serviceRepositoryId,
+              branchName,
+              yamlService,
+              true,
+              null,
+              build
             );
+            const mergedAttributes = this.mergeDeployableAttributes(
+              buildUUID,
+              service,
+              yamlAttributes,
+              deployableServices.get(service.name)
+            );
+            mergedAttributes.source = 'db-yaml-merged';
+            mergedAttributes.reconcileEligible = false;
+            mergedAttributes.resolvedFromRepositoryId = serviceRepositoryId ?? null;
+            deployableServices.set(service.name, mergedAttributes);
           }
         }
       }
@@ -755,8 +786,9 @@ export default class DeployableService extends BaseService {
     pullRequest: PullRequest,
     build?: Build,
     filterGithubRepositoryId?: number
-  ) {
+  ): Promise<boolean> {
     try {
+      let allReferencedYamlConfigsResolved = true;
       let filterRepositoryFullName: string | null = null;
       if (filterGithubRepositoryId) {
         const filterRepo = await this.db.models.Repository.query().findOne({
@@ -907,6 +939,7 @@ export default class DeployableService extends BaseService {
                         );
                       }
                     } else {
+                      allReferencedYamlConfigsResolved = false;
                       getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
                         `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
                       );
@@ -933,7 +966,7 @@ export default class DeployableService extends BaseService {
         }
       };
 
-      if (pullRequest == null) return;
+      if (pullRequest == null) return false;
 
       await pullRequest.$fetchGraph('[build.[deploys.[deployable], environment], repository]');
       if (pullRequest.repository != null && pullRequest.branchName != null) {
@@ -982,10 +1015,12 @@ export default class DeployableService extends BaseService {
               );
             }
           }
+          return allReferencedYamlConfigsResolved;
         }
       } else {
         getLogger({ buildUUID }).warn('PR: branch name missing');
       }
+      return false;
     } catch (error) {
       getLogger({ buildUUID, error }).error('Deployable: create/update from yaml failed');
       throw error;
@@ -1007,9 +1042,10 @@ export default class DeployableService extends BaseService {
     environment: Environment,
     build?: Build,
     filterGithubRepositoryId?: number
-  ): Promise<Deployable[]> {
+  ): Promise<DeployableReconciliationResult> {
     // We are going to ingest all the database and yaml configuration and process in the memory before writes into the database
-    let deployables: Deployable[];
+    let deployables: Deployable[] = [];
+    let canReconcile = false;
 
     // Temporary storage for all the deployable configurations in memory
     const deployableServices: Map<string, DeployableAttributes> = new Map<string, DeployableAttributes>();
@@ -1031,7 +1067,7 @@ export default class DeployableService extends BaseService {
 
         // Next read the YAML config file from the PR's repository and branch
         // Overwrite the db config exists in the YAML + any YAML only configurations
-        await this.updateOrCreateDeployableUsingYamlConfig(
+        canReconcile = await this.updateOrCreateDeployableUsingYamlConfig(
           deployableServices,
           buildId,
           buildUUID,
@@ -1058,7 +1094,19 @@ export default class DeployableService extends BaseService {
       throw error;
     }
     getLogger({ buildUUID }).info(`Deployable: upserted count=${deployables.length}`);
-    return deployables;
+    return {
+      deployables,
+      canReconcile,
+      filterGithubRepositoryId: filterGithubRepositoryId ?? null,
+      reconcileEligibleDeployables: Array.from(deployableServices.values())
+        .filter((deployable) => deployable.reconcileEligible)
+        .map((deployable) => ({
+          name: deployable.name,
+          source: deployable.source ?? 'db',
+          reconcileEligible: deployable.reconcileEligible ?? false,
+          resolvedFromRepositoryId: deployable.resolvedFromRepositoryId ?? null,
+        })),
+    };
   }
 
   /**

@@ -221,7 +221,7 @@ function contextForDeploy(deploy: Deploy, settings: string) {
  * Deletes a CLI deploy
  * @param deploy cli deploys to delete
  */
-async function deleteDeploy(deploy: Deploy) {
+export async function deleteDeploy(deploy: Deploy) {
   const serviceCmd = deploy.build.enableFullYaml ? deploy.deployable.command : deploy.service.command;
 
   const { settings, region } = await getSettingsFor(serviceCmd);

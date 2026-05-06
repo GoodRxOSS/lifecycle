@@ -107,6 +107,11 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 125,
   });
 
+  queueManager.registerWorker(QUEUE_NAMES.DEPLOY_CLEANUP, services.DeployCleanupService.processCleanupQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 5,
+  });
+
   queueManager.registerWorker(QUEUE_NAMES.LABEL, services.LabelService.processLabelQueue, {
     connection: redisClient.getConnection(),
     concurrency: 10,

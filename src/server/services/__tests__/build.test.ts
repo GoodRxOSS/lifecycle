@@ -19,7 +19,10 @@ const mockGenerateManifest = jest.fn();
 const mockApplyManifests = jest.fn();
 const mockWaitForPodReady = jest.fn();
 const mockGetAllConfigs = jest.fn();
+const mockIsFeatureEnabled = jest.fn();
 const mockQueueAdd = jest.fn();
+const mockCleanupDeploy = jest.fn();
+const mockDeleteServiceRows = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -55,10 +58,12 @@ jest.mock('server/lib/logger', () => ({
 jest.mock('shared/config', () => ({
   TMP_PATH: '/tmp',
   QUEUE_NAMES: {
-    BUILD_QUEUE: 'build',
-    RESOLVE_DEPLOY_BUILD_QUEUE: 'resolve-deploy',
-    BUILD_CLEANUP_QUEUE: 'build-cleanup',
-    BUILD_REQUEST_QUEUE: 'build-request',
+    DELETE_QUEUE: 'delete_queue_test',
+    BUILD_QUEUE: 'build_queue_test',
+    RESOLVE_AND_DEPLOY: 'resolve_and_deploy_test',
+    BUILD_CLEANUP_QUEUE: 'build_cleanup_test',
+    BUILD_REQUEST_QUEUE: 'build_request_test',
+    DEPLOY_CLEANUP: 'deploy_cleanup_test',
     GLOBAL_CONFIG_CACHE_REFRESH: 'global-config-refresh',
     GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github-client-token-refresh',
     INGRESS_MANIFEST_QUEUE: 'ingress-manifest',
@@ -88,6 +93,8 @@ jest.mock('server/lib/github', () => ({
   createGitDeployment: jest.fn(),
   updateGitDeploymentStatus: jest.fn(),
   getPullRequest: jest.fn(),
+  getSHAForBranch: jest.fn(),
+  getYamlFileContentFromBranch: jest.fn(),
 }));
 
 jest.mock('server/lib/helm', () => ({
@@ -104,23 +111,35 @@ jest.mock('server/lib/buildEnvVariables', () => ({
   })),
 }));
 
-jest.mock('server/services/deploy', () => ({
-  __esModule: true,
-  default: jest.fn().mockImplementation(() => ({})),
-}));
-
-jest.mock('server/services/webhook', () => ({
-  __esModule: true,
-  default: jest.fn().mockImplementation(() => ({})),
-}));
-
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
       getAllConfigs: (...args: any[]) => mockGetAllConfigs(...args),
+      isFeatureEnabled: (...args: any[]) => mockIsFeatureEnabled(...args),
     })),
   },
+}));
+
+jest.mock('server/services/deployCleanup', () =>
+  jest.fn().mockImplementation(() => ({
+    cleanupDeploy: (...args: any[]) => mockCleanupDeploy(...args),
+    deleteServiceRows: (...args: any[]) => mockDeleteServiceRows(...args),
+  }))
+);
+
+jest.mock('server/services/deploy', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    patchAndUpdateActivityFeed: jest.fn().mockResolvedValue(undefined),
+  })),
+}));
+
+jest.mock('server/services/webhook', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    upsertWebhooksWithYaml: jest.fn().mockResolvedValue(undefined),
+  })),
 }));
 
 jest.mock('server/lib/fastly', () =>
@@ -131,6 +150,19 @@ jest.mock('server/lib/fastly', () =>
 
 import BuildService from '../build';
 import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
+
+function createThenableQuery(result: any[] = []) {
+  const query: any = {
+    where: jest.fn(() => query),
+    whereIn: jest.fn(() => query),
+    whereNot: jest.fn(() => query),
+    whereNotNull: jest.fn(() => query),
+    delete: jest.fn().mockResolvedValue(result.length),
+    then: (resolve: (value: any[]) => void, reject: (reason: unknown) => void) =>
+      Promise.resolve(result).then(resolve, reject),
+  };
+  return query;
+}
 
 describe('BuildService failure boundaries', () => {
   let buildService: BuildService;
@@ -255,6 +287,271 @@ describe('BuildService status updates', () => {
       status: BuildStatus.DEPLOYED,
       statusMessage: '',
     });
+  });
+});
+
+describe('BuildService stale deploy reconciliation', () => {
+  let buildService: BuildService;
+  let deployableQuery: any;
+  let deployQuery: any;
+  const targetRepoId = 1001;
+  const otherRepoId = 2002;
+
+  const createService = (existingDeployables: any[] = [], staleDeploys: any[] = []) => {
+    deployableQuery = createThenableQuery(existingDeployables);
+    deployQuery = {
+      where: jest.fn(() => deployQuery),
+      whereIn: jest.fn(() => deployQuery),
+      withGraphFetched: jest.fn().mockResolvedValue(staleDeploys),
+    };
+
+    buildService = new BuildService(
+      {
+        models: {
+          Deployable: {
+            query: jest.fn().mockReturnValueOnce(deployableQuery),
+          },
+          Deploy: {
+            query: jest.fn().mockReturnValueOnce(deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({
+          add: jest.fn(),
+          process: jest.fn(),
+          on: jest.fn(),
+        })),
+      } as any
+    );
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsFeatureEnabled.mockResolvedValue(true);
+    mockCleanupDeploy.mockResolvedValue(true);
+    mockDeleteServiceRows.mockResolvedValue(undefined);
+  });
+
+  const createBuild = (overrides: any = {}) =>
+    ({
+      id: 10,
+      uuid: 'build-1',
+      enableFullYaml: true,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    } as any);
+
+  test('feature flag off leaves stale deployables untouched', async () => {
+    createService([{ id: 1, name: 'old-api' }]);
+    mockIsFeatureEnabled.mockResolvedValue(false);
+
+    await (buildService as any).reconcileDeletedDeployables({ id: 10, uuid: 'build-1', enableFullYaml: true } as any, {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
+    });
+
+    expect((buildService as any).db.models.Deployable.query).not.toHaveBeenCalled();
+    expect(mockCleanupDeploy).not.toHaveBeenCalled();
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+  });
+
+  test('cleans stale YAML-owned deployables and deletes deploy/deployable rows', async () => {
+    const staleDeploy = { id: 77, uuid: 'old-api-build-1', deployableId: 1 };
+    createService(
+      [
+        { id: 1, name: 'old-api' },
+        { id: 2, name: 'api' },
+      ],
+      [staleDeploy]
+    );
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build as any, {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
+    });
+
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+    expect(deployQuery.whereIn).toHaveBeenCalledWith('deployableId', [1]);
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [1] });
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+  });
+
+  test('treats renamed YAML services as deleted old service plus created new service', async () => {
+    const staleDeploy = { id: 78, uuid: 'worker-old-build-1', deployableId: 3 };
+    createService(
+      [
+        { id: 2, name: 'api', resolvedFromRepositoryId: targetRepoId },
+        { id: 3, name: 'worker-old', resolvedFromRepositoryId: targetRepoId },
+      ],
+      [staleDeploy]
+    );
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build, {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [
+        { name: 'api', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+        { name: 'worker-new', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+      ],
+    });
+
+    expect(mockCleanupDeploy).toHaveBeenCalledTimes(1);
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [3] });
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+  });
+
+  test('repo-filtered reconciliation removes only deployables from the triggering repository scope', async () => {
+    const staleDeploy = { id: 79, uuid: 'target-old-build-1', deployableId: 4 };
+    createService([{ id: 4, name: 'target-old', resolvedFromRepositoryId: targetRepoId }], [staleDeploy]);
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(
+      build,
+      {
+        canReconcile: true,
+        deployables: [],
+        reconcileEligibleDeployables: [
+          { name: 'target-new', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+          { name: 'other-service', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: otherRepoId },
+        ],
+      },
+      targetRepoId
+    );
+
+    expect(deployableQuery.where).toHaveBeenCalledWith('resolvedFromRepositoryId', targetRepoId);
+    expect(deployableQuery.whereNotNull).toHaveBeenCalledWith('resolvedFromRepositoryId');
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [4] });
+  });
+
+  test('full reconciliation can delete YAML-owned deployables with null repository ownership', async () => {
+    const staleDeploy = { id: 80, uuid: 'external-cache-build-1', deployableId: 5 };
+    createService([{ id: 5, name: 'external-cache', resolvedFromRepositoryId: null }], [staleDeploy]);
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build, {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
+    });
+
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [5] });
+  });
+
+  test('repo-filtered reconciliation excludes ambiguous null repository ownership', async () => {
+    createService([], []);
+
+    await (buildService as any).reconcileDeletedDeployables(
+      { id: 10, uuid: 'build-1', enableFullYaml: true } as any,
+      {
+        canReconcile: true,
+        deployables: [],
+        reconcileEligibleDeployables: [],
+      },
+      123
+    );
+
+    expect(deployableQuery.where).toHaveBeenCalledWith('resolvedFromRepositoryId', 123);
+    expect(deployableQuery.whereNotNull).toHaveBeenCalledWith('resolvedFromRepositoryId');
+    expect(mockCleanupDeploy).not.toHaveBeenCalled();
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+  });
+
+  test('skips cleanup when YAML import did not resolve the authoritative config scope', async () => {
+    createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
+
+    await (buildService as any).reconcileDeletedDeployables(createBuild(), {
+      canReconcile: false,
+      deployables: [],
+      reconcileEligibleDeployables: [],
+    });
+
+    expect((buildService as any).db.models.Deployable.query).not.toHaveBeenCalled();
+    expect(mockCleanupDeploy).not.toHaveBeenCalled();
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+  });
+
+  test('stale lookup is scoped to YAML-owned non-configuration deployables', async () => {
+    createService([], []);
+
+    await (buildService as any).reconcileDeletedDeployables(createBuild(), {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [],
+    });
+
+    expect(deployableQuery.where).toHaveBeenCalledWith({
+      buildId: 10,
+      buildUUID: 'build-1',
+      reconcileEligible: true,
+      source: 'yaml',
+    });
+    expect(deployableQuery.whereNot).toHaveBeenCalledWith('type', DeployTypes.CONFIGURATION);
+  });
+
+  test('cleanup errors are logged but database rows are still deleted', async () => {
+    createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
+    mockCleanupDeploy.mockRejectedValue(new Error('targeted cleanup failed'));
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build as any, {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [],
+    });
+
+    expect(mockCleanupDeploy).toHaveBeenCalledTimes(1);
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [1] });
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+  });
+
+  test('service redeploy YAML import skips stale reconciliation', async () => {
+    const upsertDeployables = jest.fn().mockResolvedValue({
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
+    });
+    const upsertWebhooksWithYaml = jest.fn().mockResolvedValue(undefined);
+    const reconcileDeletedDeployables = jest.fn();
+    const queueManager = {
+      registerQueue: jest.fn(() => ({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      })),
+    };
+    buildService = new BuildService(
+      {
+        services: {
+          Deployable: { upsertDeployables },
+          Webhook: { upsertWebhooksWithYaml },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      queueManager as any
+    );
+    (buildService as any).reconcileDeletedDeployables = reconcileDeletedDeployables;
+
+    const build = createBuild({ pullRequest: { id: 20 } });
+    const environment = { id: 30 };
+
+    await (buildService as any).importYamlConfigFile(environment, build, targetRepoId, {
+      skipDeletedServiceReconciliation: true,
+    });
+
+    expect(upsertDeployables).toHaveBeenCalledWith(10, 'build-1', build.pullRequest, environment, build, targetRepoId);
+    expect(reconcileDeletedDeployables).not.toHaveBeenCalled();
+    expect(upsertWebhooksWithYaml).toHaveBeenCalledWith(build, build.pullRequest);
   });
 });
 
@@ -407,6 +704,72 @@ describe('BuildService queue fingerprinting', () => {
       }),
       expect.objectContaining({
         jobId: `build:1:${expectedFingerprint}`,
+      })
+    );
+  });
+
+  test('service redeploy queues scoped build without deleted-service reconciliation', async () => {
+    const patchAndFetch = jest.fn().mockResolvedValue(undefined);
+    const deploy = {
+      id: 33,
+      uuid: 'pdm-db-good-dev-0',
+      githubRepositoryId: 425935548,
+      deployable: {
+        name: 'pdm-db',
+        repositoryId: 425935548,
+      },
+      $query: jest.fn(() => ({ patchAndFetch })),
+    };
+    const build = createMockBuild({
+      id: 1449,
+      uuid: 'good-dev-0',
+      deploys: [deploy],
+    });
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    await buildService.redeployServiceFromBuild('good-dev-0', 'pdm-db');
+
+    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
+      'resolve-deploy',
+      expect.objectContaining({
+        buildId: 1449,
+        githubRepositoryId: 425935548,
+        skipDeletedServiceReconciliation: true,
+      }),
+      expect.any(Object)
+    );
+    expect(patchAndFetch).toHaveBeenCalledWith({
+      runUUID: expect.any(String),
+    });
+  });
+
+  test('resolve queue preserves deleted-service reconciliation skip flag for service redeploys', async () => {
+    const build = createMockBuild({
+      id: 1449,
+      uuid: 'good-dev-0',
+      pullRequest: {
+        latestCommit: 'abcdef123456',
+        deployOnUpdate: true,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+    mockBuildQuery.findOne.mockResolvedValue(build);
+    const enqueueBuildJob = jest.spyOn(buildService, 'enqueueBuildJob').mockResolvedValue(undefined as any);
+
+    await buildService.processResolveAndDeployBuildQueue({
+      data: {
+        buildId: 1449,
+        githubRepositoryId: 425935548,
+        skipDeletedServiceReconciliation: true,
+      },
+    });
+
+    expect(enqueueBuildJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildId: 1449,
+        githubRepositoryId: 425935548,
+        skipDeletedServiceReconciliation: true,
       })
     );
   });

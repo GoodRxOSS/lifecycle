@@ -14,14 +14,45 @@
  * limitations under the License.
  */
 
-import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
-mockRedisClient();
+const mockGetAllConfigs = jest.fn();
+const mockInstance = {
+  getAllConfigs: (...args: any[]) => mockGetAllConfigs(...args),
+  isFeatureEnabled: jest.fn().mockResolvedValue(false),
+};
+
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => mockInstance),
+  },
+}));
+
+jest.mock('server/lib/dependencies', () => ({
+  defaultDb: {},
+  defaultRedis: {},
+  defaultRedlock: {},
+  defaultQueueManager: {},
+  redisClient: {
+    getConnection: jest.fn(),
+  },
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({
+    error: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    fatal: jest.fn(),
+  })),
+}));
+
+jest.mock('server/lib/github', () => ({
+  getYamlFileContentFromBranch: jest.fn(),
+}));
 
 import * as YamlService from 'server/models/yaml';
-import GlobalConfigService from 'server/services/globalConfig';
 import DeployableService, { DeployableAttributes } from '../deployable';
-
-jest.mock('server/services/globalConfig');
 
 const lifecycleDefaults = {
   defaultUUID: 'mockedUUID',
@@ -56,21 +87,13 @@ const globalConfigs = {
   domainDefaults: domainDefaults,
 };
 
-const mockedGetAllConfigs = jest.fn().mockResolvedValue(globalConfigs);
-
-const mockedInstance = {
-  getAllConfigs: mockedGetAllConfigs,
-  isFeatureEnabled: jest.fn().mockResolvedValue(false),
-};
-
-(GlobalConfigService.getInstance as jest.Mock).mockReturnValue(mockedInstance);
 describe('Deployable Service', () => {
   describe('generateAttributesFromYamlConfig', () => {
     const deployableService: DeployableService = new DeployableService(null, null, null);
 
     beforeEach(() => {
-      mockedGetAllConfigs.mockResolvedValue(globalConfigs);
-      mockedInstance.isFeatureEnabled.mockResolvedValue(false);
+      mockGetAllConfigs.mockResolvedValue(globalConfigs);
+      mockInstance.isFeatureEnabled.mockResolvedValue(false);
     });
 
     test('Generates from Github Service Type Configuration', async () => {
@@ -156,6 +179,9 @@ describe('Deployable Service', () => {
         buildUUID: 'unit-test-12345',
         buildId: 100,
         repositoryId: '1234567890',
+        resolvedFromRepositoryId: 1234567890,
+        source: 'yaml',
+        reconcileEligible: true,
         branchName: 'unit-test',
         defaultUUID: lifecycleDefaults.defaultUUID,
         dockerfilePath: 'app1/app.Dockerfile',
@@ -318,6 +344,9 @@ describe('Deployable Service', () => {
         buildUUID: 'unit-test-12345',
         buildId: 100,
         repositoryId: '1234567890',
+        resolvedFromRepositoryId: 1234567890,
+        source: 'yaml',
+        reconcileEligible: true,
         branchName: 'unit-test',
         defaultUUID: lifecycleDefaults.defaultUUID,
         dockerfilePath: 'app1/app.Dockerfile',
@@ -432,7 +461,7 @@ describe('Deployable Service', () => {
     });
 
     test('inherits global buildkit engine for Github docker services', async () => {
-      mockedGetAllConfigs.mockResolvedValue({
+      mockGetAllConfigs.mockResolvedValue({
         ...globalConfigs,
         buildDefaults: { engine: 'buildkit' },
       });
@@ -464,7 +493,7 @@ describe('Deployable Service', () => {
     });
 
     test('inherits global buildkit engine for Helm docker services', async () => {
-      mockedGetAllConfigs.mockResolvedValue({
+      mockGetAllConfigs.mockResolvedValue({
         ...globalConfigs,
         buildDefaults: { engine: 'buildkit' },
         'sample-chart': {
@@ -507,7 +536,7 @@ describe('Deployable Service', () => {
     });
 
     test('service builder engine ci overrides global buildkit and persists ci', async () => {
-      mockedGetAllConfigs.mockResolvedValue({
+      mockGetAllConfigs.mockResolvedValue({
         ...globalConfigs,
         buildDefaults: { engine: 'buildkit' },
       });
@@ -542,7 +571,7 @@ describe('Deployable Service', () => {
     });
 
     test('service builder engine kaniko overrides global buildkit', async () => {
-      mockedGetAllConfigs.mockResolvedValue({
+      mockGetAllConfigs.mockResolvedValue({
         ...globalConfigs,
         buildDefaults: { engine: 'buildkit' },
       });
