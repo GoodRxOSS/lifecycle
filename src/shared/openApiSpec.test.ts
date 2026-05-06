@@ -25,6 +25,30 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.BuildMetadataLinkPatchRequest.additionalProperties).toBe(false);
   });
 
+  it('documents build config and service override routes', () => {
+    expect(getOperation('/api/v2/builds/{uuid}/services/{name}/override', 'patch')).toBeUndefined();
+    expect(getOperation('/api/v2/builds/{uuid}/services/overrides', 'patch')).toBeUndefined();
+    expect(getOperation('/api/v2/builds/{uuid}/environment-overrides', 'patch')).toBeUndefined();
+    expect(getOperation('/api/v2/builds/{uuid}/options', 'patch')).toBeUndefined();
+    expect(getOperation('/api/v2/builds/{uuid}', 'patch')?.tags).toEqual(['Builds']);
+    expect(getOperation('/api/v2/builds/{uuid}/services', 'patch')?.tags).toEqual(['Builds']);
+    expect(schemas.UpdateBuildServiceOverrideRequest).toBeUndefined();
+    expect(schemas.UpdateBuildEnvironmentOverridesRequest).toBeUndefined();
+    expect(schemas.UpdateBuildOptionsRequest).toBeUndefined();
+    expect(schemas.UpdateBuildConfigPatchRequest.additionalProperties).toBe(false);
+    expect(schemas.UpdateBuildConfigPatchRequest.anyOf).toEqual([
+      { required: ['uuid'] },
+      { required: ['isStatic'] },
+      { required: ['trackDefaultBranches'] },
+      { required: ['commentRuntimeEnv'] },
+      { required: ['commentInitEnv'] },
+    ]);
+    expect(schemas.BuildServiceOverridePatch.required).toEqual(['serviceName']);
+    expect(schemas.UpdateBuildServiceOverridesRequest.required).toEqual(['serviceOverrides']);
+    expect(schemas.UpdateBuildServiceOverridesRequest.properties.serviceOverrides.minItems).toBe(1);
+    expect(schemas.BuildOverrideUpdateResult.required).toEqual(['status', 'buildUuid', 'queued']);
+  });
+
   it('documents canonical run events with public context and a version', () => {
     const eventSchema = schemas.AgentRunMessagePartEvent;
 
