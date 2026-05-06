@@ -32,6 +32,9 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(getOperation('/api/v2/builds/{uuid}/options', 'patch')).toBeUndefined();
     expect(getOperation('/api/v2/builds/{uuid}', 'patch')?.tags).toEqual(['Builds']);
     expect(getOperation('/api/v2/builds/{uuid}/services', 'patch')?.tags).toEqual(['Builds']);
+    expect(schemas.UpdateBuildConfigSuccessResponse.allOf[1].properties.data).toEqual({
+      $ref: '#/components/schemas/Build',
+    });
     expect(schemas.UpdateBuildServiceOverrideRequest).toBeUndefined();
     expect(schemas.UpdateBuildEnvironmentOverridesRequest).toBeUndefined();
     expect(schemas.UpdateBuildOptionsRequest).toBeUndefined();
@@ -44,9 +47,16 @@ describe('OpenAPI v2 agent session contract', () => {
       { required: ['commentInitEnv'] },
     ]);
     expect(schemas.BuildServiceOverridePatch.required).toEqual(['serviceName']);
+    expect(schemas.BuildServiceOverridePatch.additionalProperties).toBe(true);
     expect(schemas.UpdateBuildServiceOverridesRequest.required).toEqual(['serviceOverrides']);
     expect(schemas.UpdateBuildServiceOverridesRequest.properties.serviceOverrides.minItems).toBe(1);
+    expect(schemas.UpdateBuildServiceOverridesRequest.additionalProperties).toBe(true);
     expect(schemas.BuildOverrideUpdateResult.required).toEqual(['status', 'buildUuid', 'queued']);
+  });
+
+  it('documents build webhooks with the implemented invoke method', () => {
+    expect(getOperation('/api/v2/builds/{uuid}/webhooks', 'put')?.tags).toEqual(['Builds']);
+    expect(getOperation('/api/v2/builds/{uuid}/webhooks', 'post')).toBeUndefined();
   });
 
   it('documents canonical run events with public context and a version', () => {

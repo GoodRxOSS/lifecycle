@@ -3071,7 +3071,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           },
           required: ['serviceName'],
           anyOf: [{ required: ['active'] }, { required: ['branchOrExternalUrl'] }],
-          additionalProperties: false,
+          additionalProperties: true,
         },
 
         UpdateBuildServiceOverridesRequest: {
@@ -3084,7 +3084,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           required: ['serviceOverrides'],
-          additionalProperties: false,
+          additionalProperties: true,
         },
 
         BuildOverrideUpdateResult: {

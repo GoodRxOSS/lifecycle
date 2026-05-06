@@ -192,6 +192,7 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
   }
 
   const override = new OverrideService();
+  const buildService = new BuildService();
   const build = await override.db.models.Build.query().findOne({ uuid: params.uuid }).withGraphFetched('pullRequest');
 
   if (!build) {
@@ -206,7 +207,13 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
       runUuid: nanoid(),
     });
 
-    return successResponse(updatedBuild, { status: 200 }, req);
+    const hydratedBuild = await buildService.getBuildByUUID(updatedBuild.uuid);
+
+    if (!hydratedBuild) {
+      return errorResponse(new Error(`Build with UUID ${updatedBuild.uuid} not found`), { status: 404 }, req);
+    }
+
+    return successResponse(hydratedBuild, { status: 200 }, req);
   } catch (error) {
     if (error instanceof BuildUuidValidationError) {
       return errorResponse(error, { status: 400 }, req);
