@@ -15,6 +15,7 @@
  */
 
 jest.mock('server/models/AgentSession');
+jest.mock('server/models/AgentRun');
 jest.mock('server/services/agentSession', () => {
   class ActiveAgentRunSuspensionError extends Error {
     constructor() {
@@ -26,6 +27,7 @@ jest.mock('server/services/agentSession', () => {
   return {
     __esModule: true,
     ActiveAgentRunSuspensionError,
+    AGENT_RUN_TERMINAL_STATUSES: ['completed', 'failed', 'cancelled'],
     default: {
       endSession: jest.fn(),
       suspendChatRuntime: jest.fn(),
@@ -54,6 +56,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 });
 
 import AgentSession from 'server/models/AgentSession';
+import AgentRun from 'server/models/AgentRun';
 import AgentSessionService, { ActiveAgentRunSuspensionError } from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
 import { processAgentSessionCleanup } from '../agentSessionCleanup';
@@ -67,6 +70,13 @@ describe('agentSessionCleanup', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (getLogger as jest.Mock).mockReturnValue(mockLogger);
+    (AgentRun.query as jest.Mock).mockReturnValue({
+      where: jest.fn().mockReturnValue({
+        whereNotIn: jest.fn().mockReturnValue({
+          first: jest.fn().mockResolvedValue(null),
+        }),
+      }),
+    });
     jest.useFakeTimers().setSystemTime(new Date('2026-03-23T12:00:00.000Z'));
   });
 
@@ -143,6 +153,9 @@ describe('agentSessionCleanup', () => {
         sessionKind: 'chat',
         workspaceStatus: 'ready',
         status: 'active',
+        namespace: 'sample-namespace',
+        podName: 'sample-pod',
+        pvcName: 'sample-pvc',
         lastActivity: '2026-03-23T11:00:00.000Z',
         updatedAt: '2026-03-23T11:00:00.000Z',
       },
@@ -189,6 +202,261 @@ describe('agentSessionCleanup', () => {
     expect(AgentSessionService.endSession).not.toHaveBeenCalled();
   });
 
+  it('ends idle chat sessions when no ready runtime can be suspended', async () => {
+    const activeSessions = [
+      {
+        id: 1,
+        uuid: 'freeform-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        status: 'active',
+        namespace: null,
+        pvcName: null,
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:00:00.000Z',
+      },
+      {
+        id: 2,
+        uuid: 'failed-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'failed',
+        status: 'active',
+        namespace: 'sample-namespace',
+        pvcName: 'sample-pvc',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:00:00.000Z',
+      },
+      {
+        id: 3,
+        uuid: 'missing-pod-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'ready',
+        status: 'active',
+        namespace: 'sample-namespace',
+        podName: null,
+        pvcName: 'sample-pvc',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:00:00.000Z',
+      },
+    ];
+
+    const activeQuery = { where: jest.fn() };
+    activeQuery.where
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce((callback) => {
+        callback({
+          whereNot: jest.fn().mockReturnValue({
+            orWhereNot: jest.fn(),
+          }),
+        });
+        return Promise.resolve(activeSessions);
+      });
+
+    const emptyTwoWhereQuery = { where: jest.fn() };
+    emptyTwoWhereQuery.where
+      .mockImplementationOnce(() => emptyTwoWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    const emptyFourWhereQuery = { where: jest.fn() };
+    emptyFourWhereQuery.where
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    (AgentSession.query as jest.Mock) = jest
+      .fn()
+      .mockReturnValueOnce(activeQuery)
+      .mockReturnValueOnce(emptyTwoWhereQuery)
+      .mockReturnValueOnce(emptyFourWhereQuery);
+    (AgentSessionService.endSession as jest.Mock).mockResolvedValue(undefined);
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
+    expect(AgentSessionService.endSession).toHaveBeenCalledTimes(3);
+    expect(AgentSessionService.endSession).toHaveBeenNthCalledWith(1, 'freeform-chat-session');
+    expect(AgentSessionService.endSession).toHaveBeenNthCalledWith(2, 'failed-chat-session');
+    expect(AgentSessionService.endSession).toHaveBeenNthCalledWith(3, 'missing-pod-chat-session');
+  });
+
+  it('does not end a non-ready idle chat session while a run is active', async () => {
+    const activeSessions = [
+      {
+        id: 1,
+        uuid: 'freeform-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        status: 'active',
+        namespace: null,
+        pvcName: null,
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:00:00.000Z',
+      },
+    ];
+
+    const activeQuery = { where: jest.fn() };
+    activeQuery.where
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce((callback) => {
+        callback({
+          whereNot: jest.fn().mockReturnValue({
+            orWhereNot: jest.fn(),
+          }),
+        });
+        return Promise.resolve(activeSessions);
+      });
+
+    const emptyTwoWhereQuery = { where: jest.fn() };
+    emptyTwoWhereQuery.where
+      .mockImplementationOnce(() => emptyTwoWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    const emptyFourWhereQuery = { where: jest.fn() };
+    emptyFourWhereQuery.where
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    (AgentSession.query as jest.Mock) = jest
+      .fn()
+      .mockReturnValueOnce(activeQuery)
+      .mockReturnValueOnce(emptyTwoWhereQuery)
+      .mockReturnValueOnce(emptyFourWhereQuery);
+    (AgentRun.query as jest.Mock).mockReturnValue({
+      where: jest.fn().mockReturnValue({
+        whereNotIn: jest.fn().mockReturnValue({
+          first: jest.fn().mockResolvedValue({ id: 123 }),
+        }),
+      }),
+    });
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
+    expect(AgentSessionService.endSession).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'Session: cleanup skipped sessionId=freeform-chat-session reason=active_run'
+    );
+  });
+
+  it('does not end an idle chat session while runtime provisioning is still fresh', async () => {
+    const activeSessions = [
+      {
+        id: 1,
+        uuid: 'provisioning-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'provisioning',
+        status: 'active',
+        namespace: 'sample-namespace',
+        pvcName: 'sample-pvc',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:50:00.000Z',
+      },
+    ];
+
+    const activeQuery = { where: jest.fn() };
+    activeQuery.where
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce((callback) => {
+        callback({
+          whereNot: jest.fn().mockReturnValue({
+            orWhereNot: jest.fn(),
+          }),
+        });
+        return Promise.resolve(activeSessions);
+      });
+
+    const emptyTwoWhereQuery = { where: jest.fn() };
+    emptyTwoWhereQuery.where
+      .mockImplementationOnce(() => emptyTwoWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    const emptyFourWhereQuery = { where: jest.fn() };
+    emptyFourWhereQuery.where
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    (AgentSession.query as jest.Mock) = jest
+      .fn()
+      .mockReturnValueOnce(activeQuery)
+      .mockReturnValueOnce(emptyTwoWhereQuery)
+      .mockReturnValueOnce(emptyFourWhereQuery);
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
+    expect(AgentSessionService.endSession).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'Session: cleanup skipped sessionId=provisioning-chat-session reason=runtime_provisioning'
+    );
+  });
+
+  it('ends an idle chat session when runtime provisioning is stale', async () => {
+    const activeSessions = [
+      {
+        id: 1,
+        uuid: 'stale-provisioning-chat-session',
+        userId: 'sample-user',
+        sessionKind: 'chat',
+        workspaceStatus: 'provisioning',
+        status: 'active',
+        namespace: 'sample-namespace',
+        pvcName: 'sample-pvc',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+        updatedAt: '2026-03-23T11:40:00.000Z',
+      },
+    ];
+
+    const activeQuery = { where: jest.fn() };
+    activeQuery.where
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce(() => activeQuery)
+      .mockImplementationOnce((callback) => {
+        callback({
+          whereNot: jest.fn().mockReturnValue({
+            orWhereNot: jest.fn(),
+          }),
+        });
+        return Promise.resolve(activeSessions);
+      });
+
+    const emptyTwoWhereQuery = { where: jest.fn() };
+    emptyTwoWhereQuery.where
+      .mockImplementationOnce(() => emptyTwoWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    const emptyFourWhereQuery = { where: jest.fn() };
+    emptyFourWhereQuery.where
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => emptyFourWhereQuery)
+      .mockImplementationOnce(() => Promise.resolve([]));
+
+    (AgentSession.query as jest.Mock) = jest
+      .fn()
+      .mockReturnValueOnce(activeQuery)
+      .mockReturnValueOnce(emptyTwoWhereQuery)
+      .mockReturnValueOnce(emptyFourWhereQuery);
+    (AgentSessionService.endSession as jest.Mock).mockResolvedValue(undefined);
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
+    expect(AgentSessionService.endSession).toHaveBeenCalledWith('stale-provisioning-chat-session');
+  });
+
   it('skips idle chat suspension when a run is still active', async () => {
     const activeSessions = [
       {
@@ -198,6 +466,9 @@ describe('agentSessionCleanup', () => {
         sessionKind: 'chat',
         workspaceStatus: 'ready',
         status: 'active',
+        namespace: 'sample-namespace',
+        podName: 'sample-pod',
+        pvcName: 'sample-pvc',
         lastActivity: '2026-03-23T11:00:00.000Z',
         updatedAt: '2026-03-23T11:00:00.000Z',
       },

@@ -50,8 +50,11 @@ jest.mock('server/services/agentRuntime/mcp/config', () => ({
 import AgentSettingsService from 'server/services/agent/SettingsService';
 
 describe('AgentSettingsService', () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.OPENAI_API_KEY;
     mockListEnabledConnectionsForUser.mockResolvedValue([
       {
         slug: 'sample-connector',
@@ -79,6 +82,14 @@ describe('AgentSettingsService', () => {
         sharedDiscoveredTools: [],
       },
     ]);
+  });
+
+  afterAll(() => {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
   });
 
   it('returns provider states and per-user MCP connection state for the current user', async () => {
@@ -118,5 +129,37 @@ describe('AgentSettingsService', () => {
         }),
       ],
     });
+  });
+
+  it('marks providers backed by shared env keys as connected', async () => {
+    process.env.OPENAI_API_KEY = 'shared-openai-key';
+
+    const result = await AgentSettingsService.getProviderCredentialStates(
+      {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+        preferredUsername: 'sample-user',
+        email: 'sample-user@example.com',
+        firstName: 'Sample',
+        lastName: 'User',
+        displayName: 'Sample User',
+        gitUserName: 'Sample User',
+        gitUserEmail: 'sample-user@example.com',
+      },
+      'example-org/example-repo'
+    );
+
+    expect(result).toEqual([
+      {
+        provider: 'anthropic',
+        hasKey: true,
+        maskedKey: 'sk-ant...1234',
+        updatedAt: '2026-04-05T12:00:00.000Z',
+      },
+      {
+        provider: 'openai',
+        hasKey: true,
+      },
+    ]);
   });
 });

@@ -118,7 +118,7 @@ const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
 const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environment_build_unique';
 const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, service, build.[pullRequest.[repository]]]';
 const SESSION_DEPLOY_GRAPH = '[deployable, repository, service]';
-const AGENT_RUN_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+export const AGENT_RUN_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
 
 export class ActiveAgentRunSuspensionError extends Error {
   constructor() {
@@ -1303,9 +1303,10 @@ export default class AgentSessionService {
     resolvedModelId = selection.modelId;
     const resolvedServiceNames = (resolvedServices || []).map((service) => service.name);
     const [, providerApiKeys, sessionPodServers, resolvedCompatiblePrewarm, forwardedAgentEnv] = await Promise.all([
-      AgentProviderRegistry.getRequiredStoredApiKey({
+      AgentProviderRegistry.getRequiredProviderApiKey({
         provider: selection.provider,
         userIdentity: providerUserIdentity,
+        repoFullName: primaryWorkspaceRepo?.repo,
       }),
       AgentProviderRegistry.resolveCredentialEnvMap({
         repoFullName: primaryWorkspaceRepo?.repo,

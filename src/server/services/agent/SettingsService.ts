@@ -20,6 +20,7 @@ import UserApiKeyService from 'server/services/userApiKey';
 import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
 import type { AgentMcpConnection } from 'server/services/agentRuntime/mcp/types';
 import { normalizeStoredAgentProviderName, type StoredAgentProviderName } from './providerConfig';
+import AgentProviderRegistry from './ProviderRegistry';
 
 export type AgentProviderCredentialState = {
   provider: StoredAgentProviderName;
@@ -60,17 +61,27 @@ export default class AgentSettingsService {
       providers.map(async (provider) => {
         const masked = await UserApiKeyService.getMaskedKey(userIdentity.userId, provider, userIdentity.githubUsername);
 
-        return masked
-          ? {
-              provider,
-              hasKey: true,
-              maskedKey: masked.maskedKey,
-              updatedAt: masked.updatedAt,
-            }
-          : {
-              provider,
-              hasKey: false,
-            };
+        if (masked) {
+          return {
+            provider,
+            hasKey: true,
+            maskedKey: masked.maskedKey,
+            updatedAt: masked.updatedAt,
+          };
+        }
+
+        const sharedKey = await AgentProviderRegistry.getSharedProviderApiKey({ repoFullName, provider });
+        if (sharedKey) {
+          return {
+            provider,
+            hasKey: true,
+          };
+        }
+
+        return {
+          provider,
+          hasKey: false,
+        };
       })
     );
   }

@@ -15,7 +15,11 @@
  */
 
 import AgentSession from 'server/models/AgentSession';
-import AgentSessionService, { ActiveAgentRunSuspensionError } from 'server/services/agentSession';
+import AgentRun from 'server/models/AgentRun';
+import AgentSessionService, {
+  ActiveAgentRunSuspensionError,
+  AGENT_RUN_TERMINAL_STATUSES,
+} from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
 import { AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import { resolveAgentSessionCleanupConfig } from 'server/lib/agentSession/runtimeConfig';
@@ -48,17 +52,41 @@ export async function processAgentSessionCleanup(): Promise<void> {
   for (const session of staleSessions) {
     const sessionId = session.uuid || String(session.id);
     try {
-      if (
+      const isProvisioningChatRuntime =
         session.status === 'active' &&
         session.sessionKind === AgentSessionKind.CHAT &&
-        session.workspaceStatus !== AgentWorkspaceStatus.HIBERNATED
-      ) {
+        session.workspaceStatus === AgentWorkspaceStatus.PROVISIONING;
+      if (isProvisioningChatRuntime && new Date(session.updatedAt).getTime() >= startingCutoff.getTime()) {
+        logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=runtime_provisioning`);
+        continue;
+      }
+
+      const canSuspendChatRuntime =
+        session.status === 'active' &&
+        session.sessionKind === AgentSessionKind.CHAT &&
+        session.workspaceStatus === AgentWorkspaceStatus.READY &&
+        Boolean(session.namespace) &&
+        Boolean(session.podName) &&
+        Boolean(session.pvcName);
+
+      if (canSuspendChatRuntime) {
         logger().info(`Session: cleanup suspending sessionId=${sessionId} lastActivity=${session.lastActivity}`);
         await AgentSessionService.suspendChatRuntime({
           sessionId,
           userId: session.userId,
         });
         continue;
+      }
+
+      if (session.status === 'active' && session.sessionKind === AgentSessionKind.CHAT) {
+        const activeRun = await AgentRun.query()
+          .where({ sessionId: session.id })
+          .whereNotIn('status', AGENT_RUN_TERMINAL_STATUSES)
+          .first();
+        if (activeRun) {
+          logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=active_run`);
+          continue;
+        }
       }
 
       logger().info(
