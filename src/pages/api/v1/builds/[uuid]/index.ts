@@ -17,6 +17,7 @@
 import { nanoid } from 'nanoid';
 import { NextApiRequest, NextApiResponse } from 'next/types';
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
+import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import BuildService from 'server/services/build';
 import OverrideService, { BuildUuidValidationError } from 'server/services/override';
 
@@ -60,9 +61,20 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
   const { uuid } = req.query;
   const { uuid: newUuid } = req.body;
 
-  if (!newUuid || typeof newUuid !== 'string') {
+  if (newUuid == null) {
     getLogger().debug('Missing or invalid uuid in request body');
     return res.status(400).json({ error: 'uuid is required' });
+  }
+
+  if (typeof newUuid !== 'string') {
+    getLogger().debug('Invalid uuid in request body');
+    return res.status(400).json({ error: 'uuid must be a string' });
+  }
+
+  const uuidFormatError = validateBuildUuidFormat(newUuid);
+  if (uuidFormatError) {
+    getLogger().debug(`UUID validation failed: error=${uuidFormatError}`);
+    return res.status(400).json({ error: uuidFormatError });
   }
 
   try {
@@ -211,7 +223,10 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *             properties:
  *               uuid:
  *                 type: string
- *                 description: The new UUID (3-50 characters, alphanumeric + hyphens)
+ *                 minLength: 3
+ *                 maxLength: 50
+ *                 pattern: '^[a-z0-9-]+$'
+ *                 description: The new UUID (3-50 characters, lowercase letters, numbers, and hyphens)
  *                 example: my-custom-environment
  *             required:
  *               - uuid
@@ -287,7 +302,7 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *                     same_uuid:
  *                       value: UUID must be different
  *                     invalid_format:
- *                       value: UUID can only contain letters, numbers, and hyphens
+ *                       value: UUID can only contain lowercase letters, numbers, and hyphens
  *                     invalid_length:
  *                       value: UUID must be between 3 and 50 characters
  *                     invalid_boundaries:

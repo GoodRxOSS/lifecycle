@@ -16,6 +16,7 @@
 
 import BaseService from './_service';
 import { extractContextForQueue, getLogger, updateLogContext } from 'server/lib/logger';
+import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { Build, Deploy, PullRequest } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
@@ -371,16 +372,9 @@ export default class OverrideService extends BaseService {
    * @returns ValidationResult with validation status and error details
    */
   async validateUuid(uuid: string, currentBuildId?: number): Promise<ValidationResult> {
-    if (uuid.length < 3 || uuid.length > 50) {
-      return { valid: false, error: 'UUID must be between 3 and 50 characters' };
-    }
-
-    if (!/^[a-zA-Z0-9-]+$/.test(uuid)) {
-      return { valid: false, error: 'UUID can only contain letters, numbers, and hyphens' };
-    }
-
-    if (uuid.startsWith('-') || uuid.endsWith('-')) {
-      return { valid: false, error: 'UUID cannot start or end with a hyphen' };
+    const formatError = validateBuildUuidFormat(uuid);
+    if (formatError) {
+      return { valid: false, error: formatError };
     }
 
     try {

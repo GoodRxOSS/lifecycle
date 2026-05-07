@@ -35,6 +35,13 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.UpdateBuildConfigSuccessResponse.allOf[1].properties.data).toEqual({
       $ref: '#/components/schemas/Build',
     });
+    expect(schemas.UpdateBuildConfigPatchRequest.properties.uuid).toEqual(
+      expect.objectContaining({
+        minLength: 3,
+        maxLength: 50,
+        pattern: '^[a-z0-9-]+$',
+      })
+    );
     expect(schemas.Build.properties.commentRuntimeEnv).toEqual(
       expect.objectContaining({
         type: 'object',

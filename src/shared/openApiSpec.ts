@@ -3028,8 +3028,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             uuid: {
               type: 'string',
+              minLength: 3,
+              maxLength: 50,
+              pattern: '^[a-z0-9-]+$',
               example: 'curly-meadow-171613',
-              description: 'The new UUID to assign to the build.',
+              description:
+                'The new UUID to assign to the build. Must use lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen.',
             },
             isStatic: {
               type: 'boolean',
