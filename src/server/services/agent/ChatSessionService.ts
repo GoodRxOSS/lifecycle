@@ -90,9 +90,10 @@ export default class AgentChatSessionService {
       requestedProvider,
       requestedModelId,
     });
-    await AgentProviderRegistry.getRequiredStoredApiKey({
+    await AgentProviderRegistry.getRequiredProviderApiKey({
       provider: selection.provider,
       userIdentity: providerUserIdentity,
+      repoFullName: primaryWorkspaceRepo?.repo,
     });
     let validatedRuntimeControlChoices: ValidatedEntryRuntimeControlChoices | null = null;
     if (opts.runtimeControlChoices) {

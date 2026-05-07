@@ -398,6 +398,8 @@ const baseOpts: CreateSessionOptions = {
 };
 
 describe('AgentSessionService', () => {
+  const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+
   describe('buildAgentSessionPodName', () => {
     it('keeps the legacy short form when no build UUID is provided', () => {
       expect(buildAgentSessionPodName('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe('agent-aaaaaaaa');
@@ -422,6 +424,7 @@ describe('AgentSessionService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.ANTHROPIC_API_KEY;
     (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(mockSessionQuery);
     (AgentSession.transaction as jest.Mock) = jest.fn(async (callback) => callback({ trx: true }));
     (AgentThread.query as jest.Mock) = jest.fn().mockReturnValue(mockThreadQuery);
@@ -638,6 +641,14 @@ describe('AgentSessionService', () => {
     (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockImplementation(
       jest.requireActual('server/lib/agentSession/systemPrompt').resolveAgentSessionPromptContext
     );
+  });
+
+  afterAll(() => {
+    if (originalAnthropicKey === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+    }
   });
 
   it('creates a chat session without provisioning runtime resources', async () => {
@@ -1122,11 +1133,11 @@ describe('AgentSessionService', () => {
       );
     });
 
-    it('requires a stored provider API key to launch the session workspace', async () => {
+    it('requires a provider API key to launch the session workspace', async () => {
       (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValue(null);
 
       await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow(
-        'No stored API key is configured for provider "anthropic"'
+        'No API key is configured for provider "anthropic"'
       );
       expect(createAgentPvc).not.toHaveBeenCalled();
       expect(createSessionWorkspacePod).not.toHaveBeenCalled();

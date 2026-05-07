@@ -84,6 +84,7 @@ function makeRequest(
 describe('API /api/v2/ai/agent/api-keys', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;
   const originalLocalDevUserId = process.env.LOCAL_DEV_USER_ID;
+  const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
 
   const restoreEnv = () => {
     if (originalEnableAuth === undefined) {
@@ -97,11 +98,18 @@ describe('API /api/v2/ai/agent/api-keys', () => {
     } else {
       process.env.LOCAL_DEV_USER_ID = originalLocalDevUserId;
     }
+
+    if (originalAnthropicKey === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+    }
   };
 
   beforeEach(() => {
     jest.clearAllMocks();
     restoreEnv();
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   afterAll(() => {
@@ -145,6 +153,18 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       const json = await res.json();
       expect(json.data.hasKey).toBe(true);
       expect(json.data.maskedKey).toBe('sk-ant...xyz9');
+    });
+
+    it('returns shared key status when the provider env key is configured', async () => {
+      process.env.ANTHROPIC_API_KEY = 'shared-anthropic-key';
+      mockGetMaskedKey.mockResolvedValue(null);
+
+      const res = await GET(makeRequest(undefined, { sub: 'user-1' }));
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.data.hasKey).toBe(true);
+      expect(json.data.maskedKey).toBeUndefined();
     });
 
     it('returns 400 when provider is invalid', async () => {

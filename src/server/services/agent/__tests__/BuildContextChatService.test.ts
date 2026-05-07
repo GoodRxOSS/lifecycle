@@ -22,7 +22,7 @@ const mockAgentSessionTransaction = jest.fn();
 const mockAgentThreadQuery = jest.fn();
 const mockAgentSourceQuery = jest.fn();
 const mockResolveSelection = jest.fn();
-const mockGetRequiredStoredApiKey = jest.fn();
+const mockGetRequiredProviderApiKey = jest.fn();
 const mockLoggerInfo = jest.fn();
 
 jest.mock('server/models/Build', () => ({
@@ -58,7 +58,7 @@ jest.mock('../ProviderRegistry', () => ({
   __esModule: true,
   default: {
     resolveSelection: (...args: unknown[]) => mockResolveSelection(...args),
-    getRequiredStoredApiKey: (...args: unknown[]) => mockGetRequiredStoredApiKey(...args),
+    getRequiredProviderApiKey: (...args: unknown[]) => mockGetRequiredProviderApiKey(...args),
   },
 }));
 
@@ -291,7 +291,7 @@ describe('BuildContextChatService', () => {
       provider: 'gemini',
       modelId: 'gemini-3-flash-preview',
     });
-    mockGetRequiredStoredApiKey.mockResolvedValue('sample-api-key');
+    mockGetRequiredProviderApiKey.mockResolvedValue('sample-api-key');
   });
 
   afterEach(() => {
@@ -326,12 +326,13 @@ describe('BuildContextChatService', () => {
       requestedProvider: undefined,
       requestedModelId: 'gemini-3-flash-preview',
     });
-    expect(mockGetRequiredStoredApiKey).toHaveBeenCalledWith({
+    expect(mockGetRequiredProviderApiKey).toHaveBeenCalledWith({
       provider: 'gemini',
       userIdentity: {
         userId: 'sample-user',
         githubUsername: 'sample-user',
       },
+      repoFullName: 'example-org/example-repo',
     });
     expect(arranged.sessionInsertAndFetch).toHaveBeenCalledWith(
       expect.objectContaining({

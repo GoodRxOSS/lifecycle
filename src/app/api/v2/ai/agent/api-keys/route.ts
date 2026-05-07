@@ -20,6 +20,7 @@ import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
+import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
 import {
   STORED_AGENT_PROVIDER_NAMES,
   normalizeStoredAgentProviderName,
@@ -115,6 +116,27 @@ async function buildProviderState(
     hasKey: true,
     maskedKey: masked.maskedKey,
     updatedAt: masked.updatedAt,
+  };
+}
+
+async function buildProviderStateWithSharedFallback(
+  userId: string,
+  ownerGithubUsername: string | null | undefined,
+  provider: SupportedProvider
+): Promise<ProviderKeyState> {
+  const userState = await buildProviderState(userId, ownerGithubUsername, provider);
+  if (userState.hasKey) {
+    return userState;
+  }
+
+  const sharedKey = await AgentProviderRegistry.getSharedProviderApiKey({ provider });
+  if (!sharedKey) {
+    return userState;
+  }
+
+  return {
+    provider,
+    hasKey: true,
   };
 }
 
@@ -260,7 +282,9 @@ const getHandler = async (req: NextRequest) => {
   const configuredProviders = await getConfiguredProviders();
   const providers = requestedProvider ? [requestedProvider] : configuredProviders;
   const states = await Promise.all(
-    providers.map((provider) => buildProviderState(userIdentity.userId, userIdentity.githubUsername, provider))
+    providers.map((provider) =>
+      buildProviderStateWithSharedFallback(userIdentity.userId, userIdentity.githubUsername, provider)
+    )
   );
   const primaryState = states[0] || {
     provider: configuredProviders[0],

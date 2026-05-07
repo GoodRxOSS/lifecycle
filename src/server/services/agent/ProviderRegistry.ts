@@ -41,7 +41,7 @@ export class MissingAgentProviderApiKeyError extends Error {
 
   constructor(provider: string) {
     super(
-      `No stored API key is configured for provider "${provider}". Save your ${provider} API key in Agent Session settings before starting a session or run.`
+      `No API key is configured for provider "${provider}". Save your ${provider} API key in Agent Session settings or configure a shared Agent provider key.`
     );
     this.name = 'MissingAgentProviderApiKeyError';
     this.provider = provider;
@@ -67,6 +67,31 @@ function getProviderInstance(provider: AgentResolvedModelSelection['provider'], 
     default:
       throw new Error(`Unsupported agent provider: ${provider}`);
   }
+}
+
+function readSharedProviderApiKey(providerName: string, explicitEnvVar?: string): string | null {
+  for (const envVar of getProviderEnvVarCandidates(providerName, explicitEnvVar)) {
+    const apiKey = process.env[envVar]?.trim();
+    if (apiKey) {
+      return apiKey;
+    }
+  }
+
+  return null;
+}
+
+function findProviderConfig(providerConfigs: ProviderConfig[], providerName: string): ProviderConfig | null {
+  const targetProvider = normalizeStoredAgentProviderName(providerName) || providerName;
+  return (
+    providerConfigs.find((provider) => {
+      if (provider?.enabled === false || typeof provider.name !== 'string') {
+        return false;
+      }
+
+      const normalized = normalizeStoredAgentProviderName(provider.name) || provider.name;
+      return normalized === targetProvider;
+    }) || null
+  );
 }
 
 export function resolveRequestedModelSelection(
@@ -137,6 +162,60 @@ export default class AgentProviderRegistry {
     return getProviderEnvVarCandidates(providerName, explicitEnvVar);
   }
 
+  private static async getEnabledProviderConfig(
+    repoFullName: string | undefined,
+    providerName: string
+  ): Promise<ProviderConfig | null> {
+    const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const providerConfigs = Array.isArray(config.providers) ? (config.providers as ProviderConfig[]) : [];
+    return findProviderConfig(providerConfigs, providerName);
+  }
+
+  static async getSharedProviderApiKey({
+    repoFullName,
+    provider,
+  }: {
+    repoFullName?: string;
+    provider: string;
+  }): Promise<string | null> {
+    const providerConfig = await this.getEnabledProviderConfig(repoFullName, provider).catch((error) => {
+      getLogger().warn(
+        { error, repoFullName, provider },
+        `AgentExec: shared provider credential lookup skipped provider=${provider} repo=${repoFullName || 'none'}`
+      );
+      return null;
+    });
+
+    return readSharedProviderApiKey(providerConfig?.name || provider, providerConfig?.apiKeyEnvVar);
+  }
+
+  static async getProviderApiKey({
+    repoFullName,
+    provider,
+    userIdentity,
+    apiKeyEnvVar,
+  }: {
+    repoFullName?: string;
+    provider: string;
+    userIdentity: Pick<RequestUserIdentity, 'userId' | 'githubUsername'>;
+    apiKeyEnvVar?: string;
+  }): Promise<string | null> {
+    const userApiKey = await UserApiKeyService.getDecryptedKey(
+      userIdentity.userId,
+      provider,
+      userIdentity.githubUsername
+    );
+    if (userApiKey) {
+      return userApiKey;
+    }
+
+    const sharedApiKey =
+      apiKeyEnvVar === undefined
+        ? await this.getSharedProviderApiKey({ repoFullName, provider })
+        : readSharedProviderApiKey(provider, apiKeyEnvVar);
+    return sharedApiKey;
+  }
+
   static async listAvailableModels(repoFullName?: string): Promise<AgentModelSummary[]> {
     const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     return transformProviderModels(config.providers || []).flatMap((model) => {
@@ -167,11 +246,11 @@ export default class AgentProviderRegistry {
     const configuredProviders = new Set<string>();
     await Promise.all(
       uniqueProviders.map(async (provider) => {
-        const apiKey = await UserApiKeyService.getDecryptedKey(
-          userIdentity.userId,
+        const apiKey = await this.getProviderApiKey({
+          repoFullName,
           provider,
-          userIdentity.githubUsername
-        );
+          userIdentity,
+        });
 
         if (apiKey) {
           configuredProviders.add(provider);
@@ -208,11 +287,12 @@ export default class AgentProviderRegistry {
         .filter((provider) => provider?.enabled !== false && typeof provider.name === 'string')
         .map(async (provider) => {
           const envVarCandidates = this.getProviderEnvVarCandidates(provider.name, provider.apiKeyEnvVar);
-          const apiKey = await UserApiKeyService.getDecryptedKey(
-            userIdentity.userId,
-            provider.name,
-            userIdentity.githubUsername
-          );
+          const apiKey = await this.getProviderApiKey({
+            repoFullName,
+            provider: provider.name,
+            userIdentity,
+            apiKeyEnvVar: provider.apiKeyEnvVar,
+          });
 
           if (!apiKey) {
             return;
@@ -240,14 +320,20 @@ export default class AgentProviderRegistry {
     return resolveRequestedModelSelection(models, requestedProvider, requestedModelId);
   }
 
-  static async getRequiredStoredApiKey({
+  static async getRequiredProviderApiKey({
     provider,
     userIdentity,
+    repoFullName,
   }: {
     provider: string;
     userIdentity: Pick<RequestUserIdentity, 'userId' | 'githubUsername'>;
+    repoFullName?: string;
   }): Promise<string> {
-    const apiKey = await UserApiKeyService.getDecryptedKey(userIdentity.userId, provider, userIdentity.githubUsername);
+    const apiKey = await this.getProviderApiKey({
+      repoFullName,
+      provider,
+      userIdentity,
+    });
 
     if (!apiKey) {
       throw new MissingAgentProviderApiKeyError(provider);
@@ -257,6 +343,7 @@ export default class AgentProviderRegistry {
   }
 
   static async createLanguageModel({
+    repoFullName,
     selection,
     userIdentity,
   }: {
@@ -264,9 +351,10 @@ export default class AgentProviderRegistry {
     selection: AgentResolvedModelSelection;
     userIdentity: RequestUserIdentity;
   }): Promise<LanguageModel> {
-    const apiKey = await this.getRequiredStoredApiKey({
+    const apiKey = await this.getRequiredProviderApiKey({
       provider: selection.provider,
       userIdentity,
+      repoFullName,
     });
     const provider = getProviderInstance(selection.provider, apiKey);
 

@@ -19,7 +19,7 @@ const mockAgentSessionTransaction = jest.fn();
 const mockAgentThreadQuery = jest.fn();
 const mockCreateSessionSource = jest.fn();
 const mockResolveSelection = jest.fn();
-const mockGetRequiredStoredApiKey = jest.fn();
+const mockGetRequiredProviderApiKey = jest.fn();
 const mockValidateEntryChoices = jest.fn();
 const mockLoggerInfo = jest.fn();
 
@@ -42,7 +42,7 @@ jest.mock('../ProviderRegistry', () => ({
   __esModule: true,
   default: {
     resolveSelection: (...args: unknown[]) => mockResolveSelection(...args),
-    getRequiredStoredApiKey: (...args: unknown[]) => mockGetRequiredStoredApiKey(...args),
+    getRequiredProviderApiKey: (...args: unknown[]) => mockGetRequiredProviderApiKey(...args),
   },
 }));
 
@@ -129,7 +129,7 @@ function arrangePersistence() {
 describe('AgentChatSessionService.createChatSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetRequiredStoredApiKey.mockResolvedValue('sample-key');
+    mockGetRequiredProviderApiKey.mockResolvedValue('sample-key');
     mockValidateEntryChoices.mockResolvedValue(null);
   });
 
@@ -151,12 +151,13 @@ describe('AgentChatSessionService.createChatSession', () => {
       requestedProvider: 'sample-provider',
       requestedModelId: 'sample-model',
     });
-    expect(mockGetRequiredStoredApiKey).toHaveBeenCalledWith({
+    expect(mockGetRequiredProviderApiKey).toHaveBeenCalledWith({
       provider: 'sample-provider',
       userIdentity: {
         userId: 'sample-user',
         githubUsername: null,
       },
+      repoFullName: undefined,
     });
     expect(persistence.sessionInsertAndFetch).toHaveBeenCalledWith(
       expect.objectContaining({

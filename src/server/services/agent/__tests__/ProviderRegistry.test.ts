@@ -89,6 +89,7 @@ describe('resolveRequestedModelSelection', () => {
 
 describe('AgentProviderRegistry credential resolution', () => {
   const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  const originalGeminiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -109,7 +110,8 @@ describe('AgentProviderRegistry credential resolution', () => {
       ],
     });
     (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValue(null);
-    process.env.ANTHROPIC_API_KEY = 'env-anthropic-key-that-must-be-ignored';
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   });
 
   afterAll(() => {
@@ -118,9 +120,15 @@ describe('AgentProviderRegistry credential resolution', () => {
     } else {
       process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
     }
+
+    if (originalGeminiKey === undefined) {
+      delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    } else {
+      process.env.GOOGLE_GENERATIVE_AI_API_KEY = originalGeminiKey;
+    }
   });
 
-  it('uses stored user keys and ignores process env fallback', async () => {
+  it('uses stored user keys for provider credential env maps', async () => {
     (UserApiKeyService.getDecryptedKey as jest.Mock).mockImplementation(async (_userId: string, provider: string) => {
       if (provider === 'gemini') {
         return 'user-gemini-key';
@@ -139,6 +147,22 @@ describe('AgentProviderRegistry credential resolution', () => {
       })
     ).resolves.toEqual({
       GOOGLE_GENERATIVE_AI_API_KEY: 'user-gemini-key',
+    });
+  });
+
+  it('uses shared provider env keys when no user key is stored', async () => {
+    process.env.ANTHROPIC_API_KEY = 'shared-anthropic-key';
+
+    await expect(
+      AgentProviderRegistry.resolveCredentialEnvMap({
+        repoFullName: 'example-org/example-repo',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        },
+      })
+    ).resolves.toEqual({
+      ANTHROPIC_API_KEY: 'shared-anthropic-key',
     });
   });
 
@@ -205,9 +229,24 @@ describe('AgentProviderRegistry credential resolution', () => {
     });
   });
 
-  it('throws when the requested provider has no stored user key', async () => {
+  it('uses the shared provider env key when the requested provider has no stored user key', async () => {
+    process.env.ANTHROPIC_API_KEY = 'shared-anthropic-key';
+
     await expect(
-      AgentProviderRegistry.getRequiredStoredApiKey({
+      AgentProviderRegistry.getRequiredProviderApiKey({
+        provider: 'anthropic',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        },
+        repoFullName: 'example-org/example-repo',
+      })
+    ).resolves.toBe('shared-anthropic-key');
+  });
+
+  it('throws when the requested provider has no user or shared key', async () => {
+    await expect(
+      AgentProviderRegistry.getRequiredProviderApiKey({
         provider: 'anthropic',
         userIdentity: {
           userId: 'sample-user',
@@ -267,6 +306,46 @@ describe('AgentProviderRegistry credential resolution', () => {
         provider: 'gemini',
         modelId: 'gemini-3-flash-preview',
         displayName: 'Gemini 3 Flash Preview',
+        default: true,
+        maxTokens: 8192,
+      },
+    ]);
+  });
+
+  it('lists models backed by shared provider env keys', async () => {
+    process.env.ANTHROPIC_API_KEY = 'shared-anthropic-key';
+    mockGetEffectiveConfig.mockResolvedValueOnce({
+      providers: [
+        {
+          name: 'anthropic',
+          enabled: true,
+          apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+          models: [
+            {
+              id: 'claude-sonnet-4-5',
+              displayName: 'Claude Sonnet 4.5',
+              enabled: true,
+              default: true,
+              maxTokens: 8192,
+            },
+          ],
+        },
+      ],
+    });
+
+    await expect(
+      AgentProviderRegistry.listAvailableModelsForUser({
+        repoFullName: 'example-org/example-repo',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        },
+      })
+    ).resolves.toEqual([
+      {
+        provider: 'anthropic',
+        modelId: 'claude-sonnet-4-5',
+        displayName: 'Claude Sonnet 4.5',
         default: true,
         maxTokens: 8192,
       },
