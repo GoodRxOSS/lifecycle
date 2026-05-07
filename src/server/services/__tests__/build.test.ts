@@ -164,6 +164,89 @@ function createThenableQuery(result: any[] = []) {
   return query;
 }
 
+describe('BuildService build response queries', () => {
+  function createQueueManager() {
+    return {
+      registerQueue: jest.fn(() => ({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      })),
+    };
+  }
+
+  test('selects comment env columns when listing builds', async () => {
+    const build = {
+      uuid: 'sample-build',
+      commentRuntimeEnv: { FEATURE_ENABLED: 'true' },
+      commentInitEnv: { MIGRATION_ENABLED: 'true' },
+    };
+    const query: any = {
+      select: jest.fn(() => query),
+      where: jest.fn(() => query),
+      whereNotIn: jest.fn(() => query),
+      modify: jest.fn((callback: (builder: any) => void) => {
+        callback(query);
+        return query;
+      }),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn(() => query),
+      orderBy: jest.fn(() => query),
+      page: jest.fn().mockResolvedValue({ results: [build], total: 1 }),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => query),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+
+    const result = await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 });
+
+    expect(result.data).toEqual([build]);
+    expect(query.select.mock.calls[0]).toEqual(expect.arrayContaining(['commentRuntimeEnv', 'commentInitEnv']));
+  });
+
+  test('selects comment env columns when loading a build by UUID', async () => {
+    const build = {
+      uuid: 'sample-build',
+      commentRuntimeEnv: { FEATURE_ENABLED: 'true' },
+      commentInitEnv: { MIGRATION_ENABLED: 'true' },
+    };
+    const query: any = {
+      findOne: jest.fn(() => query),
+      select: jest.fn(() => query),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn(() => query),
+      then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(build).then(resolve, reject),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => query),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+
+    await expect(buildService.getBuildByUUID('sample-build')).resolves.toBe(build);
+
+    expect(query.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
+    expect(query.select.mock.calls[0]).toEqual(expect.arrayContaining(['commentRuntimeEnv', 'commentInitEnv']));
+  });
+});
+
 describe('BuildService failure boundaries', () => {
   let buildService: BuildService;
   let recordDeployFailure: jest.Mock;
