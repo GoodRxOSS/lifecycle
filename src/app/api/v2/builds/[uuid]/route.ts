@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid';
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
+import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import BuildService from 'server/services/build';
 import OverrideService, { BuildUuidValidationError, type BuildConfigPatchInput } from 'server/services/override';
 
@@ -44,8 +45,13 @@ function validateBuildConfigPatch(body: unknown): BuildConfigPatchInput | Error 
   const patch: BuildConfigPatchInput = {};
 
   if (hasOwn(body, 'uuid')) {
-    if (typeof body.uuid !== 'string' || body.uuid.length === 0) {
-      return new Error('uuid must be a non-empty string');
+    if (typeof body.uuid !== 'string') {
+      return new Error('uuid must be a string');
+    }
+
+    const uuidFormatError = validateBuildUuidFormat(body.uuid);
+    if (uuidFormatError) {
+      return new Error(uuidFormatError);
     }
     patch.uuid = body.uuid;
   }

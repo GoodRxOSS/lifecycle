@@ -254,7 +254,9 @@ export default class BuildService extends BaseService {
         'updatedAt',
         'isStatic',
         'kind',
-        'baseBuildId'
+        'baseBuildId',
+        'commentRuntimeEnv',
+        'commentInitEnv'
       )
       .where('kind', BuildKind.ENVIRONMENT)
       .whereNotIn('status', exclude)
@@ -315,7 +317,9 @@ export default class BuildService extends BaseService {
         'dependencyGraph',
         'isStatic',
         'kind',
-        'baseBuildId'
+        'baseBuildId',
+        'commentRuntimeEnv',
+        'commentInitEnv'
       )
       .withGraphFetched('[baseBuild, pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {

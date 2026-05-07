@@ -2974,6 +2974,22 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
             baseBuildId: { type: 'integer', nullable: true },
+            commentRuntimeEnv: {
+              type: 'object',
+              additionalProperties: true,
+              example: {
+                FEATURE_ENABLED: 'true',
+              },
+              description: 'Runtime environment overrides parsed from build comments.',
+            },
+            commentInitEnv: {
+              type: 'object',
+              additionalProperties: true,
+              example: {
+                MIGRATION_ENABLED: 'true',
+              },
+              description: 'Init environment overrides parsed from build comments.',
+            },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
             baseBuild: {
@@ -3012,8 +3028,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             uuid: {
               type: 'string',
+              minLength: 3,
+              maxLength: 50,
+              pattern: '^[a-z0-9-]+$',
               example: 'curly-meadow-171613',
-              description: 'The new UUID to assign to the build.',
+              description:
+                'The new UUID to assign to the build. Must use lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen.',
             },
             isStatic: {
               type: 'boolean',

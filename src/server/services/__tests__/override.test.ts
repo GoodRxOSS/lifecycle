@@ -730,6 +730,33 @@ describe('OverrideService.applyBuildOverrides', () => {
   });
 });
 
+describe('OverrideService.validateUuid', () => {
+  it('rejects uppercase UUIDs before checking uniqueness', async () => {
+    const findOne = jest.fn();
+    const query = jest.fn(() => ({
+      findOne,
+    }));
+    const service = new OverrideService(
+      {
+        models: {
+          Build: {
+            query,
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+
+    await expect(service.validateUuid('New-Build', 42)).resolves.toEqual({
+      valid: false,
+      error: 'UUID can only contain lowercase letters, numbers, and hyphens',
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
 describe('OverrideService.applyBuildConfigPatch', () => {
   beforeEach(() => {
     jest.clearAllMocks();
