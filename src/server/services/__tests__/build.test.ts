@@ -1,5 +1,5 @@
 /**
- * Copyright 2026 GoodRx, Inc.
+ * Copyright 2026 Lifecycle contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ jest.mock('server/lib/logger', () => ({
     warn: jest.fn(),
     debug: jest.fn(),
   })),
-  withLogContext: jest.fn((ctx, fn) => fn()),
+  withLogContext: jest.fn((_ctx, fn) => fn()),
   extractContextForQueue: jest.fn(() => ({})),
   updateLogContext: jest.fn(),
   LogStage: {},
@@ -644,6 +644,20 @@ describe('BuildService queue fingerprinting', () => {
     const changedFingerprint = await buildService.computeBuildRequestFingerprint(changedBuild);
 
     expect(baseFingerprint).not.toEqual(changedFingerprint);
+  });
+
+  test('changes fingerprint when static mode changes', async () => {
+    const previewBuild = createMockBuild({
+      isStatic: false,
+    });
+    const staticBuild = createMockBuild({
+      isStatic: true,
+    });
+
+    const previewFingerprint = await buildService.computeBuildRequestFingerprint(previewBuild);
+    const staticFingerprint = await buildService.computeBuildRequestFingerprint(staticBuild);
+
+    expect(previewFingerprint).not.toEqual(staticFingerprint);
   });
 
   test('changes fingerprint when repository filter changes', async () => {

@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 Lifecycle contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,8 @@ import { Build, PullRequest, Deploy, Repository } from 'server/models';
 import * as github from 'server/lib/github';
 import { QUEUE_NAMES, LIFECYCLE_UI_URL } from 'shared/config';
 import { Metrics } from 'server/lib/metrics';
-import * as psl from 'psl';
 import { CommentHelper } from 'server/lib/comment';
-import OverrideService from './override';
+import OverrideService, { type BuildOverrideInput } from './override';
 import {
   BuildKind,
   BuildStatus,
@@ -90,7 +89,7 @@ export default class ActivityStream extends BaseService {
         const { repository } = pullRequest;
         await this.db.services.ActivityStream.updatePullRequestActivityStream(
           build,
-          build.deploys,
+          build.deploys || [],
           pullRequest,
           repository,
           true,
@@ -129,7 +128,8 @@ export default class ActivityStream extends BaseService {
   async updateBuildsAndDeploysFromCommentEdit(pullRequest: PullRequest, commentBody: string) {
     await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
     const { build, repository } = pullRequest;
-    const { deploys, id: buildId } = build;
+    const { id: buildId } = build;
+    const deploys = build.deploys || [];
     const buildUuid = build?.uuid;
 
     return withLogContext({ buildUuid }, async () => {
@@ -199,112 +199,15 @@ export default class ActivityStream extends BaseService {
       return;
     }
 
-    const serviceOverrides = CommentHelper.parseServiceBranches(commentBody);
-    const vanityUrl = CommentHelper.parseVanityUrl(commentBody);
-    const envOverrides = CommentHelper.parseEnvironmentOverrides(commentBody);
-    const redeployOnPush = CommentHelper.parseRedeployOnPushes(commentBody);
-    const requestedUuid = vanityUrl && vanityUrl !== build.uuid ? vanityUrl : null;
+    const overrides: BuildOverrideInput = {
+      serviceOverrides: CommentHelper.parseServiceBranches(commentBody),
+      vanityUrl: CommentHelper.parseVanityUrl(commentBody),
+      envOverrides: CommentHelper.parseEnvironmentOverrides(commentBody),
+      redeployOnPush: CommentHelper.parseRedeployOnPushes(commentBody),
+    };
     const override = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
 
-    if (requestedUuid) {
-      const validation = await override.validateUuid(requestedUuid, build.id);
-      if (!validation.valid) {
-        getLogger().warn(`UUID: comment override rejected newUuid=${requestedUuid} error=${validation.error}`);
-        return;
-      }
-    }
-
-    getLogger().debug(`Parsed environment overrides: ${JSON.stringify(envOverrides)}`);
-
-    await build.$query().patch({
-      commentInitEnv: envOverrides,
-      commentRuntimeEnv: envOverrides,
-      trackDefaultBranches: redeployOnPush,
-    });
-
-    getLogger().debug(`Service overrides: ${JSON.stringify(serviceOverrides)}`);
-
-    await Promise.all(serviceOverrides.map((override) => this.patchServiceOverride(build, deploys, override)));
-
-    // handle build uuid updates here
-    if (requestedUuid) {
-      await override.updateBuildUuid(build, requestedUuid);
-    }
-
-    // if pull request should be built and deployed again, add it to build queue
-    if (pullRequest.deployOnUpdate) {
-      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
-        buildId: build.id,
-        runUUID: runUuid,
-        ...extractContextForQueue(),
-      });
-    }
-  }
-
-  private async patchServiceOverride(build: Build, deploys: Deploy[], { active, serviceName, branchOrExternalUrl }) {
-    getLogger().debug(`Patching service: ${serviceName} active=${active} branch/url=${branchOrExternalUrl}`);
-
-    const deploy: Deploy = build.enableFullYaml
-      ? deploys.find((d) => d.deployable.name === serviceName)
-      : deploys.find((d) => d.service.name === serviceName);
-
-    if (!deploy) {
-      getLogger().warn(`Deploy: not found service=${serviceName}`);
-      return;
-    }
-
-    const { service, deployable } = deploy;
-
-    if (psl.isValid(branchOrExternalUrl)) {
-      // External URL override
-      // ??? not exactly sure where we use an external url in this context
-      await deploy
-        .$query()
-        .patch({
-          publicUrl: branchOrExternalUrl,
-          branchName: null,
-          dockerImage: null,
-          active,
-        })
-        .catch((error) => {
-          getLogger().error({ error }, `Deploy: patch failed service=${serviceName} field=externalUrl`);
-        });
-    } else {
-      getLogger().debug(`Setting branch override: ${branchOrExternalUrl} for deployable: ${deployable?.name}`);
-      await deploy.deployable
-        .$query()
-        .patch({ commentBranchName: branchOrExternalUrl })
-        .catch((error) => {
-          getLogger().error({ error }, `Deployable: patch failed service=${serviceName} field=branch`);
-        });
-
-      await deploy
-        .$query()
-        .patch({
-          branchName: branchOrExternalUrl,
-          publicUrl: build.enableFullYaml
-            ? this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)
-            : this.db.services.Deploy.hostForServiceDeploy(deploy, service),
-          active,
-        })
-        .catch((error) => {
-          getLogger().error({ error }, `Deploy: patch failed service=${serviceName} field=branch`);
-        });
-    }
-
-    // patch dependent deploys
-    if (build.enableFullYaml) {
-      const dependents = deploys.filter(
-        (d) =>
-          d.deployable.dependsOnDeployableName === deploy.deployable.name &&
-          d.deployable.buildUUID === deploy.deployable.buildUUID &&
-          d.deployable.buildId === deploy.deployable.buildId
-      );
-      await Promise.all(dependents.map((d) => d.$query().patch({ active })));
-    } else {
-      const dependents = deploys.filter((d) => d.service.dependsOnServiceId === service.id);
-      await Promise.all(dependents.map((d) => d.$query().patch({ active })));
-    }
+    await override.applyBuildOverrides({ build, deploys, pullRequest, overrides, runUuid });
   }
 
   private async updateMissionControlComment(
@@ -397,7 +300,7 @@ export default class ActivityStream extends BaseService {
     repository: Repository,
     updateMissionControl: boolean,
     updateStatus: boolean,
-    error: Error = null,
+    error: Error | null = null,
     queue: boolean = true,
     targetGithubRepositoryId?: number
   ) {

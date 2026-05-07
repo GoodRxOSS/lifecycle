@@ -20,10 +20,7 @@ const mockLogger = {
   info: jest.fn(),
   warn: jest.fn(),
 };
-const mockBuildFindOne = jest.fn();
-const mockBuildQuery = jest.fn();
-const mockBuildPatch = jest.fn();
-const mockEnqueueResolveAndDeployBuild = jest.fn();
+const mockApplyBuildOverrides = jest.fn();
 const mockRegisterQueue = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
@@ -104,6 +101,13 @@ jest.mock('server/services/buildMetadata', () => ({
   default: jest.fn().mockImplementation(() => ({})),
 }));
 
+jest.mock('../override', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    applyBuildOverrides: (...args: unknown[]) => mockApplyBuildOverrides(...args),
+  })),
+}));
+
 import ActivityStream from '../activityStream';
 import { CommentParser } from 'shared/constants';
 
@@ -113,25 +117,13 @@ function createActivityStream() {
   });
 
   const db = {
-    models: {
-      Build: {
-        query: mockBuildQuery,
-      },
-    },
     services: {
-      BuildService: {
-        enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
-      },
       Deploy: {
         hostForDeployableDeploy: jest.fn(),
         hostForServiceDeploy: jest.fn(),
       },
     },
   };
-
-  mockBuildQuery.mockReturnValue({
-    findOne: mockBuildFindOne,
-  });
 
   return new ActivityStream(
     db as any,
@@ -146,44 +138,78 @@ function createActivityStream() {
 describe('ActivityStream comment overrides', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockBuildFindOne.mockResolvedValue({
-      id: 999,
-      uuid: 'existing-build',
-    });
-    mockBuildPatch.mockResolvedValue(undefined);
   });
 
-  it('rejects an unavailable comment UUID before applying other overrides', async () => {
+  it('parses comment overrides and delegates structured updates to OverrideService', async () => {
     const service = createActivityStream();
     const build = {
       id: 42,
       uuid: 'current-build',
-      $query: jest.fn(() => ({
-        patch: mockBuildPatch,
-      })),
+    };
+    const deploys = [{ id: 1 }];
+    const pullRequest = {
+      deployOnUpdate: true,
     };
     const commentBody = [
       CommentParser.HEADER,
-      'url: existing-build',
+      '- [x] api: feature/api',
+      '- [ ] cache: main',
+      'url: new-build',
       'ENV:FEATURE_ENABLED:true',
       CommentParser.FOOTER,
+      '- [x] Redeploy on pushes to default branches',
     ].join('\n');
 
     await (service as any).applyCommentOverrides({
       build,
-      deploys: [],
-      pullRequest: {
-        deployOnUpdate: true,
-      },
+      deploys,
+      pullRequest,
       commentBody,
       runUuid: 'run-uuid',
     });
 
-    expect(mockBuildFindOne).toHaveBeenCalledWith({ uuid: 'existing-build' });
-    expect(mockBuildPatch).not.toHaveBeenCalled();
-    expect(mockEnqueueResolveAndDeployBuild).not.toHaveBeenCalled();
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      'UUID: comment override rejected newUuid=existing-build error=UUID is not available'
-    );
+    expect(mockApplyBuildOverrides).toHaveBeenCalledWith({
+      build,
+      deploys,
+      pullRequest,
+      runUuid: 'run-uuid',
+      overrides: {
+        serviceOverrides: [
+          {
+            active: true,
+            serviceName: 'api',
+            branchOrExternalUrl: 'feature/api',
+          },
+          {
+            active: false,
+            serviceName: 'cache',
+            branchOrExternalUrl: 'main',
+          },
+        ],
+        vanityUrl: 'new-build',
+        envOverrides: {
+          FEATURE_ENABLED: 'true',
+        },
+        redeployOnPush: true,
+      },
+    });
+  });
+
+  it('does not delegate when build id is missing', async () => {
+    const service = createActivityStream();
+    const commentBody = [CommentParser.HEADER, '- [x] api: feature/api', CommentParser.FOOTER].join('\n');
+
+    await (service as any).applyCommentOverrides({
+      build: {
+        uuid: 'current-build',
+      },
+      deploys: [],
+      pullRequest: {},
+      commentBody,
+      runUuid: 'run-uuid',
+    });
+
+    expect(mockApplyBuildOverrides).not.toHaveBeenCalled();
+    expect(mockLogger.error).toHaveBeenCalledWith('Build: missing for comment edit overrides');
   });
 });

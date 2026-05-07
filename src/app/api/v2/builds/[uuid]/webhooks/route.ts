@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 Lifecycle contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ import BuildService from 'server/services/build';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
- *   post:
+ *   put:
  *     summary: Invoke webhooks for a build
  *     description: |
  *       Triggers the execution of configured webhooks for a specific build.

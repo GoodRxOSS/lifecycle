@@ -3007,7 +3007,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
-        UpdateBuildUUIDRequest: {
+        UpdateBuildConfigPatchRequest: {
           type: 'object',
           properties: {
             uuid: {
@@ -3015,9 +3015,90 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               example: 'curly-meadow-171613',
               description: 'The new UUID to assign to the build.',
             },
+            isStatic: {
+              type: 'boolean',
+              example: true,
+              description: 'Whether this build should be treated as a static environment.',
+            },
+            trackDefaultBranches: {
+              type: 'boolean',
+              example: true,
+              description: 'Whether pushes to selected default branches should redeploy this build.',
+            },
+            commentRuntimeEnv: {
+              type: 'object',
+              example: {
+                FEATURE_ENABLED: 'true',
+              },
+              description: 'Runtime environment override object to replace on the build when provided.',
+            },
+            commentInitEnv: {
+              type: 'object',
+              example: {
+                MIGRATION_ENABLED: 'true',
+              },
+              description: 'Init environment override object to replace on the build when provided.',
+            },
           },
-          required: ['uuid'],
+          anyOf: [
+            { required: ['uuid'] },
+            { required: ['isStatic'] },
+            { required: ['trackDefaultBranches'] },
+            { required: ['commentRuntimeEnv'] },
+            { required: ['commentInitEnv'] },
+          ],
           additionalProperties: false,
+        },
+
+        BuildServiceOverridePatch: {
+          type: 'object',
+          properties: {
+            serviceName: {
+              type: 'string',
+              example: 'backend',
+              description: 'The service name to update.',
+            },
+            active: {
+              type: 'boolean',
+              example: true,
+              description: 'Whether the service should be selected for the build.',
+            },
+            branchOrExternalUrl: {
+              type: 'string',
+              example: 'feature/api',
+              description: 'The branch name or external URL override for the service.',
+            },
+          },
+          required: ['serviceName'],
+          anyOf: [{ required: ['active'] }, { required: ['branchOrExternalUrl'] }],
+          additionalProperties: true,
+        },
+
+        UpdateBuildServiceOverridesRequest: {
+          type: 'object',
+          properties: {
+            serviceOverrides: {
+              type: 'array',
+              minItems: 1,
+              items: { $ref: '#/components/schemas/BuildServiceOverridePatch' },
+            },
+          },
+          required: ['serviceOverrides'],
+          additionalProperties: true,
+        },
+
+        BuildOverrideUpdateResult: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['success'] },
+            buildUuid: { type: 'string', example: 'curly-meadow-171613' },
+            queued: {
+              type: 'boolean',
+              example: true,
+              description: 'Whether the build was queued for redeploy after the override update.',
+            },
+          },
+          required: ['status', 'buildUuid', 'queued'],
         },
 
         BuildMetadataLink: {
@@ -3230,13 +3311,29 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         /**
          * @description The specific success response for the PATCH /builds/{uuid} endpoint.
          */
-        UpdateBuildUUIDSuccessResponse: {
+        UpdateBuildConfigSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
             {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/Build' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for PATCH build override endpoints.
+         */
+        BuildOverrideUpdateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/BuildOverrideUpdateResult' },
               },
               required: ['data'],
             },
