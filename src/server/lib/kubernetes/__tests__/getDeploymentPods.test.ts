@@ -16,6 +16,8 @@
 
 var mockListNamespacedDeployment: jest.Mock;
 var mockListNamespacedStatefulSet: jest.Mock;
+var mockListNamespacedJob: jest.Mock;
+var mockListNamespacedCronJob: jest.Mock;
 var mockListNamespacedPod: jest.Mock;
 var mockBuildFindOne: jest.Mock;
 
@@ -23,11 +25,17 @@ jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
   mockListNamespacedDeployment = jest.fn();
   mockListNamespacedStatefulSet = jest.fn();
+  mockListNamespacedJob = jest.fn();
+  mockListNamespacedCronJob = jest.fn();
   mockListNamespacedPod = jest.fn();
 
   const appsClient = {
     listNamespacedDeployment: mockListNamespacedDeployment,
     listNamespacedStatefulSet: mockListNamespacedStatefulSet,
+  };
+  const batchClient = {
+    listNamespacedJob: mockListNamespacedJob,
+    listNamespacedCronJob: mockListNamespacedCronJob,
   };
   const coreClient = {
     listNamespacedPod: mockListNamespacedPod,
@@ -41,6 +49,10 @@ jest.mock('@kubernetes/client-node', () => {
       makeApiClient: jest.fn().mockImplementation((client: unknown) => {
         if (client === actual.AppsV1Api) {
           return appsClient;
+        }
+
+        if (client === actual.BatchV1Api) {
+          return batchClient;
         }
 
         if (client === actual.CoreV1Api) {
@@ -113,6 +125,28 @@ function buildPod({
   };
 }
 
+function buildJob({
+  name,
+  matchLabels = { 'batch.kubernetes.io/controller-uid': `${name}-uid` },
+  ownerReferences,
+}: {
+  name: string;
+  matchLabels?: Record<string, string>;
+  ownerReferences?: Array<Record<string, unknown>>;
+}) {
+  return {
+    metadata: {
+      name,
+      ownerReferences,
+    },
+    spec: {
+      selector: {
+        matchLabels,
+      },
+    },
+  };
+}
+
 describe('getDeploymentPods', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -137,6 +171,12 @@ describe('getDeploymentPods', () => {
       },
     });
     mockListNamespacedStatefulSet.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedJob.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedCronJob.mockResolvedValue({
       body: { items: [] },
     });
   });
@@ -257,6 +297,265 @@ describe('getDeploymentPods', () => {
           }),
         ],
       },
+    });
+
+    await expect(getDeploymentPods('sample-service', 'sample-env')).resolves.toEqual([]);
+  });
+
+  it('uses a StatefulSet selector when no Deployment exists', async () => {
+    mockListNamespacedDeployment.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedStatefulSet.mockResolvedValue({
+      body: {
+        items: [
+          {
+            spec: {
+              selector: {
+                matchLabels: {
+                  app: 'sample-stateful-service',
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+    mockListNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          buildPod({
+            name: 'stateful-active',
+            createdAt: '2026-03-27T19:00:00.000Z',
+          }),
+        ],
+      },
+    });
+
+    const pods = await getDeploymentPods('sample-service', 'sample-env');
+
+    expect(pods.map((pod) => pod.podName)).toEqual(['stateful-active']);
+    expect(mockListNamespacedPod).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'app=sample-stateful-service'
+    );
+    expect(mockListNamespacedJob).not.toHaveBeenCalled();
+  });
+
+  it('falls back to Job pods and includes terminal job pods', async () => {
+    mockListNamespacedDeployment.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedStatefulSet.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedJob.mockResolvedValue({
+      body: {
+        items: [buildJob({ name: 'sample-service-job' })],
+      },
+    });
+    mockListNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          buildPod({
+            name: 'job-succeeded',
+            createdAt: '2026-03-27T19:00:00.000Z',
+            phase: 'Succeeded',
+            containerStatuses: [
+              {
+                name: 'app',
+                ready: false,
+                restartCount: 0,
+                state: { terminated: { reason: 'Completed' } },
+              },
+            ],
+          }),
+          buildPod({
+            name: 'job-failed',
+            createdAt: '2026-03-27T18:00:00.000Z',
+            phase: 'Failed',
+            containerStatuses: [
+              {
+                name: 'app',
+                ready: false,
+                restartCount: 1,
+                state: { terminated: { reason: 'Error' } },
+              },
+            ],
+          }),
+          buildPod({
+            name: 'job-deleting',
+            createdAt: '2026-03-27T17:00:00.000Z',
+            deletionTimestamp: '2026-03-27T19:01:00.000Z',
+          }),
+        ],
+      },
+    });
+
+    const pods = await getDeploymentPods('sample-service', 'sample-env');
+
+    expect(pods.map((pod) => pod.podName)).toEqual(['job-succeeded', 'job-failed']);
+    expect(pods.map((pod) => pod.status)).toEqual(['Completed', 'Error']);
+    expect(mockListNamespacedJob).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'app.kubernetes.io/instance=sample-service-sample-env'
+    );
+    expect(mockListNamespacedPod).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'batch.kubernetes.io/controller-uid=sample-service-job-uid'
+    );
+  });
+
+  it('falls back to job-name when a Job selector is unavailable', async () => {
+    mockListNamespacedDeployment.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedStatefulSet.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedJob.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: {
+              name: 'sample-service-job',
+            },
+          },
+        ],
+      },
+    });
+    mockListNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          buildPod({
+            name: 'job-active',
+            createdAt: '2026-03-27T19:00:00.000Z',
+          }),
+        ],
+      },
+    });
+
+    await getDeploymentPods('sample-service', 'sample-env');
+
+    expect(mockListNamespacedPod).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'job-name=sample-service-job'
+    );
+  });
+
+  it('returns CronJob child Job pods when no direct workload exists', async () => {
+    mockListNamespacedDeployment.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedStatefulSet.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedCronJob.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: {
+              name: 'sample-service-cron',
+              uid: 'cron-uid',
+            },
+          },
+        ],
+      },
+    });
+    mockListNamespacedJob
+      .mockResolvedValueOnce({
+        body: { items: [] },
+      })
+      .mockResolvedValueOnce({
+        body: {
+          items: [
+            buildJob({
+              name: 'sample-service-cron-123',
+              ownerReferences: [
+                {
+                  kind: 'CronJob',
+                  name: 'sample-service-cron',
+                  uid: 'cron-uid',
+                },
+              ],
+            }),
+            buildJob({
+              name: 'unrelated-job',
+              ownerReferences: [
+                {
+                  kind: 'CronJob',
+                  name: 'unrelated-cron',
+                  uid: 'unrelated-uid',
+                },
+              ],
+            }),
+          ],
+        },
+      });
+    mockListNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          buildPod({
+            name: 'cronjob-succeeded',
+            createdAt: '2026-03-27T19:00:00.000Z',
+            phase: 'Succeeded',
+            containerStatuses: [
+              {
+                name: 'app',
+                ready: false,
+                restartCount: 0,
+                state: { terminated: { reason: 'Completed' } },
+              },
+            ],
+          }),
+        ],
+      },
+    });
+
+    const pods = await getDeploymentPods('sample-service', 'sample-env');
+
+    expect(pods.map((pod) => pod.podName)).toEqual(['cronjob-succeeded']);
+    expect(mockListNamespacedCronJob).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'app.kubernetes.io/instance=sample-service-sample-env'
+    );
+    expect(mockListNamespacedJob).toHaveBeenLastCalledWith('env-sample-env');
+    expect(mockListNamespacedPod).toHaveBeenCalledWith(
+      'env-sample-env',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'batch.kubernetes.io/controller-uid=sample-service-cron-123-uid'
+    );
+  });
+
+  it('returns an empty list when no supported workload exists', async () => {
+    mockListNamespacedDeployment.mockResolvedValue({
+      body: { items: [] },
+    });
+    mockListNamespacedStatefulSet.mockResolvedValue({
+      body: { items: [] },
     });
 
     await expect(getDeploymentPods('sample-service', 'sample-env')).resolves.toEqual([]);
