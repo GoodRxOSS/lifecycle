@@ -118,6 +118,10 @@ function isTerminalPod(pod: k8s.V1Pod): boolean {
   return appContainerStatuses.length > 0 && appContainerStatuses.every((status) => Boolean(status.state?.terminated));
 }
 
+function isDeletingPod(pod: k8s.V1Pod): boolean {
+  return Boolean(pod.metadata?.deletionTimestamp);
+}
+
 function containerState(cs?: k8s.V1ContainerStatus): { state: ContainerState; reason?: string } {
   if (!cs) return { state: 'Unknown' };
 
@@ -174,9 +178,76 @@ export function extractContainers(pod: k8s.V1Pod): ContainerInfo[] {
   return containers;
 }
 
+function toPodInfo(pod: k8s.V1Pod): PodInfo {
+  const ageSeconds = podAgeSeconds(pod);
+  const containers = extractContainers(pod);
+
+  return {
+    podName: pod.metadata?.name ?? '',
+    status: podStatus(pod),
+    restarts: podRestarts(pod),
+    ageSeconds,
+    age: formatAge(ageSeconds),
+    ready: podReady(pod),
+    containers,
+  };
+}
+
+function sortPodsByAge(pods: PodInfo[]): PodInfo[] {
+  return pods.sort((left, right) => left.ageSeconds - right.ageSeconds);
+}
+
+function getJobPodSelector(job: k8s.V1Job): string | undefined {
+  const matchLabels = job.spec?.selector?.matchLabels;
+
+  if (matchLabels && Object.keys(matchLabels).length > 0) {
+    return buildLabelSelector(matchLabels);
+  }
+
+  const jobName = job.metadata?.name;
+  return jobName ? `job-name=${jobName}` : undefined;
+}
+
+function isOwnedByCronJob(job: k8s.V1Job, cronJob: k8s.V1CronJob): boolean {
+  const cronJobName = cronJob.metadata?.name;
+  const cronJobUid = cronJob.metadata?.uid;
+
+  return (job.metadata?.ownerReferences ?? []).some(
+    (owner) =>
+      owner.kind === 'CronJob' &&
+      ((cronJobUid && owner.uid === cronJobUid) || (!cronJobUid && cronJobName && owner.name === cronJobName))
+  );
+}
+
+async function listPodsBySelectors(
+  coreV1: k8s.CoreV1Api,
+  namespace: string,
+  selectors: string[],
+  includeTerminalPods: boolean
+): Promise<PodInfo[]> {
+  const podsByName = new Map<string, k8s.V1Pod>();
+
+  for (const selector of selectors) {
+    const podResp = await coreV1.listNamespacedPod(namespace, undefined, undefined, undefined, undefined, selector);
+
+    for (const pod of podResp.body.items ?? []) {
+      const podName = pod.metadata?.name;
+      if (!podName) continue;
+      podsByName.set(podName, pod);
+    }
+  }
+
+  const pods = Array.from(podsByName.values()).filter((pod) =>
+    includeTerminalPods ? !isDeletingPod(pod) : !isTerminalPod(pod)
+  );
+
+  return sortPodsByAge(pods.map(toPodInfo));
+}
+
 export async function getDeploymentPods(deploymentName: string, uuid: string): Promise<PodInfo[]> {
   const kc = loadKubeConfig();
   const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
+  const batchV1 = kc.makeApiClient(k8s.BatchV1Api);
   const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
   try {
@@ -184,7 +255,7 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
     const fullDeploymentName = `${deploymentName}-${uuid}`;
 
     const workloadSelector = `app.kubernetes.io/instance=${fullDeploymentName}`;
-    let matchLabels: Record<string, string> | undefined;
+    let workloadPodSelector: string | undefined;
 
     // Try to find a Deployment using the label selector
     const deployResp = await appsV1.listNamespacedDeployment(
@@ -197,7 +268,9 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
     );
 
     if (deployResp.body.items.length > 0) {
-      matchLabels = deployResp.body.items[0].spec?.selector?.matchLabels;
+      const matchLabels = deployResp.body.items[0].spec?.selector?.matchLabels;
+      workloadPodSelector =
+        matchLabels && Object.keys(matchLabels).length > 0 ? buildLabelSelector(matchLabels) : undefined;
     } else {
       //  if no Deployment found, try to find a StatefulSet
       const stsResp = await appsV1.listNamespacedStatefulSet(
@@ -210,48 +283,57 @@ export async function getDeploymentPods(deploymentName: string, uuid: string): P
       );
 
       if (stsResp.body.items.length > 0) {
-        matchLabels = stsResp.body.items[0].spec?.selector?.matchLabels;
+        const matchLabels = stsResp.body.items[0].spec?.selector?.matchLabels;
+        workloadPodSelector =
+          matchLabels && Object.keys(matchLabels).length > 0 ? buildLabelSelector(matchLabels) : undefined;
       }
     }
 
-    // If neither found or no labels to match, return empty
-    if (!matchLabels || Object.keys(matchLabels).length === 0) {
-      return [];
+    if (workloadPodSelector) {
+      return listPodsBySelectors(coreV1, namespace, [workloadPodSelector], false);
     }
 
-    const labelSelector = buildLabelSelector(matchLabels);
-
-    const podResp = await coreV1.listNamespacedPod(
+    const jobResp = await batchV1.listNamespacedJob(
       namespace,
       undefined,
       undefined,
       undefined,
       undefined,
-      labelSelector
+      workloadSelector
     );
+    const jobPodSelectors = (jobResp.body.items ?? [])
+      .map((job) => getJobPodSelector(job))
+      .filter((selector): selector is string => Boolean(selector));
 
-    const pods = (podResp.body.items ?? []).filter((pod) => !isTerminalPod(pod));
+    if (jobPodSelectors.length > 0) {
+      return listPodsBySelectors(coreV1, namespace, jobPodSelectors, true);
+    }
 
-    if (pods.length === 0) {
+    const cronJobResp = await batchV1.listNamespacedCronJob(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      workloadSelector
+    );
+    const cronJobs = cronJobResp.body.items ?? [];
+
+    if (cronJobs.length === 0) {
       return [];
     }
 
-    return pods
-      .map((pod) => {
-        const ageSeconds = podAgeSeconds(pod);
-        const containers = extractContainers(pod);
+    const allJobsResp = await batchV1.listNamespacedJob(namespace);
+    const cronJobPodSelectors = (allJobsResp.body.items ?? [])
+      .filter((job) => cronJobs.some((cronJob) => isOwnedByCronJob(job, cronJob)))
+      .map((job) => getJobPodSelector(job))
+      .filter((selector): selector is string => Boolean(selector));
 
-        return {
-          podName: pod.metadata?.name ?? '',
-          status: podStatus(pod),
-          restarts: podRestarts(pod),
-          ageSeconds,
-          age: formatAge(ageSeconds),
-          ready: podReady(pod),
-          containers,
-        };
-      })
-      .sort((left, right) => left.ageSeconds - right.ageSeconds);
+    if (cronJobPodSelectors.length === 0) {
+      return [];
+    }
+
+    return listPodsBySelectors(coreV1, namespace, cronJobPodSelectors, true);
   } catch (error) {
     getLogger().error({ error }, `K8s: failed to list workload pods service=${deploymentName}`);
     throw error;
