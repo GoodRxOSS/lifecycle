@@ -19,6 +19,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import OverrideService, {
+  ServiceOverrideNotEditableError,
   ServiceOverrideNotFoundError,
   type ServiceOverridePatchInput,
 } from 'server/services/override';
@@ -40,12 +41,12 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
     return new Error(`serviceOverrides[${index}] must be an object`);
   }
 
-  const serviceName = value.serviceName;
+  const name = value.name;
   const hasActive = hasOwn(value, 'active');
   const hasBranchOrExternalUrl = hasOwn(value, 'branchOrExternalUrl');
 
-  if (typeof serviceName !== 'string' || serviceName.length === 0) {
-    return new Error(`serviceOverrides[${index}].serviceName must be a non-empty string`);
+  if (typeof name !== 'string' || name.length === 0) {
+    return new Error(`serviceOverrides[${index}].name must be a non-empty string`);
   }
 
   if (!hasActive && !hasBranchOrExternalUrl) {
@@ -61,7 +62,7 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
   }
 
   return {
-    serviceName,
+    name,
     ...(hasActive ? { active: value.active as boolean } : {}),
     ...(hasBranchOrExternalUrl ? { branchOrExternalUrl: value.branchOrExternalUrl as string } : {}),
   };
@@ -95,7 +96,7 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/BuildOverrideUpdateSuccessResponse'
+ *               $ref: '#/components/schemas/UpdateBuildServiceOverridesSuccessResponse'
  *       '400':
  *         description: Invalid request body.
  *         content:
@@ -136,7 +137,7 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
   const override = new OverrideService();
   const build = await override.db.models.Build.query()
     .findOne({ uuid: params.uuid })
-    .withGraphFetched('[pullRequest, deploys.[service, deployable]]');
+    .withGraphFetched('[pullRequest, environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
 
   if (!build) {
     return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
@@ -150,11 +151,24 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
       serviceOverrides,
       runUuid: nanoid(),
     });
+    const updatedBuild = await override.db.models.Build.query()
+      .findOne({ uuid: params.uuid })
+      .withGraphFetched('[environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
 
-    return successResponse(result, { status: 200 }, req);
+    if (!updatedBuild) {
+      return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
+    }
+
+    const updatedServiceOverrides = await override.getServiceOverrideStates(updatedBuild, updatedBuild.deploys || []);
+
+    return successResponse({ serviceOverrides: updatedServiceOverrides, queued: result.queued }, { status: 200 }, req);
   } catch (error) {
     if (error instanceof ServiceOverrideNotFoundError) {
       return errorResponse(error, { status: 404 }, req);
+    }
+
+    if (error instanceof ServiceOverrideNotEditableError) {
+      return errorResponse(error, { status: 400 }, req);
     }
 
     throw error;

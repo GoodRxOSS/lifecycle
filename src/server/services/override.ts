@@ -21,6 +21,7 @@ import { Build, Deploy, PullRequest } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
 import * as psl from 'psl';
+import { DeployTypes } from 'shared/constants';
 
 export interface ValidationResult {
   valid: boolean;
@@ -69,7 +70,7 @@ export interface ApplyBuildConfigPatchArgs {
 }
 
 export interface ServiceOverridePatchInput {
-  serviceName: string;
+  name: string;
   active?: boolean;
   branchOrExternalUrl?: string;
 }
@@ -88,6 +89,17 @@ export interface OverrideApplyResult {
   status: 'success';
 }
 
+export interface BuildServiceOverrideState {
+  name: string;
+  active: boolean;
+  branchOrExternalUrl: string | null;
+  status: string | null;
+  statusMessage: string | null;
+  updatedAt: string | Date | null;
+  group: 'default' | 'optional';
+  editable: boolean;
+}
+
 export class BuildUuidValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -102,8 +114,56 @@ export class ServiceOverrideNotFoundError extends Error {
   }
 }
 
+export class ServiceOverrideNotEditableError extends Error {
+  constructor(serviceName: string) {
+    super(`Service ${serviceName} branchOrExternalUrl is not editable`);
+    this.name = 'ServiceOverrideNotEditableError';
+  }
+}
+
 function hasOwn(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isBranchOrExternalUrlEditable(deployType?: DeployTypes): boolean {
+  if (!deployType) {
+    return false;
+  }
+
+  return [DeployTypes.GITHUB, DeployTypes.HELM, DeployTypes.EXTERNAL_HTTP].includes(deployType);
+}
+
+function getDockerDisplayValue(dockerImage?: string | null, defaultTag?: string | null): string | null {
+  if (dockerImage && defaultTag) {
+    return `${dockerImage}@${defaultTag}`;
+  }
+
+  return dockerImage || defaultTag || null;
+}
+
+function getBranchOrExternalUrl(deploy: Deploy, deployConfig?: any): string | null | undefined {
+  switch (deployConfig?.type) {
+    case DeployTypes.GITHUB:
+      return deploy.branchName ?? deploy.publicUrl ?? null;
+    case DeployTypes.HELM:
+    case DeployTypes.CODEFRESH:
+    case DeployTypes.CONFIGURATION:
+      return deploy.branchName ?? null;
+    case DeployTypes.EXTERNAL_HTTP:
+      return deploy.publicUrl ?? deployConfig.defaultPublicUrl ?? null;
+    case DeployTypes.DOCKER:
+      return getDockerDisplayValue(deployConfig.dockerImage, deployConfig.defaultTag);
+    default:
+      return undefined;
+  }
+}
+
+function sortServiceOverrideStates(left: BuildServiceOverrideState, right: BuildServiceOverrideState): number {
+  if (left.group !== right.group) {
+    return left.group === 'default' ? -1 : 1;
+  }
+
+  return left.name.localeCompare(right.name);
 }
 
 export default class OverrideService extends BaseService {
@@ -213,18 +273,59 @@ export default class OverrideService extends BaseService {
       throw new Error('serviceOverrides is required');
     }
 
+    const overrideStates = await this.getServiceOverrideStates(build, deploys);
+    const overrideStateByName = new Map(overrideStates.map((state) => [state.name, state]));
+    const sanitizedServiceOverrides: ServiceOverridePatchInput[] = [];
+
     for (const serviceOverride of serviceOverrides) {
       if (serviceOverride.active == null && serviceOverride.branchOrExternalUrl == null) {
         throw new Error('active or branchOrExternalUrl is required');
       }
 
-      if (!this.findDeployForService(build, deploys, serviceOverride.serviceName)) {
-        throw new ServiceOverrideNotFoundError(serviceOverride.serviceName);
+      if (!this.findDeployForService(build, deploys, serviceOverride.name)) {
+        throw new ServiceOverrideNotFoundError(serviceOverride.name);
+      }
+
+      const overrideState = overrideStateByName.get(serviceOverride.name);
+      if (!overrideState) {
+        throw new ServiceOverrideNotFoundError(serviceOverride.name);
+      }
+
+      const sanitizedServiceOverride = { ...serviceOverride };
+      if (serviceOverride.branchOrExternalUrl != null && !overrideState.editable) {
+        if (serviceOverride.branchOrExternalUrl !== overrideState.branchOrExternalUrl) {
+          throw new ServiceOverrideNotEditableError(serviceOverride.name);
+        }
+
+        delete sanitizedServiceOverride.branchOrExternalUrl;
+      }
+
+      if (sanitizedServiceOverride.active != null || sanitizedServiceOverride.branchOrExternalUrl != null) {
+        sanitizedServiceOverrides.push(sanitizedServiceOverride);
       }
     }
 
+    if (sanitizedServiceOverrides.length === 0) {
+      return {
+        buildUuid: build.uuid,
+        queued: false,
+        status: 'success',
+      };
+    }
+
     await Promise.all(
-      serviceOverrides.map((serviceOverride) => this.patchServiceOverride(build, deploys, serviceOverride, true, true))
+      sanitizedServiceOverrides.map((serviceOverride) =>
+        this.patchServiceOverride(
+          build,
+          deploys,
+          {
+            ...serviceOverride,
+            serviceName: serviceOverride.name,
+          },
+          true,
+          true
+        )
+      )
     );
 
     const queued = await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid);
@@ -233,6 +334,22 @@ export default class OverrideService extends BaseService {
       queued,
       status: 'success',
     };
+  }
+
+  async getServiceOverrideStates(build: Build, deploys: Deploy[]): Promise<BuildServiceOverrideState[]> {
+    if (build.enableFullYaml) {
+      return deploys
+        .map((deploy) => this.getFullYamlServiceOverrideState(deploy))
+        .filter((state): state is BuildServiceOverrideState => state != null)
+        .sort(sortServiceOverrideStates);
+    }
+
+    const groups = await this.getClassicServiceGroups(build);
+
+    return deploys
+      .map((deploy) => this.getClassicServiceOverrideState(deploy, groups))
+      .filter((state): state is BuildServiceOverrideState => state != null)
+      .sort(sortServiceOverrideStates);
   }
 
   private async patchServiceOverride(
@@ -343,6 +460,86 @@ export default class OverrideService extends BaseService {
     return build.enableFullYaml
       ? deploys.find((deploy) => deploy.deployable!.name === serviceName)
       : deploys.find((deploy) => deploy.service.name === serviceName);
+  }
+
+  private getFullYamlServiceOverrideState(deploy: Deploy): BuildServiceOverrideState | null {
+    const { deployable } = deploy;
+
+    if (!deployable || deployable.dependsOnServiceId != null) {
+      return null;
+    }
+
+    return this.getServiceOverrideStateForDeploy(deploy, deployable.name, deployable.active ? 'default' : 'optional');
+  }
+
+  private async getClassicServiceGroups(build: Build): Promise<{
+    defaultServiceIds: Set<number>;
+    optionalServiceIds: Set<number>;
+  }> {
+    if (!build.environment && typeof build.$fetchGraph === 'function') {
+      await build.$fetchGraph('environment');
+    }
+
+    if (
+      build.environment &&
+      (!Array.isArray(build.environment.defaultServices) || !Array.isArray(build.environment.optionalServices)) &&
+      typeof build.environment.$fetchGraph === 'function'
+    ) {
+      await build.environment.$fetchGraph('[defaultServices, optionalServices]');
+    }
+
+    return {
+      defaultServiceIds: new Set((build.environment?.defaultServices || []).map((service) => service.id)),
+      optionalServiceIds: new Set((build.environment?.optionalServices || []).map((service) => service.id)),
+    };
+  }
+
+  private getClassicServiceOverrideState(
+    deploy: Deploy,
+    {
+      defaultServiceIds,
+      optionalServiceIds,
+    }: {
+      defaultServiceIds: Set<number>;
+      optionalServiceIds: Set<number>;
+    }
+  ): BuildServiceOverrideState | null {
+    if (!deploy.service) {
+      return null;
+    }
+
+    const serviceId = deploy.serviceId ?? deploy.service.id;
+    const group = defaultServiceIds.has(serviceId) ? 'default' : optionalServiceIds.has(serviceId) ? 'optional' : null;
+    if (!group) {
+      return null;
+    }
+
+    return this.getServiceOverrideStateForDeploy(deploy, deploy.service.name, group);
+  }
+
+  private getServiceOverrideStateForDeploy(
+    deploy: Deploy,
+    name: string,
+    group: 'default' | 'optional'
+  ): BuildServiceOverrideState | null {
+    const deployConfig = deploy.deployable || deploy.service;
+    const deployType = deployConfig?.type;
+    const branchOrExternalUrl = getBranchOrExternalUrl(deploy, deployConfig);
+
+    if (branchOrExternalUrl === undefined) {
+      return null;
+    }
+
+    return {
+      name,
+      active: deploy.active,
+      branchOrExternalUrl,
+      status: deploy.status ?? null,
+      statusMessage: deploy.statusMessage ?? null,
+      updatedAt: deploy.updatedAt ?? null,
+      group,
+      editable: isBranchOrExternalUrlEditable(deployType),
+    };
   }
 
   private async enqueueRedeployIfEnabled(

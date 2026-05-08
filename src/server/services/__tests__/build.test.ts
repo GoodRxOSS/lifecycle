@@ -23,6 +23,7 @@ const mockIsFeatureEnabled = jest.fn();
 const mockQueueAdd = jest.fn();
 const mockCleanupDeploy = jest.fn();
 const mockDeleteServiceRows = jest.fn();
+const mockGetServiceOverrideStates = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -142,6 +143,13 @@ jest.mock('server/services/webhook', () => ({
   })),
 }));
 
+jest.mock('server/services/override', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    getServiceOverrideStates: (...args: any[]) => mockGetServiceOverrideStates(...args),
+  })),
+}));
+
 jest.mock('server/lib/fastly', () =>
   jest.fn().mockImplementation(() => ({
     getServiceDashboardUrl: jest.fn(),
@@ -244,6 +252,95 @@ describe('BuildService build response queries', () => {
 
     expect(query.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
     expect(query.select.mock.calls[0]).toEqual(expect.arrayContaining(['commentRuntimeEnv', 'commentInitEnv']));
+  });
+
+  test('attaches service override edit state to deploys when loading a build by UUID', async () => {
+    const build = {
+      id: 10,
+      uuid: 'sample-build',
+      deploys: [
+        {
+          uuid: 'api-sample-build',
+          deployable: { name: 'api' },
+        },
+        {
+          uuid: 'internal-sample-build',
+          deployable: { name: 'internal' },
+        },
+      ],
+    };
+    const buildForServiceOverrides = {
+      id: 10,
+      uuid: 'sample-build',
+      deploys: [{ uuid: 'api-sample-build' }],
+    };
+    const query: any = {
+      findOne: jest.fn(() => query),
+      select: jest.fn(() => query),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn(() => query),
+      then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(build).then(resolve, reject),
+    };
+    const serviceOverrideQuery: any = {
+      findOne: jest.fn(() => serviceOverrideQuery),
+      select: jest.fn(() => serviceOverrideQuery),
+      withGraphFetched: jest.fn(() => serviceOverrideQuery),
+      then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(buildForServiceOverrides).then(resolve, reject),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn().mockReturnValueOnce(query).mockReturnValueOnce(serviceOverrideQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    mockGetServiceOverrideStates.mockResolvedValueOnce([
+      {
+        name: 'api',
+        active: true,
+        branchOrExternalUrl: 'feature/api',
+        status: 'deployed',
+        statusMessage: null,
+        updatedAt: '2026-05-08T12:00:00.000Z',
+        group: 'default',
+        editable: true,
+      },
+    ]);
+
+    await expect(buildService.getBuildByUUID('sample-build')).resolves.toBe(build);
+
+    expect(serviceOverrideQuery.findOne).toHaveBeenCalledWith({ id: 10 });
+    expect(serviceOverrideQuery.withGraphFetched).toHaveBeenCalledWith(
+      '[environment.[defaultServices, optionalServices], deploys.[service, deployable]]'
+    );
+    expect(mockGetServiceOverrideStates).toHaveBeenCalledWith(
+      buildForServiceOverrides,
+      buildForServiceOverrides.deploys
+    );
+    expect(build.deploys).toEqual([
+      {
+        uuid: 'api-sample-build',
+        deployable: { name: 'api' },
+        serviceOverride: {
+          name: 'api',
+          branchOrExternalUrl: 'feature/api',
+          group: 'default',
+          editable: true,
+        },
+      },
+      {
+        uuid: 'internal-sample-build',
+        deployable: { name: 'internal' },
+        serviceOverride: null,
+      },
+    ]);
   });
 });
 
