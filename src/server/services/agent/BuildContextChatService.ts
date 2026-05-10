@@ -19,8 +19,12 @@ import { getLogger } from 'server/lib/logger';
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
 import Build from 'server/models/Build';
+import Deploy from 'server/models/Deploy';
 import { AgentChatStatus, AgentSessionKind } from 'shared/constants';
-import AgentChatSessionService, { type AgentBuildContextChatMetadata } from './ChatSessionService';
+import AgentChatSessionService, {
+  type AgentBuildContextChatMetadata,
+  type AgentBuildContextSelectedDeployMetadata,
+} from './ChatSessionService';
 import AgentThreadService from './ThreadService';
 
 const ACTIVE_BUILD_CONTEXT_CHAT_UNIQUE_CONSTRAINT = 'agent_sessions_active_build_context_chat_unique';
@@ -32,8 +36,16 @@ export class BuildContextChatBuildNotFoundError extends Error {
   }
 }
 
+export class BuildContextChatSelectedDeployError extends Error {
+  constructor(readonly buildUuid: string, readonly selectedDeployUuid: string) {
+    super(`Selected deploy ${selectedDeployUuid} does not belong to build ${buildUuid}`);
+    this.name = 'BuildContextChatSelectedDeployError';
+  }
+}
+
 interface LaunchBuildContextChatOptions {
   buildUuid: string;
+  selectedDeployUuid?: string;
   userId: string;
   userIdentity?: RequestUserIdentity;
   model?: string;
@@ -52,7 +64,70 @@ function isUniqueConstraintError(error: unknown, constraintName: string): boolea
   return knexError?.code === '23505' && knexError?.constraint === constraintName;
 }
 
-function buildLaunchMetadata(build: Build, buildUuid: string): AgentBuildContextChatMetadata {
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && Boolean(item)) : [];
+}
+
+function readFullCommitSha(value: unknown): string | null {
+  const normalized = readString(value);
+  return normalized && /^[0-9a-f]{40}$/i.test(normalized) ? normalized : null;
+}
+
+function buildSelectedDeployMetadata(deploy: Deploy): AgentBuildContextSelectedDeployMetadata {
+  const deployable = deploy.deployable;
+  const helm = deployable?.helm;
+  const chart = helm?.chart;
+
+  return {
+    selectedDeployUuid: deploy.uuid,
+    deployId: deploy.id,
+    deployableName: readString(deployable?.name) || readString(deploy.service?.name) || deploy.uuid,
+    deployableType: readString(deployable?.type),
+    repositoryFullName: readString(deploy.repository?.fullName),
+    branchName: readString(deploy.branchName) || readString(deployable?.branchName),
+    serviceSha: readString(deploy.sha),
+    dockerfilePath: readString(deployable?.dockerfilePath),
+    initDockerfilePath: readString(deployable?.initDockerfilePath),
+    deployStatus: readString(deploy.status),
+    deployStatusMessage: readString(deploy.statusMessage),
+    dockerImage: readString(deploy.dockerImage),
+    buildPipelineId: readString(deploy.buildPipelineId),
+    deployPipelineId: readString(deploy.deployPipelineId),
+    source: readString(deployable?.source),
+    helm: helm
+      ? {
+          chartName: readString(chart?.name),
+          chartRepoUrl: readString(chart?.repoUrl),
+          valueFiles: readStringArray(chart?.valueFiles),
+        }
+      : null,
+  };
+}
+
+async function resolveSelectedDeploy(build: Build, selectedDeployUuid?: string): Promise<Deploy | null> {
+  if (!selectedDeployUuid) {
+    return null;
+  }
+
+  const selectedDeploy = await Deploy.query()
+    .findOne({ uuid: selectedDeployUuid })
+    .withGraphFetched('[deployable, repository, service]');
+  if (!selectedDeploy || selectedDeploy.buildId !== build.id) {
+    throw new BuildContextChatSelectedDeployError(build.uuid, selectedDeployUuid);
+  }
+
+  return selectedDeploy;
+}
+
+function buildLaunchMetadata(
+  build: Build,
+  buildUuid: string,
+  selectedDeploy: Deploy | null
+): AgentBuildContextChatMetadata {
   const pullRequest = build.pullRequest
     ? {
         fullName: build.pullRequest.fullName || null,
@@ -66,8 +141,10 @@ function buildLaunchMetadata(build: Build, buildUuid: string): AgentBuildContext
     buildKind: build.kind || null,
     namespace: build.namespace || null,
     baseBuildUuid: build.baseBuild?.uuid || null,
-    revision: build.sha || build.pullRequest?.latestCommit || null,
+    revision: readFullCommitSha(build.pullRequest?.latestCommit) || readFullCommitSha(build.sha),
     pullRequest,
+    selectedDeployUuid: selectedDeploy?.uuid || null,
+    selectedDeploy: selectedDeploy ? buildSelectedDeployMetadata(selectedDeploy) : null,
     contextFreshAt: new Date().toISOString(),
   };
 }
@@ -93,11 +170,13 @@ export default class BuildContextChatService {
       throw new BuildContextChatBuildNotFoundError(opts.buildUuid);
     }
 
-    const buildContext = buildLaunchMetadata(build, opts.buildUuid);
+    const selectedDeploy = await resolveSelectedDeploy(build, opts.selectedDeployUuid);
+    const buildContext = buildLaunchMetadata(build, opts.buildUuid, selectedDeploy);
     const existingSession = await findReusableBuildContextChat(opts.buildUuid, opts.userId);
 
     if (existingSession) {
       const thread = await AgentThreadService.getDefaultThreadForSession(existingSession.uuid, opts.userId);
+      const session = await AgentChatSessionService.updateBuildContextChatSession(existingSession, buildContext);
       const reused = true;
 
       getLogger().info(
@@ -105,7 +184,7 @@ export default class BuildContextChatService {
       );
 
       return {
-        session: existingSession,
+        session,
         thread,
         created: false,
         reused,
@@ -132,13 +211,14 @@ export default class BuildContextChatService {
       }
 
       const thread = await AgentThreadService.getDefaultThreadForSession(racedSession.uuid, opts.userId);
+      const session = await AgentChatSessionService.updateBuildContextChatSession(racedSession, buildContext);
 
       getLogger().info(
         `Session: launched build-context chat buildUuid=${opts.buildUuid} sessionId=${racedSession.uuid} reused=true`
       );
 
       return {
-        session: racedSession,
+        session,
         thread,
         created: false,
         reused: true,

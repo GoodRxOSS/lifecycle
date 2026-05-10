@@ -21,6 +21,17 @@ jest.mock('server/models/yaml', () => ({
   fetchLifecycleConfig: jest.fn(),
   getDeployingServicesByName: jest.fn(),
 }));
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getLabels: jest.fn().mockResolvedValue({
+        deploy: ['lifecycle-deploy!'],
+        disabled: ['lifecycle-disabled!'],
+      }),
+    })),
+  },
+}));
 
 import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
@@ -28,7 +39,6 @@ import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
 import {
   buildAgentSessionDynamicSystemPrompt,
-  buildLifecycleDebuggingProfilePrompt,
   combineAgentSessionAppendSystemPrompt,
   resolveAgentSessionPromptContext,
 } from '../systemPrompt';
@@ -53,8 +63,8 @@ describe('agent session system prompt', () => {
         buildUuid: 'sample-123456',
         skillsAvailable: true,
         toolLines: [
-          '- inspect files, services, and git state: workspace.read_file, workspace.exec',
-          '- run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
+          '- inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_exec',
+          '- run mutating or networked shell commands that are not direct file edits: mcp__sandbox__workspace_exec_mutation',
         ],
         services: [
           {
@@ -66,15 +76,15 @@ describe('agent session system prompt', () => {
       })
     ).toBe(
       [
-        'Session context:',
+        'Initial Lifecycle snapshot:',
         '- namespace: env-sample-123456',
         '- buildUuid: sample-123456',
-        '- selected services:',
-        '  - next-web: publicUrl=https://next-web-sample.lifecycle.dev.example.com, workDir=/workspace/apps/next-web',
+        'Selected services:',
+        '- next-web: publicUrl=https://next-web-sample.lifecycle.dev.example.com, workDir=/workspace/apps/next-web',
         '- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it',
         '- equipped tools:',
-        '  - inspect files, services, and git state: workspace.read_file, workspace.exec',
-        '  - run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
+        '  - inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_exec',
+        '  - run mutating or networked shell commands that are not direct file edits: mcp__sandbox__workspace_exec_mutation',
       ].join('\n')
     );
   });
@@ -83,21 +93,6 @@ describe('agent session system prompt', () => {
     expect(
       combineAgentSessionAppendSystemPrompt('Use concise responses.', 'Session context:\n- namespace: env-sample')
     ).toBe('Use concise responses.\n\nSession context:\n- namespace: env-sample');
-  });
-
-  it('builds a Lifecycle debugging profile without the legacy JSON-only output contract', () => {
-    const profile = buildLifecycleDebuggingProfilePrompt();
-
-    expect(profile).toContain('Compare desired config state with actual runtime state');
-    expect(profile).toContain('Investigate build failures before deploy failures');
-    expect(profile).toContain('Cite specific evidence before diagnosing a root cause');
-    expect(profile).toContain('Say when there is not enough evidence');
-    expect(profile).toContain(
-      'Only perform mutating fixes through approval-gated actions when those tools are available'
-    );
-    expect(profile).not.toContain('output_schema');
-    expect(profile).not.toContain('fixesApplied');
-    expect(profile).not.toContain('investigation_complete');
   });
 
   it('builds diagnostic prompt sections for build-context chats without sensitive legacy fields', () => {
@@ -118,6 +113,9 @@ describe('agent session system prompt', () => {
         url: 'https://github.com/example-org/example-repo/pull/42',
         status: 'open',
         labels: ['lifecycle-deploy'],
+        deployOnUpdate: true,
+        deployLabels: ['lifecycle-deploy!'],
+        disabledLabels: ['lifecycle-disabled!'],
         latestCommit: 'abc123',
         repositoryUrl: 'https://github.com/example-org/example-repo',
       },
@@ -125,6 +123,8 @@ describe('agent session system prompt', () => {
       diagnosticServices: [
         {
           name: 'next-web',
+          deployUuid: 'next-web-deploy-1',
+          active: true,
           status: 'deploy_failed',
           statusMessage: 'CrashLoopBackOff',
           publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
@@ -137,26 +137,147 @@ describe('agent session system prompt', () => {
       ],
     });
 
-    expect(prompt).toContain('Lifecycle debugging profile:');
-    expect(prompt).toContain('Build context:');
+    expect(prompt).not.toContain('Lifecycle debugging profile:');
+    expect(prompt).not.toContain('explicitly asks to continue into repair');
+    expect(prompt).toContain('Initial Lifecycle snapshot:');
     expect(prompt).toContain(
-      '- buildUuid=sample-build-1: status=deploy_failed, statusMessage=web deploy failed, namespace=env-sample-123456, sha=abc123'
+      '- build=sample-build-1: buildStatusAtStart=deploy_failed, buildStatusMessageAtStart=web deploy failed, namespace=env-sample-123456, sha=abc123'
     );
     expect(prompt).toContain('Pull request:');
     expect(prompt).toContain(
-      '- repo=example-org/example-repo, branch=feature/sample, number=42, url=https://github.com/example-org/example-repo/pull/42, status=open, labels=lifecycle-deploy, latestCommit=abc123, repositoryUrl=https://github.com/example-org/example-repo'
+      '- repo=example-org/example-repo, branch=feature/sample, number=42, url=https://github.com/example-org/example-repo/pull/42, statusAtStart=open, labelsAtStart=lifecycle-deploy, deployOnUpdateAtStart=true, deployLabels=lifecycle-deploy!, disabledLabels=lifecycle-disabled!, latestCommit=abc123, repositoryUrl=https://github.com/example-org/example-repo'
     );
-    expect(prompt).toContain('Diagnostic services:');
+    expect(prompt).toContain('Deploy roster:');
     expect(prompt).toContain(
-      '- next-web: status=deploy_failed, statusMessage=CrashLoopBackOff, repo=example-org/example-repo, branch=feature/sample, publicUrl=https://next-web-sample.lifecycle.dev.example.com, dockerImage=registry.example.test/next-web:abc123, buildPipelineId=build-pipeline-1, deployPipelineId=deploy-pipeline-1'
+      '- next-web: deployUuid=next-web-deploy-1, activeAtStart=true, statusAtStart=deploy_failed, statusMessageAtStart=CrashLoopBackOff, repo=example-org/example-repo, branch=feature/sample, publicUrl=https://next-web-sample.lifecycle.dev.example.com, dockerImage=registry.example.test/next-web:abc123, buildPipelineId=build-pipeline-1, deployPipelineId=deploy-pipeline-1'
     );
-    expect(prompt).toContain('Context freshness:');
-    expect(prompt).toContain('- gatheredAt: 2026-04-30T12:00:00.000Z');
+    expect(prompt).toContain('- observedAt: 2026-04-30T12:00:00.000Z');
+    expect(prompt).toContain('- source: lifecycle_db');
     expect(prompt).not.toContain('secret');
     expect(prompt).not.toContain('MCP token');
     expect(prompt).not.toContain('conversation_messages');
     expect(prompt).not.toContain('server/services/ai/context');
     expect(prompt).not.toContain('server/services/ai/prompts');
+  });
+
+  it('renders selected deploy facts once without reasoning guidance', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      gatheredAt: '2026-04-30T12:00:00.000Z',
+      services: [
+        {
+          name: 'sample-service',
+          deployUuid: 'deploy-1',
+          active: false,
+          status: 'build_failed',
+          statusMessage: 'Dockerfile not found',
+          repo: 'example-org/service-repo',
+          branch: 'feature/service-change',
+          serviceSha: 'service-sha-1',
+          dockerfilePath: 'services/sample/Dockerfile',
+          initDockerfilePath: 'services/sample/init.Dockerfile',
+          deployableType: 'docker',
+          source: 'yaml',
+        },
+      ],
+      selectedDeploy: {
+        name: 'sample-service',
+        deployUuid: 'deploy-1',
+        active: false,
+        status: 'build_failed',
+        statusMessage: 'Dockerfile not found',
+        repo: 'example-org/service-repo',
+        branch: 'feature/service-change',
+        serviceSha: 'service-sha-1',
+        dockerfilePath: 'services/sample/Dockerfile',
+        initDockerfilePath: 'services/sample/init.Dockerfile',
+        deployableType: 'docker',
+        source: 'yaml',
+      },
+    });
+
+    expect(prompt).toContain('Selected deploy:');
+    expect(prompt).toContain(
+      '- sample-service: deployUuid=deploy-1, activeAtStart=false, statusAtStart=build_failed, statusMessageAtStart=Dockerfile not found, repo=example-org/service-repo, branch=feature/service-change, serviceSha=service-sha-1, dockerfilePath=services/sample/Dockerfile'
+    );
+    expect(prompt.match(/deployUuid=deploy-1/g)).toHaveLength(1);
+    expect(prompt).not.toContain('Selected services:');
+    expect(prompt).not.toContain('Fresh repository reads:');
+    expect(prompt).not.toContain('Mismatch handling:');
+  });
+
+  it('renders deploy-gated pending builds as an explicit initial snapshot', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      gatheredAt: '2026-04-30T12:00:00.000Z',
+      build: {
+        uuid: 'sample-build-1',
+        status: 'pending',
+        namespace: 'env-sample-123456',
+        sha: 'abc123',
+      },
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        branchName: 'feature/sample',
+        pullRequestNumber: 42,
+        status: 'open',
+        labels: [],
+        deployOnUpdate: false,
+        deployLabels: ['lifecycle-deploy!'],
+        disabledLabels: ['lifecycle-disabled!'],
+        latestCommit: 'abc123',
+      },
+      services: [
+        {
+          name: 'sample-service',
+          deployUuid: 'sample-service-sample-build-1',
+          active: false,
+          status: 'pending',
+          repo: 'example-org/example-repo',
+          branch: 'feature/sample',
+          serviceSha: 'abc123',
+          deployableType: 'helm',
+          source: 'yaml',
+        },
+      ],
+      selectedDeploy: {
+        name: 'sample-service',
+        deployUuid: 'sample-service-sample-build-1',
+        active: false,
+        status: 'pending',
+        repo: 'example-org/example-repo',
+        branch: 'feature/sample',
+        serviceSha: 'abc123',
+        deployableType: 'helm',
+        source: 'yaml',
+      },
+      diagnosticServices: [
+        {
+          name: 'sample-service',
+          deployUuid: 'sample-service-sample-build-1',
+          active: false,
+          status: 'pending',
+          repo: 'example-org/example-repo',
+          branch: 'feature/sample',
+        },
+      ],
+    });
+
+    expect(prompt).toContain('Initial Lifecycle snapshot:');
+    expect(prompt).toContain('buildStatusAtStart=pending');
+    expect(prompt).toContain('buildStatusMessageAtStart=<none>');
+    expect(prompt).toContain('labelsAtStart=<none>');
+    expect(prompt).toContain('deployOnUpdateAtStart=false');
+    expect(prompt).toContain('deployLabels=lifecycle-deploy!');
+    expect(prompt).toContain('disabledLabels=lifecycle-disabled!');
+    expect(prompt).toContain(
+      '- sample-service: deployUuid=sample-service-sample-build-1, activeAtStart=false, statusAtStart=pending, statusMessageAtStart=<none>'
+    );
+    expect(prompt).toContain('Deploy roster:');
+    expect(prompt).not.toContain('Fresh repository reads:');
+    expect(prompt).not.toContain('Mismatch handling:');
+    expect(prompt).not.toContain('lifecycle.yaml');
+    expect(prompt).not.toContain('process.env');
   });
 
   it('resolves selected service public URLs and workdirs from deploy and lifecycle config metadata', async () => {
@@ -172,6 +293,7 @@ describe('agent session system prompt', () => {
           pullRequestNumber: 42,
           status: 'open',
           labels: ['lifecycle-deploy'],
+          deployOnUpdate: true,
           latestCommit: 'abc123',
           repository: {
             htmlUrl: 'https://github.com/example-org/example-repo',
@@ -188,6 +310,7 @@ describe('agent session system prompt', () => {
       withGraphFetched: jest.fn().mockResolvedValue([
         {
           uuid: 'next-web-sample-123456',
+          active: true,
           branchName: 'feature/sample',
           publicUrl: 'next-web-sample.lifecycle.dev.example.com',
           deployable: { name: 'next-web' },
@@ -232,12 +355,17 @@ describe('agent session system prompt', () => {
         url: 'https://github.com/example-org/example-repo/pull/42',
         status: 'open',
         labels: ['lifecycle-deploy'],
+        deployOnUpdate: true,
+        deployLabels: ['lifecycle-deploy!'],
+        disabledLabels: ['lifecycle-disabled!'],
         latestCommit: 'abc123',
         repositoryUrl: 'https://github.com/example-org/example-repo',
       },
       services: [
         {
           name: 'next-web',
+          active: true,
+          deployUuid: 'next-web-sample-123456',
           status: undefined,
           statusMessage: undefined,
           publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
@@ -249,6 +377,20 @@ describe('agent session system prompt', () => {
           workDir: '/workspace/apps/next-web',
         },
       ],
+      selectedDeploy: {
+        name: 'next-web',
+        active: true,
+        deployUuid: 'next-web-sample-123456',
+        status: undefined,
+        statusMessage: undefined,
+        publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
+        repo: 'example-org/example-repo',
+        branch: 'feature/sample',
+        dockerImage: undefined,
+        buildPipelineId: undefined,
+        deployPipelineId: undefined,
+        workDir: '/workspace/apps/next-web',
+      },
       diagnosticServices: [],
       skillsAvailable: false,
     });
@@ -266,8 +408,8 @@ describe('agent session system prompt', () => {
     const buildGraphQuery = {
       withGraphFetched: jest.fn().mockResolvedValue({
         uuid: 'sample-build-1',
-        status: 'build_failed',
-        statusMessage: 'image build failed',
+        status: 'pending',
+        statusMessage: '',
         namespace: 'env-sample-123456',
         sha: 'abc123',
         pullRequest: {
@@ -275,7 +417,8 @@ describe('agent session system prompt', () => {
           branchName: 'feature/sample',
           pullRequestNumber: 42,
           status: 'open',
-          labels: ['lifecycle-deploy'],
+          labels: [],
+          deployOnUpdate: false,
           latestCommit: 'abc123',
           repository: {
             htmlUrl: 'https://github.com/example-org/example-repo',
@@ -285,8 +428,9 @@ describe('agent session system prompt', () => {
           {
             id: 10,
             uuid: 'next-web-deploy-1',
-            status: 'deploy_failed',
-            statusMessage: 'CrashLoopBackOff',
+            active: false,
+            status: 'pending',
+            statusMessage: null,
             branchName: 'feature/sample',
             publicUrl: 'next-web-sample.lifecycle.dev.example.com',
             dockerImage: 'registry.example.test/next-web:abc123',
@@ -330,8 +474,8 @@ describe('agent session system prompt', () => {
       gatheredAt: '2026-04-30T12:00:00.000Z',
       build: {
         uuid: 'sample-build-1',
-        status: 'build_failed',
-        statusMessage: 'image build failed',
+        status: 'pending',
+        statusMessage: undefined,
         namespace: 'env-sample-123456',
         sha: 'abc123',
       },
@@ -341,15 +485,20 @@ describe('agent session system prompt', () => {
         pullRequestNumber: 42,
         url: 'https://github.com/example-org/example-repo/pull/42',
         status: 'open',
-        labels: ['lifecycle-deploy'],
+        labels: [],
+        deployOnUpdate: false,
+        deployLabels: ['lifecycle-deploy!'],
+        disabledLabels: ['lifecycle-disabled!'],
         latestCommit: 'abc123',
         repositoryUrl: 'https://github.com/example-org/example-repo',
       },
       services: [
         {
           name: 'next-web',
-          status: 'deploy_failed',
-          statusMessage: 'CrashLoopBackOff',
+          active: false,
+          deployUuid: 'next-web-deploy-1',
+          status: 'pending',
+          statusMessage: undefined,
           publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
           repo: 'example-org/example-repo',
           branch: 'feature/sample',
@@ -359,11 +508,27 @@ describe('agent session system prompt', () => {
           workDir: '/workspace/apps/next-web',
         },
       ],
+      selectedDeploy: {
+        name: 'next-web',
+        active: false,
+        deployUuid: 'next-web-deploy-1',
+        status: 'pending',
+        statusMessage: undefined,
+        publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
+        repo: 'example-org/example-repo',
+        branch: 'feature/sample',
+        dockerImage: 'registry.example.test/next-web:abc123',
+        buildPipelineId: 'build-pipeline-1',
+        deployPipelineId: 'deploy-pipeline-1',
+        workDir: '/workspace/apps/next-web',
+      },
       diagnosticServices: [
         {
           name: 'next-web',
-          status: 'deploy_failed',
-          statusMessage: 'CrashLoopBackOff',
+          active: false,
+          deployUuid: 'next-web-deploy-1',
+          status: 'pending',
+          statusMessage: undefined,
           publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
           repo: 'example-org/example-repo',
           branch: 'feature/sample',

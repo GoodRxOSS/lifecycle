@@ -1,0 +1,78 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { buildUpdateFilePreview, shouldRequestUpdateFileApproval } from '../diagnosticTools';
+import type { GitHubClient } from '../tools/shared/githubClient';
+
+function buildGithubClient(currentContent: string | null): GitHubClient {
+  return {
+    isFilePathAllowed: jest.fn(() => true),
+    validateBranch: jest.fn(() => ({ valid: true })),
+    getOctokit: jest.fn(async () => ({
+      request: jest.fn(async () => {
+        if (currentContent === null) {
+          throw new Error('not found');
+        }
+
+        return {
+          data: {
+            content: Buffer.from(currentContent).toString('base64'),
+          },
+        };
+      }),
+    })),
+  } as unknown as GitHubClient;
+}
+
+const updateFileInput = {
+  repository_owner: 'sample-owner',
+  repository_name: 'sample-repo',
+  branch: 'sample-branch',
+  file_path: 'lifecycle.yaml',
+  new_content: 'services:\n  - name: sample-service\n',
+  commit_message: 'fix: update sample service',
+};
+
+describe('diagnostic update_file previews', () => {
+  it('does not request approval or emit a file-change preview for no-op updates', async () => {
+    const githubClient = buildGithubClient(updateFileInput.new_content);
+
+    await expect(shouldRequestUpdateFileApproval(githubClient, updateFileInput)).resolves.toBe(false);
+    await expect(buildUpdateFilePreview(githubClient, updateFileInput, 'tool-call-1', 'update_file')).resolves.toEqual(
+      []
+    );
+  });
+
+  it('requests approval and emits a diff preview when update_file changes content', async () => {
+    const githubClient = buildGithubClient('services:\n  - name: old-service\n');
+
+    await expect(shouldRequestUpdateFileApproval(githubClient, updateFileInput)).resolves.toBe(true);
+    const [preview] = await buildUpdateFilePreview(githubClient, updateFileInput, 'tool-call-1', 'update_file');
+
+    expect(preview).toEqual(
+      expect.objectContaining({
+        path: 'lifecycle.yaml',
+        displayPath: 'lifecycle.yaml',
+        additions: 1,
+        deletions: 1,
+        oldSha256: expect.any(String),
+        newSha256: expect.any(String),
+      })
+    );
+    expect(preview.unifiedDiff).toContain('-  - name: old-service');
+    expect(preview.unifiedDiff).toContain('+  - name: sample-service');
+  });
+});

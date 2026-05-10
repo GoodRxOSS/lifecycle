@@ -40,6 +40,7 @@ import type {
   AgentFileChangeData,
   AgentToolAuditRecord,
 } from './types';
+import type { AgentRuntimeToolMetadata } from './CapabilityService';
 import AgentPolicyService from './PolicyService';
 import type { ResolvedAgentCapabilityAccess } from './PolicyService';
 import type { AgentCapabilityCatalogId } from './capabilityCatalog';
@@ -130,14 +131,31 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
-function shouldRequestUpdateFileApproval(client: GitHubClient, input: Record<string, unknown>): boolean {
+function normalizeUpdateFileContent(value: string): string {
+  return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+}
+
+export async function shouldRequestUpdateFileApproval(
+  client: GitHubClient,
+  input: Record<string, unknown>
+): Promise<boolean> {
   const filePath = readString(input.file_path);
   const branch = readString(input.branch);
+  const newContent = typeof input.new_content === 'string' ? input.new_content : null;
   if (!filePath || !branch) {
     return false;
   }
 
-  return client.isFilePathAllowed(filePath, 'write') && client.validateBranch(branch).valid;
+  if (!client.isFilePathAllowed(filePath, 'write') || !client.validateBranch(branch).valid) {
+    return false;
+  }
+
+  if (newContent === null) {
+    return false;
+  }
+
+  const currentContent = await readGithubFileContent(client, input, normalizeFilePath(filePath));
+  return currentContent === null || currentContent !== normalizeUpdateFileContent(newContent);
 }
 
 function createLifecycleDiagnosticReadToolSpecs(
@@ -294,7 +312,7 @@ async function readGithubFileContent(
   }
 }
 
-async function buildUpdateFilePreview(
+export async function buildUpdateFilePreview(
   githubClient: GitHubClient,
   input: Record<string, unknown>,
   toolCallId: string,
@@ -305,8 +323,12 @@ async function buildUpdateFilePreview(
   }
 
   const path = normalizeFilePath(input.file_path);
-  const content = input.new_content.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+  const content = normalizeUpdateFileContent(input.new_content);
   const oldContent = await readGithubFileContent(githubClient, input, path);
+  if (oldContent !== null && oldContent === content) {
+    return [];
+  }
+
   const diff = oldContent === null ? null : buildSingleHunkUnifiedDiff(path, oldContent, content);
   const beforeTextPreview = oldContent === null ? null : trimPreview(oldContent);
   const afterTextPreview = trimPreview(content);
@@ -388,6 +410,7 @@ function registerLifecycleDiagnosticToolSpecs({
   toolRules,
   specs,
   resolvedCapabilityAccess,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -397,6 +420,7 @@ function registerLifecycleDiagnosticToolSpecs({
   specs: LifecycleDiagnosticToolSpec[];
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
   githubSafety?: LifecycleDiagnosticGithubSafety;
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   if (!session.buildUuid) {
     return;
@@ -488,6 +512,13 @@ function registerLifecycleDiagnosticToolSpecs({
           throw error;
         }
       },
+    });
+    toolMetadata?.push({
+      toolKey,
+      catalogCapabilityId,
+      capabilityKey,
+      approvalMode: mode,
+      exposure: capabilityKey === 'read' || capabilityKey === 'external_mcp_read' ? 'read' : 'repair',
     });
   }
 }

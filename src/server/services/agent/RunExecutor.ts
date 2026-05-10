@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { stepCountIs, ToolLoopAgent } from 'ai';
+import { ToolLoopAgent, convertToModelMessages, generateText } from 'ai';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import type AgentRun from 'server/models/AgentRun';
@@ -35,13 +35,27 @@ import AgentRunQueueService from './RunQueueService';
 import AgentRunService from './RunService';
 import AgentRunPlanResolver from './RunPlanResolver';
 import AgentSourceService from './SourceService';
-import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
+import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
+import type { ResolvedAgentCapabilityAccess } from './PolicyService';
 import type { AgentFileChangeData, AgentUIMessage } from './types';
 import { applyApprovalResponsesToFileChangeParts, buildResultFileChanges } from './fileChanges';
 import { AgentRunTerminalFailure, SessionWorkspaceGatewayUnavailableError } from './errors';
 import { limitDurablePayloadValue } from './payloadLimits';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import { isReadOnlyDebugIntent, resolveDebugIntent, resolveDebugToolLoopControls } from './debugToolLoopControls';
+import { buildDebugRepairObservationText } from './debugRepairObservation';
+import { assistantRunHasText, sanitizeDebugRepairAssistantMessages } from './debugResponseSanitizer';
+
+const DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT = [
+  'You are completing a read-only Debug diagnosis after the evidence-gathering tool loop reached its tool-step budget.',
+  'Do not call tools, propose edits, or claim a fix was applied.',
+  'Use only the evidence already present in the transcript.',
+  'Answer with: likely cause, evidence, confidence, missing evidence if any, and concise next choices.',
+].join(' ');
+
+const DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT =
+  'Write the final diagnostic answer now. Do not continue investigating or call tools.';
 
 function buildSystemPrompt(parts: Array<string | undefined>): string | undefined {
   const normalized = parts.map((part) => part?.trim()).filter(Boolean) as string[];
@@ -50,6 +64,12 @@ function buildSystemPrompt(parts: Array<string | undefined>): string | undefined
   }
 
   return normalized.join('\n\n');
+}
+
+function readResolvedInstructionTexts(runPlan?: AgentRunPlanSnapshotV1 | null): string[] {
+  return (runPlan?.prompt.resolvedInstructions || [])
+    .map((instruction) => instruction.renderedText)
+    .filter((text): text is string => typeof text === 'string' && Boolean(text.trim()));
 }
 
 function applyFinalObservabilityToMessages(
@@ -90,6 +110,46 @@ function applyFinalObservabilityToMessages(
       ...(targetMessage.metadata || {}),
       ...metadataPatch,
     },
+  };
+
+  return nextMessages;
+}
+
+function appendAssistantTextForRun(messages: AgentUIMessage[], runId: string, text: string): AgentUIMessage[] {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    return messages;
+  }
+
+  const targetIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message.role === 'assistant' && message.metadata?.runId === runId);
+
+  if (targetIndex === -1) {
+    return [
+      ...messages,
+      {
+        id: randomBytes(16).toString('hex'),
+        role: 'assistant',
+        parts: [{ type: 'text', text: normalizedText }],
+        metadata: { runId },
+      } as AgentUIMessage,
+    ];
+  }
+
+  const absoluteIndex = messages.length - targetIndex - 1;
+  const nextMessages = [...messages];
+  const targetMessage = nextMessages[absoluteIndex];
+  const previousTextPart = [...targetMessage.parts].reverse().find((part) => part.type === 'text') as
+    | { text?: unknown }
+    | undefined;
+  const appendedText =
+    typeof previousTextPart?.text === 'string' && previousTextPart.text.trim()
+      ? `\n\n${normalizedText}`
+      : normalizedText;
+  nextMessages[absoluteIndex] = {
+    ...targetMessage,
+    parts: [...targetMessage.parts, { type: 'text', text: appendedText } as AgentUIMessage['parts'][number]],
   };
 
   return nextMessages;
@@ -165,7 +225,8 @@ function classifyTerminalRunFailure({
 }
 
 function readRunMaxIterations(run?: AgentRun): number | null {
-  const snapshot = isAgentRunPlanSnapshotV1(run?.runPlanSnapshot) ? run.runPlanSnapshot : null;
+  const runPlanSnapshot = run?.runPlanSnapshot;
+  const snapshot = isAgentRunPlanSnapshotV1(runPlanSnapshot) ? runPlanSnapshot : null;
   const runtimeOptions = snapshot?.runtime.runtimeOptions || run?.policySnapshot?.runtimeOptions;
   if (!runtimeOptions || typeof runtimeOptions !== 'object' || Array.isArray(runtimeOptions)) {
     return null;
@@ -212,8 +273,11 @@ export default class AgentRunExecutor {
       session.uuid,
       userIdentity
     );
-    const existingRunPlan = isAgentRunPlanSnapshotV1(existingRun?.runPlanSnapshot) ? existingRun.runPlanSnapshot : null;
-    let executionRunPlan = existingRunPlan;
+    const existingRunSnapshot = existingRun?.runPlanSnapshot;
+    const existingRunPlan: AgentRunPlanSnapshotV1 | null = isAgentRunPlanSnapshotV1(existingRunSnapshot)
+      ? existingRunSnapshot
+      : null;
+    let executionRunPlan: AgentRunPlanSnapshotV1 | null = existingRunPlan;
     let pendingRunPlan: Awaited<ReturnType<typeof AgentRunPlanResolver.resolveForRunAdmission>> | null = null;
     if (!existingRun) {
       const source = await AgentSourceService.getSessionSource(session.id);
@@ -242,7 +306,7 @@ export default class AgentRunExecutor {
       selection,
       userIdentity,
     });
-    const observabilityTracker = new AgentRunObservabilityTracker();
+    const observabilityTracker = new AgentRunObservabilityTracker(selection);
     const touchSessionActivity = async () => {
       try {
         await AgentSessionService.touchActivity(session.uuid);
@@ -286,12 +350,13 @@ export default class AgentRunExecutor {
         throw new Error('Agent run plan snapshot is required for execution.');
       }
 
-      const tools = await AgentCapabilityService.buildToolSet({
+      const { tools, metadata: toolMetadata } = await AgentCapabilityService.buildToolSetWithMetadata({
         session,
         repoFullName,
         userIdentity,
         approvalPolicy,
-        resolvedCapabilityAccess: executionRunPlan?.capabilities.resolvedCapabilityAccess ?? [],
+        resolvedCapabilityAccess: (executionRunPlan?.capabilities.resolvedCapabilityAccess ??
+          []) as ResolvedAgentCapabilityAccess[],
         selectedRuntimeMcpConnectionRefs: executionRunPlan?.capabilities.selectedRuntimeMcpConnectionRefs,
         workspaceToolDiscoveryTimeoutMs: runControlPlaneConfig.workspaceToolDiscoveryTimeoutMs,
         workspaceToolExecutionTimeoutMs: runControlPlaneConfig.workspaceToolExecutionTimeoutMs,
@@ -364,23 +429,26 @@ export default class AgentRunExecutor {
           onFileChange: async (change) => {
             await onFileChange?.(change);
           },
+          getActiveRunUuid: () => requireRun().uuid,
         },
       });
 
-      if (existingRun) {
-        if (!existingRun.executionOwner) {
+      const activeExistingRun = existingRun;
+      if (activeExistingRun) {
+        if (!activeExistingRun.executionOwner) {
           throw new Error('Agent run execution owner is required.');
         }
 
-        const fallbackResolvedHarness = existingRun.resolvedHarness || session.defaultHarness || 'lifecycle_ai_sdk';
+        const fallbackResolvedHarness =
+          activeExistingRun.resolvedHarness || session.defaultHarness || 'lifecycle_ai_sdk';
         run = await AgentRunService.startRunForExecutionOwner(
-          existingRun.uuid,
-          existingRun.executionOwner,
+          activeExistingRun.uuid,
+          activeExistingRun.executionOwner,
           {
             resolvedHarness: existingRunPlan?.runtime.resolvedHarness || fallbackResolvedHarness,
             provider: selection.provider,
             model: selection.modelId,
-            sandboxGeneration: existingRun.sandboxGeneration,
+            sandboxGeneration: activeExistingRun.sandboxGeneration,
           },
           { dispatchAttemptId }
         );
@@ -448,15 +516,70 @@ export default class AgentRunExecutor {
         }, resolveHeartbeatIntervalMs(runExecutionLeaseMs));
         heartbeatTimer.unref?.();
       }
+      const loopControls = resolveDebugToolLoopControls({
+        runPlanSnapshot: executionRunPlan,
+        tools,
+        toolMetadata,
+        maxIterations: runControlPlaneConfig.maxIterations,
+      });
+      const resolvedInstructionTexts = readResolvedInstructionTexts(executionRunPlan);
+      const synthesizeReadOnlyDebugAnswer = async (messages: AgentUIMessage[]): Promise<string | null> => {
+        const debugIntent = resolveDebugIntent(executionRunPlan);
+        if (!debugIntent || !isReadOnlyDebugIntent(debugIntent)) {
+          return null;
+        }
+
+        try {
+          const modelMessages = await convertToModelMessages(
+            messages.map(({ id: _id, ...message }) => message) as any,
+            {
+              tools,
+              ignoreIncompleteToolCalls: true,
+            }
+          );
+          const result = await generateText({
+            model,
+            system: buildSystemPrompt([
+              runControlPlaneConfig.systemPrompt,
+              ...resolvedInstructionTexts,
+              executionRunPlan?.prompt.instructionAddendum || undefined,
+              sessionPrompt,
+              DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT,
+            ]),
+            messages: [...modelMessages, { role: 'user', content: DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT }],
+            toolChoice: 'none',
+          });
+          observabilityTracker.addGeneration({
+            usage: result.totalUsage,
+            providerMetadata: result.providerMetadata,
+            finishReason: result.finishReason,
+            rawFinishReason: result.rawFinishReason,
+            warnings: result.warnings,
+            response: result.response,
+          });
+
+          return result.text.trim() || null;
+        } catch (error) {
+          const activeRun = requireRun();
+          getLogger().warn(
+            { error, runId: activeRun.uuid },
+            `AgentExec: debug synthesis failed runId=${activeRun.uuid}`
+          );
+          return null;
+        }
+      };
       const agent = new ToolLoopAgent({
         model,
         instructions: buildSystemPrompt([
           runControlPlaneConfig.systemPrompt,
+          ...resolvedInstructionTexts,
           executionRunPlan?.prompt.instructionAddendum || undefined,
           sessionPrompt,
         ]),
         tools,
-        stopWhen: stepCountIs(runControlPlaneConfig.maxIterations),
+        activeTools: loopControls.activeTools,
+        stopWhen: loopControls.stopWhen,
+        prepareStep: loopControls.prepareStep,
         onStepFinish: async (step) => {
           try {
             const usageSummary = observabilityTracker.updateFromStep({
@@ -536,21 +659,61 @@ export default class AgentRunExecutor {
           finishReason?: string;
           isAborted: boolean;
         }) => {
-          const observabilitySummary = observabilityTracker.getSummary();
+          let observabilitySummary = observabilityTracker.getSummary();
           try {
             if (!activeExecutionOwner) {
               throw new Error('Agent run execution owner is required.');
             }
 
-            const messagesWithApprovalStages = applyApprovalResponsesToFileChangeParts(updatedMessages);
+            let effectiveMessages = updatedMessages;
+            let effectiveFinishReason = finishReason;
+            if (finishReason === 'tool-calls') {
+              const synthesizedAnswer = await synthesizeReadOnlyDebugAnswer(updatedMessages);
+              if (synthesizedAnswer) {
+                effectiveMessages = appendAssistantTextForRun(updatedMessages, activeRun.uuid, synthesizedAnswer);
+                effectiveFinishReason = 'stop';
+              }
+            }
+            if (executionRunPlan?.agent.id === 'system.debug' && executionRunPlan.debug?.resolvedIntent === 'repair') {
+              effectiveMessages = sanitizeDebugRepairAssistantMessages(effectiveMessages, activeRun.uuid);
+            }
+            let hasDebugRepairObservation = false;
+            try {
+              const repairObservationText = await buildDebugRepairObservationText({
+                session,
+                messages: effectiveMessages,
+                runPlanSnapshot: executionRunPlan,
+              });
+              if (repairObservationText) {
+                hasDebugRepairObservation = true;
+                if (!assistantRunHasText(effectiveMessages, activeRun.uuid, repairObservationText)) {
+                  effectiveMessages = appendAssistantTextForRun(
+                    effectiveMessages,
+                    activeRun.uuid,
+                    repairObservationText
+                  );
+                }
+              }
+            } catch (error) {
+              getLogger().warn(
+                { error, runId: activeRun.uuid },
+                `AgentExec: debug repair observation failed runId=${activeRun.uuid}`
+              );
+            }
+            if (hasDebugRepairObservation && effectiveFinishReason === 'tool-calls') {
+              effectiveFinishReason = 'stop';
+            }
+
+            observabilitySummary = observabilityTracker.getSummary();
+            const messagesWithApprovalStages = applyApprovalResponsesToFileChangeParts(effectiveMessages);
             const messagesWithObservability = applyFinalObservabilityToMessages(
               messagesWithApprovalStages,
               activeRun.uuid,
               buildMessageObservabilityMetadataPatch(observabilitySummary)
             );
             const terminalFailure = classifyTerminalRunFailure({
-              finishReason,
-              maxIterations: runControlPlaneConfig.maxIterations,
+              finishReason: effectiveFinishReason,
+              maxIterations: loopControls.effectiveMaxIterations,
             });
             const completedAt = new Date().toISOString();
 

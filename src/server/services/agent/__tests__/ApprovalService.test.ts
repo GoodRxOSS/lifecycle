@@ -969,6 +969,77 @@ describe('ApprovalService', () => {
     });
   });
 
+  it('completes denied Debug repair approvals instead of immediately resuming repair', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      payload: { approvalId: 'approval-1' },
+      runUuid: 'run-uuid',
+    };
+    const updatedAction = {
+      ...action,
+      status: 'denied',
+      resolution: {
+        approved: false,
+        reason: 'not now',
+      },
+    };
+    const completedRun = {
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'completed',
+      usageSummary: {},
+      error: null,
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action, null, updatedAction);
+    const runQuery = makeTransactionalRunQuery(
+      {
+        id: 11,
+        uuid: 'run-uuid',
+        status: 'waiting_for_approval',
+        usageSummary: {},
+        error: null,
+        runPlanSnapshot: {
+          version: 1,
+          debug: {
+            resolvedIntent: 'repair',
+          },
+        },
+      },
+      completedRun
+    );
+
+    mockEnqueueRun.mockResolvedValue(undefined);
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await ApprovalService.resolvePendingAction('action-1', 'sample-user', 'denied', {
+      approved: false,
+      reason: 'not now',
+    });
+
+    expect(runQuery.patchAndFetchById).toHaveBeenCalledWith(
+      11,
+      expect.objectContaining({
+        status: 'completed',
+        completedAt: expect.any(String),
+        executionOwner: null,
+      })
+    );
+    expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+      completedRun,
+      'run.completed',
+      expect.objectContaining({
+        status: 'completed',
+      }),
+      { trx: true }
+    );
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
   it('resumes a waiting run from an already resolved action without duplicate approval side effects', async () => {
     const action = {
       id: 99,

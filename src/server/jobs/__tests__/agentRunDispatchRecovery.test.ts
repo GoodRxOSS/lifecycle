@@ -18,6 +18,14 @@ jest.mock('server/services/agent/RunService', () => ({
   __esModule: true,
   default: {
     listRunsNeedingDispatch: jest.fn(),
+    markWaitingForInputForRecovery: jest.fn(),
+  },
+}));
+
+jest.mock('server/services/agent/RunResumeEligibilityService', () => ({
+  __esModule: true,
+  default: {
+    evaluateRun: jest.fn(),
   },
 }));
 
@@ -41,12 +49,15 @@ jest.mock('server/lib/logger', () => {
 
 import AgentRunService from 'server/services/agent/RunService';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
+import AgentRunResumeEligibilityService from 'server/services/agent/RunResumeEligibilityService';
 import { getLogger } from 'server/lib/logger';
 import { processAgentRunDispatchRecovery } from '../agentRunDispatchRecovery';
 
 const mockListRunsNeedingDispatch = AgentRunService.listRunsNeedingDispatch as jest.Mock;
+const mockMarkWaitingForInputForRecovery = AgentRunService.markWaitingForInputForRecovery as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
-const mockLogger = getLogger() as {
+const mockEvaluateRun = AgentRunResumeEligibilityService.evaluateRun as jest.Mock;
+const mockLogger = getLogger() as unknown as {
   info: jest.Mock;
   warn: jest.Mock;
 };
@@ -54,6 +65,14 @@ const mockLogger = getLogger() as {
 describe('agentRunDispatchRecovery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockEvaluateRun.mockImplementation(async (run) => ({
+      decision: 'auto_resume_allowed',
+      reason: 'queued_dispatch_retry',
+      previousStatus: run.status || 'queued',
+      previousOwner: run.executionOwner || null,
+      leaseExpiresAt: run.leaseExpiresAt || null,
+      evaluatedAt: '2026-05-08T12:00:00.000Z',
+    }));
   });
 
   it('re-enqueues stale queued and expired-lease runs', async () => {
@@ -73,12 +92,77 @@ describe('agentRunDispatchRecovery', () => {
         { runId: 'run-1', dispatchAttemptId: 'attempt-1' },
         { runId: 'run-2', dispatchAttemptId: 'attempt-2' },
       ],
+      skipped: [],
+      paused: [],
       failed: [],
     });
     expect(mockLogger.info).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'run-1', dispatchAttemptId: 'attempt-1' }),
-      'AgentExec: recovery enqueued runId=run-1 reason=resume dispatchAttemptId=attempt-1'
+      expect.stringContaining('AgentExec: recovery enqueued runId=run-1 reason=resume')
     );
+  });
+
+  it('pauses manual recovery runs instead of enqueueing them', async () => {
+    const run = {
+      uuid: 'run-1',
+      status: 'running',
+      executionOwner: 'worker-1',
+      leaseExpiresAt: '2026-05-08T11:59:00.000Z',
+    };
+    const eligibility = {
+      decision: 'manual_recovery_required',
+      reason: 'write_capability',
+      previousStatus: 'running',
+      previousOwner: 'worker-1',
+      leaseExpiresAt: '2026-05-08T11:59:00.000Z',
+      evaluatedAt: '2026-05-08T12:00:00.000Z',
+    };
+    mockListRunsNeedingDispatch.mockResolvedValue([run]);
+    mockEvaluateRun.mockResolvedValue(eligibility);
+    mockMarkWaitingForInputForRecovery.mockResolvedValue({ ...run, status: 'waiting_for_input' });
+
+    const result = await processAgentRunDispatchRecovery();
+
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockMarkWaitingForInputForRecovery).toHaveBeenCalledWith(
+      'run-1',
+      eligibility,
+      expect.objectContaining({
+        expectedExecutionOwner: 'worker-1',
+        resumeAttemptId: expect.any(String),
+      })
+    );
+    expect(result).toEqual({
+      runs: 1,
+      enqueued: [],
+      skipped: [],
+      paused: [{ runId: 'run-1', reason: 'write_capability' }],
+      failed: [],
+    });
+  });
+
+  it('skips replay-only runs without enqueueing or pausing', async () => {
+    mockListRunsNeedingDispatch.mockResolvedValue([{ uuid: 'run-1' }]);
+    mockEvaluateRun.mockResolvedValue({
+      decision: 'replay_only',
+      reason: 'lease_active',
+      previousStatus: 'running',
+      previousOwner: 'worker-1',
+      leaseExpiresAt: '2026-05-08T12:01:00.000Z',
+      evaluatedAt: '2026-05-08T12:00:00.000Z',
+    });
+
+    const result = await processAgentRunDispatchRecovery();
+
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockMarkWaitingForInputForRecovery).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      runs: 1,
+      enqueued: [],
+      skipped: [{ runId: 'run-1', decision: 'replay_only', reason: 'lease_active' }],
+      paused: [],
+      failed: [],
+    });
   });
 
   it('continues re-enqueueing remaining runs after one enqueue fails', async () => {
@@ -94,6 +178,8 @@ describe('agentRunDispatchRecovery', () => {
     expect(result).toEqual({
       runs: 2,
       enqueued: [{ runId: 'run-2', dispatchAttemptId: 'attempt-2' }],
+      skipped: [],
+      paused: [],
       failed: [{ runId: 'run-1' }],
     });
   });

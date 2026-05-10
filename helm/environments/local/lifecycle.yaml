@@ -67,6 +67,12 @@ components:
       enabled: false
     deployment:
       replicaCount: 1
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          memory: 12Gi
       extraEnv:
         - name: JOB_VERSION
           value: default
@@ -79,9 +85,11 @@ components:
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
-          value: debug
+          value: info
         - name: NODE_ENV
           value: development
+        - name: NODE_OPTIONS
+          value: '--max-old-space-size=6144'
         - name: LIFECYCLE_MODE
           value: web
         - name: PORT
@@ -128,7 +136,7 @@ components:
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
-          value: debug
+          value: info
         - name: NODE_ENV
           value: development
         - name: APP_ENV

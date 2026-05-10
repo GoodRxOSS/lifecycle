@@ -168,16 +168,6 @@ function renderCallbackPage(options: {
  *         schema:
  *           type: string
  *       - in: query
- *         name: scope
- *         schema:
- *           type: string
- *         description: Legacy scope parameter kept for compatibility with in-flight callbacks.
- *       - in: query
- *         name: flow
- *         schema:
- *           type: string
- *         description: Legacy flow identifier kept for compatibility with in-flight callbacks.
- *       - in: query
  *         name: code
  *         schema:
  *           type: string
@@ -188,27 +178,11 @@ function renderCallbackPage(options: {
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
   const { slug } = await params;
-  const requestedScope = req.nextUrl.searchParams.get('scope');
   const code = req.nextUrl.searchParams.get('code') || undefined;
   const callbackState = req.nextUrl.searchParams.get('state') || undefined;
   const oauthError = req.nextUrl.searchParams.get('error');
-  const queryFlowId = req.nextUrl.searchParams.get('flow') || '';
   const stateFlowId = extractMcpOAuthFlowId(callbackState);
-  if (stateFlowId && queryFlowId && stateFlowId !== queryFlowId) {
-    return new NextResponse(
-      renderCallbackPage({
-        title: 'Connection failed',
-        message: 'Connection callback did not match the original authorization flow.',
-      }),
-      {
-        status: 400,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      }
-    );
-  }
-
-  const flowId = stateFlowId || queryFlowId;
-  const flow = await McpOAuthFlowService.consume(flowId);
+  const flow = stateFlowId ? await McpOAuthFlowService.consume(stateFlowId) : null;
 
   if (!flow) {
     return new NextResponse(
@@ -229,7 +203,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     targetOrigin: flow.appOrigin,
   } as const;
 
-  if (slug !== flow.slug || (requestedScope && requestedScope !== flow.scope)) {
+  if (slug !== flow.slug) {
     const mismatchMessage = 'Connection callback did not match the original MCP request.';
     await clearPendingFlowState(flow, mismatchMessage);
     return new NextResponse(

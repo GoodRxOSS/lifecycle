@@ -143,6 +143,9 @@ describe('CustomAgentDefinitionService', () => {
     await expect(service.getUserDefinition('system.freeform', 'sample-user')).rejects.toMatchObject({
       code: 'not_found',
     });
+    await expect(service.getUserDefinition('system.debug', 'sample-user')).rejects.toMatchObject({
+      code: 'not_found',
+    });
 
     expect(mockFindOne).toHaveBeenCalledWith({
       definitionId: 'custom.other-user',
@@ -211,6 +214,62 @@ describe('CustomAgentDefinitionService', () => {
         readOnly: false,
       })
     );
+  });
+
+  it('keeps crafted system-definition fields out of user create and update persistence', async () => {
+    mockInsert.mockImplementation(async (row) => buildRow({ id: 10, ...row }));
+    mockFindOne.mockResolvedValue(buildRow({ id: 10, version: 4 }));
+    mockPatchAndFetchById.mockImplementation(async (_id, patch) => buildRow({ id: 10, version: 5, ...patch }));
+
+    await service.createUserDefinition(userIdentity, {
+      definitionId: 'system.debug',
+      ownerKind: 'system',
+      instructionRefs: ['system:debug'],
+      requiredCapabilityRefs: ['github_write'],
+      codeOwned: true,
+      readOnly: true,
+      name: '  Crafted Debug  ',
+      description: '  Tries to edit Debug.  ',
+      instructionAddendum: '  Behave normally.  ',
+      capabilityRefs: ['read_context'],
+      resourceBehavior: 'chat_only',
+    } as any);
+
+    const inserted = mockInsert.mock.calls[0][0] as Record<string, unknown>;
+    expect(inserted).toEqual(
+      expect.objectContaining({
+        definitionId: expect.stringMatching(/^custom\./),
+        ownerKind: 'user',
+        ownerUserId: 'sample-user',
+        instructionRefs: [],
+        requiredCapabilityRefs: [],
+        optionalCapabilityRefs: ['read_context'],
+        codeOwned: false,
+        readOnly: false,
+      })
+    );
+    expect(inserted.definitionId).not.toBe('system.debug');
+
+    await service.updateUserDefinition('custom.sample-agent', userIdentity, {
+      definitionId: 'system.debug',
+      ownerKind: 'system',
+      instructionRefs: ['system:debug'],
+      requiredCapabilityRefs: ['github_write'],
+      codeOwned: true,
+      readOnly: true,
+      name: '  Updated helper  ',
+      instructionAddendum: '  Prefer short answers.  ',
+      capabilityRefs: ['read_context'],
+      resourceBehavior: 'chat_only',
+    } as any);
+
+    const patch = mockPatchAndFetchById.mock.calls[0][1] as Record<string, unknown>;
+    expect(patch).not.toHaveProperty('definitionId');
+    expect(patch).not.toHaveProperty('ownerKind');
+    expect(patch).not.toHaveProperty('instructionRefs');
+    expect(patch.requiredCapabilityRefs).toEqual([]);
+    expect(patch.codeOwned).toBe(false);
+    expect(patch.readOnly).toBe(false);
   });
 
   it('archiveUserDefinition changes status to archived and keeps the row', async () => {

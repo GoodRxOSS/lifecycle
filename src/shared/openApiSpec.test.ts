@@ -1,4 +1,8 @@
 import swaggerJSDoc from 'swagger-jsdoc';
+import {
+  WORKSPACE_RUNTIME_FAILURE_ORIGINS,
+  WORKSPACE_RUNTIME_FAILURE_STAGES,
+} from '../server/lib/agentSession/startupFailureState';
 import { openApiSpecificationForV2Api } from './openApiSpec';
 
 const swaggerSpec = swaggerJSDoc(openApiSpecificationForV2Api) as any;
@@ -148,6 +152,17 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.AgentRunPlanSummary.properties.capabilities).toEqual({
       $ref: '#/components/schemas/AgentRunPlanCapabilitiesSummary',
     });
+    expect(schemas.AgentRunPlanSummary.properties.debug).toEqual({
+      type: 'object',
+      properties: {
+        intent: {
+          type: 'string',
+          enum: ['diagnose', 'investigate', 'repair'],
+        },
+      },
+      required: ['intent'],
+      additionalProperties: false,
+    });
 
     const runPlanSchemas = JSON.stringify({
       AgentRunPlanSummary: schemas.AgentRunPlanSummary,
@@ -164,6 +179,9 @@ describe('OpenAPI v2 agent session contract', () => {
       `selectedRuntime${'Mcp'}ConnectionRefs`,
       'runtimeCapabilityKey',
       'approvalPolicy',
+      'requestedIntent',
+      'decisionSource',
+      'reasonCode',
     ]) {
       expect(runPlanSchemas).not.toContain(forbidden);
     }
@@ -195,14 +213,38 @@ describe('OpenAPI v2 agent session contract', () => {
       "resolves its run plan server-side from the thread's selected agent"
     );
     expect(Object.keys(schemas.CreateAgentThreadRunRequest.properties).sort()).toEqual([
+      'debugIntent',
       'message',
       'model',
       'runtimeOptions',
     ]);
+    expect(schemas.CreateAgentThreadRunRequest.properties.debugIntent).toEqual({
+      type: 'string',
+      enum: ['diagnose', 'investigate', 'repair'],
+    });
     expect(schemas.CreateAgentThreadRunRequest.additionalProperties).toBe(false);
     expect(schemas.AgentRun.properties.runPlan).toEqual({
       $ref: '#/components/schemas/AgentRunPlanSummary',
     });
+  });
+
+  it('documents the public run recovery summary', () => {
+    expect(schemas.AgentRunRecovery).toEqual(
+      expect.objectContaining({
+        type: 'object',
+        required: ['decision', 'reason'],
+      })
+    );
+    expect(schemas.AgentRunRecovery.properties.decision.enum).toEqual([
+      'auto_resume_allowed',
+      'replay_only',
+      'manual_recovery_required',
+    ]);
+    expect(schemas.AgentRun.properties.recovery).toEqual({
+      allOf: [{ $ref: '#/components/schemas/AgentRunRecovery' }],
+      nullable: true,
+    });
+    expect(schemas.AgentRun.required).toEqual(expect.arrayContaining(['recovery']));
   });
 
   it('documents exact thread usage without raw provider internals', () => {
@@ -212,11 +254,13 @@ describe('OpenAPI v2 agent session contract', () => {
       'cacheCreationInputTokens',
       'cacheReadInputTokens',
       'cachedInputTokens',
+      'estimatedCostUsd',
       'inputTokens',
       'nonCachedInputTokens',
       'outputTokens',
       'reasoningTokens',
       'textOutputTokens',
+      'totalCostUsd',
       'totalTokens',
     ]);
     expect(schemas.AgentUsageByModel.required).toEqual([
@@ -250,11 +294,120 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(usageSchemas).not.toContain('providerMetadata');
   });
 
+  it('documents session thread history with dedicated summary metadata', () => {
+    const threadsResponse = getOperation('/api/v2/ai/agent/sessions/{sessionId}/threads', 'get').responses['200']
+      .content['application/json'].schema;
+
+    expect(threadsResponse.allOf[1].properties.data.properties.threads.items).toEqual({
+      $ref: '#/components/schemas/AgentThreadHistoryEntry',
+    });
+    expect(schemas.AgentThread.properties.summary).toBeUndefined();
+    expect(schemas.AgentThreadHistoryEntry.allOf[0]).toEqual({ $ref: '#/components/schemas/AgentThread' });
+    expect(schemas.AgentThreadHistorySummary.required).toEqual([
+      'messageCount',
+      'runCount',
+      'pendingActionsCount',
+      'latestRun',
+      'lastActivityAt',
+      'usage',
+    ]);
+    expect(schemas.AgentThreadHistorySummary.properties.usage).toEqual({
+      $ref: '#/components/schemas/AgentUsageAggregate',
+    });
+    expect(schemas.AgentThreadLatestRunSummary.nullable).toBe(true);
+    expect(schemas.AgentThreadLatestRunSummary.required).toEqual(
+      expect.arrayContaining(['id', 'status', 'provider', 'model', 'usageSummary'])
+    );
+  });
+
   it('documents session summaries with lifetime usage', () => {
-    expect(schemas.AgentSessionSummary.required).toEqual(['session', 'source', 'sandbox', 'usage']);
+    expect(schemas.AgentSessionSummary.required).toEqual([
+      'session',
+      'conversationSummary',
+      'source',
+      'sandbox',
+      'usage',
+    ]);
+    expect(schemas.AgentSessionSummary.properties.conversationSummary.required).toEqual([
+      'activeTitle',
+      'conversationCount',
+      'lastActivityAt',
+    ]);
     expect(schemas.AgentSessionSummary.properties.usage).toEqual({
       $ref: '#/components/schemas/AgentUsageAggregate',
     });
+  });
+
+  it('documents reusable workspace runtime failure and provider-state schemas', () => {
+    expect(schemas.WorkspaceRuntimeFailureStage).toEqual({
+      type: 'string',
+      enum: [...WORKSPACE_RUNTIME_FAILURE_STAGES],
+    });
+    expect(schemas.WorkspaceRuntimeFailureOrigin).toEqual({
+      type: 'string',
+      enum: [...WORKSPACE_RUNTIME_FAILURE_ORIGINS],
+    });
+    expect(schemas.WorkspaceRuntimeFailure.required).toEqual([
+      'stage',
+      'title',
+      'message',
+      'recordedAt',
+      'retryable',
+      'origin',
+    ]);
+    expect(schemas.WorkspaceRuntimeFailure.additionalProperties).toBe(false);
+    expect(schemas.WorkspaceRuntimeFailure.properties.stage).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeFailureStage',
+    });
+    expect(schemas.WorkspaceRuntimeFailure.properties.origin).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeFailureOrigin',
+    });
+    expect(schemas.WorkspaceRuntimeFailure.properties.recordedAt).toEqual({
+      type: 'string',
+      format: 'date-time',
+    });
+    expect(schemas.WorkspaceRuntimeProviderState.additionalProperties).toBe(false);
+    expect(Object.keys(schemas.WorkspaceRuntimeProviderState.properties).sort()).toEqual([
+      'namespace',
+      'podName',
+      'pvcName',
+      'selectedServices',
+      'workspaceStorage',
+    ]);
+    expect(schemas.WorkspaceRuntimeProviderState.properties.workspaceStorage).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeProviderWorkspaceStorage',
+    });
+    expect(schemas.WorkspaceRuntimeProviderState.properties.selectedServices.items).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeProviderSelectedService',
+    });
+    expect(schemas.WorkspaceFailureLinkData.required).toEqual(['sessionId', 'sessionUrl', 'workspaceFailure']);
+    expect(schemas.WorkspaceFailureLinkData.properties.workspaceFailure).toEqual({
+      allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
+      nullable: true,
+    });
+    expect(schemas.AgentSandbox.properties.error).toEqual({
+      allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
+      nullable: true,
+    });
+    expect(schemas.AgentSandbox.properties.providerState).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeProviderState',
+    });
+    expect(schemas.AgentSandbox.required).toEqual(expect.arrayContaining(['providerState']));
+  });
+
+  it('uses the workspace runtime failure schema for startup failure projections', () => {
+    const attachStartupFailure = getOperation('/api/v2/ai/agent/sessions/{sessionId}/services', 'post')?.responses[
+      '200'
+    ].content['application/json'].schema.properties.data.properties.startupFailure;
+
+    const expectedFailureRef = {
+      allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
+      nullable: true,
+    };
+
+    expect(schemas.AgentAdminSessionSummary.properties.startupFailure).toEqual(expectedFailureRef);
+    expect(attachStartupFailure).toEqual(expectedFailureRef);
+    expect(Object.keys(attachStartupFailure).sort()).toEqual(['allOf', 'nullable']);
   });
 
   it('keeps admin capability policy docs admin-scoped and payload-compatible', () => {
@@ -286,6 +439,55 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.CreatorCapabilityAvailability.enum).toEqual(['available', 'reserved']);
     expect(schemas.AgentRuntimeConfig.properties.customAgentCreationPolicy).toEqual({
       $ref: '#/components/schemas/CustomAgentCreationPolicy',
+    });
+  });
+
+  it('documents instruction template admin routes and metadata schemas', () => {
+    const listPath = '/api/v2/ai/admin/agent/instruction-templates';
+    const detailPath = '/api/v2/ai/admin/agent/instruction-templates/{ref}';
+    const overridePath = '/api/v2/ai/admin/agent/instruction-templates/{ref}/override';
+    const resetPath = '/api/v2/ai/admin/agent/instruction-templates/{ref}/reset';
+
+    expect(getOperation(listPath, 'get')?.tags).toEqual(['Agent Admin']);
+    expect(getOperation(detailPath, 'get')?.tags).toEqual(['Agent Admin']);
+    expect(getOperation(overridePath, 'put')?.tags).toEqual(['Agent Admin']);
+    expect(getOperation(resetPath, 'post')?.tags).toEqual(['Agent Admin']);
+    expect(getOperation(listPath, 'get')?.summary).toBe('List agent instruction templates');
+    expect(getOperation(detailPath, 'get')?.summary).toBe('Get an agent instruction template');
+    expect(getOperation(overridePath, 'put')?.summary).toBe('Override an agent instruction template');
+    expect(getOperation(resetPath, 'post')?.summary).toBe('Reset an agent instruction template override');
+
+    expect(schemas.AgentInstructionTemplateSummary.properties.default).toEqual({
+      $ref: '#/components/schemas/AgentInstructionTemplateDefaultMetadata',
+    });
+    expect(schemas.AgentInstructionTemplateSummary.properties.override).toEqual({
+      allOf: [{ $ref: '#/components/schemas/AgentInstructionTemplateOverrideMetadata' }],
+      nullable: true,
+    });
+    expect(schemas.AgentInstructionTemplateSummary.properties.effective).toEqual({
+      $ref: '#/components/schemas/AgentInstructionTemplateEffectiveMetadata',
+    });
+    expect(schemas.AgentInstructionTemplateEffectiveMetadata.properties.source.enum).toEqual(['default', 'override']);
+    expect(schemas.AgentInstructionTemplateOverrideMetadata.required).toEqual(
+      expect.arrayContaining(['content', 'baseDefaultVersion', 'baseDefaultHash', 'updatedBy', 'updatedAt'])
+    );
+    expect(schemas.UpdateAgentInstructionTemplateOverrideRequest.required).toEqual(['content']);
+    expect(schemas.UpdateAgentInstructionTemplateOverrideRequest.additionalProperties).toBe(false);
+    const listTemplateItems =
+      schemas.ListAdminAgentInstructionTemplatesSuccessResponse.allOf[1].properties.data.properties.templates.items;
+    const getTemplateData =
+      schemas.GetAdminAgentInstructionTemplateSuccessResponse.allOf[1].properties.data.properties.template;
+    const mutationTemplateData =
+      schemas.MutateAdminAgentInstructionTemplateSuccessResponse.allOf[1].properties.data.properties.template;
+
+    expect(listTemplateItems).toEqual({
+      $ref: '#/components/schemas/AgentInstructionTemplateSummary',
+    });
+    expect(getTemplateData).toEqual({
+      $ref: '#/components/schemas/AgentInstructionTemplateDetail',
+    });
+    expect(mutationTemplateData).toEqual({
+      $ref: '#/components/schemas/AgentInstructionTemplateDetail',
     });
   });
 
@@ -374,6 +576,18 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.GetAIConfigSuccessResponse).toBeDefined();
     expect(schemas.AgentRuntimeConfig).toBeDefined();
     expect(schemas.AgentRuntimeRepoOverride).toBeDefined();
+    expect(schemas.CreateBuildContextAgentChatRequest.properties.selectedDeployUuid).toEqual({ type: 'string' });
+    expect(schemas.CreateBuildContextAgentChatRequest.additionalProperties).toBe(false);
+    expect(schemas.BuildContextAgentChatContext.properties.selectedDeployUuid).toEqual({
+      type: 'string',
+      nullable: true,
+    });
+    expect(schemas.BuildContextAgentChatContext.properties.selectedDeploy).toEqual(
+      expect.objectContaining({
+        nullable: true,
+        additionalProperties: false,
+      })
+    );
   });
 
   it('documents JSON error responses for changed canonical endpoints', () => {

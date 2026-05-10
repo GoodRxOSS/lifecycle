@@ -42,7 +42,7 @@ interface SuccessResponseOptions {
 
 export interface ErrorResponse {
   request_id: string;
-  data: null;
+  data: unknown | null;
   error: {
     message: string;
   };
@@ -50,6 +50,7 @@ export interface ErrorResponse {
 
 interface ErrorResponseOptions {
   status: ErrorStatusCode;
+  data?: unknown | null;
 }
 
 export function successResponse<T>(data: T, options: SuccessResponseOptions, req: NextRequest): NextResponse {
@@ -83,7 +84,7 @@ export function errorResponse(error: unknown, options: ErrorResponseOptions, req
 
   const body: ErrorResponse = {
     request_id: req.headers.get('x-request-id') || '',
-    data: null,
+    data: options.data ?? null,
     error: {
       message: error instanceof Error ? error.message : 'An unknown error occurred.',
     },

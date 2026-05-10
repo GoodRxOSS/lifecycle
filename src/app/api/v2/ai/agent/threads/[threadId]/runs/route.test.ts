@@ -48,6 +48,16 @@ jest.mock('server/services/agent/MessageStore', () => ({
 
 jest.mock('server/services/agent/RunPlanResolver', () => ({
   __esModule: true,
+  AgentRunPlanAgentUnavailableError: class AgentRunPlanAgentUnavailableError extends Error {
+    constructor(
+      public readonly agentId: string,
+      public readonly reason: string,
+      public readonly details?: Record<string, unknown>
+    ) {
+      super(`Agent "${agentId}" is unavailable: ${reason}.`);
+      this.name = 'AgentRunPlanAgentUnavailableError';
+    }
+  },
   default: {
     resolveForRunAdmission: jest.fn(),
   },
@@ -64,6 +74,7 @@ jest.mock('server/services/agent/RunService', () => ({
   __esModule: true,
   default: {
     isActiveRunConflictError: jest.fn(),
+    hasPriorCompletedDebugIntentRun: jest.fn(),
     markFailed: jest.fn(),
     markQueuedRunDispatchFailed: jest.fn(),
     serializeRun: jest.fn((run) => ({ id: run.uuid, status: run.status })),
@@ -85,6 +96,13 @@ jest.mock('server/services/agent/ThreadService', () => ({
   },
 }));
 
+jest.mock('server/services/agent/SessionReadService', () => ({
+  __esModule: true,
+  default: {
+    getOwnedSessionRecord: jest.fn(),
+  },
+}));
+
 jest.mock('server/services/agentSession', () => ({
   __esModule: true,
   default: {
@@ -98,11 +116,12 @@ import { POST } from './route';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
-import AgentRunPlanResolver from 'server/services/agent/RunPlanResolver';
+import AgentRunPlanResolver, { AgentRunPlanAgentUnavailableError } from 'server/services/agent/RunPlanResolver';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
 import AgentRunService from 'server/services/agent/RunService';
 import AgentSourceService from 'server/services/agent/SourceService';
 import AgentThreadService from 'server/services/agent/ThreadService';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import AgentSessionService from 'server/services/agentSession';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
@@ -111,8 +130,10 @@ const mockCreateQueuedRunWithMessage = AgentRunAdmissionService.createQueuedRunW
 const mockResolveForRunAdmission = AgentRunPlanResolver.resolveForRunAdmission as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
 const mockMarkQueuedRunDispatchFailed = AgentRunService.markQueuedRunDispatchFailed as jest.Mock;
+const mockHasPriorCompletedDebugIntentRun = AgentRunService.hasPriorCompletedDebugIntentRun as jest.Mock;
 const mockGetSessionSource = AgentSourceService.getSessionSource as jest.Mock;
 const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
+const mockGetOwnedSessionRecord = AgentSessionReadService.getOwnedSessionRecord as jest.Mock;
 const mockCanAcceptMessages = AgentSessionService.canAcceptMessages as jest.Mock;
 const mockTouchActivity = AgentSessionService.touchActivity as jest.Mock;
 
@@ -337,6 +358,79 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     expect(mockEnqueueRun).not.toHaveBeenCalled();
   });
 
+  it('maps workspace_required admission failures to 409 and does not queue a run', async () => {
+    const workspaceFailure = {
+      stage: 'connect_runtime',
+      title: 'Workspace did not start',
+      message: 'workspace pod failed',
+      recordedAt: '2026-05-09T16:00:00.000Z',
+      retryable: true,
+      origin: 'chat_runtime',
+    };
+    mockResolveForRunAdmission.mockRejectedValueOnce(
+      new AgentRunPlanAgentUnavailableError('system.develop', 'workspace_required', {
+        sourceKind: 'freeform_chat',
+      })
+    );
+    mockGetOwnedSessionRecord.mockResolvedValueOnce({
+      session: { id: 'session-1' },
+      sandbox: {
+        status: 'failed',
+        error: workspaceFailure,
+      },
+    });
+
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Update the sample file in the workspace' }],
+        },
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.message).toBe('Agent "system.develop" is unavailable: workspace_required.');
+    expect(body.data).toEqual({
+      sessionId: 'session-1',
+      sessionUrl: '/api/v2/ai/agent/sessions/session-1',
+      workspaceFailure,
+    });
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockGetOwnedSessionRecord).toHaveBeenCalledWith('session-1', 'sample-user');
+  });
+
+  it('allows non-workspace runs when a chat workspaceStatus is failed', async () => {
+    mockGetOwnedThreadWithSession.mockResolvedValueOnce({
+      thread: { id: 7, uuid: 'thread-1' },
+      session: {
+        id: 17,
+        uuid: 'session-1',
+        defaultHarness: 'lifecycle_ai_sdk',
+        defaultModel: 'gpt-5.4',
+        workspaceStatus: 'failed',
+      },
+    });
+
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Summarize the sample thread' }],
+        },
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockResolveForRunAdmission).toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).toHaveBeenCalled();
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+  });
+
   it('resolves explicit-or-default values before queueing', async () => {
     const response = await POST(
       makeRequest({
@@ -359,6 +453,9 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         requestedProvider: null,
         requestedModel: null,
         runtimeOptions: { maxIterations: 12 },
+        messageText: 'Hi',
+        requestedDebugIntent: null,
+        findPriorCompletedDebugIntentRun: mockHasPriorCompletedDebugIntentRun,
       })
     );
     expect(mockCreateQueuedRunWithMessage).toHaveBeenCalledWith(
@@ -396,6 +493,47 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
       })
     );
+  });
+
+  it('forwards normalized Debug intent to run-plan admission', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Please investigate more' }],
+        },
+        debugIntent: ' investigate ',
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageText: 'Please investigate more',
+        requestedDebugIntent: 'investigate',
+        findPriorCompletedDebugIntentRun: mockHasPriorCompletedDebugIntentRun,
+      })
+    );
+  });
+
+  it('rejects unsupported Debug intent values', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Please repair this' }],
+        },
+        debugIntent: 'fix',
+      }),
+      { params: { threadId: 'thread-1' } }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('debugIntent must be one of diagnose, investigate, or repair');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
   });
 
   it('passes a custom-agent runPlanSnapshot through queued run admission and response links', async () => {

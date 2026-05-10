@@ -29,6 +29,13 @@ interface QueryResult {
   totalCount: number;
 }
 
+interface TableSchema {
+  primaryKey?: string;
+  columns: string[];
+  columnAliases?: Record<string, string>;
+  relations: Record<string, string>;
+}
+
 export class DatabaseClient {
   constructor(private db: any) {}
 
@@ -79,11 +86,12 @@ export class DatabaseClient {
       const likeFilters: Array<{ column: string; pattern: string }> = [];
       const invalidKeys: string[] = [];
       for (const [key, value] of Object.entries(opts.filters)) {
-        if (schema.columns.includes(key)) {
+        const column = this.normalizeColumnName(schema, key);
+        if (schema.columns.includes(column)) {
           if (typeof value === 'string' && (value.includes('%') || value.includes('_'))) {
-            likeFilters.push({ column: key, pattern: value });
+            likeFilters.push({ column, pattern: value });
           } else {
-            validFilters[key] = value;
+            validFilters[column] = value;
           }
         } else {
           invalidKeys.push(key);
@@ -97,7 +105,7 @@ export class DatabaseClient {
         query = query.where(column, 'like', pattern);
         countQuery = countQuery.where(column, 'like', pattern);
       }
-      if (invalidKeys.length > 0 && Object.keys(validFilters).length === 0 && likeFilters.length === 0) {
+      if (invalidKeys.length > 0) {
         throw new Error(
           `Invalid filter columns: ${invalidKeys.join(', ')}. Valid columns for ${opts.table}: ${schema.columns.join(
             ', '
@@ -106,10 +114,25 @@ export class DatabaseClient {
       }
     }
 
+    const topLevelRelations = opts.relations ? [...new Set(opts.relations.map((r: string) => r.split('.')[0]))] : [];
+    const invalidRelations = topLevelRelations.filter((relation) => !schema.relations[relation]);
+    if (invalidRelations.length > 0) {
+      throw new Error(
+        `Invalid relations: ${invalidRelations.join(', ')}. Valid relations for ${opts.table}: ${Object.keys(
+          schema.relations
+        ).join(', ')}`
+      );
+    }
+
     const totalCount = await countQuery.resultSize();
 
     if (opts.select && opts.select.length > 0) {
-      const validColumns = opts.select.filter((col: string) => schema.columns.includes(col));
+      const validColumns = opts.select
+        .map((col: string) => this.normalizeColumnName(schema, col))
+        .filter(
+          (col: string, index: number, columns: string[]) =>
+            schema.columns.includes(col) && columns.indexOf(col) === index
+        );
       if (validColumns.length > 0) {
         query = query.select(validColumns);
       }
@@ -117,12 +140,11 @@ export class DatabaseClient {
 
     if (opts.orderBy) {
       const [column, direction = 'asc'] = opts.orderBy.split(':');
-      if (schema.columns.includes(column)) {
-        query = query.orderBy(column, direction === 'desc' ? 'desc' : 'asc');
+      const normalizedColumn = this.normalizeColumnName(schema, column);
+      if (schema.columns.includes(normalizedColumn)) {
+        query = query.orderBy(normalizedColumn, direction === 'desc' ? 'desc' : 'asc');
       }
     }
-
-    const topLevelRelations = opts.relations ? [...new Set(opts.relations.map((r: string) => r.split('.')[0]))] : [];
 
     if (topLevelRelations.length > 0) {
       const relationsString = `[${topLevelRelations.join(', ')}]`;
@@ -167,11 +189,38 @@ export class DatabaseClient {
     };
   }
 
-  getTableSchema(table: string): any {
-    const schemas: Record<string, any> = {
+  private normalizeColumnName(schema: TableSchema, column: string): string {
+    return schema.columnAliases?.[column] ?? column;
+  }
+
+  getTableSchema(table: string): TableSchema {
+    const schemas: Record<string, TableSchema> = {
       builds: {
         primaryKey: 'uuid',
-        columns: ['uuid', 'status', 'statusMessage', 'namespace', 'sha', 'capacityType', 'createdAt', 'updatedAt'],
+        columns: [
+          'id',
+          'uuid',
+          'status',
+          'statusMessage',
+          'manifest',
+          'environmentId',
+          'pullRequestId',
+          'buildRequestId',
+          'sha',
+          'runUUID',
+          'capacityType',
+          'kind',
+          'namespace',
+          'createdAt',
+          'updatedAt',
+        ],
+        columnAliases: {
+          created_at: 'createdAt',
+          updated_at: 'updatedAt',
+          pull_request_id: 'pullRequestId',
+          build_request_id: 'buildRequestId',
+          run_uuid: 'runUUID',
+        },
         relations: {
           pullRequest: 'belongs to PullRequest',
           environment: 'belongs to Environment',
@@ -215,19 +264,40 @@ export class DatabaseClient {
         primaryKey: 'id',
         columns: [
           'id',
-          'number',
+          'githubPullRequestId',
+          'repositoryId',
+          'pullRequestNumber',
           'title',
           'status',
+          'deployOnUpdate',
           'branchName',
           'fullName',
           'githubLogin',
           'commentId',
+          'consoleId',
+          'statusCommentId',
+          'latestCommit',
           'createdAt',
           'updatedAt',
         ],
+        columnAliases: {
+          number: 'pullRequestNumber',
+          pull_request_number: 'pullRequestNumber',
+          github_pull_request_id: 'githubPullRequestId',
+          repository_id: 'repositoryId',
+          branch_name: 'branchName',
+          full_name: 'fullName',
+          github_login: 'githubLogin',
+          comment_id: 'commentId',
+          console_id: 'consoleId',
+          status_comment_id: 'statusCommentId',
+          latest_commit: 'latestCommit',
+          created_at: 'createdAt',
+          updated_at: 'updatedAt',
+        },
         relations: {
           repository: 'belongs to Repository',
-          builds: 'has many Builds',
+          build: 'has one Build',
         },
       },
       repositories: {

@@ -94,6 +94,23 @@ function findProviderConfig(providerConfigs: ProviderConfig[], providerName: str
   );
 }
 
+function toResolvedModelSelection(model: AgentModelSummary): AgentResolvedModelSelection {
+  const selection: AgentResolvedModelSelection = {
+    provider: model.provider,
+    modelId: model.modelId,
+  };
+
+  if (typeof model.inputCostPerMillion === 'number') {
+    selection.inputCostPerMillion = model.inputCostPerMillion;
+  }
+
+  if (typeof model.outputCostPerMillion === 'number') {
+    selection.outputCostPerMillion = model.outputCostPerMillion;
+  }
+
+  return selection;
+}
+
 export function resolveRequestedModelSelection(
   models: AgentModelSummary[],
   requestedProvider?: string,
@@ -115,10 +132,7 @@ export function resolveRequestedModelSelection(
       throw new AgentModelSelectionError(`Model ${requestedProvider}:${requestedModelId} is not enabled`);
     }
 
-    return {
-      provider: matched.provider,
-      modelId: matched.modelId,
-    };
+    return toResolvedModelSelection(matched);
   }
 
   if (requestedModelId) {
@@ -131,10 +145,7 @@ export function resolveRequestedModelSelection(
       throw new AgentModelSelectionError(`Model id ${requestedModelId} is ambiguous; provider is required`);
     }
 
-    return {
-      provider: matches[0].provider,
-      modelId: matches[0].modelId,
-    };
+    return toResolvedModelSelection(matches[0]);
   }
 
   if (normalizedRequestedProvider) {
@@ -144,17 +155,11 @@ export function resolveRequestedModelSelection(
     }
 
     const defaultProviderModel = providerModels.find((model) => model.default) || providerModels[0];
-    return {
-      provider: defaultProviderModel.provider,
-      modelId: defaultProviderModel.modelId,
-    };
+    return toResolvedModelSelection(defaultProviderModel);
   }
 
   const defaultModel = models.find((model) => model.default) || models[0];
-  return {
-    provider: defaultModel.provider,
-    modelId: defaultModel.modelId,
-  };
+  return toResolvedModelSelection(defaultModel);
 }
 
 export default class AgentProviderRegistry {

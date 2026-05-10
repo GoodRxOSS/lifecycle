@@ -197,20 +197,13 @@ async function resolveLifecycleConfigForSession({
   return fetchLifecycleConfig(repositoryName, branch);
 }
 
-function isResolvedSessionService(value: unknown): value is ResolvedSessionService {
-  return (
-    value != null &&
-    typeof value === 'object' &&
-    typeof (value as ResolvedSessionService).name === 'string' &&
-    typeof (value as ResolvedSessionService).deployId === 'number' &&
-    (value as ResolvedSessionService).devConfig != null
-  );
-}
-
 function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
+  const allowedKeys = new Set(['name', 'repo', 'branch']);
   return (
     value != null &&
     typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => allowedKeys.has(key)) &&
     typeof (value as RequestedAgentSessionServiceRef).name === 'string' &&
     ((value as RequestedAgentSessionServiceRef).repo == null ||
       typeof (value as RequestedAgentSessionServiceRef).repo === 'string') &&
@@ -235,16 +228,8 @@ async function resolveRequestedServices(
     return [];
   }
 
-  if (requestedServices.every(isResolvedSessionService)) {
-    return requestedServices;
-  }
-
-  if (!buildUuid) {
+  if (!buildUuid || !buildContext) {
     throw new Error('buildUuid is required when services are specified');
-  }
-
-  if (!buildContext) {
-    throw new Error('Build not found');
   }
 
   const { resolveAgentSessionServiceCandidatesForBuild, resolveRequestedAgentSessionServices } = await import(
@@ -457,7 +442,17 @@ const postHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
-  const body = (await req.json()) as CreateSessionBody;
+  let body: CreateSessionBody;
+  try {
+    const parsedBody = await req.json();
+    if (!isPlainObject(parsedBody)) {
+      return errorResponse(new Error('Request body must be an object'), { status: 400 }, req);
+    }
+    body = parsedBody as CreateSessionBody;
+  } catch {
+    return errorResponse(new Error('Invalid JSON body'), { status: 400 }, req);
+  }
+
   let requestedWorkspaceStorageSize: string | undefined;
   let runtimeControlChoices: AgentThreadRuntimeControlChoiceInput | undefined;
   try {
@@ -474,6 +469,14 @@ const postHandler = async (req: NextRequest) => {
     body.source?.input && typeof body.source.input === 'object' && !Array.isArray(body.source.input)
       ? body.source.input
       : {};
+  if (body.source?.adapter === 'lifecycle_fork') {
+    return errorResponse(
+      new Error('Forked sandbox sessions must be created through /api/v2/ai/agent/sandbox-sessions'),
+      { status: 400 },
+      req
+    );
+  }
+
   const buildUuid =
     typeof (sourceInput as { buildUuid?: unknown }).buildUuid === 'string'
       ? (sourceInput as { buildUuid: string }).buildUuid
@@ -484,12 +487,7 @@ const postHandler = async (req: NextRequest) => {
   const requestedModel = body.defaults?.model;
   const requestedProvider =
     typeof body.defaults?.provider === 'string' ? body.defaults.provider.trim() || undefined : undefined;
-  const sessionKind =
-    body.source?.adapter === 'blank_workspace'
-      ? AgentSessionKind.CHAT
-      : body.source?.adapter === 'lifecycle_fork'
-      ? AgentSessionKind.SANDBOX
-      : AgentSessionKind.ENVIRONMENT;
+  const sessionKind = body.source?.adapter === 'blank_workspace' ? AgentSessionKind.CHAT : AgentSessionKind.ENVIRONMENT;
 
   if (sessionKind === AgentSessionKind.CHAT) {
     if (buildUuid || (Array.isArray(services) && services.length > 0)) {
@@ -566,6 +564,14 @@ const postHandler = async (req: NextRequest) => {
     }
 
     buildKind = buildContext.kind || BuildKind.ENVIRONMENT;
+    if (buildKind === BuildKind.SANDBOX) {
+      return errorResponse(
+        new Error('Forked sandbox sessions must be created through /api/v2/ai/agent/sandbox-sessions'),
+        { status: 400 },
+        req
+      );
+    }
+
     repoUrl = repoUrl || `https://github.com/${buildContext.pullRequest.fullName}.git`;
     branch = branch || buildContext.pullRequest.branchName;
     prNumber = prNumber ?? buildContext.pullRequest.pullRequestNumber;
@@ -596,12 +602,7 @@ const postHandler = async (req: NextRequest) => {
   try {
     const [
       { resolveRequestGitHubToken },
-      {
-        mergeAgentSessionReadinessForServices,
-        mergeAgentSessionResources,
-        resolveAgentSessionRuntimeConfig,
-        resolveAgentSessionWorkspaceStorageIntent,
-      },
+      { mergeAgentSessionReadinessForServices, mergeAgentSessionResources, resolveAgentSessionRuntimeConfig },
       { default: AgentSessionService },
     ] = await Promise.all([
       import('server/lib/agentSession/githubToken'),
@@ -609,10 +610,6 @@ const postHandler = async (req: NextRequest) => {
       import('server/services/agentSession'),
     ]);
     const runtimeConfig = await resolveAgentSessionRuntimeConfig();
-    const workspaceStorage = resolveAgentSessionWorkspaceStorageIntent({
-      requestedSize: requestedWorkspaceStorageSize,
-      storage: runtimeConfig.workspaceStorage,
-    });
     const githubToken = await resolveRequestGitHubToken(req);
     const session = await AgentSessionService.createSession({
       userId: userIdentity.userId,
@@ -641,7 +638,7 @@ const postHandler = async (req: NextRequest) => {
         runtimeConfig.resources,
         lifecycleConfig?.environment?.agentSession?.resources
       ),
-      workspaceStorage,
+      workspaceStorageSize: requestedWorkspaceStorageSize,
       redisTtlSeconds: runtimeConfig.cleanup.redisTtlSeconds,
     });
 

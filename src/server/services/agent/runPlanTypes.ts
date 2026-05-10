@@ -24,6 +24,11 @@ import type {
 } from './agentDefinitionTypes';
 
 export type AgentRunPlanSourceKind = 'build_context_chat' | 'workspace_session' | 'freeform_chat';
+export type AgentDebugRunIntent = 'diagnose' | 'investigate' | 'repair';
+
+export function isAgentDebugRunIntent(value: unknown): value is AgentDebugRunIntent {
+  return value === 'diagnose' || value === 'investigate' || value === 'repair';
+}
 
 export interface AgentRunPlanWarning {
   code: string;
@@ -50,6 +55,24 @@ export interface AgentRunPlanSourceSnapshot {
   repoFullName?: string | null;
   branch?: string | null;
   namespace?: string | null;
+  selectedDeploy?: {
+    selectedDeployUuid: string;
+    deployableName?: string | null;
+    deployableType?: string | null;
+    repositoryFullName?: string | null;
+    branchName?: string | null;
+    serviceSha?: string | null;
+    dockerfilePath?: string | null;
+    initDockerfilePath?: string | null;
+    deployStatus?: string | null;
+    deployStatusMessage?: string | null;
+    source?: string | null;
+    helm?: {
+      chartName?: string | null;
+      chartRepoUrl?: string | null;
+      valueFiles?: string[];
+    } | null;
+  } | null;
   workspaceLayout?: {
     repoCount?: number;
     primaryRepo?: string | null;
@@ -79,8 +102,17 @@ export interface AgentRunPlanRuntimeSnapshot {
   approvalPolicy: AgentApprovalPolicy;
 }
 
+export interface AgentRunPlanResolvedInstructionSnapshot {
+  ref: string;
+  source: 'default' | 'override';
+  version: number;
+  hash: string;
+  renderedText: string;
+}
+
 export interface AgentRunPlanPromptSnapshot {
   instructionRefs: string[];
+  resolvedInstructions?: AgentRunPlanResolvedInstructionSnapshot[];
   instructionAddendum?: string | null;
   renderedSummary: string;
   renderedHash: string;
@@ -113,6 +145,12 @@ export interface AgentRunPlanSnapshotV1 {
   runtime: AgentRunPlanRuntimeSnapshot;
   prompt: AgentRunPlanPromptSnapshot;
   capabilities: AgentRunPlanCapabilitiesSnapshot;
+  debug?: {
+    requestedIntent: AgentDebugRunIntent | null;
+    resolvedIntent: AgentDebugRunIntent;
+    decisionSource: 'default' | 'client_request' | 'message_heuristic' | 'repair_guard';
+    reasonCode: string;
+  };
   warnings: AgentRunPlanWarning[];
 }
 
@@ -153,6 +191,9 @@ export interface AgentRunPlanPublicSummary {
       toolChoiceIds: string[];
       mcpChoiceIds: string[];
     };
+  };
+  debug?: {
+    intent: AgentDebugRunIntent;
   };
   warnings: Array<{
     code: string;

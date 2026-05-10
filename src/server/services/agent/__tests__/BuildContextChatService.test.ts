@@ -17,6 +17,7 @@
 import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind } from 'shared/constants';
 
 const mockBuildQuery = jest.fn();
+const mockDeployQuery = jest.fn();
 const mockAgentSessionQuery = jest.fn();
 const mockAgentSessionTransaction = jest.fn();
 const mockAgentThreadQuery = jest.fn();
@@ -29,6 +30,13 @@ jest.mock('server/models/Build', () => ({
   __esModule: true,
   default: {
     query: (...args: unknown[]) => mockBuildQuery(...args),
+  },
+}));
+
+jest.mock('server/models/Deploy', () => ({
+  __esModule: true,
+  default: {
+    query: (...args: unknown[]) => mockDeployQuery(...args),
   },
 }));
 
@@ -82,12 +90,23 @@ function mockBuildLookup(build: Record<string, unknown> | null) {
   return { findOne, withGraphFetched };
 }
 
+function mockDeployLookup(deploy: Record<string, unknown> | null) {
+  const withGraphFetched = jest.fn().mockResolvedValue(deploy);
+  const findOne = jest.fn(() => ({ withGraphFetched }));
+  mockDeployQuery.mockReturnValueOnce({ findOne });
+  return { findOne, withGraphFetched };
+}
+
 function buildSessionReadQuery({ firstResult, findOneResult }: { firstResult: unknown; findOneResult: unknown }) {
   const query = {
     where: jest.fn(() => query),
     orderBy: jest.fn(() => query),
     first: jest.fn().mockResolvedValue(firstResult),
     findOne: jest.fn().mockResolvedValue(findOneResult),
+    patchAndFetchById: jest.fn(async (_id, patch) => ({
+      ...((typeof findOneResult === 'function' ? findOneResult() : findOneResult) as Record<string, unknown>),
+      ...patch,
+    })),
   };
   return query;
 }
@@ -225,6 +244,12 @@ function arrangeReusePath({
   const threadQueries = defaultThread
     ? [{ findOne: threadFindOne }]
     : [{ findOne: threadFindOne }, { insertAndFetch: threadInsertAndFetch }];
+  const sourceFindOne = jest.fn().mockResolvedValue({
+    id: 31,
+    input: {},
+    preparedSource: {},
+  });
+  const sourcePatchAndFetchById = jest.fn().mockResolvedValue({ id: 31 });
 
   mockAgentSessionQuery.mockImplementation((trx?: unknown) => {
     if (trx) {
@@ -237,22 +262,28 @@ function arrangeReusePath({
     throw new Error('transaction should not run when an active build-context chat can be reused');
   });
   mockAgentThreadQuery.mockImplementation(() => threadQueries.shift() || { findOne: threadFindOne });
+  mockAgentSourceQuery.mockReturnValue({
+    findOne: sourceFindOne,
+    patchAndFetchById: sourcePatchAndFetchById,
+  });
 
   return {
     buildLookup,
     reuseQuery,
     threadFindOne,
     threadInsertAndFetch,
+    sourcePatchAndFetchById,
     recreatedThread,
   };
 }
 
 function sampleBuild(overrides: Record<string, unknown> = {}) {
   return {
+    id: 9,
     uuid: 'build-uuid-1',
     kind: BuildKind.ENVIRONMENT,
     namespace: 'env-sample-123',
-    sha: 'commit-sha-1',
+    sha: '1b9337',
     baseBuild: {
       uuid: 'base-build-uuid-1',
     },
@@ -260,8 +291,36 @@ function sampleBuild(overrides: Record<string, unknown> = {}) {
       fullName: 'example-org/example-repo',
       branchName: 'feature/sample-change',
       pullRequestNumber: 42,
-      latestCommit: 'latest-pr-commit-1',
+      latestCommit: '0123456789abcdef0123456789abcdef01234567',
     },
+    ...overrides,
+  };
+}
+
+function sampleDeploy(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 41,
+    uuid: 'deploy-uuid-1',
+    buildId: 9,
+    status: 'build_failed',
+    statusMessage: 'Dockerfile not found',
+    branchName: 'feature/service-change',
+    sha: 'abcdef0123456789abcdef0123456789abcdef01',
+    dockerImage: 'registry.example.test/sample-service:service-sha-1',
+    buildPipelineId: 'build-pipeline-1',
+    deployPipelineId: 'deploy-pipeline-1',
+    deployable: {
+      name: 'sample-service',
+      type: 'docker',
+      dockerfilePath: 'services/sample/Dockerfile',
+      initDockerfilePath: 'services/sample/init.Dockerfile',
+      source: 'yaml',
+      helm: null,
+    },
+    repository: {
+      fullName: 'example-org/service-repo',
+    },
+    service: null,
     ...overrides,
   };
 }
@@ -292,6 +351,11 @@ describe('BuildContextChatService', () => {
       modelId: 'gemini-3-flash-preview',
     });
     mockGetRequiredProviderApiKey.mockResolvedValue('sample-api-key');
+    mockDeployQuery.mockReset();
+    mockAgentSourceQuery.mockReturnValue({
+      findOne: jest.fn().mockResolvedValue({ id: 31, input: {}, preparedSource: {} }),
+      patchAndFetchById: jest.fn().mockResolvedValue({ id: 31 }),
+    });
   });
 
   afterEach(() => {
@@ -352,7 +416,7 @@ describe('BuildContextChatService', () => {
             repo: 'example-org/example-repo',
             repoUrl: 'https://github.com/example-org/example-repo.git',
             branch: 'feature/sample-change',
-            revision: 'commit-sha-1',
+            revision: '0123456789abcdef0123456789abcdef01234567',
             mountPath: '/workspace',
             primary: true,
           },
@@ -367,12 +431,14 @@ describe('BuildContextChatService', () => {
       sessionKind: AgentSessionKind.CHAT,
       namespace: 'env-sample-123',
       baseBuildUuid: 'base-build-uuid-1',
-      revision: 'commit-sha-1',
+      revision: '0123456789abcdef0123456789abcdef01234567',
       pullRequest: {
         fullName: 'example-org/example-repo',
         branchName: 'feature/sample-change',
         pullRequestNumber: 42,
       },
+      selectedDeployUuid: null,
+      selectedDeploy: null,
       contextFreshAt: NOW,
     };
     expect(arranged.sourceInsertAndFetch).toHaveBeenCalledWith(
@@ -404,7 +470,7 @@ describe('BuildContextChatService', () => {
         buildKind: BuildKind.ENVIRONMENT,
         namespace: 'env-sample-123',
         baseBuildUuid: 'base-build-uuid-1',
-        revision: 'commit-sha-1',
+        revision: '0123456789abcdef0123456789abcdef01234567',
         pullRequest: {
           fullName: 'example-org/example-repo',
           branchName: 'feature/sample-change',
@@ -437,6 +503,91 @@ describe('BuildContextChatService', () => {
         userId: 'sample-user',
       })
     ).rejects.toBeInstanceOf(BuildContextChatBuildNotFoundError);
+
+    expect(mockAgentSessionTransaction).not.toHaveBeenCalled();
+  });
+
+  it('validates and persists selected deploy build-time facts', async () => {
+    const build = sampleBuild();
+    const deploy = sampleDeploy();
+    const arranged = arrangeCreatePath({ build });
+    const deployLookup = mockDeployLookup(deploy);
+
+    const result = await BuildContextChatService.launchBuildContextChat({
+      buildUuid: 'build-uuid-1',
+      selectedDeployUuid: 'deploy-uuid-1',
+      userId: 'sample-user',
+    });
+
+    expect(deployLookup.findOne).toHaveBeenCalledWith({ uuid: 'deploy-uuid-1' });
+    expect(deployLookup.withGraphFetched).toHaveBeenCalledWith('[deployable, repository, service]');
+    expect(arranged.sessionInsertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceRepos: [
+          expect.objectContaining({
+            repo: 'example-org/service-repo',
+            branch: 'feature/service-change',
+            revision: 'abcdef0123456789abcdef0123456789abcdef01',
+          }),
+        ],
+        selectedServices: [
+          expect.objectContaining({
+            name: 'sample-service',
+            deployId: 41,
+            deployUuid: 'deploy-uuid-1',
+            repo: 'example-org/service-repo',
+            branch: 'feature/service-change',
+            revision: 'abcdef0123456789abcdef0123456789abcdef01',
+            dockerfilePath: 'services/sample/Dockerfile',
+            initDockerfilePath: 'services/sample/init.Dockerfile',
+            deployStatus: 'build_failed',
+            deployStatusMessage: 'Dockerfile not found',
+          }),
+        ],
+      })
+    );
+    expect(arranged.sourceInsertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          selectedDeployUuid: 'deploy-uuid-1',
+          selectedDeploy: expect.objectContaining({
+            selectedDeployUuid: 'deploy-uuid-1',
+            deployableName: 'sample-service',
+            repositoryFullName: 'example-org/service-repo',
+            branchName: 'feature/service-change',
+            serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+            dockerfilePath: 'services/sample/Dockerfile',
+          }),
+        }),
+        preparedSource: expect.objectContaining({
+          metadata: expect.objectContaining({
+            selectedDeployUuid: 'deploy-uuid-1',
+          }),
+        }),
+      })
+    );
+    expect(result.buildContext.selectedDeploy).toEqual(
+      expect.objectContaining({
+        selectedDeployUuid: 'deploy-uuid-1',
+        deployableName: 'sample-service',
+        repositoryFullName: 'example-org/service-repo',
+        branchName: 'feature/service-change',
+        serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+      })
+    );
+  });
+
+  it('rejects selected deploys that do not belong to the build', async () => {
+    mockBuildLookup(sampleBuild());
+    mockDeployLookup(sampleDeploy({ buildId: 99 }));
+
+    await expect(
+      BuildContextChatService.launchBuildContextChat({
+        buildUuid: 'build-uuid-1',
+        selectedDeployUuid: 'deploy-uuid-1',
+        userId: 'sample-user',
+      })
+    ).rejects.toThrow('Selected deploy deploy-uuid-1 does not belong to build build-uuid-1');
 
     expect(mockAgentSessionTransaction).not.toHaveBeenCalled();
   });
@@ -521,12 +672,15 @@ describe('BuildContextChatService', () => {
     expect(arranged.reuseQuery.orderBy).toHaveBeenNthCalledWith(1, 'updatedAt', 'desc');
     expect(arranged.reuseQuery.orderBy).toHaveBeenNthCalledWith(2, 'createdAt', 'desc');
     expect(result).toMatchObject({
-      session: existingSession,
+      session: expect.objectContaining({
+        uuid: existingSession.uuid,
+      }),
       thread: defaultThread,
       created: false,
       reused: true,
     });
     expect(mockAgentSessionTransaction).not.toHaveBeenCalled();
+    expect(arranged.sourcePatchAndFetchById).toHaveBeenCalled();
   });
 
   it('creates a separate chat when a different user launches the same buildUuid', async () => {

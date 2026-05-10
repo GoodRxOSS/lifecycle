@@ -30,12 +30,27 @@ import AgentThreadService from './ThreadService';
 import AgentThreadRuntimeControlsService from './ThreadRuntimeControlsService';
 import type { AgentDefinitionContract } from './agentDefinitionTypes';
 import { getAgentCapabilityCatalogEntry, type AgentCapabilityCatalogId } from './capabilityCatalog';
-import type { AgentRunPlanSnapshotV1, AgentRunPlanSourceKind, AgentRunPlanWarning } from './runPlanTypes';
+import type {
+  AgentDebugRunIntent,
+  AgentRunPlanResolvedInstructionSnapshot,
+  AgentRunPlanSnapshotV1,
+  AgentRunPlanSourceKind,
+  AgentRunPlanWarning,
+} from './runPlanTypes';
 import {
   isSystemAgentDefinitionId,
   sourceKindForSystemAgentDefinitionId,
   type SystemAgentDefinitionId,
 } from './systemAgentDefinitions';
+import InstructionTemplateService, {
+  InstructionTemplateServiceError,
+  type ResolvedInstructionTemplate,
+} from './InstructionTemplateService';
+
+type FindPriorCompletedDebugIntentRun = (input: {
+  threadId: number;
+  intents: AgentDebugRunIntent[];
+}) => Promise<boolean>;
 
 export class AgentRunPlanCapabilityUnavailableError extends Error {
   constructor(public readonly capabilityId: string, public readonly reason: string | undefined) {
@@ -52,6 +67,18 @@ export class AgentRunPlanAgentUnavailableError extends Error {
   ) {
     super(`Agent "${agentId}" is unavailable: ${reason}.`);
     this.name = 'AgentRunPlanAgentUnavailableError';
+  }
+}
+
+export class AgentRunPlanInstructionTemplateError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly statusCode?: number,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(`Agent instruction template configuration is invalid: ${message}`);
+    this.name = 'AgentRunPlanInstructionTemplateError';
   }
 }
 
@@ -72,15 +99,87 @@ function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function hashPromptRefs(
+function compactSelectedDeploy(value: unknown): AgentRunPlanSnapshotV1['source']['selectedDeploy'] {
+  const selectedDeploy = readRecord(value);
+  const selectedDeployUuid = readString(selectedDeploy.selectedDeployUuid);
+  if (!selectedDeployUuid) {
+    return null;
+  }
+
+  const helm = readRecord(selectedDeploy.helm);
+  const valueFiles = Array.isArray(helm.valueFiles)
+    ? helm.valueFiles.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+    : [];
+
+  return {
+    selectedDeployUuid,
+    deployableName: readString(selectedDeploy.deployableName),
+    deployableType: readString(selectedDeploy.deployableType),
+    repositoryFullName: readString(selectedDeploy.repositoryFullName),
+    branchName: readString(selectedDeploy.branchName),
+    serviceSha: readString(selectedDeploy.serviceSha),
+    dockerfilePath: readString(selectedDeploy.dockerfilePath),
+    initDockerfilePath: readString(selectedDeploy.initDockerfilePath),
+    deployStatus: readString(selectedDeploy.deployStatus),
+    deployStatusMessage: readString(selectedDeploy.deployStatusMessage),
+    source: readString(selectedDeploy.source),
+    helm:
+      Object.keys(helm).length > 0
+        ? {
+            chartName: readString(helm.chartName),
+            chartRepoUrl: readString(helm.chartRepoUrl),
+            valueFiles,
+          }
+        : null,
+  };
+}
+
+function toResolvedInstructionSnapshot(resolved: ResolvedInstructionTemplate): AgentRunPlanResolvedInstructionSnapshot {
+  return {
+    ref: resolved.ref,
+    source: resolved.source,
+    version: resolved.version,
+    hash: resolved.hash,
+    renderedText: resolved.content,
+  };
+}
+
+async function resolveInstructionSnapshots(
+  instructionRefs: readonly string[]
+): Promise<AgentRunPlanResolvedInstructionSnapshot[]> {
+  try {
+    await InstructionTemplateService.seedSystemTemplates();
+    if (instructionRefs.length === 0) {
+      return [];
+    }
+
+    const resolved = await InstructionTemplateService.resolveRefs(instructionRefs);
+    return resolved.map(toResolvedInstructionSnapshot);
+  } catch (error) {
+    if (error instanceof InstructionTemplateServiceError) {
+      throw new AgentRunPlanInstructionTemplateError(error.code, error.message, error.statusCode, error.details);
+    }
+
+    throw error;
+  }
+}
+
+function hashPromptSnapshot(
   definitionId: string,
   instructionRefs: string[],
   version: number,
+  resolvedInstructions: AgentRunPlanResolvedInstructionSnapshot[],
   instructionAddendum?: string | null
 ): string {
   return createHash('sha256')
     .update(
-      JSON.stringify({ definitionId, instructionRefs, version, instructionAddendum: instructionAddendum || null })
+      JSON.stringify({
+        definitionId,
+        instructionRefs,
+        version,
+        resolvedInstructions,
+        instructionAddendum: instructionAddendum || null,
+      })
     )
     .digest('hex');
 }
@@ -103,6 +202,9 @@ function compactSource({
   const primaryRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0] || null;
   const primaryService = selectedServices[0] || null;
   const sourceInput = readRecord(source.input);
+  const selectedDeploy = compactSelectedDeploy(sourceInput.selectedDeploy);
+  const selectedRepo = selectedDeploy?.repositoryFullName || null;
+  const selectedBranch = selectedDeploy?.branchName || null;
 
   return {
     id: source.uuid || null,
@@ -110,14 +212,15 @@ function compactSource({
     status: source.status || null,
     sessionKind: session.sessionKind || null,
     buildUuid: readString(sourceInput.buildUuid) || session.buildUuid || null,
-    repoFullName: primaryRepo?.repo || repoFullName || null,
-    branch: primaryRepo?.branch || readString(sourceInput.branchName) || null,
+    repoFullName: selectedRepo || primaryRepo?.repo || repoFullName || null,
+    branch: selectedBranch || primaryRepo?.branch || readString(sourceInput.branchName) || null,
     namespace: session.namespace || readString(sourceInput.namespace) || null,
+    selectedDeploy,
     workspaceLayout: {
       repoCount: Array.isArray(session.workspaceRepos) ? session.workspaceRepos.length : 0,
-      primaryRepo: primaryRepo?.repo || repoFullName || null,
+      primaryRepo: selectedRepo || primaryRepo?.repo || repoFullName || null,
       selectedServiceCount: Array.isArray(session.selectedServices) ? session.selectedServices.length : 0,
-      primaryService: primaryService?.name || null,
+      primaryService: selectedDeploy?.deployableName || primaryService?.name || null,
     },
     sandboxRequirements: source.sandboxRequirements || {},
     freshness: {
@@ -155,6 +258,100 @@ function warningForUnavailableOptionalCapability(
           },
         }
       : {}),
+  };
+}
+
+function messageRequestsDeeperInvestigation(messageText?: string | null): boolean {
+  const normalized = messageText?.toLowerCase() || '';
+  return (
+    normalized.includes('investigate more') || normalized.includes('dig deeper') || normalized.includes('more evidence')
+  );
+}
+
+async function resolveDebugIntentSnapshot({
+  selectedDefinitionId,
+  sourceKind,
+  threadId,
+  messageText,
+  requestedDebugIntent,
+  findPriorCompletedDebugIntentRun,
+  warnings,
+}: {
+  selectedDefinitionId: string;
+  sourceKind: AgentRunPlanSourceKind;
+  threadId: number;
+  messageText?: string | null;
+  requestedDebugIntent?: AgentDebugRunIntent | null;
+  findPriorCompletedDebugIntentRun?: FindPriorCompletedDebugIntentRun;
+  warnings: AgentRunPlanWarning[];
+}): Promise<AgentRunPlanSnapshotV1['debug'] | undefined> {
+  if (selectedDefinitionId !== 'system.debug' || sourceKind !== 'build_context_chat') {
+    return undefined;
+  }
+
+  const requestedIntent = requestedDebugIntent || null;
+  if (requestedIntent === 'investigate') {
+    return {
+      requestedIntent,
+      resolvedIntent: 'investigate',
+      decisionSource: 'client_request',
+      reasonCode: 'explicit_investigate',
+    };
+  }
+
+  if (requestedIntent === 'repair') {
+    const hasPriorDiagnosisOrInvestigation = findPriorCompletedDebugIntentRun
+      ? await findPriorCompletedDebugIntentRun({
+          threadId,
+          intents: ['diagnose', 'investigate'],
+        })
+      : false;
+
+    if (hasPriorDiagnosisOrInvestigation) {
+      return {
+        requestedIntent,
+        resolvedIntent: 'repair',
+        decisionSource: 'client_request',
+        reasonCode: 'explicit_repair_after_diagnosis',
+      };
+    }
+
+    warnings.push({
+      code: 'debug_repair_requires_prior_diagnosis',
+      message: 'Debug repair requires a prior completed diagnosis or investigation. Diagnosis will run first.',
+    });
+
+    return {
+      requestedIntent,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'repair_guard',
+      reasonCode: 'repair_requires_prior_diagnosis',
+    };
+  }
+
+  if (requestedIntent === 'diagnose') {
+    return {
+      requestedIntent,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'client_request',
+      reasonCode: 'explicit_diagnose',
+    };
+  }
+
+  if (messageRequestsDeeperInvestigation(messageText)) {
+    return {
+      requestedIntent: null,
+      resolvedIntent: 'investigate',
+      decisionSource: 'message_heuristic',
+      reasonCode: 'message_requests_investigation',
+    };
+  }
+
+  return {
+    requestedIntent: null,
+    resolvedIntent: 'diagnose',
+    decisionSource: 'default',
+    reasonCode: 'default_debug_diagnose',
   };
 }
 
@@ -214,6 +411,9 @@ export default class AgentRunPlanResolver {
     requestedProvider,
     requestedModel,
     runtimeOptions = {},
+    messageText,
+    requestedDebugIntent,
+    findPriorCompletedDebugIntentRun,
   }: {
     thread: AgentThread;
     session: AgentSession;
@@ -222,6 +422,9 @@ export default class AgentRunPlanResolver {
     requestedProvider?: string | null;
     requestedModel?: string | null;
     runtimeOptions?: AgentRunRuntimeOptions;
+    messageText?: string | null;
+    requestedDebugIntent?: AgentDebugRunIntent | null;
+    findPriorCompletedDebugIntentRun?: FindPriorCompletedDebugIntentRun;
   }): Promise<{
     approvalPolicy: Awaited<ReturnType<typeof AgentCapabilityService.resolveSessionContext>>['approvalPolicy'];
     requestedHarness: null;
@@ -354,8 +557,18 @@ export default class AgentRunPlanResolver {
       (runtimeChoices.selectedRuntimeCapabilityIds || []).every((capabilityId) =>
         provisionalCapabilityIds.includes(capabilityId)
       );
+    const resolvedInstructions = await resolveInstructionSnapshots(definition.instructionRefs);
 
     const capturedAt = new Date().toISOString();
+    const debugIntentSnapshot = await resolveDebugIntentSnapshot({
+      selectedDefinitionId,
+      sourceKind,
+      threadId: thread.id,
+      messageText,
+      requestedDebugIntent,
+      findPriorCompletedDebugIntentRun,
+      warnings,
+    });
     const runPlanSnapshot: AgentRunPlanSnapshotV1 = {
       version: 1,
       capturedAt,
@@ -384,12 +597,14 @@ export default class AgentRunPlanResolver {
       },
       prompt: {
         instructionRefs: definition.instructionRefs,
+        resolvedInstructions,
         instructionAddendum: definition.instructionAddendum || null,
         renderedSummary: definition.description || definition.name,
-        renderedHash: hashPromptRefs(
+        renderedHash: hashPromptSnapshot(
           selectedDefinitionId,
           definition.instructionRefs,
           definition.version,
+          resolvedInstructions,
           definition.instructionAddendum
         ),
       },
@@ -422,6 +637,7 @@ export default class AgentRunPlanResolver {
             }
           : {}),
       },
+      ...(debugIntentSnapshot ? { debug: debugIntentSnapshot } : {}),
       warnings,
     };
 

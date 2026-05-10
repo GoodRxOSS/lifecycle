@@ -16,6 +16,9 @@
 
 import { NextRequest } from 'next/server';
 
+const mockGetUser = jest.fn();
+const mockGetRequestUserIdentity = jest.fn();
+
 jest.mock('server/services/agent/AdminService', () => ({
   __esModule: true,
   default: {
@@ -24,15 +27,14 @@ jest.mock('server/services/agent/AdminService', () => ({
 }));
 
 jest.mock('server/lib/get-user', () => ({
-  getRequestUserIdentity: jest.fn(),
+  getUser: (...args: unknown[]) => mockGetUser(...args),
+  getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
 }));
 
 import { GET } from './route';
 import AgentAdminService from 'server/services/agent/AdminService';
-import { getRequestUserIdentity } from 'server/lib/get-user';
 
 const mockListSessions = AgentAdminService.listSessions as jest.Mock;
-const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
 
 function makeRequest(url: string): NextRequest {
   return {
@@ -42,12 +44,33 @@ function makeRequest(url: string): NextRequest {
 }
 
 describe('GET /api/v2/ai/admin/agent/sessions', () => {
+  const originalEnableAuth = process.env.ENABLE_AUTH;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.ENABLE_AUTH = 'true';
+    mockGetUser.mockReturnValue({
+      sub: 'sample-admin',
+      realm_access: {
+        roles: ['admin'],
+      },
+    });
+    mockGetRequestUserIdentity.mockReturnValue({
+      userId: 'sample-admin',
+      githubUsername: 'sample-admin',
+    });
+  });
+
+  afterEach(() => {
+    if (originalEnableAuth === undefined) {
+      delete process.env.ENABLE_AUTH;
+    } else {
+      process.env.ENABLE_AUTH = originalEnableAuth;
+    }
   });
 
   it('returns 401 when the requester is not authenticated', async () => {
-    mockGetRequestUserIdentity.mockReturnValue(null);
+    mockGetUser.mockReturnValue(null);
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions'));
 
@@ -58,11 +81,23 @@ describe('GET /api/v2/ai/admin/agent/sessions', () => {
     expect(mockListSessions).not.toHaveBeenCalled();
   });
 
-  it('returns paginated agent sessions using the requested filters', async () => {
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-admin',
-      githubUsername: 'sample-admin',
+  it('returns 403 for non-admin users before listing sessions', async () => {
+    mockGetUser.mockReturnValue({
+      sub: 'sample-user',
+      realm_access: {
+        roles: ['user'],
+      },
     });
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions'));
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body.error.message).toBe('Forbidden: insufficient permissions');
+    expect(mockListSessions).not.toHaveBeenCalled();
+  });
+
+  it('returns paginated agent sessions using the requested filters', async () => {
     mockListSessions.mockResolvedValue({
       data: [
         {

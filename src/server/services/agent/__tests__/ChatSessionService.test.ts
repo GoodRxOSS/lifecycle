@@ -180,6 +180,80 @@ describe('AgentChatSessionService.createChatSession', () => {
     );
   });
 
+  it('uses the pull request branch as the build-context workspace while preserving selected deploy facts', async () => {
+    const persistence = arrangePersistence();
+    mockResolveSelection.mockResolvedValue({
+      provider: 'sample-provider',
+      modelId: 'sample-model',
+    });
+
+    await AgentChatSessionService.createChatSession({
+      userId: 'sample-user',
+      provider: 'sample-provider',
+      model: 'sample-model',
+      buildContext: {
+        buildUuid: 'sample-build-1',
+        buildKind: null,
+        namespace: 'sample-namespace',
+        baseBuildUuid: null,
+        revision: '0123456789abcdef0123456789abcdef01234567',
+        pullRequest: {
+          fullName: 'example-org/example-repo',
+          branchName: 'feature/sample-fix',
+          pullRequestNumber: 42,
+        },
+        selectedDeployUuid: 'sample-service-sample-build-1',
+        selectedDeploy: {
+          selectedDeployUuid: 'sample-service-sample-build-1',
+          deployId: 41,
+          deployableName: 'sample-service',
+          deployableType: 'github',
+          repositoryFullName: 'example-org/example-repo',
+          branchName: 'main',
+          serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+          dockerfilePath: 'services/sample/Dockerfile',
+          initDockerfilePath: null,
+          deployStatus: 'build_failed',
+          deployStatusMessage: 'Dockerfile missing',
+          dockerImage: null,
+          buildPipelineId: null,
+          deployPipelineId: null,
+          source: 'github',
+          helm: null,
+        },
+        contextFreshAt: '2026-05-07T22:00:00.000Z',
+      },
+    });
+
+    expect(mockResolveSelection).toHaveBeenCalledWith({
+      repoFullName: 'example-org/example-repo',
+      requestedProvider: 'sample-provider',
+      requestedModelId: 'sample-model',
+    });
+    expect(persistence.sessionInsertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceRepos: [
+          expect.objectContaining({
+            repo: 'example-org/example-repo',
+            branch: 'feature/sample-fix',
+            revision: '0123456789abcdef0123456789abcdef01234567',
+            primary: true,
+          }),
+        ],
+        selectedServices: [
+          expect.objectContaining({
+            name: 'sample-service',
+            repo: 'example-org/example-repo',
+            branch: 'main',
+            revision: 'abcdef0123456789abcdef0123456789abcdef01',
+            dockerfilePath: 'services/sample/Dockerfile',
+            deployStatus: 'build_failed',
+          }),
+        ],
+      })
+    );
+  });
+
   it('rejects an invalid provider and model pair through provider registry resolution', async () => {
     const invalidProviderModelPairError = new Error('Model sample-provider:sample-model is not enabled');
     mockResolveSelection.mockRejectedValue(invalidProviderModelPairError);

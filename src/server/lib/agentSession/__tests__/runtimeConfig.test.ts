@@ -392,6 +392,7 @@ describe('runtimeConfig', () => {
         'Use the available tools directly when you need to inspect files, search the workspace, run commands, or modify code.\n' +
         'Do not emit pseudo-tool markup or pretend execution happened. Never write things like <read_file>, <write_file>, <attempt_completion>, <result>, or shell commands as if they were already executed.\n' +
         'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.\n' +
+        'A local git commit is not a remote branch update. Only say a PR branch, GitHub commit URL, webhook rebuild, or Lifecycle build changed after a successful push, GitHub API call, or observed Lifecycle state confirms it.\n' +
         'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
       appendSystemPrompt:
         'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.\n' +

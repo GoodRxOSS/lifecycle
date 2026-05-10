@@ -213,6 +213,52 @@ describe('AgentRunService', () => {
     });
   });
 
+  describe('hasPriorCompletedDebugIntentRun', () => {
+    it('returns false for invalid thread ids without querying the database', async () => {
+      await expect(
+        AgentRunService.hasPriorCompletedDebugIntentRun({
+          threadId: 0,
+          intents: ['diagnose'],
+        })
+      ).resolves.toBe(false);
+
+      expect(mockRunQuery).not.toHaveBeenCalled();
+    });
+
+    it('returns false for empty intent lists without querying the database', async () => {
+      await expect(
+        AgentRunService.hasPriorCompletedDebugIntentRun({
+          threadId: 7,
+          intents: [],
+        })
+      ).resolves.toBe(false);
+
+      expect(mockRunQuery).not.toHaveBeenCalled();
+    });
+
+    it('queries completed Debug run snapshots by resolved intent', async () => {
+      const query: any = {
+        where: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 1 }),
+      };
+      mockRunQuery.mockReturnValue(query);
+
+      await expect(
+        AgentRunService.hasPriorCompletedDebugIntentRun({
+          threadId: 7,
+          intents: ['diagnose', 'investigate'],
+        })
+      ).resolves.toBe(true);
+
+      expect(query.where).toHaveBeenCalledWith({ threadId: 7, status: 'completed' });
+      expect(query.whereRaw).toHaveBeenCalledWith(`"runPlanSnapshot"->'agent'->>'id' = ?`, ['system.debug']);
+      expect(query.whereIn).toHaveBeenCalledWith(expect.anything(), ['diagnose', 'investigate']);
+      expect(query.first).toHaveBeenCalled();
+    });
+  });
+
   describe('serializeRun', () => {
     const baseRun = {
       uuid: VALID_RUN_UUID,
@@ -244,8 +290,39 @@ describe('AgentRunService', () => {
       expect(AgentRunService.serializeRun({ ...baseRun, runPlanSnapshot: null } as any)).toEqual(
         expect.objectContaining({
           runPlan: null,
+          recovery: null,
         })
       );
+    });
+
+    it('exposes structured recovery metadata when a run is paused for manual recovery', () => {
+      const serialized = AgentRunService.serializeRun({
+        ...baseRun,
+        runPlanSnapshot: null,
+        error: {
+          code: 'run_auto_resume_ineligible',
+          message: 'Manual recovery required.',
+          details: {
+            recovery: {
+              decision: 'manual_recovery_required',
+              reason: 'write_capability',
+              previousStatus: 'running',
+              previousOwner: 'worker-1',
+              evaluatedAt: '2026-05-08T12:00:00.000Z',
+              resumeAttemptId: 'resume-1',
+            },
+          },
+        },
+      } as any);
+
+      expect(serialized.recovery).toEqual({
+        decision: 'manual_recovery_required',
+        reason: 'write_capability',
+        previousStatus: 'running',
+        previousOwner: 'worker-1',
+        evaluatedAt: '2026-05-08T12:00:00.000Z',
+        resumeAttemptId: 'resume-1',
+      });
     });
 
     it('returns a safe runPlan summary for versioned snapshots', () => {
@@ -313,6 +390,35 @@ describe('AgentRunService', () => {
       ]) {
         expect(runPlanJson).not.toContain(forbidden);
       }
+    });
+
+    it('exposes only the resolved Debug intent in public run-plan summaries', () => {
+      const serialized = AgentRunService.serializeRun({
+        ...baseRun,
+        runPlanSnapshot: {
+          ...runPlanSnapshot,
+          agent: {
+            id: 'system.debug',
+            label: 'Debug',
+            sourceKind: 'build_context_chat',
+          },
+          debug: {
+            requestedIntent: 'repair',
+            resolvedIntent: 'diagnose',
+            decisionSource: 'repair_guard',
+            reasonCode: 'repair_requires_prior_diagnosis',
+          },
+        },
+      } as any);
+
+      expect(serialized.runPlan?.debug).toEqual({
+        intent: 'diagnose',
+      });
+      const runPlanJson = JSON.stringify(serialized.runPlan);
+      expect(runPlanJson).not.toContain('requestedIntent');
+      expect(runPlanJson).not.toContain('decisionSource');
+      expect(runPlanJson).not.toContain('reasonCode');
+      expect(runPlanJson).not.toContain('repair_requires_prior_diagnosis');
     });
 
     it('defaults missing selected runtime choice arrays to empty arrays', () => {
@@ -478,6 +584,176 @@ describe('AgentRunService', () => {
           },
         })
       );
+    });
+  });
+
+  describe('markWaitingForInputForRecovery', () => {
+    const eligibility = {
+      decision: 'manual_recovery_required' as const,
+      reason: 'write_capability' as const,
+      previousStatus: 'running' as const,
+      previousOwner: 'worker-1',
+      leaseExpiresAt: '2026-05-08T11:59:00.000Z',
+      evaluatedAt: '2026-05-08T12:00:00.000Z',
+    };
+
+    it('pauses an expired active run and appends a recovery status event', async () => {
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+        leaseExpiresAt: '2026-05-08T11:59:00.000Z',
+        heartbeatAt: '2026-05-08T11:58:00.000Z',
+        usageSummary: {},
+      };
+      const pausedRun = {
+        ...run,
+        status: 'waiting_for_input',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        error: {
+          code: 'run_auto_resume_ineligible',
+          message:
+            'Lifecycle paused this run because automatic recovery is not safe. Review the run and continue manually.',
+          details: {
+            recovery: expect.any(Object),
+          },
+        },
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(pausedRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(44);
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility, {
+          now: new Date('2026-05-08T12:00:00.000Z'),
+          expectedExecutionOwner: 'worker-1',
+          resumeAttemptId: 'resume-1',
+        })
+      ).resolves.toBe(pausedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'waiting_for_input',
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          error: expect.objectContaining({
+            code: 'run_auto_resume_ineligible',
+            details: {
+              recovery: expect.objectContaining({
+                decision: 'manual_recovery_required',
+                reason: 'write_capability',
+                previousStatus: 'running',
+                previousOwner: 'worker-1',
+                resumeAttemptId: 'resume-1',
+              }),
+            },
+          }),
+        })
+      );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        pausedRun,
+        'run.updated',
+        expect.objectContaining({
+          status: 'waiting_for_input',
+          error: pausedRun.error,
+        }),
+        { trx: true }
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 44);
+    });
+
+    it('does not pause when the run has been claimed by a new owner', async () => {
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-2',
+        leaseExpiresAt: '2026-05-08T11:59:00.000Z',
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      mockRunQuery.mockReturnValueOnce({ findOne });
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility, {
+          now: new Date('2026-05-08T12:00:00.000Z'),
+          expectedExecutionOwner: 'worker-1',
+        })
+      ).resolves.toBeNull();
+
+      expect(mockRunQuery).toHaveBeenCalledTimes(1);
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('can pause an owner-fenced resume run before the active lease expires', async () => {
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+        leaseExpiresAt: '2026-05-08T12:01:00.000Z',
+        heartbeatAt: '2026-05-08T12:00:10.000Z',
+        usageSummary: {},
+      };
+      const pausedRun = {
+        ...run,
+        status: 'waiting_for_input',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        error: {
+          code: 'run_resume_state_invalid',
+          message: 'Saved state is invalid.',
+          details: {
+            recovery: expect.any(Object),
+          },
+        },
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(pausedRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(45);
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility, {
+          now: new Date('2026-05-08T12:00:30.000Z'),
+          expectedExecutionOwner: 'worker-1',
+          allowActiveLease: true,
+          errorCode: 'run_resume_state_invalid',
+          message: 'Saved state is invalid.',
+          dispatchAttemptId: 'attempt-1',
+        })
+      ).resolves.toBe(pausedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'waiting_for_input',
+          error: expect.objectContaining({
+            code: 'run_resume_state_invalid',
+            details: {
+              recovery: expect.objectContaining({
+                decision: 'manual_recovery_required',
+                previousOwner: 'worker-1',
+                leaseExpiresAt: '2026-05-08T12:01:00.000Z',
+                dispatchAttemptId: 'attempt-1',
+              }),
+            },
+          }),
+        })
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 45);
     });
   });
 

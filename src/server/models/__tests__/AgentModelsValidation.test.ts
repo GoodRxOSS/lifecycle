@@ -16,6 +16,7 @@
 
 import AgentMessage from 'server/models/AgentMessage';
 import AgentDefinition from 'server/models/AgentDefinition';
+import AgentInstructionTemplate from 'server/models/AgentInstructionTemplate';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 
@@ -119,5 +120,44 @@ describe('Agent model validation', () => {
 
     expect(() => AgentDefinition.fromJson(userDefinition)).not.toThrow();
     expect(() => AgentDefinition.fromJson({ ...userDefinition, status: 'archived' })).not.toThrow();
+  });
+
+  test('allows instruction templates with release defaults and no override', () => {
+    const template = AgentInstructionTemplate.fromJson({
+      ref: 'system:freeform',
+      name: 'Free-form',
+      description: 'Sample template description.',
+      defaultContent: 'Use the sample default instructions.',
+      defaultVersion: 1,
+      defaultHash: 'a'.repeat(64),
+    }) as AgentInstructionTemplate;
+
+    expect(AgentInstructionTemplate.timestamps).toBe(true);
+    expect(template.effectiveSource).toBe('default');
+    expect(template.effectiveVersion).toBe(1);
+    expect(template.effectiveHash).toBe('a'.repeat(64));
+    expect(template.effectiveContent).toBe('Use the sample default instructions.');
+  });
+
+  test('allows instruction templates with admin override metadata', () => {
+    const template = AgentInstructionTemplate.fromJson({
+      ref: 'system:debug',
+      name: 'Debug',
+      defaultContent: 'Use the sample default debug instructions.',
+      defaultVersion: 2,
+      defaultHash: 'b'.repeat(64),
+      overrideContent: 'Use the sample admin debug instructions.',
+      overrideVersion: 1,
+      overrideHash: 'c'.repeat(64),
+      overrideBaseDefaultVersion: 2,
+      overrideBaseDefaultHash: 'b'.repeat(64),
+      overrideUpdatedBy: 'sample-admin',
+      overrideUpdatedAt: '2026-05-01T00:00:00.000Z',
+    }) as AgentInstructionTemplate;
+
+    expect(template.effectiveSource).toBe('override');
+    expect(template.effectiveVersion).toBe(1);
+    expect(template.effectiveHash).toBe('c'.repeat(64));
+    expect(template.effectiveContent).toBe('Use the sample admin debug instructions.');
   });
 });

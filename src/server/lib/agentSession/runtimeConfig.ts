@@ -100,6 +100,7 @@ export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
   'Use the available tools directly when you need to inspect files, search the workspace, run commands, or modify code.',
   'Do not emit pseudo-tool markup or pretend execution happened. Never write things like <read_file>, <write_file>, <attempt_completion>, <result>, or shell commands as if they were already executed.',
   'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.',
+  'A local git commit is not a remote branch update. Only say a PR branch, GitHub commit URL, webhook rebuild, or Lifecycle build changed after a successful push, GitHub API call, or observed Lifecycle state confirms it.',
   'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
 ].join('\n');
 

@@ -20,16 +20,18 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { buildWorkspaceFailureLinkData } from 'server/lib/agentSession/workspaceFailureLink';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
 import AgentRunService, { InvalidAgentRunDefaultsError } from 'server/services/agent/RunService';
-import AgentRunPlanResolver from 'server/services/agent/RunPlanResolver';
+import AgentRunPlanResolver, { AgentRunPlanAgentUnavailableError } from 'server/services/agent/RunPlanResolver';
 import AgentThreadService from 'server/services/agent/ThreadService';
 import {
   normalizeCanonicalAgentMessagePart,
   type AgentRunRuntimeOptions,
   type CanonicalAgentRunMessageInput,
 } from 'server/services/agent/canonicalMessages';
+import { isAgentDebugRunIntent, type AgentDebugRunIntent } from 'server/services/agent/runPlanTypes';
 import AgentSourceService from 'server/services/agent/SourceService';
 import AgentSessionService from 'server/services/agentSession';
 import AgentMessageStore from 'server/services/agent/MessageStore';
@@ -157,12 +159,41 @@ function normalizeRuntimeOptions(value: unknown): AgentRunRuntimeOptions | null 
   return normalized;
 }
 
+function normalizeDebugIntent(value: unknown): { ok: true; value: AgentDebugRunIntent | null } | { ok: false } {
+  if (value === undefined) {
+    return { ok: true, value: null };
+  }
+
+  if (typeof value !== 'string') {
+    return { ok: false };
+  }
+
+  const normalized = value.trim();
+  if (!isAgentDebugRunIntent(normalized)) {
+    return { ok: false };
+  }
+
+  return { ok: true, value: normalized };
+}
+
+function getRunMessageText(message: CanonicalAgentRunMessageInput): string | null {
+  const text = message.parts
+    .filter((part): part is Extract<CanonicalAgentRunMessageInput['parts'][number], { type: 'text' }> => {
+      return part.type === 'text';
+    })
+    .map((part) => part.text)
+    .join('\n')
+    .trim();
+
+  return text || null;
+}
+
 /**
  * @openapi
  * /api/v2/ai/agent/threads/{threadId}/runs:
  *   post:
  *     summary: Create and enqueue a managed run for an agent thread
- *     description: Creates a run and resolves its run plan server-side from the thread's selected agent, runtime-control choices, requested model, source, and policy. Request body supports only message, model, and runtimeOptions.
+ *     description: Creates a run and resolves its run plan server-side from the thread's selected agent, runtime-control choices, requested model, optional Debug intent, source, and policy. Request body supports only message, model, debugIntent, and runtimeOptions.
  *     tags:
  *       - Agent Platform
  *     operationId: createAgentThreadRun
@@ -222,11 +253,21 @@ function normalizeRuntimeOptions(value: unknown): AgentRunRuntimeOptions | null 
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '409':
- *         description: Session source is not ready or another run is already active for the session
+ *         description: Session source is not ready, another run is already active, or the selected agent requires a workspace
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
+ *               type: object
+ *               required: [request_id, data, error]
+ *               properties:
+ *                 request_id:
+ *                   type: string
+ *                 data:
+ *                   nullable: true
+ *                   allOf:
+ *                     - $ref: '#/components/schemas/WorkspaceFailureLinkData'
+ *                 error:
+ *                   $ref: '#/components/schemas/ApiError'
  */
 const postHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -240,7 +281,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
   }
 
   const requestBody = body as Record<string, unknown>;
-  const unknownTopLevelKeys = getUnknownKeys(requestBody, ['message', 'model', 'runtimeOptions']);
+  const unknownTopLevelKeys = getUnknownKeys(requestBody, ['message', 'model', 'debugIntent', 'runtimeOptions']);
   if (unknownTopLevelKeys.length > 0) {
     return errorResponse(
       new Error(`Unsupported run request fields: ${unknownTopLevelKeys.join(', ')}`),
@@ -266,6 +307,15 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
   const runtimeOptions = normalizeRuntimeOptions(requestBody.runtimeOptions);
   if (!runtimeOptions) {
     return errorResponse(new Error('runtimeOptions contains unsupported or invalid fields'), { status: 400 }, req);
+  }
+
+  const debugIntent = normalizeDebugIntent(requestBody.debugIntent);
+  if (!debugIntent.ok) {
+    return errorResponse(
+      new Error('debugIntent must be one of diagnose, investigate, or repair'),
+      { status: 400 },
+      req
+    );
   }
 
   let threadWithSession;
@@ -301,8 +351,19 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
       requestedProvider: modelRequest.requestedProvider,
       requestedModel: modelRequest.requestedModel,
       runtimeOptions,
+      messageText: getRunMessageText(message),
+      requestedDebugIntent: debugIntent.value,
+      findPriorCompletedDebugIntentRun: AgentRunService.hasPriorCompletedDebugIntentRun,
     });
   } catch (error) {
+    if (error instanceof AgentRunPlanAgentUnavailableError && error.reason === 'workspace_required') {
+      const failureData = await buildWorkspaceFailureLinkData({
+        sessionId: session.uuid,
+        userId: userIdentity.userId,
+        includeWithoutFailure: true,
+      });
+      return errorResponse(error, { status: 409, data: failureData }, req);
+    }
     return errorResponse(error instanceof Error ? error : new Error('Invalid agent run model'), { status: 400 }, req);
   }
 

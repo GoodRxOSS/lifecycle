@@ -15,6 +15,7 @@
  */
 
 import Model from './_Model';
+import type { WorkspaceRuntimeFailure } from 'server/lib/agentSession/startupFailureState';
 
 export default class AgentSandbox extends Model {
   uuid!: string;
@@ -25,7 +26,7 @@ export default class AgentSandbox extends Model {
   capabilitySnapshot!: Record<string, unknown>;
   providerState!: Record<string, unknown>;
   metadata!: Record<string, unknown>;
-  error!: Record<string, unknown> | null;
+  error!: WorkspaceRuntimeFailure | Record<string, unknown> | null;
   suspendedAt!: string | null;
   endedAt!: string | null;
 

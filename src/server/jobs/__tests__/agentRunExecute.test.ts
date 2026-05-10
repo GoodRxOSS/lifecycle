@@ -28,6 +28,7 @@ jest.mock('server/services/agent/RunService', () => ({
     getRunByUuid: jest.fn(),
     isTerminalStatus: jest.fn(),
     markFailedForExecutionOwner: jest.fn(),
+    markWaitingForInputForRecovery: jest.fn(),
   },
 }));
 
@@ -49,6 +50,7 @@ jest.mock('server/lib/encryption', () => ({
 import LifecycleAiSdkHarness from 'server/services/agent/LifecycleAiSdkHarness';
 import AgentRunService from 'server/services/agent/RunService';
 import { AgentRunOwnershipLostError } from 'server/services/agent/AgentRunOwnershipLostError';
+import { AgentRunTerminalFailure } from 'server/services/agent/errors';
 import { processAgentRunExecute } from '../agentRunExecute';
 
 const mockClaimQueuedRunForExecution = AgentRunService.claimQueuedRunForExecution as jest.Mock;
@@ -56,6 +58,7 @@ const mockGetRunByUuid = AgentRunService.getRunByUuid as jest.Mock;
 const mockExecuteRun = LifecycleAiSdkHarness.executeRun as jest.Mock;
 const mockIsTerminalStatus = AgentRunService.isTerminalStatus as jest.Mock;
 const mockMarkFailedForExecutionOwner = AgentRunService.markFailedForExecutionOwner as jest.Mock;
+const mockMarkWaitingForInputForRecovery = AgentRunService.markWaitingForInputForRecovery as jest.Mock;
 
 describe('agentRunExecute', () => {
   beforeEach(() => {
@@ -137,6 +140,85 @@ describe('agentRunExecute', () => {
       undefined,
       { dispatchAttemptId: 'attempt-1' }
     );
+  });
+
+  it('pauses resume jobs when saved UI message validation fails', async () => {
+    const run = {
+      uuid: 'run-1',
+      status: 'starting',
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockExecuteRun.mockRejectedValue(
+      new AgentRunTerminalFailure({
+        code: 'run_resume_state_invalid',
+        message: 'Saved state is invalid.',
+        details: {
+          reason: 'ui_message_validation',
+        },
+      })
+    );
+    mockMarkWaitingForInputForRecovery.mockResolvedValue({
+      ...run,
+      status: 'waiting_for_input',
+    });
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'resume',
+        },
+      } as any)
+    ).resolves.toBeUndefined();
+
+    expect(mockMarkWaitingForInputForRecovery).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'saved_state_invalid',
+        previousOwner: expect.stringMatching(/^bull:unknown:/),
+      }),
+      expect.objectContaining({
+        expectedExecutionOwner: expect.stringMatching(/^bull:unknown:/),
+        allowActiveLease: true,
+        errorCode: 'run_resume_state_invalid',
+        message: 'Saved state is invalid.',
+        dispatchAttemptId: 'attempt-1',
+        detail: {
+          reason: 'ui_message_validation',
+        },
+      })
+    );
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('keeps submit jobs on the normal failure path when saved UI message validation fails', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockGetRunByUuid.mockResolvedValue(run);
+    mockExecuteRun.mockRejectedValue(
+      new AgentRunTerminalFailure({
+        code: 'run_resume_state_invalid',
+        message: 'Saved state is invalid.',
+      })
+    );
+    mockIsTerminalStatus.mockReturnValue(false);
+    mockMarkFailedForExecutionOwner.mockResolvedValue(undefined);
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'submit',
+        },
+      } as any)
+    ).rejects.toThrow('Saved state is invalid.');
+
+    expect(mockMarkWaitingForInputForRecovery).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).toHaveBeenCalled();
   });
 
   it('does not overwrite a run failure already recorded by the executor', async () => {

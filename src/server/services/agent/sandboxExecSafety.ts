@@ -45,6 +45,7 @@ const READ_ONLY_SEGMENT_PATTERNS: RegExp[] = [
   /^git\s+rev-parse(?:\s|$)/,
   /^git\s+ls-files(?:\s|$)/,
   /^git\s+blame(?:\s|$)/,
+  /^node\s+(?:--check|-c)(?:\s|$)/,
 ];
 
 const BLOCKED_SHELL_OPERATORS = /&&|\|\||;|`|\$\(/;

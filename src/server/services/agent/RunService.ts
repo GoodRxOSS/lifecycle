@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { PartialModelObject, Transaction } from 'objection';
+import { raw, type PartialModelObject, type Transaction } from 'objection';
 import 'server/lib/dependencies';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
@@ -22,9 +22,10 @@ import AgentSession from 'server/models/AgentSession';
 import type { AgentApprovalPolicy, AgentRunStatus, AgentRunUsageSummary } from './types';
 import type { AgentUiMessageChunk } from './streamChunks';
 import AgentRunEventService from './RunEventService';
-import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
+import { isAgentRunPlanSnapshotV1, type AgentDebugRunIntent, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
 import { serializeRunPlanSummary } from './runPlanSummary';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import type { AgentRunResumeEligibility } from './RunResumeEligibilityService';
 import {
   DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
   DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS,
@@ -107,6 +108,26 @@ function serializeRunError(error: unknown): Record<string, unknown> {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readRunRecovery(error: unknown): Record<string, unknown> | null {
+  if (!isRecord(error) || !isRecord(error.details) || !isRecord(error.details.recovery)) {
+    return null;
+  }
+
+  const recovery = error.details.recovery;
+  const decision = typeof recovery.decision === 'string' && recovery.decision.trim() ? recovery.decision : null;
+  const reason = typeof recovery.reason === 'string' && recovery.reason.trim() ? recovery.reason : null;
+
+  if (!decision || !reason) {
+    return null;
+  }
+
+  return recovery;
+}
+
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
@@ -166,6 +187,17 @@ type FinalizeRunForOwnerResult = {
 
 type OwnerStatusEventContext = {
   dispatchAttemptId?: string;
+};
+
+type RecoveryPauseOptions = {
+  now?: Date;
+  expectedExecutionOwner?: string | null;
+  allowActiveLease?: boolean;
+  errorCode?: string;
+  message?: string;
+  dispatchAttemptId?: string;
+  resumeAttemptId?: string;
+  detail?: Record<string, unknown>;
 };
 
 export default class AgentRunService {
@@ -313,6 +345,26 @@ export default class AgentRunService {
 
     const run = await AgentRun.query().findOne({ uuid: runUuid });
     return run || undefined;
+  }
+
+  static async hasPriorCompletedDebugIntentRun({
+    threadId,
+    intents,
+  }: {
+    threadId: number;
+    intents: AgentDebugRunIntent[];
+  }): Promise<boolean> {
+    if (!Number.isInteger(threadId) || threadId <= 0 || intents.length === 0) {
+      return false;
+    }
+
+    const run = await AgentRun.query()
+      .where({ threadId, status: 'completed' })
+      .whereRaw(`"runPlanSnapshot"->'agent'->>'id' = ?`, ['system.debug'])
+      .whereIn(raw(`"runPlanSnapshot"->'debug'->>'resolvedIntent'`), intents)
+      .first();
+
+    return Boolean(run);
   }
 
   static async hasActiveRun(threadId: number, trx?: Transaction): Promise<boolean> {
@@ -913,6 +965,84 @@ export default class AgentRunService {
     return failedRun;
   }
 
+  static async markWaitingForInputForRecovery(
+    runUuid: string,
+    eligibility: AgentRunResumeEligibility,
+    options: RecoveryPauseOptions = {}
+  ): Promise<AgentRun | null> {
+    if (!isUuid(runUuid)) {
+      throw new Error(RUN_NOT_FOUND_ERROR);
+    }
+
+    const now = options.now || new Date();
+    let latestSequence: number | null = null;
+    const pausedRun = await AgentRun.transaction(async (trx) => {
+      const run = await AgentRun.query(trx).findOne({ uuid: runUuid }).forUpdate();
+      if (!run) {
+        throw new Error(RUN_NOT_FOUND_ERROR);
+      }
+
+      if (run.status !== 'starting' && run.status !== 'running') {
+        return null;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(options, 'expectedExecutionOwner')) {
+        if (run.executionOwner !== options.expectedExecutionOwner) {
+          return null;
+        }
+      }
+
+      if (!options.allowActiveLease && !isLeaseExpired(run.leaseExpiresAt, now)) {
+        return null;
+      }
+
+      const recovery = {
+        ...eligibility,
+        decision: 'manual_recovery_required',
+        previousStatus: run.status,
+        previousOwner: run.executionOwner || null,
+        leaseExpiresAt: run.leaseExpiresAt || null,
+        evaluatedAt: eligibility.evaluatedAt || now.toISOString(),
+        ...(options.resumeAttemptId ? { resumeAttemptId: options.resumeAttemptId } : {}),
+        ...(options.dispatchAttemptId ? { dispatchAttemptId: options.dispatchAttemptId } : {}),
+        ...(options.detail ? { detail: { ...(eligibility.detail || {}), ...options.detail } } : {}),
+      };
+      const nextRun = await AgentRun.query(trx).patchAndFetchById(run.id, {
+        status: 'waiting_for_input',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        error: {
+          name: 'AgentRunManualRecoveryRequired',
+          code: options.errorCode || 'run_auto_resume_ineligible',
+          message:
+            options.message ||
+            'Lifecycle paused this run because automatic recovery is not safe. Review the run and continue manually.',
+          details: {
+            recovery,
+          },
+        },
+      } as Partial<AgentRun>);
+
+      latestSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+        nextRun,
+        statusEventType('waiting_for_input'),
+        this.buildStatusEventPayload('waiting_for_input', nextRun, undefined, {
+          dispatchAttemptId: options.dispatchAttemptId,
+        }),
+        trx
+      );
+
+      return nextRun;
+    });
+
+    if (pausedRun && latestSequence) {
+      await AgentRunEventService.notifyRunEventsInserted(pausedRun.uuid, latestSequence);
+    }
+
+    return pausedRun;
+  }
+
   static async appendStreamChunks(runUuid: string, chunks: AgentUiMessageChunk[]): Promise<AgentRun> {
     const run = await AgentRun.query().findOne({ uuid: runUuid });
     if (!run) {
@@ -955,6 +1085,7 @@ export default class AgentRunService {
       usageSummary: run.usageSummary || {},
       policySnapshot: run.policySnapshot || {},
       runPlan: serializeRunPlanSummary(run.runPlanSnapshot),
+      recovery: readRunRecovery(run.error),
       error: run.error,
       createdAt: run.createdAt || null,
       updatedAt: run.updatedAt || null,

@@ -275,23 +275,18 @@ describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
     expect(html).toContain('OAuth exchange failed');
   });
 
-  it('accepts legacy in-flight callbacks that still use the flow query parameter', async () => {
+  it('rejects callbacks that do not carry the flow id in OAuth state', async () => {
     const response = await GET(
       makeRequest(
-        'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?scope=global&flow=flow-123&code=sample-code&state=legacy-state'
+        'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?code=sample-code&state=legacy-state'
       ),
       {
         params: Promise.resolve({ slug: 'sample-oauth' }),
       }
     );
 
-    expect(response.status).toBe(200);
-    expect(mockConsumeFlow).toHaveBeenCalledWith('flow-123');
-    expect(mockAuth).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({
-        callbackState: 'legacy-state',
-      })
-    );
+    expect(response.status).toBe(410);
+    expect(mockConsumeFlow).not.toHaveBeenCalled();
+    expect(mockAuth).not.toHaveBeenCalled();
   });
 });

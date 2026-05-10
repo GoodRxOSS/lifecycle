@@ -19,18 +19,49 @@ import type { Redis } from 'ioredis';
 const AGENT_SESSION_STARTUP_FAILURE_REDIS_PREFIX = 'lifecycle:agent:session:startup-failure:';
 const AGENT_SESSION_STARTUP_FAILURE_TTL_SECONDS = 60 * 60;
 const AGENT_SESSION_STARTUP_FAILURE_MESSAGE_MAX_LENGTH = 4000;
+const DEFAULT_WORKSPACE_FAILURE_MESSAGE = 'Lifecycle could not open the workspace.';
+const DEFAULT_STARTUP_FAILURE_MESSAGE = 'Lifecycle could not start the session workspace.';
 
-export type AgentSessionStartupFailureStage = 'create_session' | 'connect_runtime' | 'attach_services';
+export const WORKSPACE_RUNTIME_FAILURE_STAGES = [
+  'create_session',
+  'prepare_infrastructure',
+  'connect_runtime',
+  'attach_services',
+  'suspend',
+  'resume',
+  'cleanup',
+] as const;
 
-export interface AgentSessionStartupFailureState {
-  sessionId: string;
-  stage: AgentSessionStartupFailureStage;
+export const WORKSPACE_RUNTIME_FAILURE_ORIGINS = [
+  'agent_session',
+  'chat_runtime',
+  'sandbox_launch',
+  'manual_runtime',
+  'suspend',
+  'resume',
+  'cleanup',
+  'legacy',
+] as const;
+
+export type WorkspaceRuntimeFailureStage = (typeof WORKSPACE_RUNTIME_FAILURE_STAGES)[number];
+export type WorkspaceRuntimeFailureOrigin = (typeof WORKSPACE_RUNTIME_FAILURE_ORIGINS)[number];
+
+export interface WorkspaceRuntimeFailure {
+  stage: WorkspaceRuntimeFailureStage;
   title: string;
   message: string;
   recordedAt: string;
+  retryable: boolean;
+  origin: WorkspaceRuntimeFailureOrigin;
 }
 
-export type PublicAgentSessionStartupFailure = Omit<AgentSessionStartupFailureState, 'sessionId'>;
+export type AgentSessionStartupFailureStage = WorkspaceRuntimeFailureStage;
+
+export interface AgentSessionStartupFailureState extends WorkspaceRuntimeFailure {
+  sessionId: string;
+}
+
+export type PublicAgentSessionStartupFailure = WorkspaceRuntimeFailure;
 
 function agentSessionStartupFailureKey(sessionId: string): string {
   return `${AGENT_SESSION_STARTUP_FAILURE_REDIS_PREFIX}${sessionId}`;
@@ -44,16 +75,31 @@ function truncateMessage(message: string): string {
   return `${message.slice(0, AGENT_SESSION_STARTUP_FAILURE_MESSAGE_MAX_LENGTH - 3)}...`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isWorkspaceRuntimeFailureStage(value: unknown): value is WorkspaceRuntimeFailureStage {
+  return typeof value === 'string' && WORKSPACE_RUNTIME_FAILURE_STAGES.includes(value as WorkspaceRuntimeFailureStage);
+}
+
+function isWorkspaceRuntimeFailureOrigin(value: unknown): value is WorkspaceRuntimeFailureOrigin {
+  return (
+    typeof value === 'string' && WORKSPACE_RUNTIME_FAILURE_ORIGINS.includes(value as WorkspaceRuntimeFailureOrigin)
+  );
+}
+
 function normalizeFailureMessage(error: unknown): string {
   const rawMessage =
     error instanceof Error
       ? error.message
       : typeof error === 'string'
       ? error
-      : 'Lifecycle could not start the session workspace.';
-  const message = rawMessage.trim() || 'Lifecycle could not start the session workspace.';
+      : isRecord(error) && typeof error.message === 'string'
+      ? error.message
+      : DEFAULT_STARTUP_FAILURE_MESSAGE;
 
-  return truncateMessage(message);
+  return rawMessage.trim() || DEFAULT_STARTUP_FAILURE_MESSAGE;
 }
 
 function stripMessagePrefix(message: string, prefix: string): string {
@@ -63,6 +109,45 @@ function stripMessagePrefix(message: string, prefix: string): string {
 
   const stripped = message.slice(prefix.length).trim();
   return stripped || message;
+}
+
+function redactSensitiveText(message: string): string {
+  const secretKey = String.raw`[A-Za-z0-9_.-]*(?:token|access[_-]?token|refresh[_-]?token|password|secret|api[_-]?key)[A-Za-z0-9_.-]*`;
+
+  return message
+    .replace(/Authorization:\s*(?:Bearer|token|Basic)\s+[^\s,;]+/gi, 'Authorization: [redacted]')
+    .replace(new RegExp(String.raw`\b(${secretKey})\s*=\s*([^\s,;]+)`, 'gi'), '$1=[redacted]')
+    .replace(
+      new RegExp(String.raw`(["'])(${secretKey})\1\s*:\s*(["'])(?:\\.|(?!\3)[\s\S])*\3`, 'gi'),
+      '$1$2$1: $3[redacted]$3'
+    )
+    .replace(new RegExp(String.raw`\b(${secretKey})\s*:\s*(["'])(?:\\.|(?!\2)[\s\S])*\2`, 'gi'), '$1: [redacted]')
+    .replace(new RegExp(String.raw`\b(${secretKey})\s*:\s*[^\s,;]+`, 'gi'), '$1: [redacted]')
+    .replace(
+      /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gi,
+      '[redacted private key]'
+    );
+}
+
+function stripRawDiagnostics(message: string): string {
+  return message
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) =>
+      line.replace(/\s+-\s+(?:raw pod log:|(?:npm|pnpm|yarn) ERR!|Traceback\b|at\s+\S+|command output:).*$/i, '')
+    )
+    .filter((line) => !/^(?:at\s+\S+|raw pod log:|(?:npm|pnpm|yarn) ERR!|stderr:|stdout:)/i.test(line))
+    .filter((line) => !/\bat\s+\S+\s+\(.+\)/.test(line))
+    .join(' ')
+    .trim();
+}
+
+function sanitizeFailureText(value: unknown, fallback: string): string {
+  const raw = typeof value === 'string' ? value : fallback;
+  const redacted = redactSensitiveText(raw);
+  const withoutRawDiagnostics = stripRawDiagnostics(redacted);
+  return truncateMessage(withoutRawDiagnostics || fallback);
 }
 
 function classifyFailure(
@@ -112,31 +197,126 @@ function classifyFailure(
   }
 
   return {
-    title:
-      stage === 'create_session'
-        ? 'Agent session failed to start'
-        : stage === 'attach_services'
-        ? 'Attached services failed to start'
-        : 'Session workspace connection failed',
+    title: defaultTitleForStage(stage),
     message,
   };
+}
+
+function defaultTitleForStage(stage: WorkspaceRuntimeFailureStage): string {
+  switch (stage) {
+    case 'create_session':
+      return 'Agent session failed to start';
+    case 'prepare_infrastructure':
+      return 'Workspace infrastructure could not be prepared';
+    case 'attach_services':
+      return 'Attached services failed to start';
+    case 'suspend':
+      return 'Workspace could not be suspended';
+    case 'resume':
+      return 'Workspace could not be resumed';
+    case 'cleanup':
+      return 'Workspace cleanup failed';
+    case 'connect_runtime':
+    default:
+      return 'Session workspace connection failed';
+  }
+}
+
+function normalizeRecordedAt(value: unknown): string {
+  if (typeof value === 'string' && !Number.isNaN(Date.parse(value))) {
+    return value;
+  }
+
+  return new Date().toISOString();
+}
+
+function fallbackWorkspaceRuntimeFailure(
+  params: {
+    stage?: WorkspaceRuntimeFailureStage;
+    origin?: WorkspaceRuntimeFailureOrigin;
+    retryable?: boolean;
+    recordedAt?: string;
+  } = {}
+): WorkspaceRuntimeFailure {
+  return {
+    stage: params.stage || 'connect_runtime',
+    title: 'Workspace could not be opened',
+    message: DEFAULT_WORKSPACE_FAILURE_MESSAGE,
+    recordedAt: normalizeRecordedAt(params.recordedAt),
+    retryable: params.retryable === true,
+    origin: params.origin || 'legacy',
+  };
+}
+
+export function buildWorkspaceRuntimeFailure(params: {
+  error: unknown;
+  stage?: WorkspaceRuntimeFailureStage;
+  origin?: WorkspaceRuntimeFailureOrigin;
+  retryable?: boolean;
+  recordedAt?: string;
+}): WorkspaceRuntimeFailure {
+  const stage = params.stage || 'connect_runtime';
+  const message = sanitizeFailureText(normalizeFailureMessage(params.error), DEFAULT_STARTUP_FAILURE_MESSAGE);
+  const classified = classifyFailure(message, stage);
+
+  return {
+    stage,
+    title: sanitizeFailureText(classified.title, defaultTitleForStage(stage)),
+    message: sanitizeFailureText(classified.message, DEFAULT_STARTUP_FAILURE_MESSAGE),
+    recordedAt: normalizeRecordedAt(params.recordedAt),
+    retryable: params.retryable === true,
+    origin: params.origin || 'agent_session',
+  };
+}
+
+export function normalizeWorkspaceRuntimeFailure(
+  failure: unknown,
+  fallback: {
+    stage?: WorkspaceRuntimeFailureStage;
+    origin?: WorkspaceRuntimeFailureOrigin;
+    retryable?: boolean;
+    recordedAt?: string;
+  } = {}
+): WorkspaceRuntimeFailure {
+  if (!isRecord(failure)) {
+    return fallbackWorkspaceRuntimeFailure(fallback);
+  }
+
+  if (
+    isWorkspaceRuntimeFailureStage(failure.stage) &&
+    typeof failure.title === 'string' &&
+    typeof failure.message === 'string'
+  ) {
+    return {
+      stage: failure.stage,
+      title: sanitizeFailureText(failure.title, defaultTitleForStage(failure.stage)),
+      message: sanitizeFailureText(failure.message, DEFAULT_WORKSPACE_FAILURE_MESSAGE),
+      recordedAt: normalizeRecordedAt(failure.recordedAt ?? fallback.recordedAt),
+      retryable: typeof failure.retryable === 'boolean' ? failure.retryable : fallback.retryable === true,
+      origin: isWorkspaceRuntimeFailureOrigin(failure.origin) ? failure.origin : fallback.origin || 'legacy',
+    };
+  }
+
+  return fallbackWorkspaceRuntimeFailure(fallback);
 }
 
 export function buildAgentSessionStartupFailure(params: {
   sessionId: string;
   error: unknown;
   stage?: AgentSessionStartupFailureStage;
+  origin?: WorkspaceRuntimeFailureOrigin;
+  retryable?: boolean;
 }): AgentSessionStartupFailureState {
-  const stage = params.stage || 'connect_runtime';
-  const message = normalizeFailureMessage(params.error);
-  const classified = classifyFailure(message, stage);
+  const failure = buildWorkspaceRuntimeFailure({
+    error: params.error,
+    stage: params.stage,
+    origin: params.origin,
+    retryable: params.retryable,
+  });
 
   return {
+    ...failure,
     sessionId: params.sessionId,
-    stage,
-    title: classified.title,
-    message: classified.message,
-    recordedAt: new Date().toISOString(),
   };
 }
 
@@ -161,7 +341,19 @@ export async function getAgentSessionStartupFailure(
   }
 
   try {
-    return JSON.parse(raw) as AgentSessionStartupFailureState;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return null;
+    }
+
+    return {
+      ...normalizeWorkspaceRuntimeFailure(parsed, {
+        stage: isWorkspaceRuntimeFailureStage(parsed.stage) ? parsed.stage : 'connect_runtime',
+        origin: isWorkspaceRuntimeFailureOrigin(parsed.origin) ? parsed.origin : 'agent_session',
+        recordedAt: typeof parsed.recordedAt === 'string' ? parsed.recordedAt : undefined,
+      }),
+      sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : sessionId,
+    };
   } catch {
     return null;
   }

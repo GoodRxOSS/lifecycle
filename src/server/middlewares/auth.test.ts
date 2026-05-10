@@ -39,7 +39,7 @@ describe('authMiddleware', () => {
   it('allows MCP OAuth callbacks without bearer auth', async () => {
     const next = jest.fn().mockResolvedValue(NextResponse.next());
     const request = new NextRequest(
-      'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?scope=global&flow=flow-123'
+      'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?code=sample-code&state=flow-123.sample-state'
     );
 
     await authMiddleware(request, next);

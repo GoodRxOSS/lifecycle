@@ -19,8 +19,13 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
-import AgentSessionService, { ActiveAgentRunSuspensionError } from 'server/services/agentSession';
+import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
+import AgentSessionService from 'server/services/agentSession';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
+
+function isSessionNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Session not found';
+}
 
 /**
  * @openapi
@@ -53,8 +58,10 @@ import AgentSessionReadService from 'server/services/agent/SessionReadService';
  *         description: Session cannot be suspended
  *       '401':
  *         description: Unauthorized
+ *       '404':
+ *         description: Session not found
  *       '409':
- *         description: Session has an active agent run
+ *         description: Workspace action is blocked by an active run or another lifecycle action
  */
 const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -70,8 +77,11 @@ const postHandler = async (req: NextRequest, { params }: { params: { sessionId: 
 
     return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 200 }, req);
   } catch (error) {
-    if (error instanceof ActiveAgentRunSuspensionError) {
+    if (error instanceof WorkspaceActionBlockedError) {
       return errorResponse(error, { status: 409 }, req);
+    }
+    if (isSessionNotFoundError(error)) {
+      return errorResponse(new Error('Session not found'), { status: 404 }, req);
     }
     return errorResponse(error, { status: 400 }, req);
   }

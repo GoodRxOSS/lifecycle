@@ -287,6 +287,7 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                     - sessionId
  *                     - focusUrl
  *                     - error
+ *                     - workspaceFailure
  *                   properties:
  *                     launchId:
  *                       type: string
@@ -332,6 +333,10 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *                     error:
  *                       type: string
  *                       nullable: true
+ *                     workspaceFailure:
+ *                       nullable: true
+ *                       allOf:
+ *                         - $ref: '#/components/schemas/WorkspaceRuntimeFailure'
  *                 error:
  *                   nullable: true
  *       '400':
@@ -378,7 +383,17 @@ const postHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
-  const body = (await req.json()) as CreateSandboxSessionBody;
+  let body: CreateSandboxSessionBody;
+  try {
+    const parsedBody = await req.json();
+    if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+      return errorResponse(new Error('Request body must be an object'), { status: 400 }, req);
+    }
+    body = parsedBody as CreateSandboxSessionBody;
+  } catch {
+    return errorResponse(new Error('Invalid JSON body'), { status: 400 }, req);
+  }
+
   if (!body.baseBuildUuid) {
     return errorResponse(new Error('baseBuildUuid is required'), { status: 400 }, req);
   }
@@ -411,6 +426,7 @@ const postHandler = async (req: NextRequest) => {
       sessionId: null,
       focusUrl: null,
       error: null,
+      workspaceFailure: null,
     });
 
     await sandboxLaunchQueue.add(
@@ -454,6 +470,7 @@ const postHandler = async (req: NextRequest) => {
         sessionId: null,
         focusUrl: null,
         error: null,
+        workspaceFailure: null,
       }),
       { status: 200 },
       req

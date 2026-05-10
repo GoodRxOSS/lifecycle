@@ -33,9 +33,22 @@ export interface AgentSessionWorkspaceRepo {
 export interface AgentSessionSelectedService {
   name: string;
   deployId: number;
+  deployUuid?: string | null;
   repo: string;
   branch: string;
   revision?: string | null;
+  deployableType?: string | null;
+  dockerfilePath?: string | null;
+  initDockerfilePath?: string | null;
+  deployStatus?: string | null;
+  deployStatusMessage?: string | null;
+  dockerImage?: string | null;
+  buildPipelineId?: string | null;
+  deployPipelineId?: string | null;
+  chartName?: string | null;
+  chartRepoUrl?: string | null;
+  chartValueFiles?: string[];
+  source?: string | null;
   resourceName?: string | null;
   workspacePath: string;
   workDir?: string | null;

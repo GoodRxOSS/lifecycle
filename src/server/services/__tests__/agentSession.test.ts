@@ -33,12 +33,15 @@ const mockCreateOrUpdateChatPreview = jest.fn().mockResolvedValue({
   serviceName: 'agent-preview-aaaaaaaa-3000',
   ingressName: 'agent-preview-ingress-aaaaaaaa-3000',
 });
+const mockResolveWorkspaceRuntimePlan = jest.fn();
+const mockToWorkspaceRuntimePlanMetadata = jest.fn();
 
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/AgentThread');
 jest.mock('server/models/AgentSource');
 jest.mock('server/models/AgentSandbox');
 jest.mock('server/models/AgentSandboxExposure');
+jest.mock('server/models/AgentRun');
 jest.mock('server/models/Build');
 jest.mock('server/models/Deploy');
 jest.mock('server/lib/dependencies', () => ({}));
@@ -51,6 +54,15 @@ jest.mock('server/lib/agentSession/gvisorCheck');
 jest.mock('server/lib/agentSession/configSeeder');
 jest.mock('server/lib/agentSession/devModeManager');
 jest.mock('server/lib/agentSession/forwardedEnv');
+jest.mock('server/lib/agentSession/workspaceRuntimePlan', () => {
+  const actual = jest.requireActual('server/lib/agentSession/workspaceRuntimePlan');
+  return {
+    __esModule: true,
+    ...actual,
+    resolveWorkspaceRuntimePlan: (...args: unknown[]) => mockResolveWorkspaceRuntimePlan(...args),
+    toWorkspaceRuntimePlanMetadata: (...args: unknown[]) => mockToWorkspaceRuntimePlanMetadata(...args),
+  };
+});
 jest.mock('server/lib/agentSession/chatPreviewFactory', () => ({
   createOrUpdateChatPreview: (...args: unknown[]) => mockCreateOrUpdateChatPreview(...args),
 }));
@@ -224,12 +236,17 @@ jest.mock('server/services/globalConfig', () => ({
   },
 }));
 
-import AgentSessionService, { CreateSessionOptions, buildAgentSessionPodName } from 'server/services/agentSession';
+import AgentSessionService, {
+  AgentSessionStartupError,
+  CreateSessionOptions,
+  buildAgentSessionPodName,
+} from 'server/services/agentSession';
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
 import AgentSource from 'server/models/AgentSource';
 import AgentSandbox from 'server/models/AgentSandbox';
 import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
+import AgentRun from 'server/models/AgentRun';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { createAgentPvc, deleteAgentPvc } from 'server/lib/agentSession/pvcFactory';
@@ -248,7 +265,14 @@ import {
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
-import { cleanupForwardedAgentEnvSecrets, resolveForwardedAgentEnv } from 'server/lib/agentSession/forwardedEnv';
+import {
+  applyForwardedAgentEnvSecrets,
+  cleanupForwardedAgentEnvSecrets,
+  planForwardedAgentEnv,
+  resolveForwardedAgentEnv,
+} from 'server/lib/agentSession/forwardedEnv';
+import type { WorkspaceRuntimePlan } from 'server/lib/agentSession/workspaceRuntimePlan';
+import { buildAgentNetworkPolicy } from 'server/lib/kubernetes/networkPolicyFactory';
 import * as runtimeConfig from 'server/lib/agentSession/runtimeConfig';
 import * as systemPrompt from 'server/lib/agentSession/systemPrompt';
 import UserApiKeyService from 'server/services/userApiKey';
@@ -257,7 +281,10 @@ import { deployHelm } from 'server/lib/nativeHelm/helm';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
 import BuildServiceModule from 'server/services/build';
 import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionCandidates';
-import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind } from 'shared/constants';
+import WorkspaceRuntimeStateService, {
+  WorkspaceActionBlockedError,
+} from 'server/services/agent/WorkspaceRuntimeStateService';
 
 const mockRedis = {
   setex: jest.fn().mockResolvedValue('OK'),
@@ -340,6 +367,7 @@ const mockSessionQuery = {
   findOne: jest.fn(),
   select: jest.fn(),
   findById: jest.fn().mockReturnThis(),
+  forUpdate: jest.fn(),
   patch: jest.fn().mockResolvedValue(1),
   patchAndFetchById: jest.fn(),
   insert: jest.fn().mockResolvedValue({}),
@@ -363,6 +391,7 @@ const mockSourceQuery = {
 
 const mockSandboxQuery = {
   where: jest.fn().mockReturnThis(),
+  whereIn: jest.fn().mockReturnThis(),
   orderBy: jest.fn().mockReturnThis(),
   first: jest.fn(),
   insertAndFetch: jest.fn(),
@@ -378,6 +407,15 @@ const mockSandboxExposureQuery = {
   patchAndFetchById: jest.fn(),
 };
 (AgentSandboxExposure.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxExposureQuery);
+
+const mockRunQuery = {
+  where: jest.fn().mockReturnThis(),
+  whereNotIn: jest.fn().mockReturnThis(),
+  whereNot: jest.fn().mockReturnThis(),
+  orderBy: jest.fn().mockReturnThis(),
+  first: jest.fn().mockResolvedValue(null),
+};
+(AgentRun.query as jest.Mock) = jest.fn().mockReturnValue(mockRunQuery);
 
 const mockDeployQuery = {
   where: jest.fn().mockReturnThis(),
@@ -396,6 +434,247 @@ const baseOpts: CreateSessionOptions = {
   workspaceImage: 'lifecycle-agent:latest',
   workspaceEditorImage: 'codercom/code-server:4.98.2',
 };
+
+const actualWorkspaceRuntimePlan = jest.requireActual(
+  'server/lib/agentSession/workspaceRuntimePlan'
+) as typeof import('server/lib/agentSession/workspaceRuntimePlan');
+
+function buildRuntimePlan(overrides: Partial<WorkspaceRuntimePlan> = {}): WorkspaceRuntimePlan {
+  const basePlan: WorkspaceRuntimePlan = {
+    version: 1,
+    kind: 'environment',
+    sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    namespace: 'test-ns',
+    podName: 'agent-aaaaaaaa',
+    apiKeySecretName: 'agent-secret-aaaaaaaa',
+    runtimeConfig: {
+      workspaceImage: 'lifecycle-agent:latest',
+      workspaceEditorImage: 'codercom/code-server:4.98.2',
+      workspaceGatewayImage: 'lifecycle-agent:latest',
+      nodeSelector: undefined,
+      keepAttachedServicesOnSessionNode: true,
+      readiness: undefined,
+      resources: undefined,
+      workspaceStorage: {
+        defaultSize: '10Gi',
+        allowedSizes: ['10Gi', '20Gi'],
+        allowClientOverride: true,
+        accessMode: 'ReadWriteOnce',
+      },
+      cleanup: {
+        activeIdleSuspendMs: 30 * 60 * 1000,
+        startingTimeoutMs: 15 * 60 * 1000,
+        hibernatedRetentionMs: 24 * 60 * 60 * 1000,
+        intervalMs: 5 * 60 * 1000,
+        redisTtlSeconds: 7200,
+      },
+      durability: {
+        runExecutionLeaseMs: 30 * 60 * 1000,
+        queuedRunDispatchStaleMs: 30 * 1000,
+        dispatchRecoveryLimit: 50,
+        maxDurablePayloadBytes: 64 * 1024,
+        payloadPreviewBytes: 16 * 1024,
+        fileChangePreviewChars: 4000,
+      },
+    },
+    workspaceStorage: {
+      requestedSize: null,
+      storageSize: '10Gi',
+      accessMode: 'ReadWriteOnce',
+    },
+    servicePlan: {
+      workspaceRepos: [
+        {
+          repo: 'example-org/example-repo',
+          repoUrl: 'https://github.com/example-org/example-repo.git',
+          branch: 'feature/example-session',
+          mountPath: '/workspace',
+          primary: true,
+        },
+      ],
+      services: undefined,
+      selectedServices: [],
+    },
+    skillPlan: { version: 1, skills: [] },
+    provider: {
+      selection: {
+        provider: 'anthropic',
+        modelId: 'claude-sonnet-4-6',
+      },
+      apiKey: 'sample-anthropic-provider-key',
+      credentialEnv: {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+      },
+    },
+    startupMcp: {
+      servers: [],
+      serializedConfig: '[]',
+    },
+    forwardedEnv: {
+      env: {},
+      secretRefs: [],
+      secretProviders: [],
+      secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    },
+    credentials: {
+      hasGitHubToken: false,
+      githubToken: null,
+    },
+    prewarm: {
+      compatiblePrewarm: null,
+      pvcName: 'agent-pvc-aaaaaaaa',
+      skipWorkspaceBootstrap: false,
+      ownsPvc: true,
+    },
+  };
+
+  return {
+    ...basePlan,
+    ...overrides,
+    runtimeConfig: {
+      ...basePlan.runtimeConfig,
+      ...(overrides.runtimeConfig || {}),
+    },
+    workspaceStorage: {
+      ...basePlan.workspaceStorage,
+      ...(overrides.workspaceStorage || {}),
+    },
+    servicePlan: {
+      ...basePlan.servicePlan,
+      ...(overrides.servicePlan || {}),
+    },
+    skillPlan: {
+      ...basePlan.skillPlan,
+      ...(overrides.skillPlan || {}),
+    },
+    provider: {
+      ...basePlan.provider,
+      ...(overrides.provider || {}),
+    },
+    startupMcp: {
+      ...basePlan.startupMcp,
+      ...(overrides.startupMcp || {}),
+    },
+    forwardedEnv: {
+      ...basePlan.forwardedEnv,
+      ...(overrides.forwardedEnv || {}),
+    },
+    credentials: {
+      ...basePlan.credentials,
+      ...(overrides.credentials || {}),
+    },
+    prewarm: {
+      ...basePlan.prewarm,
+      ...(overrides.prewarm || {}),
+    },
+  };
+}
+
+function sandboxWritePayloads(): Array<Record<string, unknown>> {
+  return [
+    ...mockSandboxQuery.insertAndFetch.mock.calls.map(([payload]) => payload),
+    ...mockSandboxQuery.patchAndFetchById.mock.calls.map(([, payload]) => payload),
+  ].filter(Boolean);
+}
+
+function expectSandboxFailure(expectedFailure: {
+  stage: string;
+  origin: string;
+  title?: string;
+  message?: string;
+}): void {
+  expect(sandboxWritePayloads()).toContainEqual(
+    expect.objectContaining({
+      status: 'failed',
+      error: expect.objectContaining({
+        stage: expectedFailure.stage,
+        origin: expectedFailure.origin,
+        ...(expectedFailure.title ? { title: expectedFailure.title } : {}),
+        ...(expectedFailure.message ? { message: expect.stringContaining(expectedFailure.message) } : {}),
+        retryable: false,
+        recordedAt: expect.any(String),
+      }),
+    })
+  );
+}
+
+function expectNoCreateSessionKubernetesHelpersCalled(): void {
+  expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+  expect(mockDeleteNamespace).not.toHaveBeenCalled();
+  expect(createAgentPvc).not.toHaveBeenCalled();
+  expect(deleteAgentPvc).not.toHaveBeenCalled();
+  expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+  expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+  expect(ensureAgentSessionServiceAccount).not.toHaveBeenCalled();
+  expect(createSessionWorkspaceService).not.toHaveBeenCalled();
+  expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+  expect(buildAgentNetworkPolicy).not.toHaveBeenCalled();
+  expect(isGvisorAvailable).not.toHaveBeenCalled();
+  expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+  expect(createSessionWorkspacePodWithoutWaiting).not.toHaveBeenCalled();
+  expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+  expect(applyForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+  expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+}
+
+function mockPersistedSandboxMetadata(metadata: Record<string, unknown>): void {
+  const persistedSandbox = { id: 654, metadata };
+  mockSandboxQuery.first
+    .mockResolvedValueOnce(persistedSandbox)
+    .mockResolvedValueOnce(persistedSandbox)
+    .mockImplementation(async () => {
+      const latestPayload = sandboxWritePayloads().at(-1);
+      return latestPayload ? { id: 654, ...latestPayload } : persistedSandbox;
+    });
+}
+
+function queuePatchedSession(baseSession: Record<string, unknown>): void {
+  mockSessionQuery.patchAndFetchById.mockImplementationOnce(async (_id, patch) => ({
+    ...baseSession,
+    ...(patch as Record<string, unknown>),
+  }));
+}
+
+function buildChatRuntimeSession(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 321,
+    uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    userId: 'sample-user',
+    ownerGithubUsername: 'sample-user',
+    sessionKind: AgentSessionKind.CHAT,
+    podName: null,
+    namespace: null,
+    pvcName: null,
+    model: 'claude-sonnet-4-6',
+    buildKind: null,
+    status: 'active',
+    chatStatus: AgentChatStatus.READY,
+    workspaceStatus: AgentWorkspaceStatus.NONE,
+    devModeSnapshots: {},
+    forwardedAgentSecretProviders: [],
+    workspaceRepos: [],
+    selectedServices: [],
+    skillPlan: { version: 1, skills: [] },
+    ...overrides,
+  };
+}
+
+function mockEndSessionSession(session: Record<string, unknown>): void {
+  mockSessionQuery.findOne.mockResolvedValueOnce(session);
+  mockSessionQuery.forUpdate.mockResolvedValueOnce(session);
+  queuePatchedSession(session);
+}
+
+function queueEndedSession(session: Record<string, unknown>, extraPatch: Record<string, unknown> = {}): void {
+  queuePatchedSession({
+    ...session,
+    status: 'ended',
+    chatStatus: AgentChatStatus.ENDED,
+    workspaceStatus: AgentWorkspaceStatus.ENDED,
+    endedAt: new Date().toISOString(),
+    ...extraPatch,
+  });
+}
 
 describe('AgentSessionService', () => {
   const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -431,6 +710,7 @@ describe('AgentSessionService', () => {
     (AgentSource.query as jest.Mock) = jest.fn().mockReturnValue(mockSourceQuery);
     (AgentSandbox.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxQuery);
     (AgentSandboxExposure.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxExposureQuery);
+    (AgentRun.query as jest.Mock) = jest.fn().mockReturnValue(mockRunQuery);
     (Deploy.query as jest.Mock) = jest.fn().mockReturnValue(mockDeployQuery);
     mockSessionQuery.where.mockReturnThis();
     mockSessionQuery.whereIn.mockReturnThis();
@@ -439,8 +719,25 @@ describe('AgentSessionService', () => {
     mockSessionQuery.findOne.mockResolvedValue(null);
     mockSessionQuery.select.mockResolvedValue({ id: 123 });
     mockSessionQuery.findById.mockReturnThis();
+    mockSessionQuery.forUpdate.mockResolvedValue({
+      id: 123,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: null,
+      sessionKind: 'environment',
+      podName: 'agent-aaaaaaaa',
+      namespace: 'test-ns',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: 'environment',
+      status: 'starting',
+      chatStatus: 'ready',
+      workspaceStatus: 'provisioning',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+    });
     mockSessionQuery.patch.mockResolvedValue(1);
-    mockSessionQuery.patchAndFetchById.mockResolvedValue({
+    mockSessionQuery.patchAndFetchById.mockImplementation(async (_id, patch) => ({
       id: 123,
       uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       userId: 'user-123',
@@ -457,7 +754,8 @@ describe('AgentSessionService', () => {
       defaultThreadId: 456,
       devModeSnapshots: {},
       forwardedAgentSecretProviders: [],
-    });
+      ...(patch as Record<string, unknown>),
+    }));
     mockSessionQuery.insert.mockResolvedValue({});
     mockSessionQuery.insertAndFetch.mockResolvedValue({
       id: 123,
@@ -496,8 +794,12 @@ describe('AgentSessionService', () => {
     });
     mockSourceQuery.patchAndFetchById.mockResolvedValue({});
     mockSandboxQuery.where.mockReturnThis();
+    mockSandboxQuery.whereIn.mockReturnThis();
     mockSandboxQuery.orderBy.mockReturnThis();
-    mockSandboxQuery.first.mockResolvedValue(null);
+    mockSandboxQuery.first.mockImplementation(async () => {
+      const latestPayload = sandboxWritePayloads().at(-1);
+      return latestPayload ? { id: 654, ...latestPayload } : null;
+    });
     mockSandboxQuery.insertAndFetch.mockResolvedValue({
       id: 654,
       uuid: 'sandbox-1',
@@ -521,6 +823,11 @@ describe('AgentSessionService', () => {
     mockSandboxExposureQuery.first.mockResolvedValue(null);
     mockSandboxExposureQuery.insert.mockResolvedValue({});
     mockSandboxExposureQuery.patchAndFetchById.mockResolvedValue({});
+    mockRunQuery.where.mockReturnThis();
+    mockRunQuery.whereNotIn.mockReturnThis();
+    mockRunQuery.whereNot.mockReturnThis();
+    mockRunQuery.orderBy.mockReturnThis();
+    mockRunQuery.first.mockResolvedValue(null);
     mockDeployQuery.where.mockReturnThis();
     mockDeployQuery.whereIn.mockReturnThis();
     mockDeployQuery.findById.mockReturnThis();
@@ -591,6 +898,13 @@ describe('AgentSessionService', () => {
       }
     );
     (loadAgentSessionServiceCandidates as jest.Mock).mockResolvedValue([]);
+    (planForwardedAgentEnv as jest.Mock).mockResolvedValue({
+      env: {},
+      secretRefs: [],
+      secretProviders: [],
+      secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    });
+    (applyForwardedAgentEnvSecrets as jest.Mock).mockImplementation(async ({ plan }) => plan);
     (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
       env: {},
       secretRefs: [],
@@ -598,6 +912,8 @@ describe('AgentSessionService', () => {
       secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
     });
     (cleanupForwardedAgentEnvSecrets as jest.Mock).mockResolvedValue(undefined);
+    mockResolveWorkspaceRuntimePlan.mockImplementation(actualWorkspaceRuntimePlan.resolveWorkspaceRuntimePlan);
+    mockToWorkspaceRuntimePlanMetadata.mockImplementation(actualWorkspaceRuntimePlan.toWorkspaceRuntimePlanMetadata);
     mockResolveSessionPodServersForRepo.mockResolvedValue([]);
     (runtimeConfig.resolveAgentSessionControlPlaneConfig as jest.Mock).mockResolvedValue({
       appendSystemPrompt: undefined,
@@ -782,6 +1098,9 @@ describe('AgentSessionService', () => {
     };
 
     mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
 
     const session = await AgentSessionService.provisionChatRuntime({
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -810,7 +1129,9 @@ describe('AgentSessionService', () => {
     expect(createAgentApiKeySecret).toHaveBeenCalledWith(
       'chat-aaaaaaaa',
       'agent-secret-aaaaaaaa',
-      {},
+      {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+      },
       'sample-gh-token',
       undefined,
       {},
@@ -827,7 +1148,17 @@ describe('AgentSessionService', () => {
       })
     );
     expect(createSessionWorkspaceService).toHaveBeenCalledWith('chat-aaaaaaaa', 'agent-aaaaaaaa');
-    expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+      321,
+      expect.objectContaining({
+        workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+      })
+    );
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+      321,
       expect.objectContaining({
         workspaceStatus: AgentWorkspaceStatus.READY,
         namespace: 'chat-aaaaaaaa',
@@ -837,6 +1168,740 @@ describe('AgentSessionService', () => {
     );
     expect(session.workspaceStatus).toBe('ready');
     expect(session.namespace).toBe('chat-aaaaaaaa');
+  });
+
+  it('opens an already-ready chat runtime without lifecycle or Kubernetes side effects', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const readyChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    });
+    const claimSpy = jest.spyOn(WorkspaceRuntimeStateService, 'claimWorkspaceAction');
+    mockSessionQuery.findOne.mockResolvedValueOnce(readyChatSession);
+
+    const session = await AgentSessionService.openChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(session).toBe(readyChatSession);
+    expect(claimSpy).not.toHaveBeenCalled();
+    expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(createSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(sandboxWritePayloads()).toHaveLength(0);
+    claimSpy.mockRestore();
+  });
+
+  it('opens a missing chat runtime through provisioning and claims the provision action', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const chatSession = buildChatRuntimeSession();
+    const readyChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    });
+    mockSessionQuery.findOne
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    const session = await AgentSessionService.openChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(session.workspaceStatus).toBe(AgentWorkspaceStatus.READY);
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'provisioning',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'provision',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+  });
+
+  it('passes the allowed active run id when provisioning a missing chat runtime', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const chatSession = buildChatRuntimeSession();
+    const readyChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    });
+    const claimSpy = jest.spyOn(WorkspaceRuntimeStateService, 'claimWorkspaceAction');
+    mockSessionQuery.findOne
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    await AgentSessionService.openChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+      allowedActiveRunUuid: 'run-current',
+    });
+
+    expect(claimSpy).toHaveBeenCalledWith(
+      321,
+      expect.objectContaining({
+        action: 'provision',
+        allowedActiveRunUuid: 'run-current',
+      })
+    );
+    claimSpy.mockRestore();
+  });
+
+  it('records first chat runtime provisioning failures as retryable', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const chatSession = buildChatRuntimeSession();
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('first open failed'));
+
+    await expect(
+      AgentSessionService.openChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('first open failed');
+
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({
+          origin: 'chat_runtime',
+          retryable: true,
+        }),
+      })
+    );
+  });
+
+  it('opens a failed chat runtime through retry and preserves active chat state on retry failure', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const failedChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    mockSessionQuery.findOne.mockResolvedValue(failedChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(failedChatSession);
+    queuePatchedSession(failedChatSession);
+    queuePatchedSession({
+      ...failedChatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('retry pod failed'));
+
+    await expect(
+      AgentSessionService.openChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('retry pod failed');
+
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'provisioning',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'retry',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenLastCalledWith(
+      321,
+      expect.objectContaining({
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.FAILED,
+      })
+    );
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({
+          origin: 'chat_runtime',
+          retryable: true,
+        }),
+      })
+    );
+  });
+
+  it('opens a hibernated chat runtime through hibernated-only resume behavior', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const hibernatedChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+    });
+    const readyChatSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    });
+    mockSessionQuery.findOne
+      .mockResolvedValueOnce(hibernatedChatSession)
+      .mockResolvedValueOnce(hibernatedChatSession)
+      .mockResolvedValueOnce(hibernatedChatSession)
+      .mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(hibernatedChatSession);
+    queuePatchedSession(hibernatedChatSession);
+    queuePatchedSession(readyChatSession);
+
+    const session = await AgentSessionService.openChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(session.workspaceStatus).toBe(AgentWorkspaceStatus.READY);
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'resuming',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'resume',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+  });
+
+  it('blocks canonical chat open when a workspace lifecycle action is already active', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const failedChatSession = buildChatRuntimeSession({
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    mockSessionQuery.findOne.mockResolvedValue(failedChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(failedChatSession);
+    mockSandboxQuery.first.mockResolvedValueOnce({
+      id: 654,
+      metadata: {
+        runtimeLifecycle: {
+          currentAction: 'suspend',
+          claimedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    await expect(
+      AgentSessionService.openChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed ready chat runtime state before Kubernetes side effects', async () => {
+    expect(typeof AgentSessionService.openChatRuntime).toBe('function');
+    const malformedReadySession = buildChatRuntimeSession({
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: null,
+      pvcName: 'agent-pvc-aaaaaaaa',
+    });
+    mockSessionQuery.findOne.mockResolvedValueOnce(malformedReadySession);
+
+    await expect(
+      AgentSessionService.openChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('Workspace runtime is marked ready but missing runtime references');
+
+    expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(sandboxWritePayloads()).toHaveLength(0);
+  });
+
+  it('resolves the chat workspace runtime plan before namespace creation', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: 'ready',
+    };
+    const runtimePlan = buildRuntimePlan({
+      kind: 'chat',
+      namespace: 'chat-aaaaaaaa',
+      servicePlan: {
+        workspaceRepos: [],
+        services: undefined,
+        selectedServices: [],
+      },
+      credentials: {
+        hasGitHubToken: true,
+        githubToken: 'sample-gh-token',
+      },
+    });
+    mockResolveWorkspaceRuntimePlan.mockImplementation(async () => {
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+      return runtimePlan;
+    });
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: {
+        userId: 'user-123',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(mockResolveWorkspaceRuntimePlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'chat',
+        sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        namespace: 'chat-aaaaaaaa',
+        userId: 'user-123',
+        githubToken: 'sample-gh-token',
+        workspaceRepos: [],
+        services: undefined,
+        model: 'claude-sonnet-4-6',
+      })
+    );
+    expect(mockResolveWorkspaceRuntimePlan.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]
+    );
+    expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+      mockCreateOrUpdateNamespace.mock.invocationCallOrder[0]
+    );
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'provisioning',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'provision',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+  });
+
+  it.each([
+    ['provision', AgentWorkspaceStatus.NONE],
+    ['resume', AgentWorkspaceStatus.HIBERNATED],
+  ])('blocks chat runtime %s while another workspace action is active', async (action, workspaceStatus) => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: 'chat-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus,
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    mockSandboxQuery.first.mockResolvedValueOnce({
+      id: 654,
+      metadata: {
+        runtimeLifecycle: {
+          currentAction: 'provision',
+          claimedAt: new Date().toISOString(),
+        },
+      },
+    });
+    mockResolveWorkspaceRuntimePlan.mockResolvedValue(
+      buildRuntimePlan({
+        kind: 'chat',
+        namespace: 'chat-aaaaaaaa',
+        servicePlan: {
+          workspaceRepos: [],
+          services: undefined,
+          selectedServices: [],
+        },
+      })
+    );
+
+    await expect(
+      action === 'resume'
+        ? AgentSessionService.resumeChatRuntime({
+            sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            userId: 'user-123',
+            userIdentity: {
+              userId: 'user-123',
+              githubUsername: 'sample-user',
+            } as any,
+            githubToken: 'sample-gh-token',
+          })
+        : AgentSessionService.provisionChatRuntime({
+            sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            userId: 'user-123',
+            userIdentity: {
+              userId: 'user-123',
+              githubUsername: 'sample-user',
+            } as any,
+            githubToken: 'sample-gh-token',
+          })
+    ).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(sandboxWritePayloads()).toHaveLength(0);
+  });
+
+  it.each(['provision', 'resume'])(
+    'returns a canonical conflict when chat runtime %s sees an in-flight provisioning row',
+    async (action) => {
+      const chatSession = {
+        id: 321,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'user-123',
+        ownerGithubUsername: 'sample-user',
+        sessionKind: 'chat',
+        podName: null,
+        namespace: 'chat-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
+        model: 'claude-sonnet-4-6',
+        buildKind: null,
+        status: 'active',
+        chatStatus: 'ready',
+        workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+        devModeSnapshots: {},
+        forwardedAgentSecretProviders: [],
+        workspaceRepos: [],
+        selectedServices: [],
+        skillPlan: { version: 1, skills: [] },
+      };
+      mockSessionQuery.findOne.mockResolvedValue(chatSession);
+      mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+      mockSandboxQuery.first.mockResolvedValueOnce({
+        id: 654,
+        metadata: {
+          runtimeLifecycle: {
+            currentAction: action,
+            claimedAt: new Date().toISOString(),
+          },
+        },
+      });
+
+      await expect(
+        action === 'resume'
+          ? AgentSessionService.resumeChatRuntime({
+              sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+              userId: 'user-123',
+              userIdentity: {
+                userId: 'user-123',
+                githubUsername: 'sample-user',
+              } as any,
+              githubToken: 'sample-gh-token',
+            })
+          : AgentSessionService.provisionChatRuntime({
+              sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+              userId: 'user-123',
+              userIdentity: {
+                userId: 'user-123',
+                githubUsername: 'sample-user',
+              } as any,
+              githubToken: 'sample-gh-token',
+            })
+      ).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+      expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+      expect(sandboxWritePayloads()).toHaveLength(0);
+    }
+  );
+
+  it('does not create chat runtime resources when workspace runtime plan resolution fails', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+      namespace: null,
+      podName: null,
+      pvcName: null,
+    });
+    mockResolveWorkspaceRuntimePlan.mockRejectedValue(new Error('plan failed'));
+
+    await expect(
+      AgentSessionService.provisionChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'user-123',
+        userIdentity: {
+          userId: 'user-123',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('plan failed');
+
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(ensureAgentSessionServiceAccount).not.toHaveBeenCalled();
+    expect(createSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(buildAgentNetworkPolicy).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePodWithoutWaiting).not.toHaveBeenCalled();
+    expect(sandboxWritePayloads()).not.toContainEqual(
+      expect.objectContaining({
+        status: 'ready',
+      })
+    );
+    expect(sandboxWritePayloads()).not.toContainEqual(
+      expect.objectContaining({
+        status: 'provisioning',
+      })
+    );
+    expectSandboxFailure({ stage: 'prepare_infrastructure', origin: 'chat_runtime' });
+    const failedSandboxWrite = sandboxWritePayloads().find((payload) => payload.status === 'failed');
+    expect(failedSandboxWrite?.providerState).not.toEqual(
+      expect.objectContaining({
+        namespace: expect.any(String),
+      })
+    );
+    expect(failedSandboxWrite?.providerState).not.toEqual(
+      expect.objectContaining({
+        podName: expect.any(String),
+      })
+    );
+    expect(failedSandboxWrite?.providerState).not.toEqual(
+      expect.objectContaining({
+        pvcName: expect.any(String),
+      })
+    );
+    expect(mockSandboxExposureQuery.insert).not.toHaveBeenCalled();
+    expect(mockSandboxExposureQuery.patchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('writes startup MCP config from the chat runtime plan into the API-key secret', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [
+        {
+          repo: 'example-org/example-repo',
+          repoUrl: 'https://github.com/example-org/example-repo.git',
+          branch: 'feature/sample',
+          revision: 'commit-sha-1',
+          mountPath: '/workspace',
+          primary: true,
+        },
+      ],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: 'ready',
+    };
+    const serializedMcpConfig = JSON.stringify([
+      {
+        slug: 'sample-stdio',
+        name: 'Sample stdio',
+        transport: {
+          type: 'stdio',
+          command: 'sample-mcp',
+          args: ['--stdio'],
+          env: {
+            SAMPLE_TOKEN: 'sample-secret',
+          },
+        },
+        timeout: 30000,
+      },
+    ]);
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+    mockResolveWorkspaceRuntimePlan.mockResolvedValue(
+      buildRuntimePlan({
+        kind: 'chat',
+        namespace: 'chat-aaaaaaaa',
+        servicePlan: {
+          workspaceRepos: chatSession.workspaceRepos,
+          services: undefined,
+          selectedServices: [],
+        },
+        startupMcp: {
+          servers: [],
+          serializedConfig: serializedMcpConfig,
+        },
+        credentials: {
+          hasGitHubToken: true,
+          githubToken: 'sample-gh-token',
+        },
+      })
+    );
+
+    await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: {
+        userId: 'user-123',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(mockResolveSessionPodServersForRepo).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).toHaveBeenCalledWith(
+      'chat-aaaaaaaa',
+      'agent-secret-aaaaaaaa',
+      {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+      },
+      'sample-gh-token',
+      undefined,
+      {},
+      {
+        LIFECYCLE_SESSION_MCP_CONFIG_JSON: serializedMcpConfig,
+      }
+    );
   });
 
   it('preserves build-context repo metadata when chat runtime provisioning fails', async () => {
@@ -871,6 +1936,12 @@ describe('AgentSessionService', () => {
       skillPlan: { version: 1, skills: [] },
     };
     mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
     (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('pod creation failed'));
 
     await expect(
@@ -890,20 +1961,68 @@ describe('AgentSessionService', () => {
         workspaceRepos,
       })
     );
-    expect(mockSessionQuery.patch).toHaveBeenLastCalledWith(
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenLastCalledWith(
+      321,
       expect.objectContaining({
         workspaceStatus: AgentWorkspaceStatus.FAILED,
-        namespace: null,
-        podName: null,
-        pvcName: null,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'agent-aaaaaaaa',
+        pvcName: 'agent-pvc-aaaaaaaa',
       })
     );
-    expect(mockSessionQuery.patch).toHaveBeenLastCalledWith(
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenLastCalledWith(
+      321,
       expect.not.objectContaining({
         workspaceRepos: expect.any(Array),
         selectedServices: expect.any(Array),
       })
     );
+    expectSandboxFailure({ stage: 'connect_runtime', origin: 'chat_runtime' });
+  });
+
+  it('persists chat runtime infrastructure failures with the prepare_infrastructure stage', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createAgentPvc as jest.Mock).mockRejectedValueOnce(new Error('pvc setup failed'));
+
+    await expect(
+      AgentSessionService.provisionChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'user-123',
+        userIdentity: {
+          userId: 'user-123',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('pvc setup failed');
+
+    expectSandboxFailure({ stage: 'prepare_infrastructure', origin: 'chat_runtime' });
   });
 
   it('seeds repo-scoped stdio MCP servers when provisioning a build-context chat runtime', async () => {
@@ -945,6 +2064,9 @@ describe('AgentSessionService', () => {
       workspaceStatus: 'ready',
     };
     mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
     mockResolveSessionPodServersForRepo.mockResolvedValueOnce([
       {
         slug: 'sample-stdio',
@@ -985,7 +2107,9 @@ describe('AgentSessionService', () => {
     expect(createAgentApiKeySecret).toHaveBeenCalledWith(
       'chat-aaaaaaaa',
       'agent-secret-aaaaaaaa',
-      {},
+      {
+        ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+      },
       'sample-gh-token',
       undefined,
       {},
@@ -1037,6 +2161,193 @@ describe('AgentSessionService', () => {
     }
   );
 
+  it('blocks chat runtime suspension while an agent run is active', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      chatStatus: AgentChatStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    mockRunQuery.first.mockResolvedValueOnce({
+      id: 99,
+      uuid: 'run-99',
+      status: 'running',
+    });
+
+    await expect(
+      AgentSessionService.suspendChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+      })
+    ).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+    expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('rejects chat runtime suspension when ready state is missing the pod reference', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      chatStatus: AgentChatStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: null,
+      pvcName: 'agent-pvc-aaaaaaaa',
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+
+    await expect(
+      AgentSessionService.suspendChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+      })
+    ).rejects.toThrow('Workspace runtime is not ready');
+
+    expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(mockSessionQuery.forUpdate).not.toHaveBeenCalled();
+    expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('records suspending before deleting resources and clears the action when hibernated', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      chatStatus: AgentChatStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+    };
+    const suspendedSession = {
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+      podName: null,
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(suspendedSession);
+    const recordStateSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceState');
+
+    const session = await AgentSessionService.suspendChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+    });
+
+    expect(mockSandboxQuery.insertAndFetch.mock.invocationCallOrder[0]).toBeLessThan(
+      (deleteSessionWorkspacePod as jest.Mock).mock.invocationCallOrder[0]
+    );
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'suspending',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'suspend',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'suspended',
+        metadata: expect.not.objectContaining({
+          runtimeLifecycle: expect.any(Object),
+        }),
+      })
+    );
+    expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(recordStateSpy).toHaveBeenLastCalledWith(
+      321,
+      expect.objectContaining({
+        sandboxStatus: 'suspended',
+      }),
+      expect.objectContaining({
+        expectedLifecycle: {
+          action: 'suspend',
+          claimedAt: expect.any(String),
+        },
+      })
+    );
+    expect(session.workspaceStatus).toBe(AgentWorkspaceStatus.HIBERNATED);
+    expect(session.podName).toBeNull();
+    recordStateSpy.mockRestore();
+  });
+
+  it('persists suspend failures with the suspend stage and origin', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      chatStatus: AgentChatStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (deleteSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('pod delete failed'));
+    const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+
+    await expect(
+      AgentSessionService.suspendChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+      })
+    ).rejects.toThrow('pod delete failed');
+
+    expectSandboxFailure({ stage: 'suspend', origin: 'suspend' });
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenLastCalledWith(
+      321,
+      expect.objectContaining({
+        workspaceStatus: AgentWorkspaceStatus.FAILED,
+      })
+    );
+    expect(recordFailureSpy).toHaveBeenCalledWith(
+      321,
+      expect.objectContaining({
+        failure: expect.objectContaining({
+          stage: 'suspend',
+          origin: 'suspend',
+        }),
+      }),
+      expect.objectContaining({
+        expectedLifecycle: {
+          action: 'suspend',
+          claimedAt: expect.any(String),
+        },
+      })
+    );
+    recordFailureSpy.mockRestore();
+  });
+
   it.each([AgentSessionKind.ENVIRONMENT, AgentSessionKind.SANDBOX])(
     'rejects %s sessions during chat runtime resume provisioning',
     async (sessionKind) => {
@@ -1069,6 +2380,158 @@ describe('AgentSessionService', () => {
       expect(createSessionWorkspacePod).not.toHaveBeenCalled();
     }
   );
+
+  it.each([
+    AgentWorkspaceStatus.NONE,
+    AgentWorkspaceStatus.PROVISIONING,
+    AgentWorkspaceStatus.READY,
+    AgentWorkspaceStatus.FAILED,
+  ])('rejects %s chat runtime resume before Kubernetes side effects', async (workspaceStatus) => {
+    mockSessionQuery.findOne.mockResolvedValueOnce({
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus,
+      chatStatus: AgentChatStatus.READY,
+      namespace: workspaceStatus === AgentWorkspaceStatus.READY ? 'chat-aaaaaaaa' : null,
+      podName: workspaceStatus === AgentWorkspaceStatus.READY ? 'agent-aaaaaaaa' : null,
+      pvcName: workspaceStatus === AgentWorkspaceStatus.READY ? 'agent-pvc-aaaaaaaa' : null,
+    });
+
+    await expect(
+      AgentSessionService.resumeChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('Workspace runtime can only be resumed from hibernated state');
+
+    expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(createAgentPvc).not.toHaveBeenCalled();
+    expect(createAgentApiKeySecret).not.toHaveBeenCalled();
+    expect(createSessionWorkspaceService).not.toHaveBeenCalled();
+    expect(createSessionWorkspacePod).not.toHaveBeenCalled();
+    expect(mockRedis.setex).not.toHaveBeenCalled();
+    expect(sandboxWritePayloads()).toHaveLength(0);
+  });
+
+  it('records hibernated resume as internal resuming while public workspace status is provisioning', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: 'chat-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    const readyChatSession = {
+      ...chatSession,
+      podName: 'agent-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    };
+    mockSessionQuery.findOne
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(chatSession)
+      .mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    const session = await AgentSessionService.resumeChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(mockSessionQuery.patchAndFetchById).toHaveBeenNthCalledWith(
+      1,
+      321,
+      expect.objectContaining({
+        workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+      })
+    );
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'resuming',
+        metadata: expect.objectContaining({
+          runtimeLifecycle: expect.objectContaining({
+            currentAction: 'resume',
+            claimedAt: expect.any(String),
+          }),
+        }),
+      })
+    );
+    expect(session.workspaceStatus).toBe(AgentWorkspaceStatus.READY);
+  });
+
+  it('persists resume failures with the resume stage and origin', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: 'chat-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('resume pod failed'));
+
+    await expect(
+      AgentSessionService.resumeChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('resume pod failed');
+
+    expectSandboxFailure({ stage: 'resume', origin: 'resume' });
+  });
 
   it('publishes a chat session HTTP port through ingress', async () => {
     mockSessionQuery.findOne.mockResolvedValue({
@@ -1143,6 +2606,383 @@ describe('AgentSessionService', () => {
       expect(createSessionWorkspacePod).not.toHaveBeenCalled();
     });
 
+    it('persists a terminal environment failure when templated env resolution fails before runtime plan resolution', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue(null),
+        }),
+      });
+
+      await expect(
+        AgentSessionService.createSession({
+          ...baseOpts,
+          buildUuid: 'sample-build-123',
+          services: [
+            {
+              name: 'sample-service',
+              deployId: 1,
+              devConfig: {
+                image: 'node:20',
+                command: 'pnpm dev',
+                env: {
+                  ASSET_PREFIX: 'https://{{sample-service_publicUrl}}',
+                },
+              },
+            },
+          ],
+        })
+      ).rejects.toThrow('Build not found');
+
+      expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+      expect(mockToWorkspaceRuntimePlanMetadata).not.toHaveBeenCalled();
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          userId: 'user-123',
+          ownerGithubUsername: null,
+          buildUuid: 'sample-build-123',
+          buildKind: BuildKind.ENVIRONMENT,
+          sessionKind: AgentSessionKind.ENVIRONMENT,
+          podName: null,
+          namespace: 'test-ns',
+          pvcName: null,
+          model: 'unresolved',
+          defaultModel: 'unresolved',
+          defaultHarness: 'lifecycle_ai_sdk',
+          status: 'error',
+          chatStatus: AgentChatStatus.ERROR,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+          endedAt: expect.any(String),
+          devModeSnapshots: {},
+          forwardedAgentSecretProviders: [],
+          workspaceRepos: [],
+          selectedServices: [],
+          skillPlan: { version: 1, skills: [] },
+          keepAttachedServicesOnSessionNode: null,
+        })
+      );
+      expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 123,
+          adapter: 'lifecycle_environment',
+          status: 'failed',
+        })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'create_session',
+            origin: 'agent_session',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+        }),
+        { trx: { trx: true } }
+      );
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('workspaceStorage');
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('runtimePlanMetadata');
+      expectSandboxFailure({ stage: 'create_session', origin: 'agent_session' });
+      expectNoCreateSessionKubernetesHelpersCalled();
+      recordFailureSpy.mockRestore();
+    });
+
+    it('persists a terminal sandbox failure when templated env resolution fails before runtime plan resolution', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue(null),
+        }),
+      });
+
+      await expect(
+        AgentSessionService.createSession({
+          ...baseOpts,
+          buildUuid: 'sandbox-build-uuid',
+          buildKind: BuildKind.SANDBOX,
+          model: ' sample-model ',
+          services: [
+            {
+              name: 'sample-service',
+              deployId: 1,
+              devConfig: {
+                image: 'node:20',
+                command: 'pnpm dev',
+                env: {
+                  ASSET_PREFIX: 'https://{{sample-service_publicUrl}}',
+                },
+              },
+            },
+          ],
+        })
+      ).rejects.toThrow('Build not found');
+
+      expect(mockResolveWorkspaceRuntimePlan).not.toHaveBeenCalled();
+      expect(mockToWorkspaceRuntimePlanMetadata).not.toHaveBeenCalled();
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          buildUuid: 'sandbox-build-uuid',
+          buildKind: BuildKind.SANDBOX,
+          sessionKind: AgentSessionKind.SANDBOX,
+          podName: null,
+          pvcName: null,
+          model: 'sample-model',
+          defaultModel: 'sample-model',
+          status: 'error',
+          chatStatus: AgentChatStatus.ERROR,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+          endedAt: expect.any(String),
+          selectedServices: [],
+        })
+      );
+      expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 123,
+          adapter: 'lifecycle_fork',
+          status: 'failed',
+        })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'create_session',
+            origin: 'sandbox_launch',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+        }),
+        { trx: { trx: true } }
+      );
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('workspaceStorage');
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('runtimePlanMetadata');
+      expectSandboxFailure({ stage: 'create_session', origin: 'sandbox_launch' });
+      expectNoCreateSessionKubernetesHelpersCalled();
+      recordFailureSpy.mockRestore();
+    });
+
+    it('persists a terminal environment failure when workspace runtime plan resolution fails', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      mockResolveWorkspaceRuntimePlan.mockRejectedValueOnce(new Error('plan failed'));
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('plan failed');
+
+      expect(mockResolveWorkspaceRuntimePlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'environment',
+          sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          namespace: 'test-ns',
+          userId: 'user-123',
+        })
+      );
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          userId: 'user-123',
+          ownerGithubUsername: null,
+          buildUuid: null,
+          buildKind: BuildKind.ENVIRONMENT,
+          sessionKind: AgentSessionKind.ENVIRONMENT,
+          podName: null,
+          namespace: 'test-ns',
+          pvcName: null,
+          model: 'unresolved',
+          defaultModel: 'unresolved',
+          defaultHarness: 'lifecycle_ai_sdk',
+          status: 'error',
+          chatStatus: AgentChatStatus.ERROR,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+          endedAt: expect.any(String),
+          devModeSnapshots: {},
+          forwardedAgentSecretProviders: [],
+          workspaceRepos: [],
+          selectedServices: [],
+          skillPlan: { version: 1, skills: [] },
+          keepAttachedServicesOnSessionNode: null,
+        })
+      );
+      expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 123,
+          adapter: 'lifecycle_environment',
+          status: 'failed',
+          input: expect.objectContaining({
+            buildUuid: null,
+            buildKind: BuildKind.ENVIRONMENT,
+            sessionKind: AgentSessionKind.ENVIRONMENT,
+            defaults: {
+              provider: null,
+              model: 'unresolved',
+            },
+          }),
+        })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'create_session',
+            origin: 'agent_session',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+        }),
+        { trx: { trx: true } }
+      );
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('workspaceStorage');
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('runtimePlanMetadata');
+      expectSandboxFailure({ stage: 'create_session', origin: 'agent_session' });
+      expectNoCreateSessionKubernetesHelpersCalled();
+      recordFailureSpy.mockRestore();
+    });
+
+    it('persists a terminal sandbox failure when workspace runtime plan resolution fails', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      mockResolveWorkspaceRuntimePlan.mockRejectedValueOnce(new Error('sandbox plan failed'));
+
+      await expect(
+        AgentSessionService.createSession({
+          ...baseOpts,
+          buildUuid: 'sandbox-build-uuid',
+          buildKind: BuildKind.SANDBOX,
+          model: ' sample-model ',
+        })
+      ).rejects.toThrow('sandbox plan failed');
+
+      expect(mockResolveWorkspaceRuntimePlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'sandbox',
+          sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          namespace: 'test-ns',
+          userId: 'user-123',
+          buildUuid: 'sandbox-build-uuid',
+        })
+      );
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          buildUuid: 'sandbox-build-uuid',
+          buildKind: BuildKind.SANDBOX,
+          sessionKind: AgentSessionKind.SANDBOX,
+          podName: null,
+          pvcName: null,
+          model: 'sample-model',
+          defaultModel: 'sample-model',
+          status: 'error',
+          chatStatus: AgentChatStatus.ERROR,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+          endedAt: expect.any(String),
+          selectedServices: [],
+        })
+      );
+      expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 123,
+          adapter: 'lifecycle_fork',
+          status: 'failed',
+          input: expect.objectContaining({
+            buildUuid: 'sandbox-build-uuid',
+            buildKind: BuildKind.SANDBOX,
+            sessionKind: AgentSessionKind.SANDBOX,
+            defaults: {
+              provider: null,
+              model: 'sample-model',
+            },
+          }),
+        })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'create_session',
+            origin: 'sandbox_launch',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+        }),
+        { trx: { trx: true } }
+      );
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('workspaceStorage');
+      expect(recordFailureSpy.mock.calls[0][1]).not.toHaveProperty('runtimePlanMetadata');
+      expectSandboxFailure({ stage: 'create_session', origin: 'sandbox_launch' });
+      expectNoCreateSessionKubernetesHelpersCalled();
+      recordFailureSpy.mockRestore();
+    });
+
+    it('uses the canonical failure writer when startup fails before session persistence completes', async () => {
+      const runtimePlan = buildRuntimePlan();
+      const runtimePlanMetadata = actualWorkspaceRuntimePlan.toWorkspaceRuntimePlanMetadata(runtimePlan);
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      mockResolveWorkspaceRuntimePlan.mockResolvedValueOnce(runtimePlan);
+      mockSourceQuery.insertAndFetch.mockRejectedValueOnce(new Error('source write failed'));
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('source write failed');
+
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'error',
+          chatStatus: AgentChatStatus.ERROR,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+          podName: 'agent-aaaaaaaa',
+          pvcName: 'agent-pvc-aaaaaaaa',
+          model: 'claude-sonnet-4-6',
+          defaultModel: 'claude-sonnet-4-6',
+          workspaceRepos: runtimePlan.servicePlan.workspaceRepos,
+          selectedServices: runtimePlan.servicePlan.selectedServices,
+          skillPlan: runtimePlan.skillPlan,
+        })
+      );
+      expect(mockSourceQuery.insertAndFetch).toHaveBeenCalledTimes(2);
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          workspaceStorage: runtimePlan.workspaceStorage,
+          failure: expect.objectContaining({
+            stage: 'create_session',
+            origin: 'agent_session',
+            retryable: false,
+          }),
+          runtimePlanMetadata,
+        }),
+        { trx: { trx: true } }
+      );
+      expectSandboxFailure({ stage: 'create_session', origin: 'agent_session' });
+      recordFailureSpy.mockRestore();
+    });
+
     it('creates PVC, pod, network policy, and session record', async () => {
       const session = await AgentSessionService.createSession(baseOpts);
 
@@ -1174,7 +3014,7 @@ describe('AgentSessionService', () => {
         })
       );
       expect(createSessionWorkspaceService).toHaveBeenCalledWith('test-ns', 'agent-aaaaaaaa', undefined);
-      expect(AgentSession.transaction).toHaveBeenCalledTimes(1);
+      expect(AgentSession.transaction).toHaveBeenCalledTimes(2);
       expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
         expect.objectContaining({
           uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -1185,7 +3025,8 @@ describe('AgentSessionService', () => {
           devModeSnapshots: {},
         })
       );
-      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        123,
         expect.objectContaining({
           status: 'active',
         })
@@ -1196,6 +3037,192 @@ describe('AgentSessionService', () => {
         expect.any(String)
       );
       expect(session.status).toBe('active');
+    });
+
+    it('records createSession initial and ready workspace states through the paired writer', async () => {
+      const runtimePlan = buildRuntimePlan({
+        prewarm: {
+          compatiblePrewarm: {
+            uuid: 'prewarm-1',
+            pvcName: 'prewarm-pvc',
+          },
+          pvcName: 'prewarm-pvc',
+          skipWorkspaceBootstrap: true,
+          ownsPvc: false,
+        },
+      });
+      const runtimePlanMetadata = actualWorkspaceRuntimePlan.toWorkspaceRuntimePlanMetadata(runtimePlan);
+      mockResolveWorkspaceRuntimePlan.mockResolvedValueOnce(runtimePlan);
+      const recordStateSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceState');
+
+      await AgentSessionService.createSession(baseOpts);
+
+      const provisioningWrite = recordStateSpy.mock.calls.find(([, state]) => state.sandboxStatus === 'provisioning');
+      const readyWrite = recordStateSpy.mock.calls.find(([, state]) => state.sandboxStatus === 'ready');
+
+      expect(provisioningWrite).toEqual([
+        123,
+        expect.objectContaining({
+          sessionPatch: {
+            workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+          },
+          sandboxStatus: 'provisioning',
+          workspaceStorage: runtimePlan.workspaceStorage,
+          runtimePlanMetadata,
+          runtimeLifecycle: {
+            currentAction: 'provision',
+            claimedAt: expect.any(String),
+          },
+        }),
+        { trx: { trx: true } },
+      ]);
+      expect(readyWrite).toEqual([
+        123,
+        expect.objectContaining({
+          sessionPatch: {
+            status: 'active',
+            chatStatus: AgentChatStatus.READY,
+            workspaceStatus: AgentWorkspaceStatus.READY,
+          },
+          sandboxStatus: 'ready',
+          workspaceStorage: runtimePlan.workspaceStorage,
+          runtimePlanMetadata,
+          runtimeLifecycle: null,
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'provision',
+            claimedAt: expect.any(String),
+          },
+        }),
+      ]);
+      expect(mockSessionQuery.insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+        })
+      );
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+
+      recordStateSpy.mockRestore();
+    });
+
+    it('uses resolved prewarm PVC ownership for pod creation and rollback', async () => {
+      const runtimePlan = buildRuntimePlan({
+        prewarm: {
+          compatiblePrewarm: {
+            uuid: 'prewarm-1',
+            pvcName: 'prewarm-pvc',
+          },
+          pvcName: 'prewarm-pvc',
+          skipWorkspaceBootstrap: true,
+          ownsPvc: false,
+        },
+      });
+      mockResolveWorkspaceRuntimePlan.mockResolvedValueOnce(runtimePlan);
+      (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('pod creation failed'));
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('pod creation failed');
+
+      expect(createAgentPvc).not.toHaveBeenCalled();
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'prewarm-pvc',
+          skipWorkspaceBootstrap: true,
+        })
+      );
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(mockToWorkspaceRuntimePlanMetadata).toHaveBeenCalledWith(runtimePlan);
+    });
+
+    it('uses resolved storage override ownership for fresh PVC creation', async () => {
+      const runtimePlan = buildRuntimePlan({
+        workspaceStorage: {
+          requestedSize: '20Gi',
+          storageSize: '20Gi',
+          accessMode: 'ReadWriteOnce',
+        },
+        prewarm: {
+          compatiblePrewarm: null,
+          pvcName: 'agent-pvc-custom',
+          skipWorkspaceBootstrap: false,
+          ownsPvc: true,
+        },
+      });
+      mockResolveWorkspaceRuntimePlan.mockResolvedValueOnce(runtimePlan);
+
+      await AgentSessionService.createSession({
+        ...baseOpts,
+        workspaceStorageSize: '20Gi',
+      } as CreateSessionOptions & { workspaceStorageSize: string });
+
+      expect(mockResolveWorkspaceRuntimePlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceStorageSize: '20Gi',
+        })
+      );
+      expect(createAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-custom', '20Gi', undefined, 'ReadWriteOnce');
+      expect(createSessionWorkspacePod).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pvcName: 'agent-pvc-custom',
+          skipWorkspaceBootstrap: false,
+        })
+      );
+    });
+
+    it('applies forwarded-env ExternalSecrets after plan resolution and before pod creation', async () => {
+      const runtimePlan = buildRuntimePlan({
+        forwardedEnv: {
+          env: {
+            PLAIN_TOKEN: 'plain-token',
+            SECRET_TOKEN: '{{aws:sample/path:value}}',
+          },
+          secretRefs: [
+            {
+              envKey: 'SECRET_TOKEN',
+              provider: 'aws',
+              path: 'sample/path',
+              key: 'value',
+            },
+          ],
+          secretProviders: ['aws'],
+          secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        },
+      });
+      mockResolveWorkspaceRuntimePlan.mockImplementationOnce(async () => {
+        expect(applyForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+        return runtimePlan;
+      });
+      (applyForwardedAgentEnvSecrets as jest.Mock).mockResolvedValueOnce(runtimePlan.forwardedEnv);
+
+      await AgentSessionService.createSession(baseOpts);
+
+      expect(applyForwardedAgentEnvSecrets).toHaveBeenCalledWith({
+        plan: runtimePlan.forwardedEnv,
+        namespace: 'test-ns',
+        buildUuid: undefined,
+      });
+      expect(mockResolveWorkspaceRuntimePlan.mock.invocationCallOrder[0]).toBeLessThan(
+        (applyForwardedAgentEnvSecrets as jest.Mock).mock.invocationCallOrder[0]
+      );
+      expect((applyForwardedAgentEnvSecrets as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+        (createSessionWorkspacePod as jest.Mock).mock.invocationCallOrder[0]
+      );
+      expect(createAgentApiKeySecret).toHaveBeenCalledWith(
+        'test-ns',
+        'agent-secret-aaaaaaaa',
+        {
+          ANTHROPIC_API_KEY: 'sample-anthropic-provider-key',
+        },
+        undefined,
+        undefined,
+        {
+          PLAIN_TOKEN: 'plain-token',
+        },
+        {
+          LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+        }
+      );
     });
 
     it('does not block session readiness on default thread creation', async () => {
@@ -1462,12 +3489,15 @@ describe('AgentSessionService', () => {
     });
 
     it('passes forwarded service env through to the agent pod when configured', async () => {
-      (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue({
+      const forwardedEnvPlan = {
         env: { PRIVATE_REGISTRY_TOKEN: 'plain-token' },
         secretRefs: [],
         secretProviders: [],
         secretServiceName: 'agent-env-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      });
+      };
+      (planForwardedAgentEnv as jest.Mock).mockResolvedValue(forwardedEnvPlan);
+      (applyForwardedAgentEnvSecrets as jest.Mock).mockResolvedValue(forwardedEnvPlan);
+      (resolveForwardedAgentEnv as jest.Mock).mockResolvedValue(forwardedEnvPlan);
 
       const optsWithServices: CreateSessionOptions = {
         ...baseOpts,
@@ -1808,6 +3838,31 @@ describe('AgentSessionService', () => {
       const startupFailurePayload = JSON.parse(mockRedis.setex.mock.calls[0][2]);
       expect(startupFailurePayload.stage).toBe('attach_services');
       expect(startupFailurePayload.title).toBe('Attached services failed to start');
+      expect(startupFailurePayload).toEqual(
+        expect.objectContaining({
+          message: 'service attach failed',
+          retryable: false,
+          origin: 'agent_session',
+        })
+      );
+      expectSandboxFailure({
+        stage: 'attach_services',
+        origin: 'agent_session',
+        title: 'Attached services failed to start',
+        message: 'service attach failed',
+      });
+      expect(sandboxWritePayloads()).toContainEqual(
+        expect.objectContaining({
+          status: 'failed',
+          error: expect.objectContaining({
+            stage: 'attach_services',
+            title: 'Attached services failed to start',
+            message: 'service attach failed',
+            retryable: false,
+            origin: 'agent_session',
+          }),
+        })
+      );
     });
 
     it('restores successful sibling services when one parallel dev-mode enable fails', async () => {
@@ -2078,6 +4133,7 @@ describe('AgentSessionService', () => {
     });
 
     it('rolls back on pod creation failure', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
       (createSessionWorkspacePod as jest.Mock).mockRejectedValue(new Error('pod creation failed'));
 
       await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('pod creation failed');
@@ -2096,7 +4152,155 @@ describe('AgentSessionService', () => {
         'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         []
       );
-      expect(mockSessionQuery.patch).toHaveBeenCalledWith(expect.objectContaining({ status: 'error' }));
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({ status: 'error' })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'connect_runtime',
+            origin: 'agent_session',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+          runtimePlanMetadata: expect.objectContaining({
+            pvcName: 'agent-pvc-aaaaaaaa',
+            ownsPvc: true,
+          }),
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'provision',
+            claimedAt: expect.any(String),
+          },
+        })
+      );
+      expect(deleteAgentPvc.mock.invocationCallOrder[0]).toBeLessThan(recordFailureSpy.mock.invocationCallOrder[0]);
+      expectSandboxFailure({ stage: 'connect_runtime', origin: 'agent_session' });
+      recordFailureSpy.mockRestore();
+    });
+
+    it.each([
+      {
+        name: 'image pull failure',
+        error: new Error('ImagePullBackOff while pulling lifecycle-agent:latest'),
+        title: 'Session workspace image could not be pulled',
+        message: 'ImagePullBackOff while pulling lifecycle-agent:latest',
+      },
+      {
+        name: 'init-skills failure',
+        error: new Error('init-skills: dependency install failed'),
+        title: 'Skill initialization failed',
+        message: 'init-skills: dependency install failed',
+      },
+      {
+        name: 'editor startup failure',
+        error: new Error('workspace editor container failed to start'),
+        title: 'Workspace editor failed to start',
+        message: 'workspace editor container failed to start',
+      },
+      {
+        name: 'pod readiness timeout',
+        error: new Error('Session workspace pod did not become ready within 120000ms'),
+        title: 'Session workspace did not become ready',
+        message: 'Session workspace pod did not become ready within 120000ms',
+      },
+    ])('persists classified $name through canonical workspace failure state', async ({ error, title, message }) => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(error);
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow(error.message);
+
+      const startupFailurePayload = JSON.parse(mockRedis.setex.mock.calls[0][2]);
+      expect(startupFailurePayload).toEqual(
+        expect.objectContaining({
+          stage: 'connect_runtime',
+          title,
+          message,
+          retryable: false,
+          origin: 'agent_session',
+          recordedAt: expect.any(String),
+        })
+      );
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'connect_runtime',
+            title,
+            message,
+            retryable: false,
+            origin: 'agent_session',
+          }),
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'provision',
+            claimedAt: expect.any(String),
+          },
+        })
+      );
+      expectSandboxFailure({
+        stage: 'connect_runtime',
+        origin: 'agent_session',
+        title,
+        message,
+      });
+      recordFailureSpy.mockRestore();
+    });
+
+    it('persists infrastructure preparation failures before runtime connection starts', async () => {
+      (createAgentPvc as jest.Mock).mockRejectedValueOnce(new Error('pvc setup failed'));
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow('pvc setup failed');
+
+      const startupFailurePayload = JSON.parse(mockRedis.setex.mock.calls[0][2]);
+      expect(startupFailurePayload.stage).toBe('prepare_infrastructure');
+      expectSandboxFailure({ stage: 'prepare_infrastructure', origin: 'agent_session' });
+    });
+
+    it('persists sandbox launch failures with the sandbox_launch origin', async () => {
+      (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('sandbox pod failed'));
+
+      let rejectedError: unknown;
+      try {
+        await AgentSessionService.createSession({
+          ...baseOpts,
+          buildKind: BuildKind.SANDBOX,
+          buildUuid: 'sandbox-build-uuid',
+        });
+      } catch (error) {
+        rejectedError = error;
+      }
+
+      expect(rejectedError).toBeInstanceOf(AgentSessionStartupError);
+      expect(rejectedError).toMatchObject({
+        message: 'sandbox pod failed',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        buildUuid: 'sandbox-build-uuid',
+        namespace: 'test-ns',
+        failure: expect.objectContaining({
+          stage: 'connect_runtime',
+          origin: 'sandbox_launch',
+          retryable: false,
+        }),
+      });
+
+      expectSandboxFailure({ stage: 'connect_runtime', origin: 'sandbox_launch' });
     });
 
     it('reverts deploy records and restores non-helm deploys on failure after dev mode', async () => {
@@ -2783,11 +4987,92 @@ describe('AgentSessionService', () => {
       await expect(AgentSessionService.endSession('sess-1')).rejects.toThrow('Session not found or already ended');
     });
 
+    it('blocks cleanup while an agent run is active before destructive work starts', async () => {
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: null,
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
+        forwardedAgentSecretProviders: ['aws'],
+        devModeSnapshots: {},
+      };
+      mockSessionQuery.findOne.mockResolvedValueOnce(activeSession);
+      mockSessionQuery.forUpdate.mockResolvedValueOnce(activeSession);
+      mockRunQuery.first.mockResolvedValueOnce({
+        id: 99,
+        uuid: 'run-99',
+        status: 'running',
+      });
+
+      await expect(AgentSessionService.endSession('sess-1')).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+      expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+      expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(mockDeleteNamespace).not.toHaveBeenCalled();
+      expect(mockRedis.del).not.toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+      expect(mockedBuildServiceModule.deleteQueueAdd).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+    });
+
+    it('blocks cleanup while another workspace lifecycle action is active', async () => {
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: null,
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
+        forwardedAgentSecretProviders: ['aws'],
+        devModeSnapshots: {},
+      };
+      mockSessionQuery.findOne.mockResolvedValueOnce(activeSession);
+      mockSessionQuery.forUpdate.mockResolvedValueOnce(activeSession);
+      mockSandboxQuery.first.mockResolvedValueOnce({
+        id: 654,
+        metadata: {
+          runtimeLifecycle: {
+            currentAction: 'resume',
+            claimedAt: new Date().toISOString(),
+          },
+        },
+      });
+
+      await expect(AgentSessionService.endSession('sess-1')).rejects.toBeInstanceOf(WorkspaceActionBlockedError);
+
+      expect(deleteSessionWorkspaceService).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(deleteAgentApiKeySecret).not.toHaveBeenCalled();
+      expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(mockDeleteNamespace).not.toHaveBeenCalled();
+      expect(mockedBuildServiceModule.deleteQueueAdd).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+    });
+
     it('ends session, triggers deploy restore, deletes pod and pvc, updates DB and Redis', async () => {
       const activeSession = {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
         buildUuid: null,
         namespace: 'test-ns',
         podName: 'agent-sess1',
@@ -2812,16 +5097,8 @@ describe('AgentSessionService', () => {
         },
       };
 
-      const patchMock = jest.fn().mockResolvedValue(1);
-
-      let agentQueryCount = 0;
-      (AgentSession.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        agentQueryCount++;
-        if (agentQueryCount === 1) {
-          return { findOne: jest.fn().mockResolvedValue(activeSession) };
-        }
-        return { findById: jest.fn().mockReturnValue({ patch: patchMock }) };
-      });
+      mockEndSessionSession(activeSession);
+      queueEndedSession(activeSession, { devModeSnapshots: {} });
 
       const deployManagerDeploy = jest.fn().mockResolvedValue(undefined);
       (DeploymentManager as jest.Mock).mockImplementation(() => ({
@@ -2836,18 +5113,8 @@ describe('AgentSessionService', () => {
           deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
         },
       ];
-      let deployQueryCount = 0;
-      (Deploy.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        deployQueryCount++;
-        if (deployQueryCount === 1) {
-          return {
-            where: jest.fn().mockReturnValue({
-              withGraphFetched: jest.fn().mockResolvedValue(devModeDeploys),
-            }),
-          };
-        }
-        return { findById: jest.fn().mockReturnValue({ patch: jest.fn().mockResolvedValue(1) }) };
-      });
+      mockDeployQuery.withGraphFetched.mockResolvedValueOnce(devModeDeploys);
+      const recordStateSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceState');
 
       await AgentSessionService.endSession('sess-1');
 
@@ -2869,8 +5136,80 @@ describe('AgentSessionService', () => {
       expect(cleanupForwardedAgentEnvSecrets).toHaveBeenCalledWith('test-ns', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', [
         'aws',
       ]);
-      expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended', devModeSnapshots: {} }));
+      expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+        (deleteSessionWorkspacePod as jest.Mock).mock.invocationCallOrder[0]
+      );
+      expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+        (cleanupForwardedAgentEnvSecrets as jest.Mock).mock.invocationCallOrder[0]
+      );
+      expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+        (deleteAgentPvc as jest.Mock).mock.invocationCallOrder[0]
+      );
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ status: 'ended', devModeSnapshots: {} })
+      );
+      expect(sandboxWritePayloads()).toContainEqual(
+        expect.objectContaining({
+          status: 'ended',
+          metadata: expect.not.objectContaining({
+            runtimeLifecycle: expect.any(Object),
+          }),
+        })
+      );
+      expect(recordStateSpy).toHaveBeenLastCalledWith(
+        1,
+        expect.objectContaining({
+          sandboxStatus: 'ended',
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'cleanup',
+            claimedAt: expect.any(String),
+          },
+        })
+      );
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+      recordStateSpy.mockRestore();
+    });
+
+    it('claims cleanup before deleting a chat namespace', async () => {
+      const chatSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.CHAT,
+        buildKind: null,
+        buildUuid: null,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'agent-chat',
+        pvcName: 'agent-pvc-chat',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+      mockEndSessionSession(chatSession);
+      queueEndedSession(chatSession, { devModeSnapshots: {} });
+
+      await AgentSessionService.endSession('sess-1');
+
+      expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDeleteNamespace.mock.invocationCallOrder[0]
+      );
+      expect(mockDeleteNamespace).toHaveBeenCalledWith('chat-aaaaaaaa');
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ status: 'ended', devModeSnapshots: {} })
+      );
+      expect(sandboxWritePayloads()).toContainEqual(
+        expect.objectContaining({
+          status: 'ended',
+          metadata: expect.not.objectContaining({
+            runtimeLifecycle: expect.any(Object),
+          }),
+        })
+      );
     });
 
     it('preserves a reused prewarm PVC when ending the session', async () => {
@@ -2884,6 +5223,10 @@ describe('AgentSessionService', () => {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
         buildUuid: 'build-123',
         namespace: 'test-ns',
         podName: 'agent-sess1',
@@ -2892,16 +5235,8 @@ describe('AgentSessionService', () => {
         devModeSnapshots: {},
       };
 
-      const patchMock = jest.fn().mockResolvedValue(1);
-
-      let agentQueryCount = 0;
-      (AgentSession.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        agentQueryCount++;
-        if (agentQueryCount === 1) {
-          return { findOne: jest.fn().mockResolvedValue(activeSession) };
-        }
-        return { findById: jest.fn().mockReturnValue({ patch: patchMock }) };
-      });
+      mockEndSessionSession(activeSession);
+      queueEndedSession(activeSession, { devModeSnapshots: {} });
 
       (Build.query as jest.Mock) = jest.fn().mockReturnValue({
         findOne: jest.fn().mockReturnValue({
@@ -2924,7 +5259,126 @@ describe('AgentSessionService', () => {
       expect(deleteAgentPvc).not.toHaveBeenCalled();
       expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
       expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
-      expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended', devModeSnapshots: {} }));
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ status: 'ended', devModeSnapshots: {} })
+      );
+    });
+
+    it('preserves a reused prewarm PVC from persisted runtime-plan metadata when prewarm DB state drifted', async () => {
+      mockGetReadyPrewarmByPvc.mockResolvedValue(null);
+      mockPersistedSandboxMetadata({
+        runtimePlan: {
+          version: 1,
+          pvc: {
+            name: 'agent-prewarm-pvc-1234',
+            ownsPvc: false,
+            skipWorkspaceBootstrap: true,
+            compatiblePrewarmUuid: 'prewarm-1',
+          },
+        },
+      });
+
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: 'build-123',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+
+      mockEndSessionSession(activeSession);
+      queueEndedSession(activeSession, { devModeSnapshots: {} });
+
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue({ kind: 'environment' }),
+        }),
+      });
+
+      (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue([]),
+        }),
+      });
+
+      await AgentSessionService.endSession('sess-1');
+
+      expect(mockGetReadyPrewarmByPvc).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('test-ns', 'agent-sess1');
+      expect(deleteAgentApiKeySecret).toHaveBeenCalledWith('test-ns', 'agent-secret-aaaaaaaa');
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ status: 'ended', devModeSnapshots: {} })
+      );
+    });
+
+    it('deletes an owned PVC from persisted runtime-plan metadata when ending the session', async () => {
+      mockGetReadyPrewarmByPvc.mockResolvedValue({
+        uuid: 'prewarm-1',
+        pvcName: 'agent-pvc-sess1',
+        status: 'ready',
+      });
+      mockPersistedSandboxMetadata({
+        runtimePlan: {
+          version: 1,
+          pvc: {
+            name: 'agent-pvc-sess1',
+            ownsPvc: true,
+            skipWorkspaceBootstrap: false,
+            compatiblePrewarmUuid: null,
+          },
+        },
+      });
+
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: 'build-123',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+
+      mockEndSessionSession(activeSession);
+      queueEndedSession(activeSession, { devModeSnapshots: {} });
+
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue({ kind: 'environment' }),
+        }),
+      });
+
+      (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue([]),
+        }),
+      });
+
+      await AgentSessionService.endSession('sess-1');
+
+      expect(mockGetReadyPrewarmByPvc).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ status: 'ended', devModeSnapshots: {} })
+      );
     });
 
     it('cleans up a failed session when explicitly ended', async () => {
@@ -2932,6 +5386,10 @@ describe('AgentSessionService', () => {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'error',
+        chatStatus: AgentChatStatus.ERROR,
+        workspaceStatus: AgentWorkspaceStatus.FAILED,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
         buildUuid: null,
         namespace: 'test-ns',
         podName: 'agent-sess1',
@@ -2939,16 +5397,9 @@ describe('AgentSessionService', () => {
         forwardedAgentSecretProviders: ['aws'],
         devModeSnapshots: {},
       };
-      (AgentSession.query as jest.Mock) = jest
-        .fn()
-        .mockReturnValueOnce({
-          findOne: jest.fn().mockResolvedValue(failedSession),
-        })
-        .mockReturnValueOnce({
-          findById: jest.fn().mockReturnValue({
-            patch: mockSessionQuery.patch,
-          }),
-        });
+      mockEndSessionSession(failedSession);
+      queueEndedSession(failedSession, { devModeSnapshots: {} });
+      const recordStateSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceState');
 
       await AgentSessionService.endSession('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 
@@ -2959,12 +5410,136 @@ describe('AgentSessionService', () => {
         'aws',
       ]);
       expect(deleteAgentPvc).toHaveBeenCalledWith('test-ns', 'agent-pvc-sess1');
-      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        1,
         expect.objectContaining({
           status: 'ended',
           endedAt: expect.any(String),
         })
       );
+      expect(recordStateSpy).toHaveBeenLastCalledWith(
+        1,
+        expect.objectContaining({
+          sandboxStatus: 'ended',
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'cleanup',
+            claimedAt: expect.any(String),
+          },
+        })
+      );
+      recordStateSpy.mockRestore();
+    });
+
+    it('persists cleanup failures with the cleanup stage and origin', async () => {
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: null,
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+      mockEndSessionSession(activeSession);
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue(null),
+        }),
+      });
+      (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue([]),
+        }),
+      });
+      (deleteAgentPvc as jest.Mock).mockRejectedValueOnce(new Error('pvc cleanup failed'));
+
+      await expect(AgentSessionService.endSession('sess-1')).rejects.toThrow('pvc cleanup failed');
+
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          sessionPatch: expect.objectContaining({
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+          }),
+          failure: expect.objectContaining({
+            stage: 'cleanup',
+            origin: 'cleanup',
+            retryable: false,
+            recordedAt: expect.any(String),
+          }),
+        }),
+        expect.objectContaining({
+          expectedLifecycle: {
+            action: 'cleanup',
+            claimedAt: expect.any(String),
+          },
+        })
+      );
+      expectSandboxFailure({ stage: 'cleanup', origin: 'cleanup' });
+      recordFailureSpy.mockRestore();
+    });
+
+    it('records cleanup failure without deleting a reused prewarm PVC', async () => {
+      mockPersistedSandboxMetadata({
+        runtimePlan: {
+          version: 1,
+          pvc: {
+            name: 'agent-prewarm-pvc-1234',
+            ownsPvc: false,
+            skipWorkspaceBootstrap: true,
+            compatiblePrewarmUuid: 'prewarm-1',
+          },
+        },
+      });
+
+      const activeSession = {
+        id: 1,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: 'build-123',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-prewarm-pvc-1234',
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {
+          '10': buildDevModeSnapshot('deploy-10'),
+        },
+      };
+      const devModeDeploys = [
+        {
+          id: 10,
+          uuid: 'deploy-10',
+          build: { namespace: 'test-ns' },
+          deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
+        },
+      ];
+      mockEndSessionSession(activeSession);
+      (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          withGraphFetched: jest.fn().mockResolvedValue({ kind: 'environment' }),
+        }),
+      });
+      mockDeployQuery.withGraphFetched.mockResolvedValueOnce(devModeDeploys);
+      mockDisableDevMode.mockRejectedValueOnce(new Error('dev mode cleanup failed'));
+
+      await expect(AgentSessionService.endSession('sess-1')).rejects.toThrow('dev mode cleanup failed');
+
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expectSandboxFailure({ stage: 'cleanup', origin: 'cleanup' });
     });
 
     it('returns after cleanup and restore trigger without waiting for redeploy to finish', async () => {
@@ -2972,6 +5547,10 @@ describe('AgentSessionService', () => {
         id: 1,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+        buildKind: BuildKind.ENVIRONMENT,
         namespace: 'test-ns',
         podName: 'agent-sess1',
         pvcName: 'agent-pvc-sess1',
@@ -2994,16 +5573,8 @@ describe('AgentSessionService', () => {
         },
       };
 
-      const patchMock = jest.fn().mockResolvedValue(1);
-
-      let agentQueryCount = 0;
-      (AgentSession.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        agentQueryCount++;
-        if (agentQueryCount === 1) {
-          return { findOne: jest.fn().mockResolvedValue(activeSession) };
-        }
-        return { findById: jest.fn().mockReturnValue({ patch: patchMock }) };
-      });
+      mockEndSessionSession(activeSession);
+      queueEndedSession(activeSession, { devModeSnapshots: {} });
 
       let releaseDeploy!: () => void;
       const deployManagerDeploy = jest.fn().mockImplementation(
@@ -3024,18 +5595,7 @@ describe('AgentSessionService', () => {
           deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
         },
       ];
-      let deployQueryCount = 0;
-      (Deploy.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        deployQueryCount++;
-        if (deployQueryCount === 1) {
-          return {
-            where: jest.fn().mockReturnValue({
-              withGraphFetched: jest.fn().mockResolvedValue(devModeDeploys),
-            }),
-          };
-        }
-        return { findById: jest.fn().mockReturnValue({ patch: jest.fn().mockResolvedValue(1) }) };
-      });
+      mockDeployQuery.withGraphFetched.mockResolvedValueOnce(devModeDeploys);
 
       const endPromise = AgentSessionService.endSession('sess-1');
       await new Promise((resolve) => setImmediate(resolve));
@@ -3058,23 +5618,18 @@ describe('AgentSessionService', () => {
         id: 444,
         uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
         status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.SANDBOX,
+        buildKind: BuildKind.SANDBOX,
         namespace: 'sbx-test-build',
         podName: 'agent-sbx',
         pvcName: 'agent-pvc-sbx',
         buildUuid: 'sandbox-build-uuid',
       };
 
-      const patchMock = jest.fn().mockResolvedValue(1);
-
-      let agentQueryCount = 0;
-      (AgentSession.query as jest.Mock) = jest.fn().mockImplementation(() => {
-        agentQueryCount++;
-        if (agentQueryCount === 1) {
-          return { findOne: jest.fn().mockResolvedValue(activeSandboxSession) };
-        }
-
-        return { findById: jest.fn().mockReturnValue({ patch: patchMock }) };
-      });
+      mockEndSessionSession(activeSandboxSession);
+      queueEndedSession(activeSandboxSession);
 
       const sandboxBuild = {
         id: 444,
@@ -3102,8 +5657,14 @@ describe('AgentSessionService', () => {
           sender: 'agent-session',
         })
       );
+      expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+        mockedBuildServiceModule.deleteQueueAdd.mock.invocationCallOrder[0]
+      );
       expect(mockedBuildServiceModule.deleteBuild).not.toHaveBeenCalled();
-      expect(patchMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'ended' }));
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        444,
+        expect.objectContaining({ status: 'ended' })
+      );
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     });
   });
@@ -3153,6 +5714,117 @@ describe('AgentSessionService', () => {
             title: 'Session workspace pod failed to start',
             message: 'init-workspace: ImagePullBackOff',
             recordedAt: '2026-03-25T10:00:00.000Z',
+            retryable: false,
+            origin: 'agent_session',
+          },
+        })
+      );
+    });
+
+    it('falls back to durable sandbox failure details when Redis startup failure is absent', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 1,
+        uuid: 'sess-1',
+        status: 'error',
+        buildUuid: null,
+        devModeSnapshots: {},
+      });
+      mockSandboxQuery.orderBy
+        .mockImplementationOnce(() => mockSandboxQuery)
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            {
+              id: 654,
+              uuid: 'sandbox-1',
+              sessionId: 1,
+              generation: 1,
+              provider: 'lifecycle_kubernetes',
+              status: 'failed',
+              providerState: {},
+              error: {
+                stage: 'connect_runtime',
+                title: 'Session workspace pod failed to start',
+                message: 'init-workspace: ImagePullBackOff',
+                recordedAt: '2026-03-25T10:00:00.000Z',
+                retryable: false,
+                origin: 'agent_session',
+              },
+            },
+          ])
+        );
+
+      const result = await AgentSessionService.getSession('sess-1');
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          id: 'sess-1',
+          status: 'error',
+          startupFailure: {
+            stage: 'connect_runtime',
+            title: 'Session workspace pod failed to start',
+            message: 'init-workspace: ImagePullBackOff',
+            recordedAt: '2026-03-25T10:00:00.000Z',
+            retryable: false,
+            origin: 'agent_session',
+          },
+        })
+      );
+    });
+
+    it('prefers durable sandbox failure details over stale Redis startup failure details', async () => {
+      mockSessionQuery.findOne.mockResolvedValue({
+        id: 1,
+        uuid: 'sess-1',
+        status: 'error',
+        buildUuid: null,
+        devModeSnapshots: {},
+      });
+      mockRedis.get.mockResolvedValue(
+        JSON.stringify({
+          sessionId: 'sess-1',
+          stage: 'connect_runtime',
+          title: 'Stale Redis failure',
+          message: 'stale failure',
+          recordedAt: '2026-03-24T10:00:00.000Z',
+        })
+      );
+      mockSandboxQuery.orderBy
+        .mockImplementationOnce(() => mockSandboxQuery)
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            {
+              id: 654,
+              uuid: 'sandbox-1',
+              sessionId: 1,
+              generation: 1,
+              provider: 'lifecycle_kubernetes',
+              status: 'failed',
+              providerState: {},
+              error: {
+                stage: 'attach_services',
+                title: 'Attached services failed to start',
+                message: 'sample-service failed to start',
+                recordedAt: '2026-03-25T10:00:00.000Z',
+                retryable: false,
+                origin: 'agent_session',
+              },
+            },
+          ])
+        );
+
+      const result = await AgentSessionService.getSession('sess-1');
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          id: 'sess-1',
+          status: 'error',
+          startupFailure: {
+            stage: 'attach_services',
+            title: 'Attached services failed to start',
+            message: 'sample-service failed to start',
+            recordedAt: '2026-03-25T10:00:00.000Z',
+            retryable: false,
+            origin: 'agent_session',
           },
         })
       );
@@ -3179,14 +5851,20 @@ describe('AgentSessionService', () => {
         title: 'Session workspace pod failed to start',
         message: 'init-workspace: ImagePullBackOff',
         recordedAt: '2026-03-25T10:00:00.000Z',
+        retryable: false,
+        origin: 'agent_session',
       });
     });
 
     it('persists a runtime failure in Redis and marks the session errored', async () => {
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
       mockSessionQuery.findOne.mockResolvedValue({
         id: 123,
         uuid: 'sess-1',
         status: 'active',
+        namespace: 'test-ns',
+        podName: 'agent-sess1',
+        pvcName: 'agent-pvc-sess1',
       });
 
       const result = await AgentSessionService.markSessionRuntimeFailure(
@@ -3200,10 +5878,20 @@ describe('AgentSessionService', () => {
         expect.any(String)
       );
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:sess-1');
-      expect(mockSessionQuery.patch).toHaveBeenCalledWith(
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        123,
         expect.objectContaining({
-          status: 'error',
-          endedAt: expect.any(String),
+          sessionPatch: expect.objectContaining({
+            status: 'error',
+            chatStatus: AgentChatStatus.ERROR,
+            workspaceStatus: AgentWorkspaceStatus.FAILED,
+            endedAt: expect.any(String),
+          }),
+          failure: expect.objectContaining({
+            stage: 'connect_runtime',
+            origin: 'manual_runtime',
+            retryable: false,
+          }),
         })
       );
       expect(result).toEqual(
@@ -3213,6 +5901,8 @@ describe('AgentSessionService', () => {
           message: 'init-workspace: ImagePullBackOff',
         })
       );
+      expectSandboxFailure({ stage: 'connect_runtime', origin: 'manual_runtime' });
+      recordFailureSpy.mockRestore();
     });
   });
 
@@ -3394,6 +6084,8 @@ describe('AgentSessionService', () => {
             title: 'Session workspace pod failed to start',
             message: 'init-workspace: ImagePullBackOff',
             recordedAt: '2026-03-25T10:00:00.000Z',
+            retryable: false,
+            origin: 'agent_session',
           },
         }),
       ]);

@@ -18,7 +18,12 @@ import { v4 as uuid } from 'uuid';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import { EMPTY_AGENT_SESSION_SKILL_PLAN } from 'server/lib/agentSession/skillPlan';
-import { normalizeSessionWorkspaceRepo, type AgentSessionWorkspaceRepo } from 'server/lib/agentSession/workspace';
+import {
+  SESSION_WORKSPACE_ROOT,
+  normalizeSessionWorkspaceRepo,
+  type AgentSessionSelectedService,
+  type AgentSessionWorkspaceRepo,
+} from 'server/lib/agentSession/workspace';
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
 import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind } from 'shared/constants';
@@ -41,7 +46,32 @@ export interface AgentBuildContextChatMetadata {
     branchName: string | null;
     pullRequestNumber: number | null;
   } | null;
+  selectedDeployUuid?: string | null;
+  selectedDeploy?: AgentBuildContextSelectedDeployMetadata | null;
   contextFreshAt: string;
+}
+
+export interface AgentBuildContextSelectedDeployMetadata {
+  selectedDeployUuid: string;
+  deployId: number;
+  deployableName: string | null;
+  deployableType: string | null;
+  repositoryFullName: string | null;
+  branchName: string | null;
+  serviceSha: string | null;
+  dockerfilePath: string | null;
+  initDockerfilePath: string | null;
+  deployStatus: string | null;
+  deployStatusMessage: string | null;
+  dockerImage: string | null;
+  buildPipelineId: string | null;
+  deployPipelineId: string | null;
+  source: string | null;
+  helm: {
+    chartName: string | null;
+    chartRepoUrl: string | null;
+    valueFiles: string[];
+  } | null;
 }
 
 export interface CreateChatSessionOptions {
@@ -55,8 +85,7 @@ export interface CreateChatSessionOptions {
 }
 
 function buildContextWorkspaceRepos(buildContext?: AgentBuildContextChatMetadata): AgentSessionWorkspaceRepo[] {
-  const repo = buildContext?.pullRequest?.fullName?.trim();
-  const branch = buildContext?.pullRequest?.branchName?.trim();
+  const { repo, branch } = resolveBuildContextWorkspaceRepoAndBranch(buildContext);
   if (!repo || !branch) {
     return [];
   }
@@ -67,10 +96,100 @@ function buildContextWorkspaceRepos(buildContext?: AgentBuildContextChatMetadata
         repo,
         repoUrl: `https://github.com/${repo}.git`,
         branch,
-        revision: buildContext.revision,
+        revision: resolveBuildContextWorkspaceRevision(buildContext, repo),
       },
       true
     ),
+  ];
+}
+
+function resolveBuildContextWorkspaceRepoAndBranch(buildContext?: AgentBuildContextChatMetadata): {
+  repo: string | null;
+  branch: string | null;
+} {
+  const pullRequestRepo = buildContext?.pullRequest?.fullName?.trim() || null;
+  const pullRequestBranch = buildContext?.pullRequest?.branchName?.trim() || null;
+  const selectedRepo = buildContext?.selectedDeploy?.repositoryFullName?.trim() || null;
+  const selectedBranch = buildContext?.selectedDeploy?.branchName?.trim() || null;
+
+  if (selectedRepo && selectedRepo !== pullRequestRepo) {
+    return {
+      repo: selectedRepo,
+      branch: selectedBranch,
+    };
+  }
+
+  return {
+    repo: pullRequestRepo || selectedRepo,
+    branch: pullRequestBranch || selectedBranch,
+  };
+}
+
+function readFullCommitSha(value: unknown): string | null {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value.trim()) ? value.trim() : null;
+}
+
+function resolveBuildContextWorkspaceRevision(
+  buildContext: AgentBuildContextChatMetadata | undefined,
+  repo: string
+): string | null {
+  const pullRequestRepo = buildContext?.pullRequest?.fullName?.trim() || null;
+  const selectedDeployRepo = buildContext?.selectedDeploy?.repositoryFullName?.trim() || null;
+
+  if (pullRequestRepo === repo) {
+    return readFullCommitSha(buildContext?.revision);
+  }
+
+  if (selectedDeployRepo === repo) {
+    return readFullCommitSha(buildContext?.selectedDeploy?.serviceSha);
+  }
+
+  return readFullCommitSha(buildContext?.revision);
+}
+
+function resolveBuildContextSelectedServiceRevision(
+  buildContext: AgentBuildContextChatMetadata | undefined,
+  repo: string
+): string | null {
+  const pullRequestRepo = buildContext?.pullRequest?.fullName?.trim() || null;
+  return (
+    readFullCommitSha(buildContext?.selectedDeploy?.serviceSha) ||
+    (pullRequestRepo === repo ? readFullCommitSha(buildContext?.revision) : null)
+  );
+}
+
+function buildContextSelectedServices(buildContext?: AgentBuildContextChatMetadata): AgentSessionSelectedService[] {
+  const selectedDeploy = buildContext?.selectedDeploy;
+  const repo = selectedDeploy?.repositoryFullName?.trim() || buildContext?.pullRequest?.fullName?.trim();
+  const branch = selectedDeploy?.branchName?.trim() || buildContext?.pullRequest?.branchName?.trim();
+  const name = selectedDeploy?.deployableName?.trim() || selectedDeploy?.selectedDeployUuid?.trim();
+  if (!selectedDeploy || !name || !repo || !branch) {
+    return [];
+  }
+
+  return [
+    {
+      name,
+      deployId: selectedDeploy.deployId,
+      deployUuid: selectedDeploy.selectedDeployUuid,
+      repo,
+      branch,
+      revision: resolveBuildContextSelectedServiceRevision(buildContext, repo),
+      deployableType: selectedDeploy.deployableType,
+      dockerfilePath: selectedDeploy.dockerfilePath,
+      initDockerfilePath: selectedDeploy.initDockerfilePath,
+      deployStatus: selectedDeploy.deployStatus,
+      deployStatusMessage: selectedDeploy.deployStatusMessage,
+      dockerImage: selectedDeploy.dockerImage,
+      buildPipelineId: selectedDeploy.buildPipelineId,
+      deployPipelineId: selectedDeploy.deployPipelineId,
+      chartName: selectedDeploy.helm?.chartName || null,
+      chartRepoUrl: selectedDeploy.helm?.chartRepoUrl || null,
+      chartValueFiles: selectedDeploy.helm?.valueFiles || [],
+      source: selectedDeploy.source,
+      workspacePath: SESSION_WORKSPACE_ROOT,
+      workDir: null,
+    },
   ];
 }
 
@@ -84,6 +203,7 @@ export default class AgentChatSessionService {
       githubUsername: opts.userIdentity?.githubUsername || null,
     };
     const workspaceRepos = buildContextWorkspaceRepos(opts.buildContext);
+    const selectedServices = buildContextSelectedServices(opts.buildContext);
     const primaryWorkspaceRepo = workspaceRepos.find((repo) => repo.primary) || workspaceRepos[0];
     const selection = await AgentProviderRegistry.resolveSelection({
       repoFullName: primaryWorkspaceRepo?.repo,
@@ -138,7 +258,7 @@ export default class AgentChatSessionService {
         devModeSnapshots: {},
         forwardedAgentSecretProviders: [],
         workspaceRepos,
-        selectedServices: [],
+        selectedServices,
         skillPlan: EMPTY_AGENT_SESSION_SKILL_PLAN,
       } as unknown as Partial<AgentSession>);
 
@@ -171,5 +291,21 @@ export default class AgentChatSessionService {
 
     getLogger().info(`Session: created chat sessionId=${sessionUuid} workspaceStatus=none`);
     return finalizedSession;
+  }
+
+  static async updateBuildContextChatSession(
+    session: AgentSession,
+    buildContext: AgentBuildContextChatMetadata
+  ): Promise<AgentSession> {
+    const workspaceRepos = buildContextWorkspaceRepos(buildContext);
+    const selectedServices = buildContextSelectedServices(buildContext);
+    const updatedSession = await AgentSession.query().patchAndFetchById(session.id, {
+      workspaceRepos,
+      selectedServices,
+    } as unknown as Partial<AgentSession>);
+
+    await AgentSourceService.updateSessionBuildContext(updatedSession, buildContext);
+
+    return updatedSession;
   }
 }

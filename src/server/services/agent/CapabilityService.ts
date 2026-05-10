@@ -59,6 +59,7 @@ import {
   registerLifecycleDiagnosticReadTools,
   type LifecycleDiagnosticGithubSafety,
 } from './diagnosticTools';
+import { buildAgentRuntimeToolMetadata, type AgentRuntimeToolMetadata } from './toolMetadata';
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import type { LifecycleConfig } from 'server/models/yaml/Config';
 
@@ -66,6 +67,23 @@ type ToolExecutionHooks = {
   onToolStarted?: (audit: AgentToolAuditRecord) => Promise<void>;
   onToolFinished?: (audit: AgentToolAuditRecord & { result: unknown; status: 'completed' | 'failed' }) => Promise<void>;
   onFileChange?: (change: AgentFileChangeData) => Promise<void>;
+  getActiveRunUuid?: () => string | null | undefined;
+};
+
+export type { AgentRuntimeToolMetadata } from './toolMetadata';
+
+type BuildToolSetOptions = {
+  session: AgentSession;
+  repoFullName?: string;
+  userIdentity: RequestUserIdentity;
+  approvalPolicy: AgentApprovalPolicy;
+  workspaceToolDiscoveryTimeoutMs: number;
+  workspaceToolExecutionTimeoutMs: number;
+  requestGitHubToken?: string | null;
+  hooks?: ToolExecutionHooks;
+  toolRules?: AgentSessionToolRule[];
+  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+  selectedRuntimeMcpConnectionRefs?: string[];
 };
 
 type SessionWorkspaceGatewayTimeouts = {
@@ -208,6 +226,22 @@ function collectLifecycleConfigReferencedFiles(config: LifecycleConfig | null | 
   return [...files];
 }
 
+function collectSelectedDeployReferencedFiles(session: AgentSession): string[] {
+  const files = new Set<string>();
+  const selectedService = session.selectedServices?.[0];
+  if (!selectedService) {
+    return [];
+  }
+
+  addReferencedFile(files, selectedService.dockerfilePath);
+  addReferencedFile(files, selectedService.initDockerfilePath);
+  for (const valueFile of selectedService.chartValueFiles || []) {
+    addReferencedFile(files, valueFile);
+  }
+
+  return [...files];
+}
+
 async function resolveLifecycleDiagnosticGithubSafety({
   session,
   repoFullName,
@@ -221,11 +255,12 @@ async function resolveLifecycleDiagnosticGithubSafety({
   const allowedWritePatterns = [
     ...new Set([...LIFECYCLE_CONFIG_WRITE_PATTERNS, ...(config?.allowedWritePatterns || [])]),
   ];
+  const selectedDeployReferencedFiles = collectSelectedDeployReferencedFiles(session);
   const safety: LifecycleDiagnosticGithubSafety = {
     allowedBranch,
     allowedWritePatterns,
     excludedFilePatterns: config?.excludedFilePatterns || [],
-    referencedFiles: [],
+    referencedFiles: selectedDeployReferencedFiles,
   };
 
   if (!repoFullName || !allowedBranch) {
@@ -234,7 +269,9 @@ async function resolveLifecycleDiagnosticGithubSafety({
 
   try {
     const lifecycleConfig = await new YamlConfigParser().parseYamlConfigFromBranch(repoFullName, allowedBranch);
-    safety.referencedFiles = collectLifecycleConfigReferencedFiles(lifecycleConfig);
+    safety.referencedFiles = [
+      ...new Set([...selectedDeployReferencedFiles, ...collectLifecycleConfigReferencedFiles(lifecycleConfig)]),
+    ];
   } catch (error) {
     getLogger().warn(
       { error, repo: repoFullName, branch: allowedBranch },
@@ -256,6 +293,13 @@ function resolveToolApprovalMode({
 }): AgentApprovalMode {
   const rule = toolRules?.find((item) => item.toolKey === toolKey);
   return rule?.mode || capabilityMode;
+}
+
+function recordToolMetadata(
+  toolMetadata: AgentRuntimeToolMetadata[] | undefined,
+  metadata: Omit<AgentRuntimeToolMetadata, 'effect' | 'resourceDomain' | 'workspaceNeed' | 'exposure'>
+) {
+  toolMetadata?.push(buildAgentRuntimeToolMetadata(metadata));
 }
 
 function isCatalogCapabilityAllowed(
@@ -391,10 +435,12 @@ async function ensureChatWorkspaceRuntime({
   session,
   userIdentity,
   requestGitHubToken,
+  allowedActiveRunUuid,
 }: {
   session: AgentSession;
   userIdentity: RequestUserIdentity;
   requestGitHubToken?: string | null;
+  allowedActiveRunUuid?: string | null;
 }): Promise<AgentSession> {
   const latestSession = await loadLatestSession(session.uuid);
   if (latestSession.sessionKind !== 'chat') {
@@ -406,6 +452,7 @@ async function ensureChatWorkspaceRuntime({
     userId: userIdentity.userId,
     userIdentity,
     githubToken: requestGitHubToken,
+    ...(allowedActiveRunUuid ? { allowedActiveRunUuid } : {}),
   });
 
   return ensured.session;
@@ -418,6 +465,7 @@ async function executeWorkspaceRuntimeTool({
   timeoutMs,
   userIdentity,
   requestGitHubToken,
+  allowedActiveRunUuid,
 }: {
   session: AgentSession;
   runtimeToolName: string;
@@ -425,11 +473,13 @@ async function executeWorkspaceRuntimeTool({
   timeoutMs: number;
   userIdentity: RequestUserIdentity;
   requestGitHubToken?: string | null;
+  allowedActiveRunUuid?: string | null;
 }) {
   const runtimeSession = await ensureChatWorkspaceRuntime({
     session,
     userIdentity,
     requestGitHubToken,
+    allowedActiveRunUuid,
   });
   const baseUrl =
     (await AgentSandboxService.resolveWorkspaceGatewayBaseUrl(runtimeSession.uuid)) ||
@@ -503,6 +553,7 @@ function registerChatWorkspaceExecTool({
   readOnly,
   catalogCapabilityId,
   resolvedCapabilityAccess,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -518,6 +569,7 @@ function registerChatWorkspaceExecTool({
   readOnly: boolean;
   catalogCapabilityId: AgentCapabilityCatalogId;
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
     return;
@@ -571,6 +623,7 @@ function registerChatWorkspaceExecTool({
           timeoutMs: workspaceToolExecutionTimeoutMs,
           userIdentity,
           requestGitHubToken,
+          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
         });
         const failed = result.isError || didToolResultFail(result);
         if (!readOnly) {
@@ -602,6 +655,12 @@ function registerChatWorkspaceExecTool({
       }
     },
   });
+  recordToolMetadata(toolMetadata, {
+    toolKey,
+    catalogCapabilityId,
+    capabilityKey,
+    approvalMode: mode,
+  });
 }
 
 function registerChatWorkspaceFileTool({
@@ -618,6 +677,7 @@ function registerChatWorkspaceFileTool({
   description,
   catalogCapabilityId,
   resolvedCapabilityAccess,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -632,6 +692,7 @@ function registerChatWorkspaceFileTool({
   description: string;
   catalogCapabilityId: AgentCapabilityCatalogId;
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
     return;
@@ -692,6 +753,7 @@ function registerChatWorkspaceFileTool({
           timeoutMs: workspaceToolExecutionTimeoutMs,
           userIdentity,
           requestGitHubToken,
+          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
         });
         const failed = result.isError || didToolResultFail(result);
         if (toolCallId) {
@@ -746,6 +808,12 @@ function registerChatWorkspaceFileTool({
       }
     },
   });
+  recordToolMetadata(toolMetadata, {
+    toolKey,
+    catalogCapabilityId,
+    capabilityKey,
+    approvalMode: mode,
+  });
 }
 
 function registerChatPublishHttpTool({
@@ -757,6 +825,7 @@ function registerChatPublishHttpTool({
   hooks,
   toolRules,
   resolvedCapabilityAccess,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -766,6 +835,7 @@ function registerChatPublishHttpTool({
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   const toolKey = buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_PUBLISH_HTTP_TOOL_NAME);
   if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, 'preview_publish')) {
@@ -807,6 +877,7 @@ function registerChatPublishHttpTool({
           session,
           userIdentity,
           requestGitHubToken,
+          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
         });
         const port = Number(args.port);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -837,6 +908,12 @@ function registerChatPublishHttpTool({
       }
     },
   });
+  recordToolMetadata(toolMetadata, {
+    toolKey,
+    catalogCapabilityId: 'preview_publish',
+    capabilityKey,
+    approvalMode: mode,
+  });
 }
 
 function registerChatWorkspaceTools({
@@ -849,6 +926,7 @@ function registerChatWorkspaceTools({
   hooks,
   toolRules,
   resolvedCapabilityAccess,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -859,6 +937,7 @@ function registerChatWorkspaceTools({
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   registerChatWorkspaceExecTool({
     tools,
@@ -875,6 +954,7 @@ function registerChatWorkspaceTools({
     readOnly: true,
     catalogCapabilityId: 'read_context',
     resolvedCapabilityAccess,
+    toolMetadata,
   });
   registerChatWorkspaceExecTool({
     tools,
@@ -891,6 +971,7 @@ function registerChatWorkspaceTools({
     readOnly: false,
     catalogCapabilityId: 'workspace_shell',
     resolvedCapabilityAccess,
+    toolMetadata,
   });
   registerChatWorkspaceFileTool({
     tools,
@@ -907,6 +988,7 @@ function registerChatWorkspaceTools({
       'Write a file in the chat workspace. Use this when the user asks to create or replace file contents. This provisions the workspace only when the tool runs.',
     catalogCapabilityId: 'workspace_files',
     resolvedCapabilityAccess,
+    toolMetadata,
   });
   registerChatWorkspaceFileTool({
     tools,
@@ -923,6 +1005,7 @@ function registerChatWorkspaceTools({
       'Edit a file in the chat workspace by replacing exact text. Use this for targeted file modifications. This provisions the workspace only when the tool runs.',
     catalogCapabilityId: 'workspace_files',
     resolvedCapabilityAccess,
+    toolMetadata,
   });
 }
 
@@ -935,7 +1018,9 @@ function registerGenericMcpTool({
   description,
   capabilityKey,
   mode,
+  catalogCapabilityId,
   hooks,
+  toolMetadata,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -945,7 +1030,9 @@ function registerGenericMcpTool({
   description: string;
   capabilityKey: AgentCapabilityKey;
   mode: AgentApprovalMode;
+  catalogCapabilityId: AgentCapabilityCatalogId;
   hooks?: ToolExecutionHooks;
+  toolMetadata?: AgentRuntimeToolMetadata[];
 }) {
   const toolKey = buildAgentToolKey(server.slug, exposedToolName);
 
@@ -1064,6 +1151,12 @@ function registerGenericMcpTool({
       }
     },
   });
+  recordToolMetadata(toolMetadata, {
+    toolKey,
+    catalogCapabilityId,
+    capabilityKey,
+    approvalMode: mode,
+  });
 }
 
 export default class AgentCapabilityService {
@@ -1102,7 +1195,11 @@ export default class AgentCapabilityService {
     };
   }
 
-  static async buildToolSet({
+  static async buildToolSet(options: BuildToolSetOptions): Promise<ToolSet> {
+    return (await this.buildToolSetWithMetadata(options)).tools;
+  }
+
+  static async buildToolSetWithMetadata({
     session,
     repoFullName,
     userIdentity,
@@ -1114,20 +1211,9 @@ export default class AgentCapabilityService {
     toolRules,
     resolvedCapabilityAccess,
     selectedRuntimeMcpConnectionRefs,
-  }: {
-    session: AgentSession;
-    repoFullName?: string;
-    userIdentity: RequestUserIdentity;
-    approvalPolicy: AgentApprovalPolicy;
-    workspaceToolDiscoveryTimeoutMs: number;
-    workspaceToolExecutionTimeoutMs: number;
-    requestGitHubToken?: string | null;
-    hooks?: ToolExecutionHooks;
-    toolRules?: AgentSessionToolRule[];
-    resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
-    selectedRuntimeMcpConnectionRefs?: string[];
-  }): Promise<ToolSet> {
+  }: BuildToolSetOptions): Promise<{ tools: ToolSet; metadata: AgentRuntimeToolMetadata[] }> {
     const tools: ToolSet = {};
+    const metadata: AgentRuntimeToolMetadata[] = [];
     const chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(session);
     const effectiveAgentConfig = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     const lifecycleDiagnosticGithubSafety = session.buildUuid
@@ -1149,6 +1235,7 @@ export default class AgentCapabilityService {
         hooks,
         toolRules,
         resolvedCapabilityAccess,
+        toolMetadata: metadata,
       });
 
       registerChatPublishHttpTool({
@@ -1160,6 +1247,7 @@ export default class AgentCapabilityService {
         hooks,
         toolRules,
         resolvedCapabilityAccess,
+        toolMetadata: metadata,
       });
     }
 
@@ -1171,6 +1259,7 @@ export default class AgentCapabilityService {
       toolRules,
       resolvedCapabilityAccess,
       githubSafety: lifecycleDiagnosticGithubSafety,
+      toolMetadata: metadata,
     });
     registerLifecycleDiagnosticFixTools({
       tools,
@@ -1180,6 +1269,7 @@ export default class AgentCapabilityService {
       toolRules,
       resolvedCapabilityAccess,
       githubSafety: lifecycleDiagnosticGithubSafety,
+      toolMetadata: metadata,
     });
 
     const mcpConfigService = new McpConfigService();
@@ -1301,6 +1391,12 @@ export default class AgentCapabilityService {
                   }
                 },
               });
+              recordToolMetadata(metadata, {
+                toolKey: entry.toolKey,
+                catalogCapabilityId: entry.catalogCapabilityId,
+                capabilityKey,
+                approvalMode: mode,
+              });
 
               continue;
             }
@@ -1369,6 +1465,12 @@ export default class AgentCapabilityService {
                   }
                 },
               });
+              recordToolMetadata(metadata, {
+                toolKey: entry.toolKey,
+                catalogCapabilityId: entry.catalogCapabilityId,
+                capabilityKey,
+                approvalMode: mode,
+              });
 
               continue;
             }
@@ -1382,7 +1484,9 @@ export default class AgentCapabilityService {
               description: entry.description,
               capabilityKey,
               mode,
+              catalogCapabilityId: entry.catalogCapabilityId,
               hooks,
+              toolMetadata: metadata,
             });
           }
 
@@ -1419,11 +1523,13 @@ export default class AgentCapabilityService {
           description: discoveredTool.description || `MCP tool ${discoveredTool.name} from ${server.name}`,
           capabilityKey,
           mode,
+          catalogCapabilityId,
           hooks,
+          toolMetadata: metadata,
         });
       }
     }
 
-    return tools;
+    return { tools, metadata };
   }
 }

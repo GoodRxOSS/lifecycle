@@ -23,7 +23,7 @@ export class QueryDatabaseTool extends BaseTool {
 
   constructor(private databaseClient: DatabaseClient) {
     super(
-      'Read-only database query to fetch fresh Lifecycle data. Use this to get current build/deploy status, check deployables, or verify configuration. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, builds), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like "deploys.repository".',
+      'Read-only database query to fetch fresh Lifecycle data. Use this to get current build/deploy status, check deployables, or verify configuration. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like "deploys.repository".',
       {
         type: 'object',
         properties: {
@@ -36,12 +36,12 @@ export class QueryDatabaseTool extends BaseTool {
           filters: {
             type: 'object',
             description:
-              'WHERE conditions as key-value pairs. Deploy uuid format is "{serviceName}-{buildUuid}" (e.g., "vpii-events-broad-lab-080573"). Use SQL LIKE patterns with % for partial matching: {"uuid": "vpii-events-%"} finds all deploys for service vpii-events. Use "uuid" for builds/deploys, "id" for others. Only use actual table columns as keys. IMPORTANT: To find all deploys for a build, query the builds table with relations: ["deploys"], e.g., {"table": "builds", "filters": {"uuid": "my-build-uuid"}, "relations": ["deploys"]}. Do NOT filter deploys by buildId — it is a numeric FK, not the build UUID string.',
+              'WHERE conditions as key-value pairs. Deploy uuid format is "{serviceName}-{buildUuid}" (e.g., "sample-service-broad-lab-080573"). Use SQL LIKE patterns with % for partial matching: {"uuid": "sample-service-%"} finds all deploys for sample-service. Use "uuid" for builds/deploys, "pullRequestNumber" for PR numbers, and "pullRequestId" for the build-to-PR foreign key. Common aliases such as "number", "pull_request_id", and "created_at" are accepted. IMPORTANT: To find all deploys for a build, query the builds table with relations: ["deploys"], e.g., {"table": "builds", "filters": {"uuid": "my-build-uuid"}, "relations": ["deploys"]}. Do NOT filter deploys by buildId — it is a numeric FK, not the build UUID string.',
           },
           relations: {
             type: 'array',
             description:
-              'Relations to eager load (top-level only). Valid per table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository, service], deployables: [repository, deploys], pull_requests: [repository, builds], repositories: [pullRequests, deployables], environments: [builds]. Relations are returned as compact {id, name} objects.',
+              'Relations to eager load (top-level only). Valid per table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository, service], deployables: [repository, deploys], pull_requests: [repository, build], repositories: [pullRequests, deployables], environments: [builds]. Relations are returned as compact {id, name} objects.',
             items: { type: 'string' },
           },
           limit: {
@@ -55,7 +55,8 @@ export class QueryDatabaseTool extends BaseTool {
           },
           orderBy: {
             type: 'string',
-            description: 'Column and direction, e.g., "created_at:desc". Default: primary key descending.',
+            description:
+              'Column and direction, e.g., "createdAt:desc". Common aliases such as "created_at:desc" are accepted.',
           },
           offset: {
             type: 'number',

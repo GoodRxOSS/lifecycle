@@ -21,18 +21,20 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import BuildContextChatService, {
   BuildContextChatBuildNotFoundError,
+  BuildContextChatSelectedDeployError,
 } from 'server/services/agent/BuildContextChatService';
 import { AgentModelSelectionError, MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
 
 interface CreateBuildContextChatBody {
   buildUuid: string;
+  selectedDeployUuid?: string;
   defaults?: {
     model?: string;
   };
 }
 
-const ALLOWED_TOP_LEVEL_KEYS = ['buildUuid', 'defaults'];
+const ALLOWED_TOP_LEVEL_KEYS = ['buildUuid', 'selectedDeployUuid', 'defaults'];
 const ALLOWED_DEFAULT_KEYS = ['model'];
 
 function unknownKeys(value: Record<string, unknown>, allowedKeys: string[]) {
@@ -55,9 +57,21 @@ function parseCreateBuildContextChatBody(body: unknown): CreateBuildContextChatB
   }
 
   if (requestBody.defaults === undefined) {
+    const selectedDeployUuid =
+      typeof requestBody.selectedDeployUuid === 'string' ? requestBody.selectedDeployUuid.trim() : undefined;
+    if (requestBody.selectedDeployUuid !== undefined && !selectedDeployUuid) {
+      throw new Error('selectedDeployUuid must be a non-empty string');
+    }
     return {
       buildUuid: requestBody.buildUuid.trim(),
+      ...(selectedDeployUuid ? { selectedDeployUuid } : {}),
     };
+  }
+
+  const selectedDeployUuid =
+    typeof requestBody.selectedDeployUuid === 'string' ? requestBody.selectedDeployUuid.trim() : undefined;
+  if (requestBody.selectedDeployUuid !== undefined && !selectedDeployUuid) {
+    throw new Error('selectedDeployUuid must be a non-empty string');
   }
 
   if (!requestBody.defaults || typeof requestBody.defaults !== 'object' || Array.isArray(requestBody.defaults)) {
@@ -77,6 +91,7 @@ function parseCreateBuildContextChatBody(body: unknown): CreateBuildContextChatB
   const requestedModel = defaults.model?.trim() || undefined;
   return {
     buildUuid: requestBody.buildUuid.trim(),
+    ...(selectedDeployUuid ? { selectedDeployUuid } : {}),
     ...(requestedModel ? { defaults: { model: requestedModel } } : {}),
   };
 }
@@ -156,6 +171,7 @@ const postHandler = async (req: NextRequest) => {
   try {
     const result = await BuildContextChatService.launchBuildContextChat({
       buildUuid: requestBody.buildUuid,
+      selectedDeployUuid: requestBody.selectedDeployUuid,
       userId: userIdentity.userId,
       userIdentity,
       model: requestBody.defaults?.model,
@@ -180,6 +196,8 @@ const postHandler = async (req: NextRequest) => {
           repo: result.buildContext.pullRequest?.fullName ?? null,
           branch: result.buildContext.pullRequest?.branchName ?? null,
           pullRequestNumber: result.buildContext.pullRequest?.pullRequestNumber ?? null,
+          selectedDeployUuid: result.buildContext.selectedDeployUuid ?? null,
+          selectedDeploy: result.buildContext.selectedDeploy ?? null,
           contextFreshAt: result.buildContext.contextFreshAt,
         },
         links: {
@@ -196,6 +214,9 @@ const postHandler = async (req: NextRequest) => {
   } catch (error) {
     if (error instanceof BuildContextChatBuildNotFoundError) {
       return errorResponse(error, { status: 404 }, req);
+    }
+    if (error instanceof BuildContextChatSelectedDeployError) {
+      return errorResponse(error, { status: 400 }, req);
     }
     if (error instanceof MissingAgentProviderApiKeyError) {
       return errorResponse(error, { status: 400 }, req);

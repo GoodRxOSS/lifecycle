@@ -69,12 +69,13 @@ describe('sandboxToolCatalog', () => {
         includeSkills: true,
       })
     ).toEqual([
-      '- inspect files, services, and git state: workspace.read_file, workspace.glob, workspace.grep, workspace.exec, session.get_workspace_state, session.list_ports, session.list_processes, session.get_service_status, git.status, git.diff',
-      '- change workspace files directly: workspace.write_file, workspace.edit_file',
-      '- run mutating or networked shell commands that are not direct file edits: workspace.exec_mutation',
-      '- manage git changes: git.add, git.commit, git.branch',
-      '- discover and learn equipped skills: skills.list, skills.learn',
+      '- inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_glob, mcp__sandbox__workspace_grep, mcp__sandbox__workspace_exec, mcp__sandbox__session_get_workspace_state, mcp__sandbox__session_list_ports, mcp__sandbox__session_list_processes, mcp__sandbox__session_get_service_status, mcp__sandbox__git_status, mcp__sandbox__git_diff',
+      '- change workspace files directly: mcp__sandbox__workspace_write_file, mcp__sandbox__workspace_edit_file',
+      '- run verification, mutating, or networked shell commands that are not direct file edits: mcp__sandbox__workspace_exec_mutation',
+      '- manage local git changes: mcp__sandbox__git_add, mcp__sandbox__git_commit, mcp__sandbox__git_branch',
+      '- discover and learn equipped skills: mcp__sandbox__skills_list, mcp__sandbox__skills_learn',
       '- do not claim a tool is unavailable unless it is not equipped here or a real tool call fails',
+      '- local commits do not update GitHub, PR heads, or Lifecycle builds; use the shell mutation tool for git push or gh and only claim remote/build updates after observing them',
     ]);
   });
 
@@ -102,10 +103,24 @@ describe('sandboxToolCatalog', () => {
         includeSkills: true,
       })
     ).toEqual([
-      '- inspect files, services, and git state: workspace.read_file, workspace.glob, workspace.grep, workspace.exec, session.get_workspace_state, session.list_ports, session.list_processes, session.get_service_status, git.status, git.diff',
-      '- manage git changes: git.add, git.commit, git.branch',
+      '- inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_glob, mcp__sandbox__workspace_grep, mcp__sandbox__workspace_exec, mcp__sandbox__session_get_workspace_state, mcp__sandbox__session_list_ports, mcp__sandbox__session_list_processes, mcp__sandbox__session_get_service_status, mcp__sandbox__git_status, mcp__sandbox__git_diff',
+      '- manage local git changes: mcp__sandbox__git_add, mcp__sandbox__git_commit, mcp__sandbox__git_branch',
       '- do not claim a tool is unavailable unless it is not equipped here or a real tool call fails',
+      '- local commits do not update GitHub, PR heads, or Lifecycle builds; use the shell mutation tool for git push or gh and only claim remote/build updates after observing them',
     ]);
+  });
+
+  it('makes local commit and remote publish semantics explicit', () => {
+    const entries = listSessionWorkspaceToolCatalog();
+    const mutationTool = entries.find((entry) => entry.toolName === 'workspace.exec_mutation');
+    const commitTool = entries.find((entry) => entry.toolName === 'git.commit');
+
+    expect(mutationTool?.description).toContain('verification commands such as tests and syntax checks');
+    expect(mutationTool?.description).toContain('remote verification commands such as git ls-remote');
+    expect(mutationTool?.description).toContain('git pushes');
+    expect(commitTool?.description).toContain('local-only commit');
+    expect(commitTool?.description).toContain('does not push');
+    expect(commitTool?.description).toContain('does not trigger Lifecycle rebuilds');
   });
 
   it('keeps explicitly allowed tools in the prompt summary even when the family is denied', () => {
@@ -126,7 +141,7 @@ describe('sandboxToolCatalog', () => {
       includeSkills: false,
     });
 
-    expect(lines.join('\n')).toContain('workspace.read_file');
-    expect(lines.join('\n')).not.toContain('workspace.glob');
+    expect(lines.join('\n')).toContain('mcp__sandbox__workspace_read_file');
+    expect(lines.join('\n')).not.toContain('mcp__sandbox__workspace_glob');
   });
 });

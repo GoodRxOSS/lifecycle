@@ -63,6 +63,7 @@ import { errorResponse, successResponse } from 'server/lib/response';
  *                     - sessionId
  *                     - focusUrl
  *                     - error
+ *                     - workspaceFailure
  *                   properties:
  *                     launchId:
  *                       type: string
@@ -108,6 +109,10 @@ import { errorResponse, successResponse } from 'server/lib/response';
  *                     error:
  *                       type: string
  *                       nullable: true
+ *                     workspaceFailure:
+ *                       nullable: true
+ *                       allOf:
+ *                         - $ref: '#/components/schemas/WorkspaceRuntimeFailure'
  *                 error:
  *                   nullable: true
  *       '401':

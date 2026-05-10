@@ -16,8 +16,12 @@
 
 import { NextRequest } from 'next/server';
 
+const mockGetUser = jest.fn();
+const mockGetRequestUserIdentity = jest.fn();
+
 jest.mock('server/lib/get-user', () => ({
-  getRequestUserIdentity: jest.fn(),
+  getUser: (...args: unknown[]) => mockGetUser(...args),
+  getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
 }));
 
 jest.mock('server/services/agent/AdminService', () => ({
@@ -28,10 +32,8 @@ jest.mock('server/services/agent/AdminService', () => ({
 }));
 
 import { GET } from './route';
-import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentAdminService from 'server/services/agent/AdminService';
 
-const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
 const mockGetThreadConversation = AgentAdminService.getThreadConversation as jest.Mock;
 
 function makeRequest(): NextRequest {
@@ -42,11 +44,33 @@ function makeRequest(): NextRequest {
 }
 
 describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
+  const originalEnableAuth = process.env.ENABLE_AUTH;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.ENABLE_AUTH = 'true';
+    mockGetUser.mockReturnValue({
+      sub: 'sample-admin',
+      realm_access: {
+        roles: ['admin'],
+      },
+    });
+    mockGetRequestUserIdentity.mockReturnValue({
+      userId: 'sample-admin',
+      githubUsername: 'sample-admin',
+    });
+  });
+
+  afterEach(() => {
+    if (originalEnableAuth === undefined) {
+      delete process.env.ENABLE_AUTH;
+    } else {
+      process.env.ENABLE_AUTH = originalEnableAuth;
+    }
   });
 
   it('returns 401 when the requester is not authenticated', async () => {
+    mockGetUser.mockReturnValue(null);
     mockGetRequestUserIdentity.mockReturnValue(null);
 
     const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
@@ -58,11 +82,23 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
     expect(mockGetThreadConversation).not.toHaveBeenCalled();
   });
 
-  it('returns the canonical admin replay payload from the service', async () => {
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-admin',
-      githubUsername: 'sample-admin',
+  it('returns 403 for non-admin users before loading the conversation', async () => {
+    mockGetUser.mockReturnValue({
+      sub: 'sample-user',
+      realm_access: {
+        roles: ['user'],
+      },
     });
+
+    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body.error.message).toBe('Forbidden: insufficient permissions');
+    expect(mockGetThreadConversation).not.toHaveBeenCalled();
+  });
+
+  it('returns the canonical admin replay payload from the service', async () => {
     mockGetThreadConversation.mockResolvedValue({
       session: { id: 'session-1' },
       thread: { id: 'thread-1' },
@@ -101,10 +137,6 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
   });
 
   it.each(['Agent thread not found', 'Agent session not found'])('returns 404 for %s', async (message) => {
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-admin',
-      githubUsername: 'sample-admin',
-    });
     mockGetThreadConversation.mockRejectedValue(new Error(message));
 
     const response = await GET(makeRequest(), { params: { threadId: 'missing-thread' } });
