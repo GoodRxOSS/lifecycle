@@ -19,6 +19,7 @@ import DeployService from '../deploy';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 import { ChartType } from 'server/lib/nativeHelm';
 import * as github from 'server/lib/github';
+import { SecretProcessor } from 'server/services/secretProcessor';
 
 mockRedisClient();
 
@@ -31,6 +32,7 @@ const mockCodefreshWaitForImage = jest.fn();
 const mockBuildWithNative = jest.fn();
 const mockGlobalConfigGetAllConfigs = jest.fn();
 const mockGlobalConfigGetOrgChartName = jest.fn();
+const mockEnsureNamespaceExists = jest.fn();
 
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
@@ -65,6 +67,10 @@ jest.mock('server/lib/codefresh', () => ({
 
 jest.mock('server/lib/nativeBuild', () => ({
   buildWithNative: (...args: any[]) => mockBuildWithNative(...args),
+}));
+
+jest.mock('server/lib/nativeBuild/utils', () => ({
+  ensureNamespaceExists: (...args: any[]) => mockEnsureNamespaceExists(...args),
 }));
 
 const mockDetermineChartType = jest.fn();
@@ -118,6 +124,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     mockCodefreshTagExists.mockReset();
     mockCodefreshWaitForImage.mockReset();
     mockBuildWithNative.mockReset();
+    mockEnsureNamespaceExists.mockReset();
     mockGlobalConfigGetOrgChartName.mockResolvedValue('org-chart');
     mockGlobalConfigGetAllConfigs.mockResolvedValue({
       lifecycleDefaults: {
@@ -459,6 +466,269 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(deployPatch).toHaveBeenCalledWith({ buildPipelineId: 'codefresh-build-123' });
       expect(deployPatch).toHaveBeenCalledWith({ buildOutput: 'codefresh logs' });
       expect(patchSpy).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+    });
+
+    test('buildImageForHelmAndGithub syncs external secrets when native image tag already exists', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('abcdef1234567890');
+      mockCodefreshTagExists.mockResolvedValue(true);
+      mockCodefreshGetRepositoryTag.mockReturnValue(
+        '123456789012.dkr.ecr.us-west-2.amazonaws.com/sample/app-images:lfc-abcdef1'
+      );
+      mockGlobalConfigGetAllConfigs.mockResolvedValue({
+        lifecycleDefaults: {
+          buildPipeline: 'sample/build-image',
+          deployCluster: 'test-cluster',
+          ecrDomain: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+          ecrRegistry: 'sample-registry',
+        },
+        app_setup: {
+          org: 'example-org',
+        },
+        buildDefaults: {},
+        secretProviders: {
+          aws: {
+            enabled: true,
+            clusterSecretStore: 'aws-secretsmanager',
+            refreshInterval: '1h',
+            allowedPrefixes: [],
+          },
+        },
+      });
+
+      const processSecretsSpy = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets').mockResolvedValue({
+        secretRefs: [
+          {
+            envKey: 'API_TOKEN',
+            provider: 'aws',
+            path: 'repo/example-repo/api',
+            key: 'API_TOKEN',
+          },
+        ],
+        expectedKeysPerSecret: {
+          'sample-service-aws-secrets': ['API_TOKEN'],
+        },
+        syncTokensPerSecret: {
+          'sample-service-aws-secrets': 'sync-token',
+        },
+        warnings: [],
+      });
+      const waitForSecretSyncSpy = jest
+        .spyOn(SecretProcessor.prototype, 'waitForSecretSync')
+        .mockResolvedValue(undefined);
+
+      const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deployPatch = jest.fn().mockResolvedValue(undefined);
+      const deploy = {
+        uuid: 'sample-service-build',
+        runUUID: 'run-1',
+        branchName: 'feature-branch',
+        env: {
+          NODE_ENV: 'production',
+          API_TOKEN: '{{aws:repo/example-repo/api:API_TOKEN}}',
+        },
+        initEnv: {},
+        dockerImage: 'old-image',
+        service: {
+          name: 'sample-service',
+        },
+        build: {
+          id: 1,
+          uuid: 'sample-build',
+          namespace: 'env-sample',
+          enableFullYaml: true,
+          commentRuntimeEnv: {},
+          enabledFeatures: [],
+          pullRequest: {
+            githubLogin: 'sample-user',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        deployable: {
+          name: 'sample-service',
+          type: DeployTypes.GITHUB,
+          dockerfilePath: './Dockerfile',
+          initDockerfilePath: null,
+          env: {},
+          ecr: 'sample/app-images',
+          dockerBuildPipelineName: 'sample/build-image',
+          builder: {
+            engine: 'buildkit',
+          },
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({
+          patch: deployPatch,
+        })),
+      };
+
+      try {
+        const result = await deployService.buildImageForHelmAndGithub(deploy as any, 'run-1');
+
+        expect(result).toBe(true);
+        expect(mockBuildWithNative).not.toHaveBeenCalled();
+        expect(mockEnsureNamespaceExists).toHaveBeenCalledWith('env-sample');
+        expect(processSecretsSpy).toHaveBeenCalledWith({
+          env: {
+            API_TOKEN: '{{aws:repo/example-repo/api:API_TOKEN}}',
+          },
+          serviceName: 'sample-service',
+          namespace: 'env-sample',
+          buildUuid: 'sample-service-build',
+        });
+        expect(waitForSecretSyncSpy).toHaveBeenCalledWith(
+          {
+            'sample-service-aws-secrets': ['API_TOKEN'],
+          },
+          'env-sample',
+          60000,
+          {
+            'sample-service-aws-secrets': 'sync-token',
+          }
+        );
+        expect(deployPatch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            status: DeployStatus.BUILT,
+            dockerImage: '123456789012.dkr.ecr.us-west-2.amazonaws.com/sample/app-images:lfc-abcdef1',
+          })
+        );
+        expect(patchSpy).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILT }, 'run-1');
+      } finally {
+        processSecretsSpy.mockRestore();
+        waitForSecretSyncSpy.mockRestore();
+      }
+    });
+
+    test('buildImageForHelmAndGithub syncs comment init env secrets when native image tag already exists', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('abcdef1234567890');
+      mockCodefreshTagExists.mockResolvedValue(true);
+      mockCodefreshGetRepositoryTag.mockReturnValue(
+        '123456789012.dkr.ecr.us-west-2.amazonaws.com/sample/app-images:lfc-abcdef1'
+      );
+      mockGlobalConfigGetAllConfigs.mockResolvedValue({
+        lifecycleDefaults: {
+          buildPipeline: 'sample/build-image',
+          deployCluster: 'test-cluster',
+          ecrDomain: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+          ecrRegistry: 'sample-registry',
+        },
+        app_setup: {
+          org: 'example-org',
+        },
+        buildDefaults: {},
+        secretProviders: {
+          aws: {
+            enabled: true,
+            clusterSecretStore: 'aws-secretsmanager',
+            refreshInterval: '1h',
+            allowedPrefixes: [],
+          },
+        },
+      });
+
+      const processSecretsSpy = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets').mockResolvedValue({
+        secretRefs: [
+          {
+            envKey: 'INIT_TOKEN',
+            provider: 'aws',
+            path: 'repo/example-repo/api',
+            key: 'INIT_TOKEN',
+          },
+        ],
+        expectedKeysPerSecret: {
+          'sample-service-aws-secrets': ['INIT_TOKEN'],
+        },
+        syncTokensPerSecret: {
+          'sample-service-aws-secrets': 'sync-token',
+        },
+        warnings: [],
+      });
+      const waitForSecretSyncSpy = jest
+        .spyOn(SecretProcessor.prototype, 'waitForSecretSync')
+        .mockResolvedValue(undefined);
+
+      const deployPatch = jest.fn().mockResolvedValue(undefined);
+      const deploy = {
+        uuid: 'sample-service-build',
+        runUUID: 'run-1',
+        branchName: 'feature-branch',
+        env: {
+          NODE_ENV: 'production',
+        },
+        initEnv: {},
+        dockerImage: 'old-image',
+        service: {
+          name: 'sample-service',
+        },
+        build: {
+          id: 1,
+          uuid: 'sample-build',
+          namespace: 'env-sample',
+          enableFullYaml: true,
+          commentRuntimeEnv: {},
+          commentInitEnv: {
+            INIT_TOKEN: '{{aws:repo/example-repo/api:INIT_TOKEN}}',
+          },
+          enabledFeatures: [],
+          pullRequest: {
+            githubLogin: 'sample-user',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        deployable: {
+          name: 'sample-service',
+          type: DeployTypes.GITHUB,
+          dockerfilePath: './Dockerfile',
+          initDockerfilePath: './init.Dockerfile',
+          env: {},
+          ecr: 'sample/app-images',
+          dockerBuildPipelineName: 'sample/build-image',
+          builder: {
+            engine: 'buildkit',
+          },
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
+          $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({
+          patch: deployPatch,
+        })),
+      };
+
+      try {
+        const result = await deployService.buildImageForHelmAndGithub(deploy as any, 'run-1');
+
+        expect(result).toBe(true);
+        expect(mockBuildWithNative).not.toHaveBeenCalled();
+        expect(processSecretsSpy).toHaveBeenCalledWith({
+          env: {
+            INIT_TOKEN: '{{aws:repo/example-repo/api:INIT_TOKEN}}',
+          },
+          serviceName: 'sample-service',
+          namespace: 'env-sample',
+          buildUuid: 'sample-service-build',
+        });
+        expect(waitForSecretSyncSpy).toHaveBeenCalledWith(
+          {
+            'sample-service-aws-secrets': ['INIT_TOKEN'],
+          },
+          'env-sample',
+          60000,
+          {
+            'sample-service-aws-secrets': 'sync-token',
+          }
+        );
+      } finally {
+        processSecretsSpy.mockRestore();
+        waitForSecretSyncSpy.mockRestore();
+      }
     });
 
     test('deployAurora records failures with the newly assigned runUUID', async () => {
