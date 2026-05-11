@@ -41,6 +41,7 @@ import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
 import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 import { isNativeBuilderEngine } from 'server/lib/buildEngines';
+import { SecretProvidersConfig } from 'server/services/types/globalConfig';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -58,6 +59,11 @@ export interface PipelineWaitItem {
   pipelineId: string;
   serviceName: string;
   patternInfo: PatternInfo[];
+}
+
+interface SyncedServiceExternalSecrets {
+  secretNames: string[];
+  buildSecretEnvKeys: Set<string>;
 }
 
 export default class DeployService extends BaseService {
@@ -969,6 +975,116 @@ export default class DeployService extends BaseService {
     });
   }
 
+  private async syncServiceExternalSecrets({
+    deploy,
+    serviceName,
+    secretProviders,
+    runUUID,
+  }: {
+    deploy: Deploy;
+    serviceName: string;
+    secretProviders: SecretProvidersConfig | undefined;
+    runUUID: string;
+  }): Promise<SyncedServiceExternalSecrets | false> {
+    const emptyResult = { secretNames: [], buildSecretEnvKeys: new Set<string>() };
+
+    if (!secretProviders) {
+      return emptyResult;
+    }
+
+    const buildEnvToProcess = merge({}, deploy.env || {}, deploy.build?.commentRuntimeEnv || {}) as Record<
+      string,
+      string
+    >;
+    const initEnvToProcess = merge({}, deploy.initEnv || {}, deploy.build?.commentInitEnv || {}) as Record<
+      string,
+      string
+    >;
+    const buildSecretRefs = parseSecretRefsFromEnv(buildEnvToProcess);
+    const initSecretRefs = parseSecretRefsFromEnv(initEnvToProcess);
+    const buildSecretRefKeys = new Set(buildSecretRefs.map((ref) => ref.envKey));
+    const combinedSecretEnvEntries = new Map<string, string>();
+    const conflictingSecretEnvKeys = new Set<string>();
+
+    const addSecretRef = (envKey: string, value: string) => {
+      const existingValue = combinedSecretEnvEntries.get(envKey);
+
+      if (existingValue && existingValue !== value) {
+        conflictingSecretEnvKeys.add(envKey);
+        return;
+      }
+
+      combinedSecretEnvEntries.set(envKey, value);
+    };
+
+    buildSecretRefs.forEach((ref) => addSecretRef(ref.envKey, buildEnvToProcess[ref.envKey]));
+    initSecretRefs.forEach((ref) => addSecretRef(ref.envKey, initEnvToProcess[ref.envKey]));
+
+    if (conflictingSecretEnvKeys.size > 0) {
+      getLogger().error(
+        `Build: secret env conflict service=${serviceName} keys=[${Array.from(conflictingSecretEnvKeys).join(', ')}]`
+      );
+      await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      return false;
+    }
+
+    const envToProcess = Object.fromEntries(combinedSecretEnvEntries);
+
+    if (Object.keys(envToProcess).length === 0) {
+      return emptyResult;
+    }
+
+    const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
+    await ensureNamespaceExists(deploy.build.namespace);
+
+    const secretProcessor = new SecretProcessor(secretProviders);
+
+    const secretResult = await secretProcessor.processEnvSecrets({
+      env: envToProcess,
+      serviceName,
+      namespace: deploy.build.namespace,
+      buildUuid: deploy.uuid,
+    });
+
+    const buildSecretEnvKeys = new Set(
+      secretResult.secretRefs.filter((ref) => buildSecretRefKeys.has(ref.envKey)).map((ref) => ref.envKey)
+    );
+
+    if (secretResult.warnings.length > 0) {
+      getLogger().warn(
+        `Build: secret processing warnings service=${serviceName} warnings=${secretResult.warnings.join(', ')}`
+      );
+    }
+
+    const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
+
+    if (secretNames.length === 0) {
+      return { secretNames, buildSecretEnvKeys };
+    }
+
+    getLogger().info(`Build: waiting for secrets to sync secrets=[${secretNames.join(', ')}]`);
+
+    const providerTimeouts = Object.values(secretProviders)
+      .map((p) => p.secretSyncTimeout)
+      .filter((t): t is number => t !== undefined);
+    const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
+
+    try {
+      await secretProcessor.waitForSecretSync(
+        secretResult.expectedKeysPerSecret,
+        deploy.build.namespace,
+        timeout,
+        secretResult.syncTokensPerSecret
+      );
+      getLogger().info(`Build: secrets synced count=${secretNames.length}`);
+      return { secretNames, buildSecretEnvKeys };
+    } catch (error) {
+      getLogger().error({ error }, `Build: secret sync failed service=${serviceName}`);
+      await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      return false;
+    }
+  }
+
   hostForServiceDeploy(deploy: Deploy, service: Service) {
     if (service.type === DeployTypes.EXTERNAL_HTTP) {
       return deploy.publicUrl ? deploy.publicUrl : service.defaultPublicUrl;
@@ -1031,7 +1147,8 @@ export default class DeployService extends BaseService {
       const initTag = generateDeployTag({ prefix: 'lfc-init', sha: shortSha, envVarsHash });
       let ecrRepo = deployable?.ecr;
 
-      const { lifecycleDefaults, app_setup, buildDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+      const { lifecycleDefaults, app_setup, buildDefaults, secretProviders } =
+        await GlobalConfigService.getInstance().getAllConfigs();
       const { ecrDomain, ecrRegistry: registry } = lifecycleDefaults;
 
       const serviceName = deploy.build?.enableFullYaml ? deployable?.name : deploy.service?.name;
@@ -1092,103 +1209,23 @@ export default class DeployService extends BaseService {
         if (isNativeBuilderEngine(deployable.builder?.engine)) {
           getLogger().info(`Image: building engine=${deployable.builder.engine}`);
 
-          let buildSecretNames: string[] = [];
-          let secretEnvKeys: Set<string> = new Set();
-          const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
-          const secretProviders = globalConfigs.secretProviders;
+          const syncedExternalSecrets = await this.syncServiceExternalSecrets({
+            deploy,
+            serviceName: deployable.name,
+            secretProviders,
+            runUUID,
+          });
 
-          if (secretProviders) {
-            const buildEnvToProcess = (deploy.env || {}) as Record<string, string>;
-            const initEnvToProcess = (deploy.initEnv || {}) as Record<string, string>;
-            const buildSecretRefs = parseSecretRefsFromEnv(buildEnvToProcess);
-            const initSecretRefs = parseSecretRefsFromEnv(initEnvToProcess);
-            const buildSecretRefKeys = new Set(buildSecretRefs.map((ref) => ref.envKey));
-            const combinedSecretEnvEntries = new Map<string, string>();
-            const conflictingSecretEnvKeys = new Set<string>();
-
-            const addSecretRef = (envKey: string, value: string) => {
-              const existingValue = combinedSecretEnvEntries.get(envKey);
-
-              if (existingValue && existingValue !== value) {
-                conflictingSecretEnvKeys.add(envKey);
-                return;
-              }
-
-              combinedSecretEnvEntries.set(envKey, value);
-            };
-
-            buildSecretRefs.forEach((ref) => addSecretRef(ref.envKey, buildEnvToProcess[ref.envKey]));
-            initSecretRefs.forEach((ref) => addSecretRef(ref.envKey, initEnvToProcess[ref.envKey]));
-
-            if (conflictingSecretEnvKeys.size > 0) {
-              getLogger().error(
-                `Build: secret env conflict service=${deployable.name} keys=[${Array.from(
-                  conflictingSecretEnvKeys
-                ).join(', ')}]`
-              );
-              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-              return false;
-            }
-
-            const envToProcess = Object.fromEntries(combinedSecretEnvEntries);
-
-            if (Object.keys(envToProcess).length > 0) {
-              const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
-              await ensureNamespaceExists(deploy.build.namespace);
-
-              const secretProcessor = new SecretProcessor(secretProviders);
-
-              const secretResult = await secretProcessor.processEnvSecrets({
-                env: envToProcess,
-                serviceName: deployable.name,
-                namespace: deploy.build.namespace,
-                buildUuid: deploy.uuid,
-              });
-
-              secretEnvKeys = new Set(
-                secretResult.secretRefs.filter((ref) => buildSecretRefKeys.has(ref.envKey)).map((ref) => ref.envKey)
-              );
-
-              if (secretResult.warnings.length > 0) {
-                getLogger().warn(
-                  `Build: secret processing warnings service=${deployable.name} warnings=${secretResult.warnings.join(
-                    ', '
-                  )}`
-                );
-              }
-
-              const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
-
-              if (secretNames.length > 0) {
-                getLogger().info(`Build: waiting for secrets to sync secrets=[${secretNames.join(', ')}]`);
-
-                const providerTimeouts = Object.values(secretProviders)
-                  .map((p) => p.secretSyncTimeout)
-                  .filter((t): t is number => t !== undefined);
-                const timeout = providerTimeouts.length > 0 ? Math.max(...providerTimeouts) * 1000 : 60000;
-
-                try {
-                  await secretProcessor.waitForSecretSync(
-                    secretResult.expectedKeysPerSecret,
-                    deploy.build.namespace,
-                    timeout,
-                    secretResult.syncTokensPerSecret
-                  );
-                  buildSecretNames = secretNames;
-                  getLogger().info(`Build: secrets synced count=${buildSecretNames.length}`);
-                } catch (error) {
-                  getLogger().error({ error }, `Build: secret sync failed service=${deployable.name}`);
-                  await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
-                  return false;
-                }
-              }
-            }
+          if (!syncedExternalSecrets) {
+            return false;
           }
 
           const filteredEnvVars =
-            secretEnvKeys.size > 0
+            syncedExternalSecrets.buildSecretEnvKeys.size > 0
               ? Object.fromEntries(
-                  Object.entries(buildOptions.envVars || {}).filter(([key]) => !secretEnvKeys.has(key))
+                  Object.entries(buildOptions.envVars || {}).filter(
+                    ([key]) => !syncedExternalSecrets.buildSecretEnvKeys.has(key)
+                  )
                 )
               : buildOptions.envVars;
 
@@ -1202,8 +1239,8 @@ export default class DeployService extends BaseService {
             cacheRegistry: buildDefaults?.cacheRegistry,
             resources: deployable.builder?.resources,
             podAnnotations: deployable.builder?.podAnnotations,
-            secretRefs: buildSecretNames,
-            secretEnvKeys: Array.from(secretEnvKeys),
+            secretRefs: syncedExternalSecrets.secretNames,
+            secretEnvKeys: Array.from(syncedExternalSecrets.buildSecretEnvKeys),
           };
 
           if (!initDockerfilePath) {
@@ -1253,6 +1290,18 @@ export default class DeployService extends BaseService {
         }
       } else {
         getLogger().info('Image: skipped reason=exists');
+        if (isNativeBuilderEngine(deployable.builder?.engine)) {
+          const syncedExternalSecrets = await this.syncServiceExternalSecrets({
+            deploy,
+            serviceName: deployable.name,
+            secretProviders,
+            runUUID,
+          });
+
+          if (!syncedExternalSecrets) {
+            return false;
+          }
+        }
         await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT }, runUUID);
         return true;
