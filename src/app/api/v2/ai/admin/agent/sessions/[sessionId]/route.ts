@@ -50,6 +50,12 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '403':
+ *         description: Forbidden
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '404':
  *         description: Session not found
  *         content:
@@ -74,4 +80,4 @@ const getHandler = async (req: NextRequest, { params }: { params: { sessionId: s
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { roles: ['admin'] });

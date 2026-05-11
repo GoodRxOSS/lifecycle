@@ -28,6 +28,13 @@ describe('isReadOnlyWorkspaceCommand', () => {
     expect(isReadOnlyWorkspaceCommand('rg lifecycle src | head -5')).toBe(true);
   });
 
+  it('allows Node syntax checks as read-only inspection', () => {
+    expect(isReadOnlyWorkspaceCommand('node -c sample-service/app.js')).toBe(true);
+    expect(isReadOnlyWorkspaceCommand('node --check src/index.js')).toBe(true);
+    expect(isReadOnlyWorkspaceCommand('node -e "console.log(1)"')).toBe(false);
+    expect(isReadOnlyWorkspaceCommand('node sample-service/app.js')).toBe(false);
+  });
+
   it('rejects mutating git and package manager commands', () => {
     expect(isReadOnlyWorkspaceCommand('git push -u origin feature-branch')).toBe(false);
     expect(isReadOnlyWorkspaceCommand('pnpm install')).toBe(false);

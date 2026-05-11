@@ -15,14 +15,11 @@
  */
 
 import AgentSession from 'server/models/AgentSession';
-import AgentRun from 'server/models/AgentRun';
-import AgentSessionService, {
-  ActiveAgentRunSuspensionError,
-  AGENT_RUN_TERMINAL_STATUSES,
-} from 'server/services/agentSession';
+import AgentSessionService from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
 import { AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import { resolveAgentSessionCleanupConfig } from 'server/lib/agentSession/runtimeConfig';
+import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
 
 const logger = () => getLogger();
 
@@ -78,24 +75,17 @@ export async function processAgentSessionCleanup(): Promise<void> {
         continue;
       }
 
-      if (session.status === 'active' && session.sessionKind === AgentSessionKind.CHAT) {
-        const activeRun = await AgentRun.query()
-          .where({ sessionId: session.id })
-          .whereNotIn('status', AGENT_RUN_TERMINAL_STATUSES)
-          .first();
-        if (activeRun) {
-          logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=active_run`);
-          continue;
-        }
-      }
-
       logger().info(
         `Session: cleanup starting sessionId=${sessionId} status=${session.status} lastActivity=${session.lastActivity}`
       );
       await AgentSessionService.endSession(sessionId);
     } catch (err) {
-      if (err instanceof ActiveAgentRunSuspensionError) {
-        logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=active_run`);
+      if (err instanceof WorkspaceActionBlockedError) {
+        if (err.reason === 'active_run') {
+          logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=active_run`);
+        } else {
+          logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=action_in_progress`);
+        }
         continue;
       }
       logger().error({ error: err, sessionId }, `Session: cleanup failed sessionId=${sessionId}`);

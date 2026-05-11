@@ -23,6 +23,7 @@ import { decrypt } from 'server/lib/encryption';
 import LifecycleAiSdkHarness from 'server/services/agent/LifecycleAiSdkHarness';
 import AgentRunService from 'server/services/agent/RunService';
 import { AgentRunOwnershipLostError } from 'server/services/agent/AgentRunOwnershipLostError';
+import { AgentRunTerminalFailure } from 'server/services/agent/errors';
 import type { AgentRunExecuteJob } from 'server/services/agent/RunQueueService';
 
 const logger = () => getLogger();
@@ -37,6 +38,10 @@ function requireJobString(value: unknown, field: keyof AgentRunExecuteJob): stri
 
 function buildExecutionOwner(jobId: string): string {
   return `bull:${jobId}:${os.hostname()}:${process.pid}:${randomBytes(6).toString('hex')}`;
+}
+
+function isResumeStateInvalidFailure(error: unknown): error is AgentRunTerminalFailure {
+  return error instanceof AgentRunTerminalFailure && error.code === 'run_resume_state_invalid';
 }
 
 export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Promise<void> {
@@ -78,6 +83,48 @@ export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Prom
           },
           `AgentExec: ownership lost runId=${run.uuid} owner=${executionOwner}`
         );
+        return;
+      }
+
+      if ((job.data.reason || 'submit') === 'resume' && isResumeStateInvalidFailure(error)) {
+        await AgentRunService.markWaitingForInputForRecovery(
+          run.uuid,
+          {
+            decision: 'manual_recovery_required',
+            reason: 'saved_state_invalid',
+            previousStatus: run.status,
+            previousOwner: executionOwner,
+            leaseExpiresAt: run.leaseExpiresAt || null,
+            evaluatedAt: new Date().toISOString(),
+          },
+          {
+            expectedExecutionOwner: executionOwner,
+            allowActiveLease: true,
+            errorCode: error.code,
+            message: error.message,
+            dispatchAttemptId,
+            detail: error.details,
+          }
+        ).catch((recoveryRecordError) => {
+          if (recoveryRecordError instanceof AgentRunOwnershipLostError) {
+            logger().info(
+              {
+                runId: run.uuid,
+                owner: executionOwner,
+                currentStatus: recoveryRecordError.currentStatus || null,
+                currentOwner: recoveryRecordError.currentExecutionOwner || null,
+              },
+              `AgentExec: ownership lost runId=${run.uuid} owner=${executionOwner}`
+            );
+            return;
+          }
+
+          logger().warn(
+            { error: recoveryRecordError, runId: run.uuid },
+            `AgentExec: recovery pause record failed runId=${run.uuid}`
+          );
+          throw recoveryRecordError;
+        });
         return;
       }
 

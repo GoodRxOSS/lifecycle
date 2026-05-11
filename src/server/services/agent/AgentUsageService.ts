@@ -18,7 +18,7 @@ import AgentRun from 'server/models/AgentRun';
 import type { AgentRunStatus } from './types';
 import AgentThreadService from './ThreadService';
 
-const OPTIONAL_USAGE_FIELDS = [
+const OPTIONAL_USAGE_NUMERIC_FIELDS = [
   'inputTokens',
   'outputTokens',
   'reasoningTokens',
@@ -27,9 +27,11 @@ const OPTIONAL_USAGE_FIELDS = [
   'cacheReadInputTokens',
   'nonCachedInputTokens',
   'textOutputTokens',
+  'totalCostUsd',
+  'estimatedCostUsd',
 ] as const;
 
-type OptionalUsageField = (typeof OPTIONAL_USAGE_FIELDS)[number];
+type OptionalUsageField = (typeof OPTIONAL_USAGE_NUMERIC_FIELDS)[number];
 type UsageRecord = Partial<Record<OptionalUsageField | 'totalTokens', unknown>>;
 
 const MISSING_USAGE_STATUSES: AgentRunStatus[] = [
@@ -60,6 +62,8 @@ export interface AgentUsageSummary {
   cacheReadInputTokens?: number;
   nonCachedInputTokens?: number;
   textOutputTokens?: number;
+  totalCostUsd?: number;
+  estimatedCostUsd?: number;
 }
 
 export interface AgentUsageByModel extends AgentUsageSummary {
@@ -129,8 +133,8 @@ function readExactTotal(usageSummary: UsageRecord): number | undefined {
   return Number.isFinite(computedTotal) ? computedTotal : undefined;
 }
 
-function addOptionalUsageFields(target: AgentUsageSummary, usageSummary: UsageRecord): void {
-  for (const field of OPTIONAL_USAGE_FIELDS) {
+function addOptionalUsageNumericFields(target: AgentUsageSummary, usageSummary: UsageRecord): void {
+  for (const field of OPTIONAL_USAGE_NUMERIC_FIELDS) {
     const amount = readFiniteNumber(usageSummary[field]);
     if (amount !== undefined) {
       target[field] = (target[field] ?? 0) + amount;
@@ -212,8 +216,8 @@ export default class AgentUsageService {
         bucket.missingUsageRunCount += 1;
       }
 
-      addOptionalUsageFields(usageSummary, runUsageSummary);
-      addOptionalUsageFields(bucket.usageSummary, runUsageSummary);
+      addOptionalUsageNumericFields(usageSummary, runUsageSummary);
+      addOptionalUsageNumericFields(bucket.usageSummary, runUsageSummary);
     }
 
     return {

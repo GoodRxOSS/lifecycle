@@ -20,7 +20,9 @@ import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import AgentSource from 'server/models/AgentSource';
 import AgentThread from 'server/models/AgentThread';
 import type { PaginationMetadata } from 'server/lib/paginate';
-import { AgentChatStatus, AgentSessionKind } from 'shared/constants';
+import { raw } from 'objection';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
+import { normalizeWorkspaceRuntimeFailure } from 'server/lib/agentSession/startupFailureState';
 import AgentThreadService from './ThreadService';
 import AgentSandboxService from './SandboxService';
 import AgentUsageService, { type AgentUsageAggregate } from './AgentUsageService';
@@ -39,7 +41,20 @@ interface SessionRecordRelations {
   sandbox: AgentSandbox | null;
   exposures: AgentSandboxExposure[];
   defaultThread: AgentThread | null;
+  conversationSummary: AgentSessionConversationSummary;
   usage: AgentUsageAggregate;
+}
+
+interface AgentSessionConversationSummary {
+  activeTitle: string | null;
+  conversationCount: number;
+  lastActivityAt: string | null;
+}
+
+interface AgentThreadConversationSummaryRow {
+  sessionId: number | string;
+  conversationCount: number | string;
+  lastActivityAt?: string | Date | null;
 }
 
 function mapSessionStatus(session: AgentSession): 'ready' | 'ended' | 'error' {
@@ -85,6 +100,168 @@ function readSourceDefaultProvider(source: AgentSource): string | null {
 
   const provider = (defaults as Record<string, unknown>).provider;
   return typeof provider === 'string' && provider.trim() ? provider.trim() : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function serializeWorkspaceStorageProviderState(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const workspaceStorage = {
+    ...(readString(value.size) ? { size: readString(value.size) as string } : {}),
+    ...(readString(value.accessMode) ? { accessMode: readString(value.accessMode) as string } : {}),
+    ...(readString(value.pvcName) ? { pvcName: readString(value.pvcName) as string } : {}),
+  };
+
+  return Object.keys(workspaceStorage).length > 0 ? workspaceStorage : undefined;
+}
+
+function serializeSelectedServicesProviderState(value: unknown): Array<Record<string, string>> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const selectedServices = value
+    .filter(isRecord)
+    .map((service) => ({
+      ...(readString(service.name) ? { name: readString(service.name) as string } : {}),
+      ...(readString(service.repositoryFullName)
+        ? { repositoryFullName: readString(service.repositoryFullName) as string }
+        : {}),
+      ...(readString(service.branch) ? { branch: readString(service.branch) as string } : {}),
+      ...(readString(service.deployableName) ? { deployableName: readString(service.deployableName) as string } : {}),
+      ...(readString(service.deployUuid) ? { deployUuid: readString(service.deployUuid) as string } : {}),
+    }))
+    .filter((service) => Object.keys(service).length > 0);
+
+  return selectedServices.length > 0 ? selectedServices : undefined;
+}
+
+function serializeProviderState(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const workspaceStorage = serializeWorkspaceStorageProviderState(value.workspaceStorage);
+  const selectedServices = serializeSelectedServicesProviderState(value.selectedServices);
+
+  return {
+    ...(readString(value.namespace) ? { namespace: readString(value.namespace) as string } : {}),
+    ...(readString(value.podName) ? { podName: readString(value.podName) as string } : {}),
+    ...(readString(value.pvcName) ? { pvcName: readString(value.pvcName) as string } : {}),
+    ...(workspaceStorage ? { workspaceStorage } : {}),
+    ...(selectedServices ? { selectedServices } : {}),
+  };
+}
+
+function serializeSandboxError(sandbox: AgentSandbox) {
+  if (!sandbox.error && sandbox.status !== 'failed') {
+    return null;
+  }
+
+  return normalizeWorkspaceRuntimeFailure(sandbox.error, {
+    origin: 'legacy',
+    retryable: false,
+  });
+}
+
+function serializeEmptySandbox(session: AgentSession) {
+  const failedWorkspace = session.workspaceStatus === AgentWorkspaceStatus.FAILED;
+
+  return {
+    id: null,
+    generation: null,
+    provider: null,
+    status: failedWorkspace ? 'failed' : 'none',
+    capabilitySnapshot: {},
+    providerState: {},
+    exposures: [],
+    suspendedAt: null,
+    endedAt: null,
+    error: failedWorkspace
+      ? normalizeWorkspaceRuntimeFailure(null, {
+          origin: 'legacy',
+          retryable: false,
+        })
+      : null,
+    createdAt: null,
+    updatedAt: null,
+  };
+}
+
+function normalizeTimestamp(value: string | Date | null | undefined): { time: number; iso: string } | null {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    const time = value.getTime();
+    return Number.isNaN(time) ? null : { time, iso: value.toISOString() };
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const hasExplicitTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
+  const parseableValue = hasExplicitTimezone ? trimmed : `${trimmed.replace(' ', 'T')}Z`;
+  const time = Date.parse(parseableValue);
+  return Number.isNaN(time) ? null : { time, iso: new Date(time).toISOString() };
+}
+
+function latestTimestamp(values: Array<string | Date | null | undefined>): string | null {
+  let latest: { time: number; iso: string } | null = null;
+
+  for (const value of values) {
+    const timestamp = normalizeTimestamp(value);
+    if (!timestamp) {
+      continue;
+    }
+
+    if (!latest || timestamp.time > latest.time) {
+      latest = timestamp;
+    }
+  }
+
+  return latest?.iso || null;
+}
+
+function readUsefulThreadTitle(thread: AgentThread | null): string | null {
+  const title = thread?.title?.trim();
+  if (!title || title.toLowerCase() === 'default thread') {
+    return null;
+  }
+
+  return title;
+}
+
+function resolveConversationSummary(
+  session: AgentSession,
+  activeDefaultThread: AgentThread | null,
+  threadSummary: AgentThreadConversationSummaryRow | null
+): AgentSessionConversationSummary {
+  const parsedCount = Number(threadSummary?.conversationCount || 0);
+  const conversationCount = Number.isFinite(parsedCount) ? Math.max(0, parsedCount) : 0;
+
+  return {
+    activeTitle: readUsefulThreadTitle(activeDefaultThread),
+    conversationCount,
+    lastActivityAt: latestTimestamp([
+      threadSummary?.lastActivityAt,
+      session.lastActivity,
+      session.updatedAt,
+      session.createdAt,
+    ]),
+  };
 }
 
 export default class AgentSessionReadService {
@@ -173,26 +350,16 @@ export default class AgentSessionReadService {
             provider: sandbox.provider,
             status: sandbox.status,
             capabilitySnapshot: sandbox.capabilitySnapshot || {},
+            providerState: serializeProviderState(sandbox.providerState),
             exposures: relations.exposures.map((exposure) => AgentSandboxService.serializeSandboxExposure(exposure)),
             suspendedAt: sandbox.suspendedAt,
             endedAt: sandbox.endedAt,
-            error: sandbox.error,
+            error: serializeSandboxError(sandbox),
             createdAt: sandbox.createdAt || null,
             updatedAt: sandbox.updatedAt || null,
           }
-        : {
-            id: null,
-            generation: null,
-            provider: null,
-            status: 'none',
-            capabilitySnapshot: {},
-            exposures: [],
-            suspendedAt: null,
-            endedAt: null,
-            error: null,
-            createdAt: null,
-            updatedAt: null,
-          },
+        : serializeEmptySandbox(session),
+      conversationSummary: relations.conversationSummary,
       usage: relations.usage,
     };
   }
@@ -206,17 +373,36 @@ export default class AgentSessionReadService {
     const defaultThreadIds = sessions
       .map((session) => session.defaultThreadId)
       .filter((threadId): threadId is number => Number.isInteger(threadId));
-    const [sources, sandboxes, defaultThreads, fallbackThreads, usageBySessionId] = await Promise.all([
-      AgentSource.query().whereIn('sessionId', sessionIds),
-      AgentSandbox.query().whereIn('sessionId', sessionIds).orderBy('generation', 'desc').orderBy('createdAt', 'desc'),
-      defaultThreadIds.length ? AgentThread.query().whereIn('id', defaultThreadIds) : Promise.resolve([]),
-      AgentThread.query()
-        .whereIn('sessionId', sessionIds)
-        .where({ isDefault: true })
-        .whereNull('archivedAt')
-        .orderBy('createdAt', 'asc'),
-      AgentUsageService.aggregateSessionsUsage(sessionIds),
-    ]);
+    const [sources, sandboxes, defaultThreads, activeDefaultThreads, threadSummaryRows, usageBySessionId] =
+      await Promise.all([
+        AgentSource.query().whereIn('sessionId', sessionIds),
+        AgentSandbox.query()
+          .whereIn('sessionId', sessionIds)
+          .orderBy('generation', 'desc')
+          .orderBy('createdAt', 'desc'),
+        defaultThreadIds.length ? AgentThread.query().whereIn('id', defaultThreadIds) : Promise.resolve([]),
+        AgentThread.query()
+          .whereIn('sessionId', sessionIds)
+          .where({ isDefault: true })
+          .whereNull('archivedAt')
+          .orderBy('createdAt', 'asc'),
+        AgentThread.query()
+          .whereIn('sessionId', sessionIds)
+          .whereNull('archivedAt')
+          .select(
+            'sessionId',
+            raw('count("id")::int as "conversationCount"'),
+            raw(`
+            max(greatest(
+              coalesce("lastRunAt", '-infinity'::timestamp),
+              coalesce("updatedAt", '-infinity'::timestamp),
+              coalesce("createdAt", '-infinity'::timestamp)
+            )) as "lastActivityAt"
+          `)
+          )
+          .groupBy('sessionId'),
+        AgentUsageService.aggregateSessionsUsage(sessionIds),
+      ]);
     const sourceBySessionId = new Map<number, AgentSource>();
     for (const source of sources) {
       sourceBySessionId.set(source.sessionId, source);
@@ -245,8 +431,13 @@ export default class AgentSessionReadService {
       defaultThreadById.set(thread.id, thread);
     }
 
+    const threadSummaryBySessionId = new Map<number, AgentThreadConversationSummaryRow>();
+    for (const row of threadSummaryRows as AgentThreadConversationSummaryRow[]) {
+      threadSummaryBySessionId.set(Number(row.sessionId), row);
+    }
+
     const fallbackThreadBySessionId = new Map<number, AgentThread>();
-    for (const thread of fallbackThreads) {
+    for (const thread of activeDefaultThreads) {
       if (!fallbackThreadBySessionId.has(thread.sessionId)) {
         fallbackThreadBySessionId.set(thread.sessionId, thread);
       }
@@ -268,6 +459,11 @@ export default class AgentSessionReadService {
         source,
         sandbox,
         defaultThread,
+        conversationSummary: resolveConversationSummary(
+          session,
+          fallbackThreadBySessionId.get(session.id) || null,
+          threadSummaryBySessionId.get(session.id) || null
+        ),
         exposures: sandbox ? exposuresBySandboxId.get(sandbox.id) || [] : [],
         usage: usageBySessionId.get(session.id) || AgentUsageService.aggregateRuns([]),
       });

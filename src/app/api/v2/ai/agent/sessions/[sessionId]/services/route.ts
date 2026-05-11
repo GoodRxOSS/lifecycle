@@ -205,24 +205,9 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                       nullable: true
  *                       format: date-time
  *                     startupFailure:
- *                       type: object
+ *                       allOf:
+ *                         - $ref: '#/components/schemas/WorkspaceRuntimeFailure'
  *                       nullable: true
- *                       required:
- *                         - stage
- *                         - title
- *                         - message
- *                         - recordedAt
- *                       properties:
- *                         stage:
- *                           type: string
- *                           enum: [create_session, connect_runtime, attach_services]
- *                         title:
- *                           type: string
- *                         message:
- *                           type: string
- *                         recordedAt:
- *                           type: string
- *                           format: date-time
  *                 error:
  *                   nullable: true
  *       '400':
@@ -248,33 +233,42 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ses
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
 
-  const body = (await req.json()) as {
+  let body: {
     services?: unknown[];
   };
+  try {
+    body = (await req.json()) as {
+      services?: unknown[];
+    };
+  } catch {
+    return errorResponse(new Error('Invalid JSON body'), { status: 400 }, req);
+  }
+
   if (!Array.isArray(body.services) || body.services.length === 0) {
     return errorResponse(new Error('services is required'), { status: 400 }, req);
   }
 
-  const requestedServices = body.services.map((service) => {
-    if (typeof service === 'string') {
-      return service;
-    }
+  let requestedServices: Array<string | RequestedAgentSessionServiceRef>;
+  try {
+    requestedServices = body.services.map((service) => {
+      if (typeof service === 'string') {
+        return service;
+      }
 
-    if (isRequestedSessionServiceRef(service)) {
-      return service;
-    }
+      if (isRequestedSessionServiceRef(service)) {
+        return service;
+      }
 
-    throw new Error('services must be an array of service names or repo-qualified service references');
-  });
+      throw new Error('services must be an array of service names or repo-qualified service references');
+    });
+  } catch (error) {
+    return errorResponse(error, { status: 400 }, req);
+  }
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);
-  if (!session) {
+  if (!session || session.userId !== userIdentity.userId) {
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
-  }
-
-  if (session.userId !== userIdentity.userId) {
-    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
   }
 
   try {

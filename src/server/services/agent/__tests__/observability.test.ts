@@ -202,4 +202,41 @@ describe('agent observability helpers', () => {
       responseId: 'resp_final',
     });
   });
+
+  it('estimates cost from configured model pricing', () => {
+    const tracker = new AgentRunObservabilityTracker({
+      inputCostPerMillion: 2,
+      outputCostPerMillion: 10,
+    });
+
+    const liveSummary = tracker.updateFromStep({
+      usage: {
+        inputTokens: 1_000_000,
+        outputTokens: 100_000,
+        totalTokens: 1_100_000,
+      },
+      stepNumber: 1,
+    });
+
+    expect(liveSummary).toMatchObject({
+      estimatedCostUsd: 3,
+      estimatedCostSource: 'configured_model_pricing',
+    });
+
+    const finalSummary = tracker.finalize({
+      usage: {
+        inputTokens: 500_000,
+        outputTokens: 50_000,
+        totalTokens: 550_000,
+      },
+    });
+
+    expect(finalSummary).toMatchObject({
+      inputTokens: 500_000,
+      outputTokens: 50_000,
+      totalTokens: 550_000,
+      estimatedCostUsd: 1.5,
+      estimatedCostSource: 'configured_model_pricing',
+    });
+  });
 });

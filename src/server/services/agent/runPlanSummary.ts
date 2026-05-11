@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import type { AgentRunPlanPublicSummary, AgentRunPlanSourceKind } from './runPlanTypes';
-import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
+import type { AgentDebugRunIntent, AgentRunPlanPublicSummary, AgentRunPlanSourceKind } from './runPlanTypes';
+import { isAgentDebugRunIntent, isAgentRunPlanSnapshotV1 } from './runPlanTypes';
 import { isAgentCapabilityAvailability, isAgentCapabilityCatalogId } from './capabilityCatalog';
 import type { AgentApprovalMode } from './types';
 
@@ -45,6 +45,10 @@ function readApprovalMode(value: unknown): AgentApprovalMode | null {
   }
 
   return null;
+}
+
+function readDebugRunIntent(value: unknown): AgentDebugRunIntent | null {
+  return isAgentDebugRunIntent(value) ? value : null;
 }
 
 function readStringArray(value: unknown): string[] {
@@ -129,6 +133,7 @@ export function serializeRunPlanSummary(snapshot: unknown): AgentRunPlanPublicSu
   const approvalPolicy = runtime ? readRecord(runtime.approvalPolicy) : null;
   const runtimeOptions = runtime ? readRecord(runtime.runtimeOptions) : null;
   const capabilities = readRecord(snapshot.capabilities);
+  const debug = readRecord(snapshot.debug);
 
   if (
     !agent ||
@@ -153,6 +158,7 @@ export function serializeRunPlanSummary(snapshot: unknown): AgentRunPlanPublicSu
   const defaultMode = readApprovalMode(approvalPolicy.defaultMode);
   const effectiveCapabilities = readCapabilitySummaries(capabilities.resolvedCapabilityAccess);
   const selectedCapabilityIds = readCapabilityIds(capabilities.selectedRuntimeCapabilityIds);
+  const debugIntent = debug ? readDebugRunIntent(debug.resolvedIntent) : null;
 
   if (
     !agentId ||
@@ -200,6 +206,13 @@ export function serializeRunPlanSummary(snapshot: unknown): AgentRunPlanPublicSu
         mcpChoiceIds: readStringArray(capabilities.selectedRuntimeMcpChoiceIds),
       },
     },
+    ...(debugIntent
+      ? {
+          debug: {
+            intent: debugIntent,
+          },
+        }
+      : {}),
     warnings: readWarningSummary(snapshot.warnings),
   };
 }

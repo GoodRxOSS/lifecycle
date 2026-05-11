@@ -56,6 +56,8 @@ export interface AgentRunUsageSummary {
   textOutputTokens?: number;
   totalCostUsd?: number;
   costSource?: string;
+  estimatedCostUsd?: number;
+  estimatedCostSource?: string;
   finishReason?: string;
   rawFinishReason?: string;
   warningCount?: number;
@@ -137,6 +139,8 @@ export interface AgentModelSummary {
 export interface AgentResolvedModelSelection {
   provider: string;
   modelId: string;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
 }
 
 export interface AgentRunExecutionOptions {

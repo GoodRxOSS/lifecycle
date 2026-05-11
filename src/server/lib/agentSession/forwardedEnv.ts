@@ -19,7 +19,7 @@ import Deploy from 'server/models/Deploy';
 import type { DevConfig } from 'server/models/yaml/YamlService';
 import { deleteExternalSecret, generateSecretName } from 'server/lib/kubernetes/externalSecret';
 import { getLogger } from 'server/lib/logger';
-import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from 'server/lib/secretRefs';
+import { parseSecretRefsFromEnv, type SecretRefWithEnvKey } from 'server/lib/secretRefs';
 import { SecretProcessor } from 'server/services/secretProcessor';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -37,6 +37,8 @@ export interface ForwardedAgentEnvResolution {
   secretProviders: string[];
   secretServiceName: string;
 }
+
+export type ForwardedAgentEnvPlan = ForwardedAgentEnvResolution;
 
 function getCoreApi(): k8s.CoreV1Api {
   const kc = new k8s.KubeConfig();
@@ -61,12 +63,10 @@ export function getForwardedAgentEnvSecretServiceName(sessionUuid: string): stri
   return `agent-env-${sessionUuid}`;
 }
 
-export async function resolveForwardedAgentEnv(
+export async function planForwardedAgentEnv(
   services: ForwardedAgentEnvService[] | undefined,
-  namespace: string,
-  sessionUuid: string,
-  buildUuid?: string
-): Promise<ForwardedAgentEnvResolution> {
+  sessionUuid: string
+): Promise<ForwardedAgentEnvPlan> {
   const forwardedEnv: Record<string, string> = {};
   const selectedServices = services || [];
   const servicesRequestingForwardedEnv = selectedServices.filter(
@@ -120,19 +120,32 @@ export async function resolveForwardedAgentEnv(
 
   const secretRefs = parseSecretRefsFromEnv(forwardedEnv);
   const secretServiceName = getForwardedAgentEnvSecretServiceName(sessionUuid);
-  if (secretRefs.length === 0) {
-    return {
-      env: forwardedEnv,
-      secretRefs: [],
-      secretProviders: [],
-      secretServiceName,
-    };
+
+  return {
+    env: forwardedEnv,
+    secretRefs,
+    secretProviders: [...new Set(secretRefs.map((ref) => ref.provider))],
+    secretServiceName,
+  };
+}
+
+export async function applyForwardedAgentEnvSecrets({
+  plan,
+  namespace,
+  buildUuid,
+}: {
+  plan: ForwardedAgentEnvPlan;
+  namespace: string;
+  buildUuid?: string;
+}): Promise<ForwardedAgentEnvResolution> {
+  if (plan.secretRefs.length === 0) {
+    return plan;
   }
 
   const globalConfigs = await GlobalConfigService.getInstance().getAllConfigs();
   const secretProviders = globalConfigs.secretProviders;
   if (!secretProviders) {
-    const secretKeys = secretRefs.map((ref) => ref.envKey).join(', ');
+    const secretKeys = plan.secretRefs.map((ref) => ref.envKey).join(', ');
     throw new Error(
       `Agent env forwarding for ${secretKeys} requires configured secret providers because the selected service uses native secret references.`
     );
@@ -140,8 +153,8 @@ export async function resolveForwardedAgentEnv(
 
   const secretProcessor = new SecretProcessor(secretProviders);
   const secretResult = await secretProcessor.processEnvSecrets({
-    env: forwardedEnv,
-    serviceName: secretServiceName,
+    env: plan.env,
+    serviceName: plan.secretServiceName,
     namespace,
     buildUuid,
   });
@@ -166,11 +179,21 @@ export async function resolveForwardedAgentEnv(
   }
 
   return {
-    env: forwardedEnv,
+    env: plan.env,
     secretRefs: secretResult.secretRefs,
     secretProviders: [...new Set(secretResult.secretRefs.map((ref) => ref.provider))],
-    secretServiceName,
+    secretServiceName: plan.secretServiceName,
   };
+}
+
+export async function resolveForwardedAgentEnv(
+  services: ForwardedAgentEnvService[] | undefined,
+  namespace: string,
+  sessionUuid: string,
+  buildUuid?: string
+): Promise<ForwardedAgentEnvResolution> {
+  const plan = await planForwardedAgentEnv(services, sessionUuid);
+  return applyForwardedAgentEnvSecrets({ plan, namespace, buildUuid });
 }
 
 export async function cleanupForwardedAgentEnvSecrets(

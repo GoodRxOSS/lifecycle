@@ -93,6 +93,14 @@ const agentUsageSummaryProperties = {
   cacheReadInputTokens: { type: 'number' },
   nonCachedInputTokens: { type: 'number' },
   textOutputTokens: { type: 'number' },
+  totalCostUsd: {
+    type: 'number',
+    description: 'Provider-reported USD cost when the model provider returns an explicit cost value.',
+  },
+  estimatedCostUsd: {
+    type: 'number',
+    description: 'Estimated USD cost calculated from configured per-million input and output token rates.',
+  },
 };
 
 export const openApiSpecificationForV2Api: OAS3Options = {
@@ -1224,6 +1232,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
               additionalProperties: false,
             },
+            debugIntent: {
+              type: 'string',
+              enum: ['diagnose', 'investigate', 'repair'],
+            },
             runtimeOptions: { $ref: '#/components/schemas/AgentRunRuntimeOptions' },
           },
           required: ['message'],
@@ -1240,6 +1252,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             runtimeOptions: {
               maxIterations: 12,
             },
+            debugIntent: 'diagnose',
           },
         },
 
@@ -1247,6 +1260,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             buildUuid: { type: 'string' },
+            selectedDeployUuid: { type: 'string' },
             defaults: {
               type: 'object',
               properties: {
@@ -1259,9 +1273,29 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
           example: {
             buildUuid: '00000000-0000-0000-0000-000000000000',
+            selectedDeployUuid: '11111111-1111-1111-1111-111111111111',
             defaults: {
               model: 'gpt-5.4',
             },
+          },
+        },
+
+        CreateAgentSessionThreadBody: {
+          type: 'object',
+          properties: {
+            title: {
+              type: 'string',
+              description: 'Optional display title for the new thread.',
+            },
+            sourceThreadId: {
+              type: 'string',
+              description: 'Optional source thread UUID whose safe thread settings should carry forward.',
+            },
+          },
+          additionalProperties: false,
+          example: {
+            title: 'New chat',
+            sourceThreadId: 'sample-thread-id',
           },
         },
 
@@ -1279,6 +1313,86 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
           },
           required: ['id', 'isDefault', 'metadata'],
+        },
+
+        AgentThreadLatestRunSummary: {
+          type: 'object',
+          nullable: true,
+          properties: {
+            id: { type: 'string' },
+            status: {
+              type: 'string',
+              enum: [
+                'queued',
+                'starting',
+                'running',
+                'waiting_for_approval',
+                'waiting_for_input',
+                'completed',
+                'failed',
+                'cancelled',
+              ],
+            },
+            requestedProvider: { type: 'string', nullable: true },
+            requestedModel: { type: 'string', nullable: true },
+            resolvedProvider: { type: 'string', nullable: true },
+            resolvedModel: { type: 'string', nullable: true },
+            provider: { type: 'string' },
+            model: { type: 'string' },
+            queuedAt: { type: 'string', format: 'date-time' },
+            startedAt: { type: 'string', format: 'date-time', nullable: true },
+            completedAt: { type: 'string', format: 'date-time', nullable: true },
+            cancelledAt: { type: 'string', format: 'date-time', nullable: true },
+            usageSummary: { type: 'object', additionalProperties: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: [
+            'id',
+            'status',
+            'requestedProvider',
+            'requestedModel',
+            'resolvedProvider',
+            'resolvedModel',
+            'provider',
+            'model',
+            'queuedAt',
+            'startedAt',
+            'completedAt',
+            'cancelledAt',
+            'usageSummary',
+            'createdAt',
+            'updatedAt',
+          ],
+          additionalProperties: false,
+        },
+
+        AgentThreadHistorySummary: {
+          type: 'object',
+          properties: {
+            messageCount: { type: 'integer' },
+            runCount: { type: 'integer' },
+            pendingActionsCount: { type: 'integer' },
+            latestRun: { $ref: '#/components/schemas/AgentThreadLatestRunSummary' },
+            lastActivityAt: { type: 'string', format: 'date-time', nullable: true },
+            usage: { $ref: '#/components/schemas/AgentUsageAggregate' },
+          },
+          required: ['messageCount', 'runCount', 'pendingActionsCount', 'latestRun', 'lastActivityAt', 'usage'],
+          additionalProperties: false,
+        },
+
+        AgentThreadHistoryEntry: {
+          allOf: [
+            { $ref: '#/components/schemas/AgentThread' },
+            {
+              type: 'object',
+              properties: {
+                summary: { $ref: '#/components/schemas/AgentThreadHistorySummary' },
+              },
+              required: ['summary'],
+              additionalProperties: false,
+            },
+          ],
         },
 
         AgentSessionDefaults: {
@@ -1299,7 +1413,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             status: { type: 'string', enum: ['requested', 'preparing', 'ready', 'failed', 'cleaned_up'] },
             input: { type: 'object', additionalProperties: true },
             sandboxRequirements: { type: 'object', additionalProperties: true },
-            error: { type: 'object', additionalProperties: true, nullable: true },
+            error: {
+              type: 'object',
+              additionalProperties: true,
+              nullable: true,
+            },
             preparedAt: { type: 'string', format: 'date-time', nullable: true },
             cleanedUpAt: { type: 'string', format: 'date-time', nullable: true },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
@@ -1325,6 +1443,98 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['id', 'kind', 'status', 'metadata'],
         },
 
+        WorkspaceRuntimeFailureStage: {
+          type: 'string',
+          enum: [
+            'create_session',
+            'prepare_infrastructure',
+            'connect_runtime',
+            'attach_services',
+            'suspend',
+            'resume',
+            'cleanup',
+          ],
+        },
+
+        WorkspaceRuntimeFailureOrigin: {
+          type: 'string',
+          enum: [
+            'agent_session',
+            'chat_runtime',
+            'sandbox_launch',
+            'manual_runtime',
+            'suspend',
+            'resume',
+            'cleanup',
+            'legacy',
+          ],
+        },
+
+        WorkspaceRuntimeFailure: {
+          type: 'object',
+          properties: {
+            stage: { $ref: '#/components/schemas/WorkspaceRuntimeFailureStage' },
+            title: { type: 'string' },
+            message: { type: 'string' },
+            recordedAt: { type: 'string', format: 'date-time' },
+            retryable: { type: 'boolean' },
+            origin: { $ref: '#/components/schemas/WorkspaceRuntimeFailureOrigin' },
+          },
+          required: ['stage', 'title', 'message', 'recordedAt', 'retryable', 'origin'],
+          additionalProperties: false,
+        },
+
+        WorkspaceRuntimeProviderWorkspaceStorage: {
+          type: 'object',
+          properties: {
+            size: { type: 'string' },
+            accessMode: { type: 'string' },
+            pvcName: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+
+        WorkspaceRuntimeProviderSelectedService: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            repositoryFullName: { type: 'string' },
+            branch: { type: 'string' },
+            deployableName: { type: 'string' },
+            deployUuid: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+
+        WorkspaceRuntimeProviderState: {
+          type: 'object',
+          properties: {
+            namespace: { type: 'string' },
+            podName: { type: 'string' },
+            pvcName: { type: 'string' },
+            workspaceStorage: { $ref: '#/components/schemas/WorkspaceRuntimeProviderWorkspaceStorage' },
+            selectedServices: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/WorkspaceRuntimeProviderSelectedService' },
+            },
+          },
+          additionalProperties: false,
+        },
+
+        WorkspaceFailureLinkData: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string' },
+            sessionUrl: { type: 'string' },
+            workspaceFailure: {
+              allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
+              nullable: true,
+            },
+          },
+          required: ['sessionId', 'sessionUrl', 'workspaceFailure'],
+          additionalProperties: false,
+        },
+
         AgentSandbox: {
           type: 'object',
           properties: {
@@ -1342,11 +1552,24 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             suspendedAt: { type: 'string', format: 'date-time', nullable: true },
             endedAt: { type: 'string', format: 'date-time', nullable: true },
-            error: { type: 'object', additionalProperties: true, nullable: true },
+            error: {
+              allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
+              nullable: true,
+            },
+            providerState: { $ref: '#/components/schemas/WorkspaceRuntimeProviderState' },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
           },
-          required: ['id', 'generation', 'provider', 'status', 'capabilitySnapshot', 'exposures', 'error'],
+          required: [
+            'id',
+            'generation',
+            'provider',
+            'status',
+            'capabilitySnapshot',
+            'exposures',
+            'error',
+            'providerState',
+          ],
         },
 
         AgentSessionSummary: {
@@ -1368,11 +1591,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
               required: ['id', 'status', 'userId', 'ownerGithubUsername', 'defaults', 'defaultThreadId'],
             },
+            conversationSummary: {
+              type: 'object',
+              properties: {
+                activeTitle: { type: 'string', nullable: true },
+                conversationCount: { type: 'integer', minimum: 0 },
+                lastActivityAt: { type: 'string', format: 'date-time', nullable: true },
+              },
+              required: ['activeTitle', 'conversationCount', 'lastActivityAt'],
+            },
             source: { $ref: '#/components/schemas/AgentSource' },
             sandbox: { $ref: '#/components/schemas/AgentSandbox' },
             usage: { $ref: '#/components/schemas/AgentUsageAggregate' },
           },
-          required: ['session', 'source', 'sandbox', 'usage'],
+          required: ['session', 'conversationSummary', 'source', 'sandbox', 'usage'],
         },
 
         BuildContextAgentChatContext: {
@@ -1389,6 +1621,61 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             repo: { type: 'string', nullable: true },
             branch: { type: 'string', nullable: true },
             pullRequestNumber: { type: 'integer', nullable: true },
+            selectedDeployUuid: { type: 'string', nullable: true },
+            selectedDeploy: {
+              type: 'object',
+              nullable: true,
+              properties: {
+                selectedDeployUuid: { type: 'string' },
+                deployId: { type: 'integer' },
+                deployableName: { type: 'string', nullable: true },
+                deployableType: { type: 'string', nullable: true },
+                repositoryFullName: { type: 'string', nullable: true },
+                branchName: { type: 'string', nullable: true },
+                serviceSha: { type: 'string', nullable: true },
+                dockerfilePath: { type: 'string', nullable: true },
+                initDockerfilePath: { type: 'string', nullable: true },
+                deployStatus: { type: 'string', nullable: true },
+                deployStatusMessage: { type: 'string', nullable: true },
+                dockerImage: { type: 'string', nullable: true },
+                buildPipelineId: { type: 'string', nullable: true },
+                deployPipelineId: { type: 'string', nullable: true },
+                source: { type: 'string', nullable: true },
+                helm: {
+                  type: 'object',
+                  nullable: true,
+                  properties: {
+                    chartName: { type: 'string', nullable: true },
+                    chartRepoUrl: { type: 'string', nullable: true },
+                    valueFiles: {
+                      type: 'array',
+                      items: { type: 'string' },
+                    },
+                  },
+                  required: ['chartName', 'chartRepoUrl', 'valueFiles'],
+                  additionalProperties: false,
+                },
+              },
+              required: [
+                'selectedDeployUuid',
+                'deployId',
+                'deployableName',
+                'deployableType',
+                'repositoryFullName',
+                'branchName',
+                'serviceSha',
+                'dockerfilePath',
+                'initDockerfilePath',
+                'deployStatus',
+                'deployStatusMessage',
+                'dockerImage',
+                'buildPipelineId',
+                'deployPipelineId',
+                'source',
+                'helm',
+              ],
+              additionalProperties: false,
+            },
             contextFreshAt: { type: 'string', format: 'date-time' },
           },
           required: [
@@ -1399,6 +1686,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'repo',
             'branch',
             'pullRequestNumber',
+            'selectedDeployUuid',
+            'selectedDeploy',
             'contextFreshAt',
           ],
           additionalProperties: false,
@@ -1481,8 +1770,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { type: 'object', additionalProperties: true },
             },
             startupFailure: {
-              type: 'object',
-              additionalProperties: true,
+              allOf: [{ $ref: '#/components/schemas/WorkspaceRuntimeFailure' }],
               nullable: true,
             },
             lastActivity: { type: 'string', format: 'date-time', nullable: true },
@@ -1654,6 +1942,17 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             runtime: { $ref: '#/components/schemas/AgentRunPlanRuntimeSummary' },
             approval: { $ref: '#/components/schemas/AgentRunPlanApprovalSummary' },
             capabilities: { $ref: '#/components/schemas/AgentRunPlanCapabilitiesSummary' },
+            debug: {
+              type: 'object',
+              properties: {
+                intent: {
+                  type: 'string',
+                  enum: ['diagnose', 'investigate', 'repair'],
+                },
+              },
+              required: ['intent'],
+              additionalProperties: false,
+            },
             warnings: {
               type: 'array',
               items: {
@@ -1669,6 +1968,33 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           },
           required: ['version', 'agent', 'source', 'model', 'runtime', 'approval', 'capabilities', 'warnings'],
           additionalProperties: false,
+        },
+
+        AgentRunRecovery: {
+          type: 'object',
+          properties: {
+            decision: {
+              type: 'string',
+              enum: ['auto_resume_allowed', 'replay_only', 'manual_recovery_required'],
+            },
+            reason: { type: 'string' },
+            previousStatus: {
+              allOf: [{ $ref: '#/components/schemas/AgentRunStatus' }],
+              nullable: true,
+            },
+            previousOwner: { type: 'string', nullable: true },
+            leaseExpiresAt: { type: 'string', format: 'date-time', nullable: true },
+            evaluatedAt: { type: 'string', format: 'date-time', nullable: true },
+            resumeAttemptId: { type: 'string', nullable: true },
+            dispatchAttemptId: { type: 'string', nullable: true },
+            detail: {
+              type: 'object',
+              additionalProperties: true,
+              nullable: true,
+            },
+          },
+          required: ['decision', 'reason'],
+          additionalProperties: true,
         },
 
         AgentRun: {
@@ -1695,6 +2021,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             usageSummary: { type: 'object', additionalProperties: true },
             policySnapshot: { type: 'object', additionalProperties: true },
             runPlan: { $ref: '#/components/schemas/AgentRunPlanSummary' },
+            recovery: {
+              allOf: [{ $ref: '#/components/schemas/AgentRunRecovery' }],
+              nullable: true,
+            },
             error: {
               allOf: [{ $ref: '#/components/schemas/AgentRunError' }],
               nullable: true,
@@ -1718,6 +2048,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'usageSummary',
             'policySnapshot',
             'runPlan',
+            'recovery',
           ],
         },
 
@@ -4018,6 +4349,140 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           required: ['scope', 'scopeType', 'capabilityPolicy', 'effectiveCapabilityPolicy', 'capabilities'],
+        },
+
+        AgentInstructionTemplateDefaultMetadata: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
+            hash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+          },
+          required: ['content', 'version', 'hash'],
+          additionalProperties: false,
+        },
+
+        AgentInstructionTemplateOverrideMetadata: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
+            hash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+            baseDefaultVersion: { type: 'integer', minimum: 1 },
+            baseDefaultHash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+            updatedBy: { type: 'string', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['content', 'version', 'hash', 'baseDefaultVersion', 'baseDefaultHash', 'updatedBy', 'updatedAt'],
+          additionalProperties: false,
+        },
+
+        AgentInstructionTemplateEffectiveMetadata: {
+          type: 'object',
+          properties: {
+            source: {
+              type: 'string',
+              enum: ['default', 'override'],
+            },
+            content: { type: 'string' },
+            version: { type: 'integer', minimum: 1 },
+            hash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+          },
+          required: ['source', 'content', 'version', 'hash'],
+          additionalProperties: false,
+        },
+
+        AgentInstructionTemplateSummary: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string' },
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            default: { $ref: '#/components/schemas/AgentInstructionTemplateDefaultMetadata' },
+            override: {
+              allOf: [{ $ref: '#/components/schemas/AgentInstructionTemplateOverrideMetadata' }],
+              nullable: true,
+            },
+            effective: { $ref: '#/components/schemas/AgentInstructionTemplateEffectiveMetadata' },
+          },
+          required: ['ref', 'name', 'description', 'default', 'override', 'effective'],
+          additionalProperties: false,
+        },
+
+        AgentInstructionTemplateDetail: {
+          allOf: [{ $ref: '#/components/schemas/AgentInstructionTemplateSummary' }],
+        },
+
+        UpdateAgentInstructionTemplateOverrideRequest: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', minLength: 1 },
+          },
+          required: ['content'],
+          additionalProperties: false,
+        },
+
+        ListAdminAgentInstructionTemplatesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    templates: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/AgentInstructionTemplateSummary' },
+                    },
+                  },
+                  required: ['templates'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentInstructionTemplateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    template: { $ref: '#/components/schemas/AgentInstructionTemplateDetail' },
+                  },
+                  required: ['template'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        MutateAdminAgentInstructionTemplateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    template: { $ref: '#/components/schemas/AgentInstructionTemplateDetail' },
+                  },
+                  required: ['template'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
         },
 
         UpdateAdminAgentCapabilitiesRequest: {

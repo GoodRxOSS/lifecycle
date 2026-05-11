@@ -151,7 +151,21 @@ export class UpdateFileTool extends BaseTool {
 
       const contentToCommit = newContent.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
 
-      if (currentFileContent) {
+      if (currentFileContent !== undefined) {
+        if (currentFileContent === contentToCommit) {
+          const result = {
+            success: true,
+            changed: false,
+            commit_created: false,
+            message: `No changes to ${filePath}; content already matches ${branch}.`,
+            repository: `${owner}/${repo}`,
+            branch,
+            file_path: filePath,
+          };
+
+          return this.createSuccessResult(JSON.stringify(result), `No changes to ${filePath}\nNo commit created.`);
+        }
+
         const diffResult = validateDiff(currentFileContent, contentToCommit);
         if (!diffResult.valid) {
           return this.createErrorResult(diffResult.error!, 'DIFF_VALIDATION_FAILED', false);
@@ -165,14 +179,20 @@ export class UpdateFileTool extends BaseTool {
         ...(currentFileSha && { sha: currentFileSha }),
       });
 
+      const commitSha = response.data.commit.sha;
+      const commitUrl = response.data.commit.html_url;
       const result = {
         success: true,
         message: `Successfully ${currentFileSha ? 'updated' : 'created'} ${filePath}`,
-        commit_sha: response.data.commit.sha,
-        commit_url: response.data.commit.html_url,
+        commit_sha: commitSha,
+        commit_url: commitUrl,
+        commit_message: `[Lifecycle AI] ${commitMessage}`,
+        repository: `${owner}/${repo}`,
+        branch,
+        file_path: filePath,
       };
 
-      const displayContent = `${currentFileSha ? 'Updated' : 'Created'} ${filePath}`;
+      const displayContent = `${currentFileSha ? 'Updated' : 'Created'} ${filePath}\nCommit: ${commitUrl}`;
       return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to commit changes', 'EXECUTION_ERROR');

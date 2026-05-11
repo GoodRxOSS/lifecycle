@@ -38,7 +38,7 @@ export function buildWorkspaceReadonlyExecDescription(serverName: string): strin
 export function buildWorkspaceMutationExecDescription(serverName: string): string {
   return (
     `Run a mutating or networked workspace command through ${serverName}. ` +
-    'Use this for installs, starting processes, GitHub CLI operations, git pushes, local git commits, and other state-changing operations that are not direct file-content edits. ' +
+    'Use this for verification commands such as tests and syntax checks, remote verification commands such as git ls-remote, installs, starting processes, GitHub CLI operations, git pushes, local git commits, and other state-changing operations that are not direct file-content edits. ' +
     'When creating or changing file contents, use workspace.write_file or workspace.edit_file so the file changes can be reviewed. ' +
     'This path is intended for commands that require approval.'
   );

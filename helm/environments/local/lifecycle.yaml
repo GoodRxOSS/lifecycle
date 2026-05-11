@@ -44,6 +44,8 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
+    - name: ENABLE_AUTH
+      value: 'true'
     - name: AGENT_SESSION_WORKSPACE_IMAGE
       value: 'lifecycle-workspace:latest'
     - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
@@ -67,6 +69,12 @@ components:
       enabled: false
     deployment:
       replicaCount: 1
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          memory: 12Gi
       extraEnv:
         - name: JOB_VERSION
           value: default
@@ -79,9 +87,11 @@ components:
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
-          value: debug
+          value: info
         - name: NODE_ENV
           value: development
+        - name: NODE_OPTIONS
+          value: '--max-old-space-size=6144'
         - name: LIFECYCLE_MODE
           value: web
         - name: PORT
@@ -128,7 +138,7 @@ components:
         - name: PINO_PRETTY
           value: 'false'
         - name: LOG_LEVEL
-          value: debug
+          value: info
         - name: NODE_ENV
           value: development
         - name: APP_ENV
@@ -146,7 +156,7 @@ components:
         - name: GITHUB_API_REQUEST_INTERVAL
           value: '10000'
         - name: LIFECYCLE_UI_URL
-          value: 'http://localhost:8000'
+          value: 'http://localhost:3000'
         - name: DD_TRACE_ENABLED
           value: 'false'
       ports:

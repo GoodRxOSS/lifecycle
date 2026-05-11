@@ -15,6 +15,7 @@
  */
 
 import type { Redis } from 'ioredis';
+import type { WorkspaceRuntimeFailure } from './startupFailureState';
 
 const SANDBOX_LAUNCH_REDIS_PREFIX = 'lifecycle:agent:sandbox-launch:';
 const SANDBOX_LAUNCH_TTL_SECONDS = 60 * 60;
@@ -45,6 +46,7 @@ export interface SandboxLaunchState {
   sessionId?: string | null;
   focusUrl?: string | null;
   error?: string | null;
+  workspaceFailure?: WorkspaceRuntimeFailure | null;
 }
 
 function sandboxLaunchKey(launchId: string): string {
@@ -79,6 +81,7 @@ export async function getSandboxLaunchState(redis: Redis, launchId: string): Pro
       sessionId: parsed.sessionId ?? null,
       focusUrl: parsed.focusUrl ?? null,
       error: parsed.error ?? null,
+      workspaceFailure: parsed.workspaceFailure ?? null,
     };
   } catch {
     return null;
@@ -113,5 +116,6 @@ export function toPublicSandboxLaunchState(state: SandboxLaunchState): Omit<Sand
     sessionId: publicState.sessionId ?? null,
     focusUrl: publicState.focusUrl ?? null,
     error: publicState.error ?? null,
+    workspaceFailure: publicState.workspaceFailure ?? null,
   };
 }

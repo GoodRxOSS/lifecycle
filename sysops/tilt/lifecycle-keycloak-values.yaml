@@ -57,9 +57,7 @@ secrets:
     adminPassword: keycloakdb
     userPassword: keycloakdb
   githubIdp:
-    enabled: true
-    clientId: local-github-client-id
-    clientSecret: local-github-client-secret
+    enabled: false
   lifecycleUi:
     clientSecret: changeme
 

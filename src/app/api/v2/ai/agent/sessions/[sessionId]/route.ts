@@ -20,6 +20,7 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
+import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
 import AgentSessionService from 'server/services/agentSession';
 
 /**
@@ -106,6 +107,8 @@ import AgentSessionService from 'server/services/agentSession';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '409':
+ *         description: Workspace action is blocked by an active run or another lifecycle action
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -126,15 +129,19 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);
-  if (!session) {
+  if (!session || session.userId !== userIdentity.userId) {
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
-  if (session.userId !== userIdentity.userId) {
-    return errorResponse(new Error('Forbidden: you do not own this session'), { status: 401 }, req);
+  try {
+    await AgentSessionService.endSession(sessionId);
+  } catch (error) {
+    if (error instanceof WorkspaceActionBlockedError) {
+      return errorResponse(error, { status: 409 }, req);
+    }
+    throw error;
   }
 
-  await AgentSessionService.endSession(sessionId);
   return successResponse({ ended: true }, { status: 200 }, req);
 };
 

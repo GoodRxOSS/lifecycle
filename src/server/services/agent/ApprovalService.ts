@@ -32,6 +32,7 @@ import AgentThreadService from './ThreadService';
 import AgentRunQueueService from './RunQueueService';
 import AgentRunEventService from './RunEventService';
 import AgentPolicyService from './PolicyService';
+import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
 import {
   buildAgentToolKey,
   CHAT_PUBLISH_HTTP_TOOL_NAME,
@@ -281,6 +282,21 @@ function shouldPersistApprovalRequest({
   const mode = toolRule?.mode || capabilityMode;
 
   return mode === 'require_approval';
+}
+
+function shouldCompleteAfterDeniedDebugRepairApproval({
+  run,
+  status,
+}: {
+  run: AgentRun;
+  status: Extract<AgentPendingActionStatus, 'approved' | 'denied'>;
+}): boolean {
+  if (status !== 'denied') {
+    return false;
+  }
+
+  const runPlanSnapshot = isAgentRunPlanSnapshotV1(run.runPlanSnapshot) ? run.runPlanSnapshot : null;
+  return runPlanSnapshot?.debug?.resolvedIntent === 'repair';
 }
 
 async function upsertApprovalRequestRecord({
@@ -554,6 +570,30 @@ export default class ApprovalService {
       const remainingPendingAction = await AgentPendingAction.query(trx).where({ runId, status: 'pending' }).first();
 
       if (remainingPendingAction) {
+        return;
+      }
+
+      if (shouldCompleteAfterDeniedDebugRepairApproval({ run: actionRun, status })) {
+        const completedRun = await AgentRun.query(trx).patchAndFetchById(actionRun.id, {
+          status: 'completed',
+          completedAt: resolvedAt,
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+        } as Partial<AgentRun>);
+        const completedSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+          completedRun,
+          'run.completed',
+          {
+            status: 'completed',
+            error: completedRun.error || null,
+            usageSummary: completedRun.usageSummary || {},
+          },
+          trx
+        );
+        if (completedSequence) {
+          eventNotifications.push({ runUuid: completedRun.uuid, sequence: completedSequence });
+        }
         return;
       }
 

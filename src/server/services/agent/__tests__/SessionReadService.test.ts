@@ -100,6 +100,7 @@ import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import AgentThread from 'server/models/AgentThread';
 import AgentUsageService from 'server/services/agent/AgentUsageService';
 import AgentSessionReadService from '../SessionReadService';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 
 const mockSessionQuery = AgentSession.query as jest.Mock;
 const mockSourceQuery = AgentSource.query as jest.Mock;
@@ -107,6 +108,15 @@ const mockSandboxQuery = AgentSandbox.query as jest.Mock;
 const mockSandboxExposureQuery = AgentSandboxExposure.query as jest.Mock;
 const mockThreadQuery = AgentThread.query as jest.Mock;
 const mockAggregateSessionsUsage = AgentUsageService.aggregateSessionsUsage as jest.Mock;
+
+const canonicalFailure = {
+  stage: 'connect_runtime',
+  title: 'Session workspace pod failed to start',
+  message: 'init-workspace: ImagePullBackOff',
+  recordedAt: '2026-04-24T12:04:00.000Z',
+  retryable: false,
+  origin: 'agent_session',
+};
 
 function buildSession(overrides: Record<string, unknown> = {}) {
   return {
@@ -162,6 +172,90 @@ function buildOrderedQuery<T>(rows: T[], orderCalls = 1) {
   return query;
 }
 
+function buildThreadSummaryRow(overrides: Record<string, unknown> = {}) {
+  return {
+    sessionId: 17,
+    conversationCount: 1,
+    lastActivityAt: '2026-04-24T12:02:00.000Z',
+    ...overrides,
+  };
+}
+
+function buildThreadSummaryQuery<T>(rows: T[]) {
+  const query = {
+    whereIn: jest.fn(),
+    whereNull: jest.fn(),
+    select: jest.fn(),
+    groupBy: jest.fn(),
+  };
+  query.whereIn.mockReturnValue(query);
+  query.whereNull.mockReturnValue(query);
+  query.select.mockReturnValue(query);
+  query.groupBy.mockResolvedValue(rows);
+  return query;
+}
+
+function buildSource(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 3,
+    uuid: 'source-1',
+    sessionId: 17,
+    adapter: 'lifecycle_environment',
+    status: 'failed',
+    input: {},
+    sandboxRequirements: { filesystem: 'persistent' },
+    error: { message: 'Source failed' },
+    preparedAt: '2026-04-24T12:00:00.000Z',
+    cleanedUpAt: null,
+    createdAt: '2026-04-24T12:00:00.000Z',
+    updatedAt: '2026-04-24T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function buildSandbox(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 4,
+    uuid: 'sandbox-1',
+    sessionId: 17,
+    generation: 2,
+    provider: 'lifecycle_kubernetes',
+    status: 'failed',
+    capabilitySnapshot: {},
+    providerState: {
+      namespace: 'sample-namespace',
+      podName: 'sample-pod',
+      pvcName: 'sample-pvc',
+    },
+    suspendedAt: null,
+    endedAt: null,
+    error: canonicalFailure,
+    createdAt: '2026-04-24T12:04:00.000Z',
+    updatedAt: '2026-04-24T12:04:00.000Z',
+    ...overrides,
+  };
+}
+
+function mockSingleSessionRelations(
+  source: unknown,
+  sandboxes: unknown[],
+  activeDefaultThreads: unknown[] = [],
+  threadSummaryRows: unknown[] = activeDefaultThreads.length ? [buildThreadSummaryRow()] : []
+) {
+  const defaultThread = (activeDefaultThreads as Array<{ id?: number }>).find((thread) => thread.id === 9) || {
+    id: 9,
+    uuid: 'thread-1',
+    sessionId: 17,
+  };
+
+  mockSourceQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([source]) });
+  mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery(sandboxes, 2));
+  mockThreadQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([defaultThread]) });
+  mockThreadQuery.mockReturnValueOnce(buildOrderedQuery(activeDefaultThreads, 1));
+  mockThreadQuery.mockReturnValueOnce(buildThreadSummaryQuery(threadSummaryRows));
+  mockSandboxExposureQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
+}
+
 describe('AgentSessionReadService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -213,6 +307,29 @@ describe('AgentSessionReadService', () => {
       provider: 'lifecycle_kubernetes',
       status: 'ready',
       capabilitySnapshot: {},
+      providerState: {
+        namespace: 'sample-namespace',
+        podName: 'sample-pod',
+        pvcName: 'sample-pvc',
+        workspaceStorage: {
+          size: '10Gi',
+          accessMode: 'ReadWriteOnce',
+          pvcName: 'sample-pvc',
+          storageClass: 'sample-storage-class',
+        },
+        selectedServices: [
+          {
+            name: 'sample-service',
+            repositoryFullName: 'example-org/example-repo',
+            branch: 'main',
+            deployableName: 'sample-service',
+            deployUuid: 'deploy-1',
+            repo: 'example-org/internal-repo',
+            secretValue: 'do-not-return',
+          },
+        ],
+        internalToken: 'do-not-return',
+      },
       suspendedAt: null,
       endedAt: null,
       error: null,
@@ -233,18 +350,37 @@ describe('AgentSessionReadService', () => {
       createdAt: '2026-04-24T12:00:00.000Z',
       updatedAt: '2026-04-24T12:00:00.000Z',
     };
-    const defaultThread = { id: 9, uuid: 'thread-1', sessionId: 17 };
+    const defaultThread = {
+      id: 9,
+      uuid: 'thread-1',
+      sessionId: 17,
+      title: 'Investigate sample-service',
+      isDefault: true,
+      archivedAt: null,
+      lastRunAt: '2026-04-24T12:06:00.000Z',
+      createdAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:06:00.000Z',
+    };
 
     const sessionQuery = buildPagedSessionQuery([session], 101);
     const sourceQuery = { whereIn: jest.fn().mockResolvedValue([source]) };
     const sandboxQuery = buildOrderedQuery([sandbox], 2);
     const defaultThreadQuery = { whereIn: jest.fn().mockResolvedValue([defaultThread]) };
-    const fallbackThreadQuery = buildOrderedQuery([], 1);
+    const activeDefaultThreadQuery = buildOrderedQuery([defaultThread], 1);
+    const threadSummaryQuery = buildThreadSummaryQuery([
+      buildThreadSummaryRow({
+        conversationCount: 1,
+        lastActivityAt: '2026-04-24T12:06:00.000Z',
+      }),
+    ]);
     const exposureQuery = buildOrderedQuery([exposure], 1);
     mockSessionQuery.mockReturnValueOnce(sessionQuery);
     mockSourceQuery.mockReturnValueOnce(sourceQuery);
     mockSandboxQuery.mockReturnValueOnce(sandboxQuery);
-    mockThreadQuery.mockReturnValueOnce(defaultThreadQuery).mockReturnValueOnce(fallbackThreadQuery);
+    mockThreadQuery
+      .mockReturnValueOnce(defaultThreadQuery)
+      .mockReturnValueOnce(activeDefaultThreadQuery)
+      .mockReturnValueOnce(threadSummaryQuery);
     mockSandboxExposureQuery.mockReturnValueOnce(exposureQuery);
 
     const result = await AgentSessionReadService.listOwnedSessionRecords('sample-user', {
@@ -262,6 +398,11 @@ describe('AgentSessionReadService', () => {
     expect(result.records).toHaveLength(1);
     expect(result.records[0].session.defaults.provider).toBe('sample-provider');
     expect(result.records[0].session.defaultThreadId).toBe('thread-1');
+    expect(result.records[0].conversationSummary).toEqual({
+      activeTitle: 'Investigate sample-service',
+      conversationCount: 1,
+      lastActivityAt: '2026-04-24T12:06:00.000Z',
+    });
     expect(result.records[0].usage).toEqual({
       usageSummary: { totalTokens: 0 },
       usageByModel: [],
@@ -279,11 +420,186 @@ describe('AgentSessionReadService', () => {
         kind: 'editor',
       }),
     ]);
+    expect(result.records[0].sandbox.providerState).toEqual({
+      namespace: 'sample-namespace',
+      podName: 'sample-pod',
+      pvcName: 'sample-pvc',
+      workspaceStorage: {
+        size: '10Gi',
+        accessMode: 'ReadWriteOnce',
+        pvcName: 'sample-pvc',
+      },
+      selectedServices: [
+        {
+          name: 'sample-service',
+          repositoryFullName: 'example-org/example-repo',
+          branch: 'main',
+          deployableName: 'sample-service',
+          deployUuid: 'deploy-1',
+        },
+      ],
+    });
+    expect(JSON.stringify(result.records[0].sandbox.providerState)).not.toContain('do-not-return');
+    expect(JSON.stringify(result.records[0].sandbox.providerState)).not.toContain('sample-storage-class');
+    expect(JSON.stringify(result.records[0].sandbox.providerState)).not.toContain('example-org/internal-repo');
     expect(sourceQuery.whereIn).toHaveBeenCalledWith('sessionId', [17]);
     expect(sandboxQuery.whereIn).toHaveBeenCalledWith('sessionId', [17]);
+    expect(activeDefaultThreadQuery.whereIn).toHaveBeenCalledWith('sessionId', [17]);
+    expect(activeDefaultThreadQuery.where).toHaveBeenCalledWith({ isDefault: true });
+    expect(activeDefaultThreadQuery.whereNull).toHaveBeenCalledWith('archivedAt');
+    expect(threadSummaryQuery.whereIn).toHaveBeenCalledWith('sessionId', [17]);
+    expect(threadSummaryQuery.whereNull).toHaveBeenCalledWith('archivedAt');
+    expect(threadSummaryQuery.select).toHaveBeenCalledWith('sessionId', expect.anything(), expect.anything());
+    expect(threadSummaryQuery.groupBy).toHaveBeenCalledWith('sessionId');
     expect(exposureQuery.whereIn).toHaveBeenCalledWith('sandboxId', [4]);
     expect(mockAggregateSessionsUsage).toHaveBeenCalledTimes(1);
     expect(mockAggregateSessionsUsage).toHaveBeenCalledWith([17]);
+  });
+
+  it('summarizes multiple non-archived conversations from a batched thread read', async () => {
+    const session = buildSession();
+    const source = buildSource({ status: 'ready', error: null });
+    const defaultThread = {
+      id: 9,
+      uuid: 'thread-1',
+      sessionId: 17,
+      title: 'Primary investigation',
+      isDefault: true,
+      archivedAt: null,
+      lastRunAt: '2026-04-24T12:10:00.000Z',
+      createdAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:09:00.000Z',
+    };
+    mockSingleSessionRelations(
+      source,
+      [],
+      [defaultThread],
+      [
+        buildThreadSummaryRow({
+          conversationCount: 2,
+          lastActivityAt: '2026-04-24 12:20:00',
+        }),
+      ]
+    );
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary).toEqual({
+      activeTitle: 'Primary investigation',
+      conversationCount: 2,
+      lastActivityAt: '2026-04-24T12:20:00.000Z',
+    });
+  });
+
+  it('uses newer session activity when it is later than conversation activity', async () => {
+    const session = buildSession({
+      lastActivity: '2026-04-24T12:30:00.000Z',
+      updatedAt: '2026-04-24T12:25:00.000Z',
+    });
+    const source = buildSource({ status: 'ready', error: null });
+    const defaultThread = {
+      id: 9,
+      uuid: 'thread-1',
+      sessionId: 17,
+      title: 'Primary investigation',
+      isDefault: true,
+      archivedAt: null,
+      lastRunAt: '2026-04-24T12:10:00.000Z',
+      createdAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:10:00.000Z',
+    };
+    mockSingleSessionRelations(
+      source,
+      [],
+      [defaultThread],
+      [
+        buildThreadSummaryRow({
+          conversationCount: 1,
+          lastActivityAt: '2026-04-24T12:10:00.000Z',
+        }),
+      ]
+    );
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary.lastActivityAt).toBe('2026-04-24T12:30:00.000Z');
+  });
+
+  it('returns null active title when the default conversation title is missing', async () => {
+    const session = buildSession();
+    const source = buildSource({ status: 'ready', error: null });
+    const defaultThread = {
+      id: 9,
+      uuid: 'thread-1',
+      sessionId: 17,
+      title: null,
+      isDefault: true,
+      archivedAt: null,
+      lastRunAt: null,
+      createdAt: '2026-04-24T12:01:00.000Z',
+      updatedAt: '2026-04-24T12:02:00.000Z',
+    };
+    mockSingleSessionRelations(source, [], [defaultThread]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary).toEqual({
+      activeTitle: null,
+      conversationCount: 1,
+      lastActivityAt: '2026-04-24T12:05:00.000Z',
+    });
+  });
+
+  it('returns null active title when the default conversation title is generic', async () => {
+    const session = buildSession();
+    const source = buildSource({ status: 'ready', error: null });
+    const defaultThread = {
+      id: 9,
+      uuid: 'thread-1',
+      sessionId: 17,
+      title: 'Default thread',
+      isDefault: true,
+      archivedAt: null,
+      lastRunAt: null,
+      createdAt: '2026-04-24T12:01:00.000Z',
+      updatedAt: '2026-04-24T12:02:00.000Z',
+    };
+    mockSingleSessionRelations(source, [], [defaultThread]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary).toEqual({
+      activeTitle: null,
+      conversationCount: 1,
+      lastActivityAt: '2026-04-24T12:05:00.000Z',
+    });
+  });
+
+  it('falls back to session activity when no conversations exist', async () => {
+    const session = buildSession({
+      defaultThreadId: null,
+      lastActivity: '2026-04-24T12:03:00.000Z',
+      updatedAt: '2026-04-24T12:02:00.000Z',
+      createdAt: '2026-04-24T12:01:00.000Z',
+    });
+    const source = buildSource({ status: 'ready', error: null });
+    const activeDefaultThreadQuery = buildOrderedQuery([], 1);
+    const threadSummaryQuery = buildThreadSummaryQuery([]);
+
+    mockSourceQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([source]) });
+    mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery([], 2));
+    mockThreadQuery.mockReturnValueOnce(activeDefaultThreadQuery).mockReturnValueOnce(threadSummaryQuery);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.defaultThreadId).toBeNull();
+    expect(record.conversationSummary).toEqual({
+      activeTitle: null,
+      conversationCount: 0,
+      lastActivityAt: '2026-04-24T12:03:00.000Z',
+    });
+    expect(activeDefaultThreadQuery.whereNull).toHaveBeenCalledWith('archivedAt');
+    expect(threadSummaryQuery.whereNull).toHaveBeenCalledWith('archivedAt');
   });
 
   it('keeps chat sessions ready when an on-demand workspace sandbox failed', async () => {
@@ -319,6 +635,11 @@ describe('AgentSessionReadService', () => {
       provider: 'lifecycle_kubernetes',
       status: 'failed',
       capabilitySnapshot: {},
+      providerState: {
+        namespace: 'chat-sample',
+        podName: 'agent-sample',
+        pvcName: 'agent-pvc-sample',
+      },
       suspendedAt: null,
       endedAt: null,
       error: { message: 'Sandbox failed' },
@@ -331,12 +652,222 @@ describe('AgentSessionReadService', () => {
     mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery([sandbox], 2));
     mockThreadQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([defaultThread]) });
     mockThreadQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
+    mockThreadQuery.mockReturnValueOnce(buildThreadSummaryQuery([]));
     mockSandboxExposureQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
 
     const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
 
     expect(record.session.status).toBe('ready');
     expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.providerState).toEqual({
+      namespace: 'chat-sample',
+      podName: 'agent-sample',
+      pvcName: 'agent-pvc-sample',
+    });
+    expect(record.sandbox.error).toEqual(
+      expect.objectContaining({
+        stage: 'connect_runtime',
+        title: 'Workspace could not be opened',
+        retryable: false,
+        origin: 'legacy',
+      })
+    );
+  });
+
+  it('serializes canonical sandbox errors without Redis startup failure state', async () => {
+    const session = buildSession({
+      workspaceStatus: 'failed',
+    });
+    const source = {
+      id: 3,
+      uuid: 'source-1',
+      sessionId: 17,
+      adapter: 'lifecycle_environment',
+      status: 'ready',
+      input: {},
+      sandboxRequirements: { filesystem: 'persistent' },
+      error: null,
+      preparedAt: '2026-04-24T12:00:00.000Z',
+      cleanedUpAt: null,
+      createdAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:00:00.000Z',
+    };
+    const sandbox = {
+      id: 4,
+      uuid: 'sandbox-1',
+      sessionId: 17,
+      generation: 1,
+      provider: 'lifecycle_kubernetes',
+      status: 'failed',
+      capabilitySnapshot: {},
+      providerState: {},
+      suspendedAt: null,
+      endedAt: null,
+      error: canonicalFailure,
+      createdAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:00:00.000Z',
+    };
+    const defaultThread = { id: 9, uuid: 'thread-1', sessionId: 17 };
+
+    mockSourceQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([source]) });
+    mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery([sandbox], 2));
+    mockThreadQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([defaultThread]) });
+    mockThreadQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
+    mockThreadQuery.mockReturnValueOnce(buildThreadSummaryQuery([]));
+    mockSandboxExposureQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.status).toBe('error');
+    expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.error).toEqual(canonicalFailure);
+  });
+
+  it('serializes failed environment summaries from the latest durable sandbox failure', async () => {
+    const failure = {
+      ...canonicalFailure,
+      origin: 'agent_session',
+    };
+    const session = buildSession({
+      status: 'error',
+      chatStatus: AgentChatStatus.ERROR,
+      sessionKind: AgentSessionKind.ENVIRONMENT,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+      endedAt: '2026-04-24T12:04:00.000Z',
+    });
+    const source = buildSource();
+    const sandbox = buildSandbox({ error: failure });
+    const olderSandbox = buildSandbox({
+      id: 2,
+      uuid: 'sandbox-older',
+      generation: 1,
+      status: 'ready',
+      error: null,
+    });
+    mockSingleSessionRelations(source, [sandbox, olderSandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.status).toBe('error');
+    expect(record.session.endedAt).toBe('2026-04-24T12:04:00.000Z');
+    expect(record.source.status).toBe('failed');
+    expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.providerState).toEqual({
+      namespace: 'sample-namespace',
+      podName: 'sample-pod',
+      pvcName: 'sample-pvc',
+    });
+    expect(record.sandbox.error).toEqual(failure);
+  });
+
+  it('serializes failed sandbox summaries with the same durable failure shape', async () => {
+    const failure = {
+      ...canonicalFailure,
+      origin: 'sandbox_launch',
+    };
+    const session = buildSession({
+      status: 'error',
+      chatStatus: AgentChatStatus.ERROR,
+      sessionKind: AgentSessionKind.SANDBOX,
+      buildKind: 'sandbox',
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+      endedAt: '2026-04-24T12:04:00.000Z',
+    });
+    const source = buildSource({
+      adapter: 'lifecycle_fork',
+    });
+    const sandbox = buildSandbox({ error: failure });
+    mockSingleSessionRelations(source, [sandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.status).toBe('error');
+    expect(record.session.endedAt).toBe('2026-04-24T12:04:00.000Z');
+    expect(record.source.adapter).toBe('lifecycle_fork');
+    expect(record.source.status).toBe('failed');
+    expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.error).toEqual(failure);
+    expect(record.sandbox.error).toEqual(
+      expect.objectContaining({
+        stage: 'connect_runtime',
+        title: 'Session workspace pod failed to start',
+        message: 'init-workspace: ImagePullBackOff',
+        retryable: false,
+        origin: 'sandbox_launch',
+      })
+    );
+  });
+
+  it('serializes classified durable failures with safe provider-state breadcrumbs only', async () => {
+    const failure = {
+      stage: 'attach_services',
+      title: 'Attached services failed to start',
+      message: 'service attach failed',
+      recordedAt: '2026-04-24T12:04:00.000Z',
+      retryable: false,
+      origin: 'agent_session',
+    };
+    const session = buildSession({
+      status: 'error',
+      chatStatus: AgentChatStatus.ERROR,
+      sessionKind: AgentSessionKind.ENVIRONMENT,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+      endedAt: '2026-04-24T12:04:00.000Z',
+    });
+    const source = buildSource();
+    const sandbox = buildSandbox({
+      error: failure,
+      providerState: {
+        namespace: 'sample-namespace',
+        podName: 'sample-pod',
+        pvcName: 'sample-pvc',
+        selectedServices: [
+          {
+            name: 'sample-service',
+            repo: 'example-org/example-repo',
+            branch: 'feature/sample-change',
+          },
+        ],
+        workspaceStorage: {
+          pvcName: 'sample-pvc',
+          storageClass: 'sample-storage-class',
+        },
+        rawProviderOutput: 'do-not-return',
+      },
+    });
+    mockSingleSessionRelations(source, [sandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.source.status).toBe('failed');
+    expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.error).toEqual(failure);
+    expect(record.sandbox.error).toEqual(
+      expect.objectContaining({
+        stage: 'attach_services',
+        title: 'Attached services failed to start',
+        message: 'service attach failed',
+        retryable: false,
+        origin: 'agent_session',
+      })
+    );
+    expect(record.sandbox.providerState).toEqual({
+      namespace: 'sample-namespace',
+      podName: 'sample-pod',
+      pvcName: 'sample-pvc',
+      selectedServices: [
+        {
+          name: 'sample-service',
+          branch: 'feature/sample-change',
+        },
+      ],
+      workspaceStorage: {
+        pvcName: 'sample-pvc',
+      },
+    });
+    expect(JSON.stringify(record.sandbox.providerState)).not.toContain('do-not-return');
+    expect(JSON.stringify(record.sandbox.providerState)).not.toContain('sample-storage-class');
+    expect(JSON.stringify(record.sandbox.providerState)).not.toContain('example-org/example-repo');
   });
 
   it('marks non-chat failed workspaces unavailable', async () => {
@@ -364,9 +895,20 @@ describe('AgentSessionReadService', () => {
     mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery([], 2));
     mockThreadQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([defaultThread]) });
     mockThreadQuery.mockReturnValueOnce(buildOrderedQuery([], 1));
+    mockThreadQuery.mockReturnValueOnce(buildThreadSummaryQuery([]));
 
     const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
 
     expect(record.session.status).toBe('error');
+    expect(record.sandbox.status).toBe('failed');
+    expect(record.sandbox.providerState).toEqual({});
+    expect(record.sandbox.error).toEqual(
+      expect.objectContaining({
+        stage: 'connect_runtime',
+        title: 'Workspace could not be opened',
+        retryable: false,
+        origin: 'legacy',
+      })
+    );
   });
 });

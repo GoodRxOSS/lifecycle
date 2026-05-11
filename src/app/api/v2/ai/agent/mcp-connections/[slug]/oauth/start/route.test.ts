@@ -215,9 +215,7 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
         },
         clientInformation: {
           client_id: 'sample-client',
-          redirect_uris: [
-            'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?scope=global&flow=old-flow',
-          ],
+          redirect_uris: ['https://old.example.test/oauth/callback'],
         },
         codeVerifier: 'stale-verifier',
         oauthState: 'old-flow.sample-state',

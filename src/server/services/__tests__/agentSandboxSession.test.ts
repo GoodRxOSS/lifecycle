@@ -434,4 +434,169 @@ describe('agentSandboxSession', () => {
       })
     );
   });
+
+  it('rolls back sandbox build when opening_session createSession fails', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const createSessionMock = AgentSessionService.createSession as jest.Mock;
+    const patchSandboxBuild = jest.fn().mockResolvedValue(undefined);
+    const sandboxBuild = {
+      id: 200,
+      uuid: 'sandbox-build-1',
+      namespace: 'sample-namespace',
+      pullRequest: null,
+      $query: jest.fn().mockReturnValue({
+        patch: patchSandboxBuild,
+      }),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const selectedService = {
+      name: 'frontend',
+      devConfig: {
+        image: 'node:20',
+        command: 'pnpm dev',
+      },
+      baseDeploy: {
+        id: 10,
+        branchName: 'main',
+        sha: 'abc123',
+      },
+      serviceRepo: 'example-org/frontend',
+      serviceBranch: 'main',
+    } as any;
+    const sandboxDeploy = {
+      id: 99,
+      uuid: 'sandbox-deploy-1',
+    } as any;
+    const userIdentity = {
+      userId: 'sample-user',
+      githubUsername: 'sample-user',
+      preferredUsername: 'sample-user',
+      email: 'sample-user@example.com',
+      displayName: 'Sample User',
+    };
+    const events: string[] = [];
+    const createSessionError = new Error('workspace startup failed');
+
+    jest.spyOn(service as any, 'loadBaseBuildAndCandidates').mockResolvedValue({
+      baseBuild: {
+        pullRequest: { pullRequestNumber: 42 },
+      },
+      environmentSource: {
+        repo: 'example-org/environment',
+        branch: 'main',
+      },
+      lifecycleConfig: {
+        environment: {
+          agentSession: {
+            skills: ['sample-skill'],
+          },
+        },
+      },
+      candidates: [selectedService],
+    });
+    jest.spyOn(service as any, 'createSandboxBuild').mockResolvedValue({
+      build: sandboxBuild,
+      sandboxDeploysByBaseDeployId: new Map([[10, sandboxDeploy]]),
+    });
+    jest.spyOn(service as any, 'resolveSelectedSandboxDeploys').mockReturnValue([{ selectedService, sandboxDeploy }]);
+    jest.spyOn(BuildEnvironmentVariables.prototype, 'resolve').mockResolvedValue(undefined);
+
+    (service as any).buildService.updateStatusAndComment = jest.fn().mockResolvedValue(undefined);
+    (service as any).buildService.generateAndApplyManifests = jest.fn().mockResolvedValue(true);
+    (service as any).buildService.deleteBuild = jest.fn().mockResolvedValue(undefined);
+    createSessionMock.mockImplementation(async () => {
+      events.push('createSession');
+      throw createSessionError;
+    });
+
+    await expect(
+      service.launch({
+        userId: 'sample-user',
+        userIdentity,
+        githubToken: 'sample-token',
+        baseBuildUuid: 'base-build-1',
+        services: ['frontend'],
+        model: 'sample-model',
+        workspaceImage: 'sample-agent-image',
+        workspaceEditorImage: 'sample-editor-image',
+        workspaceGatewayImage: 'sample-gateway-image',
+        nodeSelector: { role: 'sample-node' },
+        keepAttachedServicesOnSessionNode: true,
+        readiness: { timeoutMs: 60000, pollMs: 2000 },
+        resources: {
+          workspace: { requests: {}, limits: {} },
+          editor: { requests: {}, limits: {} },
+          workspaceGateway: { requests: {}, limits: {} },
+        },
+        workspaceStorage: {
+          storageSize: '10Gi',
+          accessMode: 'ReadWriteOnce',
+          requestedSize: '10Gi',
+        },
+        redisTtlSeconds: 30,
+        onProgress: async (stage) => {
+          events.push(`progress:${stage}`);
+        },
+      })
+    ).rejects.toThrow(createSessionError);
+
+    expect((service as any).buildService.updateStatusAndComment).toHaveBeenNthCalledWith(
+      1,
+      sandboxBuild,
+      BuildStatus.DEPLOYING,
+      expect.any(String),
+      false,
+      false
+    );
+    expect((service as any).buildService.generateAndApplyManifests).toHaveBeenCalledWith({
+      build: sandboxBuild,
+      githubRepositoryId: null,
+      namespace: 'sample-namespace',
+    });
+    expect(createSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'sample-user',
+        userIdentity,
+        githubToken: 'sample-token',
+        buildUuid: 'sandbox-build-1',
+        buildKind: BuildKind.SANDBOX,
+        model: 'sample-model',
+        namespace: 'sample-namespace',
+        services: [
+          {
+            name: 'frontend',
+            deployId: 99,
+            devConfig: selectedService.devConfig,
+            resourceName: 'sandbox-deploy-1',
+            repo: 'example-org/frontend',
+            branch: 'main',
+            revision: 'abc123',
+          },
+        ],
+        prNumber: 42,
+        workspaceImage: 'sample-agent-image',
+        workspaceEditorImage: 'sample-editor-image',
+        workspaceGatewayImage: 'sample-gateway-image',
+        nodeSelector: { role: 'sample-node' },
+        keepAttachedServicesOnSessionNode: true,
+        workspaceStorage: {
+          storageSize: '10Gi',
+          accessMode: 'ReadWriteOnce',
+          requestedSize: '10Gi',
+        },
+        redisTtlSeconds: 30,
+      })
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        'progress:creating_sandbox_build',
+        'progress:resolving_environment',
+        'progress:deploying_resources',
+        'progress:opening_session',
+        'createSession',
+      ])
+    );
+    expect(events.indexOf('progress:opening_session')).toBeLessThan(events.indexOf('createSession'));
+    expect((service as any).buildService.deleteBuild).toHaveBeenCalledWith(sandboxBuild);
+  });
 });

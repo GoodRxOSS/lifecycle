@@ -25,17 +25,23 @@ interface RegisteredQueue {
   worker?: Worker;
 }
 
+type QueueManagerGlobal = typeof globalThis & {
+  __lifecycleQueueManager?: QueueManager;
+};
+
 export default class QueueManager {
-  private static instance: QueueManager;
   private registeredQueues: RegisteredQueue[] = [];
 
   private constructor() {}
 
   public static getInstance(): QueueManager {
-    if (!this.instance) {
-      this.instance = new QueueManager();
+    const globalScope = globalThis as QueueManagerGlobal;
+
+    if (!globalScope.__lifecycleQueueManager) {
+      globalScope.__lifecycleQueueManager = new QueueManager();
     }
-    return this.instance;
+
+    return globalScope.__lifecycleQueueManager;
   }
 
   public registerQueue(
@@ -162,6 +168,11 @@ export default class QueueManager {
           getLogger().warn({ error: error.message }, `Queue: close failed name=${queue.name}`);
         }
       }
+    }
+    this.registeredQueues = [];
+    const globalScope = globalThis as QueueManagerGlobal;
+    if (globalScope.__lifecycleQueueManager === this) {
+      delete globalScope.__lifecycleQueueManager;
     }
     getLogger().info('Queue: closed');
   }

@@ -20,6 +20,11 @@ import AgentSession from 'server/models/AgentSession';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import type { Transaction } from 'objection';
 import type { ResolvedAgentSessionWorkspaceStorageIntent } from 'server/lib/agentSession/runtimeConfig';
+import type { WorkspaceRuntimePlanMetadata } from 'server/lib/agentSession/workspaceRuntimePlan';
+import {
+  normalizeWorkspaceRuntimeFailure,
+  type WorkspaceRuntimeFailure,
+} from 'server/lib/agentSession/startupFailureState';
 
 const SESSION_WORKSPACE_GATEWAY_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT || '13338', 10);
 
@@ -47,6 +52,106 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+export interface AgentSandboxRuntimePlanPvcMetadata {
+  name: string;
+  ownsPvc: boolean;
+  skipWorkspaceBootstrap: boolean;
+  compatiblePrewarmUuid: string | null;
+}
+
+export interface AgentSandboxRuntimeLifecycleMetadata {
+  currentAction: string;
+  claimedAt?: string;
+}
+
+function buildRuntimePlanMetadata(runtimePlanMetadata: WorkspaceRuntimePlanMetadata): Record<string, unknown> {
+  return {
+    version: runtimePlanMetadata.version,
+    pvc: {
+      name: runtimePlanMetadata.pvcName,
+      ownsPvc: runtimePlanMetadata.ownsPvc,
+      skipWorkspaceBootstrap: runtimePlanMetadata.skipWorkspaceBootstrap,
+      compatiblePrewarmUuid: runtimePlanMetadata.compatiblePrewarmUuid,
+    },
+  };
+}
+
+function buildRuntimeLifecycleMetadata(value: unknown): AgentSandboxRuntimeLifecycleMetadata | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const currentAction = readString(value.currentAction);
+  if (!currentAction) {
+    return undefined;
+  }
+
+  const claimedAt = readString(value.claimedAt);
+  return {
+    currentAction,
+    ...(claimedAt ? { claimedAt } : {}),
+  };
+}
+
+function readRuntimePlanPvcMetadata(metadata: unknown): AgentSandboxRuntimePlanPvcMetadata | null {
+  if (!isRecord(metadata) || !isRecord(metadata.runtimePlan) || !isRecord(metadata.runtimePlan.pvc)) {
+    return null;
+  }
+
+  const pvc = metadata.runtimePlan.pvc;
+  const name = readString(pvc.name);
+  const ownsPvc = readBoolean(pvc.ownsPvc);
+  const skipWorkspaceBootstrap = readBoolean(pvc.skipWorkspaceBootstrap);
+  if (!name || ownsPvc === undefined || skipWorkspaceBootstrap === undefined) {
+    return null;
+  }
+
+  let compatiblePrewarmUuid: string | null = null;
+  if (pvc.compatiblePrewarmUuid !== null && pvc.compatiblePrewarmUuid !== undefined) {
+    const prewarmUuid = readString(pvc.compatiblePrewarmUuid);
+    if (!prewarmUuid) {
+      return null;
+    }
+    compatiblePrewarmUuid = prewarmUuid;
+  }
+
+  return {
+    name,
+    ownsPvc,
+    skipWorkspaceBootstrap,
+    compatiblePrewarmUuid,
+  };
+}
+
+function buildSelectedServicesProviderState(selectedServices: unknown): Array<Record<string, string>> {
+  if (!Array.isArray(selectedServices)) {
+    return [];
+  }
+
+  return selectedServices
+    .filter(isRecord)
+    .map((service) => {
+      const repositoryFullName = readString(service.repositoryFullName) ?? readString(service.repo);
+
+      return {
+        ...(readString(service.name) ? { name: readString(service.name) as string } : {}),
+        ...(repositoryFullName ? { repositoryFullName } : {}),
+        ...(readString(service.branch) ? { branch: readString(service.branch) as string } : {}),
+        ...(readString(service.deployableName) ? { deployableName: readString(service.deployableName) as string } : {}),
+        ...(readString(service.deployUuid) ? { deployUuid: readString(service.deployUuid) as string } : {}),
+      };
+    })
+    .filter((service) => Object.keys(service).length > 0);
+}
+
 function buildProviderState(
   session: AgentSession,
   workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent,
@@ -55,11 +160,13 @@ function buildProviderState(
   const existingWorkspaceStorage = isRecord(existingProviderState?.workspaceStorage)
     ? existingProviderState.workspaceStorage
     : undefined;
+  const selectedServices = buildSelectedServicesProviderState(session.selectedServices);
 
   return {
     ...(session.namespace ? { namespace: session.namespace } : {}),
     ...(session.podName ? { podName: session.podName } : {}),
     ...(session.pvcName ? { pvcName: session.pvcName } : {}),
+    ...(selectedServices.length > 0 ? { selectedServices } : {}),
     ...(workspaceStorage
       ? {
           workspaceStorage: {
@@ -72,6 +179,61 @@ function buildProviderState(
       ? { workspaceStorage: existingWorkspaceStorage }
       : {}),
   };
+}
+
+function buildMetadata(
+  session: AgentSession,
+  runtimePlanMetadata?: WorkspaceRuntimePlanMetadata,
+  existingMetadata?: unknown,
+  runtimeLifecycle?: AgentSandboxRuntimeLifecycleMetadata | null
+): Record<string, unknown> {
+  const existingRuntimePlan =
+    isRecord(existingMetadata) && isRecord(existingMetadata.runtimePlan) ? existingMetadata.runtimePlan : undefined;
+  const runtimePlan = runtimePlanMetadata ? buildRuntimePlanMetadata(runtimePlanMetadata) : existingRuntimePlan;
+  const existingRuntimeLifecycle =
+    isRecord(existingMetadata) && isRecord(existingMetadata.runtimeLifecycle)
+      ? buildRuntimeLifecycleMetadata(existingMetadata.runtimeLifecycle)
+      : undefined;
+  const nextRuntimeLifecycle =
+    runtimeLifecycle === null
+      ? undefined
+      : runtimeLifecycle === undefined
+      ? existingRuntimeLifecycle
+      : buildRuntimeLifecycleMetadata({
+          ...existingRuntimeLifecycle,
+          ...runtimeLifecycle,
+        });
+
+  return {
+    sessionKind: session.sessionKind,
+    buildUuid: session.buildUuid,
+    buildKind: session.buildKind,
+    ...(runtimePlan ? { runtimePlan } : {}),
+    ...(nextRuntimeLifecycle ? { runtimeLifecycle: nextRuntimeLifecycle } : {}),
+  };
+}
+
+function isFailedSandboxState(session: AgentSession): boolean {
+  return session.workspaceStatus === 'failed' || session.status === 'error';
+}
+
+function buildSandboxError(
+  session: AgentSession,
+  failure?: WorkspaceRuntimeFailure | null,
+  existingError?: unknown
+): WorkspaceRuntimeFailure | null {
+  if (!isFailedSandboxState(session)) {
+    return null;
+  }
+
+  if (failure) {
+    return normalizeWorkspaceRuntimeFailure(failure);
+  }
+
+  return normalizeWorkspaceRuntimeFailure(existingError, {
+    origin: 'legacy',
+    retryable: false,
+  });
 }
 
 function toTimestampString(value: unknown): string | null {
@@ -94,19 +256,42 @@ export default class AgentSandboxService {
       .first();
   }
 
+  static async getLatestRuntimePlanPvcMetadata(
+    sessionId: number,
+    options: { trx?: Transaction } = {}
+  ): Promise<AgentSandboxRuntimePlanPvcMetadata | null> {
+    const sandbox = await this.getLatestSandboxForSession(sessionId, options);
+    return readRuntimePlanPvcMetadata(sandbox?.metadata);
+  }
+
   static async recordSessionSandboxState(
     session: AgentSession,
-    options: { trx?: Transaction; workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent } = {}
+    options: {
+      trx?: Transaction;
+      workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
+      failure?: WorkspaceRuntimeFailure | null;
+      runtimePlanMetadata?: WorkspaceRuntimePlanMetadata;
+      sandboxStatus?: AgentSandbox['status'];
+      runtimeLifecycle?: AgentSandboxRuntimeLifecycleMetadata | null;
+    } = {}
   ): Promise<AgentSandbox | null> {
-    if (!session.namespace && !session.podName && !session.pvcName) {
+    const hasRuntimeRefs = Boolean(session.namespace || session.podName || session.pvcName);
+    const shouldWriteSandboxState =
+      hasRuntimeRefs ||
+      Boolean(options.failure) ||
+      options.sandboxStatus !== undefined ||
+      options.runtimeLifecycle !== undefined;
+    if (!shouldWriteSandboxState) {
       return this.getLatestSandboxForSession(session.id, options);
     }
 
     const existing = await this.getLatestSandboxForSession(session.id, options);
+    const error = buildSandboxError(session, options.failure, existing?.error);
+    const status = options.sandboxStatus ?? mapSessionToSandboxStatus(session);
     const sandbox = existing
       ? await AgentSandbox.query(options.trx).patchAndFetchById(existing.id, {
           provider: 'lifecycle_kubernetes',
-          status: mapSessionToSandboxStatus(session),
+          status,
           capabilitySnapshot: {
             toolTransport: 'mcp',
             persistentFilesystem: Boolean(session.pvcName),
@@ -114,13 +299,8 @@ export default class AgentSandboxService {
             editorAccess: true,
           },
           providerState: buildProviderState(session, options.workspaceStorage, existing.providerState),
-          metadata: {
-            sessionKind: session.sessionKind,
-            buildUuid: session.buildUuid,
-            buildKind: session.buildKind,
-          },
-          error:
-            session.workspaceStatus === 'failed' || session.status === 'error' ? { message: 'Sandbox failed' } : null,
+          metadata: buildMetadata(session, options.runtimePlanMetadata, existing.metadata, options.runtimeLifecycle),
+          error,
           suspendedAt:
             session.workspaceStatus === 'hibernated'
               ? toTimestampString(session.updatedAt) || new Date().toISOString()
@@ -134,7 +314,7 @@ export default class AgentSandboxService {
           sessionId: session.id,
           generation: 1,
           provider: 'lifecycle_kubernetes',
-          status: mapSessionToSandboxStatus(session),
+          status,
           capabilitySnapshot: {
             toolTransport: 'mcp',
             persistentFilesystem: Boolean(session.pvcName),
@@ -142,13 +322,8 @@ export default class AgentSandboxService {
             editorAccess: true,
           },
           providerState: buildProviderState(session, options.workspaceStorage),
-          metadata: {
-            sessionKind: session.sessionKind,
-            buildUuid: session.buildUuid,
-            buildKind: session.buildKind,
-          },
-          error:
-            session.workspaceStatus === 'failed' || session.status === 'error' ? { message: 'Sandbox failed' } : null,
+          metadata: buildMetadata(session, options.runtimePlanMetadata, undefined, options.runtimeLifecycle),
+          error,
           suspendedAt:
             session.workspaceStatus === 'hibernated'
               ? toTimestampString(session.updatedAt) || new Date().toISOString()
@@ -226,11 +401,13 @@ export default class AgentSandboxService {
     userId,
     userIdentity,
     githubToken,
+    allowedActiveRunUuid,
   }: {
     sessionId: string;
     userId: string;
     userIdentity: RequestUserIdentity;
     githubToken?: string | null;
+    allowedActiveRunUuid?: string | null;
   }): Promise<{ session: AgentSession; sandbox: AgentSandbox | null }> {
     let session = await AgentSession.query().findOne({ uuid: sessionId, userId });
     if (!session) {
@@ -242,11 +419,12 @@ export default class AgentSandboxService {
       (session.workspaceStatus !== 'ready' || !session.namespace || !session.podName)
     ) {
       const AgentSessionService = (await import('server/services/agentSession')).default;
-      session = await AgentSessionService.provisionChatRuntime({
+      session = await AgentSessionService.openChatRuntime({
         sessionId,
         userId,
         userIdentity,
         githubToken,
+        ...(allowedActiveRunUuid ? { allowedActiveRunUuid } : {}),
       });
     }
 

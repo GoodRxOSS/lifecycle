@@ -19,9 +19,11 @@ import Redlock from 'redlock';
 import { REDIS_URL, APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD, APP_REDIS_TLS } from 'shared/config';
 import { getLogger } from 'server/lib/logger';
 
-export class RedisClient {
-  private static instance: RedisClient;
+type RedisClientGlobal = typeof globalThis & {
+  __lifecycleRedisClient?: RedisClient;
+};
 
+export class RedisClient {
   private readonly redis: Redis;
   private readonly subscriber: Redis;
   private readonly redlock: Redlock;
@@ -73,10 +75,13 @@ export class RedisClient {
   }
 
   public static getInstance(): RedisClient {
-    if (!this.instance) {
-      this.instance = new RedisClient();
+    const globalScope = globalThis as RedisClientGlobal;
+
+    if (!globalScope.__lifecycleRedisClient) {
+      globalScope.__lifecycleRedisClient = new RedisClient();
     }
-    return this.instance;
+
+    return globalScope.__lifecycleRedisClient;
   }
 
   public getRedis(): Redis {
@@ -100,6 +105,11 @@ export class RedisClient {
       this.redis.disconnect();
       this.subscriber.disconnect();
       this.bullConn.disconnect();
+    } finally {
+      const globalScope = globalThis as RedisClientGlobal;
+      if (globalScope.__lifecycleRedisClient === this) {
+        delete globalScope.__lifecycleRedisClient;
+      }
     }
   }
 }

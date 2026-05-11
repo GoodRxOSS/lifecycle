@@ -243,6 +243,13 @@ function buildToolSetForTest(args: Parameters<typeof AgentCapabilityService.buil
   });
 }
 
+function buildToolSetWithMetadataForTest(args: Parameters<typeof AgentCapabilityService.buildToolSetWithMetadata>[0]) {
+  return AgentCapabilityService.buildToolSetWithMetadata({
+    resolvedCapabilityAccess: defaultResolvedCapabilityAccess,
+    ...args,
+  });
+}
+
 describe('AgentCapabilityService.buildToolSet', () => {
   const session = {
     uuid: 'session-123',
@@ -841,6 +848,57 @@ describe('AgentCapabilityService.buildToolSet', () => {
     );
   });
 
+  it('returns central metadata for read and approval-gated diagnostic repair tools', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockModeForCapability.mockReturnValue('allow');
+
+    const { tools, metadata } = await buildToolSetWithMetadataForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__lifecycle__get_codefresh_logs).toBeDefined();
+    expect(tools.mcp__lifecycle__update_file).toBeDefined();
+    expect(tools.mcp__lifecycle__patch_k8s_resource).toBeDefined();
+    expect(metadata).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolKey: 'mcp__lifecycle__get_codefresh_logs',
+          catalogCapabilityId: 'diagnostics_codefresh',
+          capabilityKey: 'read',
+          approvalMode: 'allow',
+          exposure: 'read',
+        }),
+        expect.objectContaining({
+          toolKey: 'mcp__lifecycle__update_file',
+          catalogCapabilityId: 'github_write',
+          capabilityKey: 'git_write',
+          approvalMode: 'require_approval',
+          exposure: 'repair',
+        }),
+        expect.objectContaining({
+          toolKey: 'mcp__lifecycle__patch_k8s_resource',
+          catalogCapabilityId: 'diagnostics_kubernetes',
+          capabilityKey: 'deploy_k8s_mutation',
+          approvalMode: 'require_approval',
+          exposure: 'repair',
+        }),
+      ])
+    );
+  });
+
   it('does not register Lifecycle diagnostic read tools for generic no-build chats', async () => {
     mockResolveServers.mockResolvedValue([]);
 
@@ -1106,6 +1164,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       updateFileTool.needsApproval({
         branch: 'feature/sample',
         file_path: 'services/sample/Dockerfile',
+        new_content: 'FROM scratch\n',
       })
     ).resolves.toBe(true);
 
@@ -1116,6 +1175,61 @@ describe('AgentCapabilityService.buildToolSet', () => {
         file_path: 'secrets/token.txt',
       })
     ).resolves.toBe(false);
+  });
+
+  it('uses the workspace repo and branch for diagnostic GitHub safety while preserving selected deploy referenced files', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockParseYamlConfigFromBranch.mockResolvedValue({ services: [] });
+
+    await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/sample-fix',
+            revision: null,
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+        selectedServices: [
+          {
+            name: 'sample-service',
+            deployId: 41,
+            deployUuid: 'deploy-1',
+            repo: 'example-org/example-repo',
+            branch: 'main',
+            revision: 'service-sha-1',
+            workspacePath: '/workspace',
+            dockerfilePath: 'services/sample/Dockerfile',
+            initDockerfilePath: 'services/sample/init.Dockerfile',
+            chartValueFiles: ['helm/sample-values.yaml'],
+          },
+        ],
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(mockParseYamlConfigFromBranch).toHaveBeenCalledWith('example-org/example-repo', 'feature/sample-fix');
+    const fixToolClient = mockGithubClientInstances.at(-1);
+    expect(fixToolClient?.setAllowedBranch).toHaveBeenCalledWith('feature/sample-fix');
+    expect(fixToolClient?.setReferencedFiles).toHaveBeenCalledWith([
+      'services/sample/Dockerfile',
+      'services/sample/init.Dockerfile',
+      'helm/sample-values.yaml',
+    ]);
   });
 
   it('lets tool rules deny individual Lifecycle diagnostic fix tools', async () => {
@@ -1444,7 +1558,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     );
   });
 
-  it('exposes lazy chat workspace tools before runtime without provisioning during setup', async () => {
+  it('routes lazy chat workspace tools through SandboxService canonical openChatRuntime path before runtime exists', async () => {
     mockResolveServers.mockResolvedValue([]);
     mockFindSession.mockResolvedValue({
       uuid: 'session-chat',
@@ -1524,6 +1638,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       userIdentity,
       githubToken: 'sample-gh-token',
     });
+    expect(mockEnsureChatSandbox).toHaveBeenCalledTimes(1);
     expect(mockCallTool).toHaveBeenCalledWith(
       'workspace.write_file',
       {
@@ -1532,6 +1647,51 @@ describe('AgentCapabilityService.buildToolSet', () => {
       },
       22000
     );
+  });
+
+  it('passes the active run id when lazy chat workspace tools open the runtime', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockFindSession.mockResolvedValue({
+      uuid: 'session-chat',
+      sessionKind: 'chat',
+      workspaceStatus: 'none',
+      status: 'active',
+      podName: null,
+      namespace: null,
+    });
+
+    const tools = await buildToolSetForTest({
+      session: {
+        uuid: 'session-chat',
+        sessionKind: 'chat',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+      } as any,
+      repoFullName: undefined,
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      requestGitHubToken: 'sample-gh-token',
+      hooks: {
+        getActiveRunUuid: () => 'run-current',
+      },
+    });
+    const tool = tools.mcp__sandbox__workspace_exec as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+
+    await tool.execute({ command: 'ls -F' }, { toolCallId: 'tool-read' });
+
+    expect(mockEnsureChatSandbox).toHaveBeenCalledWith({
+      sessionId: 'session-chat',
+      userId: 'sample-user',
+      userIdentity,
+      githubToken: 'sample-gh-token',
+      allowedActiveRunUuid: 'run-current',
+    });
   });
 
   it('lets tool rules require approval for lazy chat workspace tools before runtime exists', async () => {

@@ -213,7 +213,8 @@ const SESSION_WORKSPACE_TOOL_CATALOG: readonly SessionWorkspaceToolCatalogRecord
     catalogCapabilityId: 'workspace_git',
     order: 170,
     adminVisibility: 'visible',
-    description: 'Create a commit from the current staged changes.',
+    description:
+      'Create a local-only commit from the current staged changes. This creates a local commit only; it does not push, update GitHub, update a PR head, and does not trigger Lifecycle rebuilds.',
   },
   {
     toolName: 'git.branch',
@@ -251,11 +252,11 @@ const PROMPT_CATEGORY_COPY: Record<SessionWorkspaceToolCategory, { label: string
     toolNames: ['workspace.write_file', 'workspace.edit_file'],
   },
   command: {
-    label: 'run mutating or networked shell commands that are not direct file edits',
+    label: 'run verification, mutating, or networked shell commands that are not direct file edits',
     toolNames: [SESSION_WORKSPACE_MUTATION_TOOL_NAME],
   },
   git_change: {
-    label: 'manage git changes',
+    label: 'manage local git changes',
     toolNames: ['git.add', 'git.commit', 'git.branch'],
   },
 };
@@ -322,7 +323,7 @@ export function buildSessionWorkspacePromptLines({
   const entries = listSessionWorkspaceToolCatalog().filter((entry) =>
     isSessionWorkspaceToolAllowed(entry, approvalPolicy, toolRules)
   );
-  const availableToolNames = new Set(entries.map((entry) => entry.toolName));
+  const entriesByToolName = new Map(entries.map((entry) => [entry.toolName, entry]));
   const lines: string[] = [];
 
   for (const category of ['inspect', 'file_change', 'command', 'git_change', 'skills'] as const) {
@@ -331,7 +332,9 @@ export function buildSessionWorkspacePromptLines({
     }
 
     const copy = PROMPT_CATEGORY_COPY[category];
-    const toolNames = copy.toolNames.filter((toolName) => availableToolNames.has(toolName));
+    const toolNames = copy.toolNames
+      .map((toolName) => entriesByToolName.get(toolName)?.toolKey)
+      .filter((toolKey): toolKey is string => Boolean(toolKey));
 
     if (toolNames.length === 0) {
       continue;
@@ -342,6 +345,11 @@ export function buildSessionWorkspacePromptLines({
 
   if (lines.length > 0) {
     lines.push('- do not claim a tool is unavailable unless it is not equipped here or a real tool call fails');
+    if (entriesByToolName.has('git.commit') || entriesByToolName.has(SESSION_WORKSPACE_MUTATION_TOOL_NAME)) {
+      lines.push(
+        '- local commits do not update GitHub, PR heads, or Lifecycle builds; use the shell mutation tool for git push or gh and only claim remote/build updates after observing them'
+      );
+    }
   }
 
   return lines;

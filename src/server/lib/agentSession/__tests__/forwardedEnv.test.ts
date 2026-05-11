@@ -60,8 +60,10 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { SecretProcessor } from 'server/services/secretProcessor';
 import { deleteExternalSecret } from 'server/lib/kubernetes/externalSecret';
 import {
+  applyForwardedAgentEnvSecrets,
   cleanupForwardedAgentEnvSecrets,
   getForwardedAgentEnvSecretServiceName,
+  planForwardedAgentEnv,
   resolveForwardedAgentEnv,
 } from '../forwardedEnv';
 
@@ -93,7 +95,7 @@ describe('forwardedEnv', () => {
   });
 
   it('returns empty forwarded env when no services are selected', async () => {
-    const result = await resolveForwardedAgentEnv([], 'test-ns', 'session-123');
+    const result = await planForwardedAgentEnv([], 'session-123');
 
     expect(result).toEqual({
       env: {},
@@ -101,6 +103,33 @@ describe('forwardedEnv', () => {
       secretProviders: [],
       secretServiceName: 'agent-env-session-123',
     });
+    expect(Deploy.query).not.toHaveBeenCalled();
+    expect(SecretProcessor).not.toHaveBeenCalled();
+  });
+
+  it('returns empty forwarded env and a stable service name when services do not request forwarding', async () => {
+    const result = await planForwardedAgentEnv(
+      [
+        {
+          name: 'web',
+          deployId: 10,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+          },
+        },
+      ],
+      'session-123'
+    );
+
+    expect(result).toEqual({
+      env: {},
+      secretRefs: [],
+      secretProviders: [],
+      secretServiceName: 'agent-env-session-123',
+    });
+    expect(Deploy.query).not.toHaveBeenCalled();
+    expect(SecretProcessor).not.toHaveBeenCalled();
   });
 
   it('collects allowlisted env vars from selected deploys', async () => {
@@ -114,7 +143,7 @@ describe('forwardedEnv', () => {
       },
     ]);
 
-    const result = await resolveForwardedAgentEnv(
+    const result = await planForwardedAgentEnv(
       [
         {
           name: 'web',
@@ -126,7 +155,6 @@ describe('forwardedEnv', () => {
           },
         },
       ],
-      'test-ns',
       'session-123'
     );
 
@@ -138,6 +166,7 @@ describe('forwardedEnv', () => {
       secretProviders: [],
       secretServiceName: 'agent-env-session-123',
     });
+    expect(SecretProcessor).not.toHaveBeenCalled();
   });
 
   it('throws when selected services resolve the same forwarded key to different values', async () => {
@@ -147,7 +176,7 @@ describe('forwardedEnv', () => {
     ]);
 
     await expect(
-      resolveForwardedAgentEnv(
+      planForwardedAgentEnv(
         [
           {
             name: 'web',
@@ -168,13 +197,13 @@ describe('forwardedEnv', () => {
             },
           },
         ],
-        'test-ns',
         'session-123'
       )
     ).rejects.toThrow('Agent env forwarding conflict for PRIVATE_REGISTRY_TOKEN');
+    expect(SecretProcessor).not.toHaveBeenCalled();
   });
 
-  it('processes secret refs through the configured secret providers', async () => {
+  it('plans native secret refs without applying ExternalSecrets', async () => {
     mockDeployQuery.select.mockResolvedValue([
       {
         id: 10,
@@ -184,6 +213,40 @@ describe('forwardedEnv', () => {
       },
     ]);
 
+    const result = await planForwardedAgentEnv(
+      [
+        {
+          name: 'web',
+          deployId: 10,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            forwardEnvVarsToAgent: ['PRIVATE_REGISTRY_TOKEN'],
+          },
+        },
+      ],
+      'session-123'
+    );
+
+    expect(result).toEqual({
+      env: {
+        PRIVATE_REGISTRY_TOKEN: '{{aws:apps/sample:npmToken}}',
+      },
+      secretRefs: [
+        {
+          envKey: 'PRIVATE_REGISTRY_TOKEN',
+          provider: 'aws',
+          path: 'apps/sample',
+          key: 'npmToken',
+        },
+      ],
+      secretProviders: ['aws'],
+      secretServiceName: 'agent-env-session-123',
+    });
+    expect(SecretProcessor).not.toHaveBeenCalled();
+  });
+
+  it('applies secret refs through the configured secret providers', async () => {
     const processEnvSecrets = jest.fn().mockResolvedValue({
       secretRefs: [
         {
@@ -219,22 +282,25 @@ describe('forwardedEnv', () => {
       }),
     });
 
-    const result = await resolveForwardedAgentEnv(
-      [
-        {
-          name: 'web',
-          deployId: 10,
-          devConfig: {
-            image: 'node:20',
-            command: 'pnpm dev',
-            forwardEnvVarsToAgent: ['PRIVATE_REGISTRY_TOKEN'],
-          },
+    const result = await applyForwardedAgentEnvSecrets({
+      namespace: 'test-ns',
+      buildUuid: 'build-123',
+      plan: {
+        env: {
+          PRIVATE_REGISTRY_TOKEN: '{{aws:apps/sample:npmToken}}',
         },
-      ],
-      'test-ns',
-      'session-123',
-      'build-123'
-    );
+        secretRefs: [
+          {
+            envKey: 'PRIVATE_REGISTRY_TOKEN',
+            provider: 'aws',
+            path: 'apps/sample',
+            key: 'npmToken',
+          },
+        ],
+        secretProviders: ['aws'],
+        secretServiceName: 'agent-env-session-123',
+      },
+    });
 
     expect(processEnvSecrets).toHaveBeenCalledWith({
       env: { PRIVATE_REGISTRY_TOKEN: '{{aws:apps/sample:npmToken}}' },
@@ -251,33 +317,88 @@ describe('forwardedEnv', () => {
     expect(result.secretProviders).toEqual(['aws']);
   });
 
+  it('skips ExternalSecret application when the plan has no native secret refs', async () => {
+    const result = await applyForwardedAgentEnvSecrets({
+      namespace: 'test-ns',
+      buildUuid: 'build-123',
+      plan: {
+        env: {
+          PRIVATE_REGISTRY_TOKEN: 'plain-token',
+        },
+        secretRefs: [],
+        secretProviders: [],
+        secretServiceName: 'agent-env-session-123',
+      },
+    });
+
+    expect(result).toEqual({
+      env: {
+        PRIVATE_REGISTRY_TOKEN: 'plain-token',
+      },
+      secretRefs: [],
+      secretProviders: [],
+      secretServiceName: 'agent-env-session-123',
+    });
+    expect(SecretProcessor).not.toHaveBeenCalled();
+  });
+
   it('throws when secret refs are forwarded without configured secret providers', async () => {
+    await expect(
+      applyForwardedAgentEnvSecrets({
+        namespace: 'test-ns',
+        plan: {
+          env: {
+            PRIVATE_REGISTRY_TOKEN: '{{aws:apps/sample:npmToken}}',
+          },
+          secretRefs: [
+            {
+              envKey: 'PRIVATE_REGISTRY_TOKEN',
+              provider: 'aws',
+              path: 'apps/sample',
+              key: 'npmToken',
+            },
+          ],
+          secretProviders: ['aws'],
+          secretServiceName: 'agent-env-session-123',
+        },
+      })
+    ).rejects.toThrow('requires configured secret providers');
+  });
+
+  it('preserves resolveForwardedAgentEnv compatibility', async () => {
     mockDeployQuery.select.mockResolvedValue([
       {
         id: 10,
         env: {
-          PRIVATE_REGISTRY_TOKEN: '{{aws:apps/sample:npmToken}}',
+          PRIVATE_REGISTRY_TOKEN: 'plain-token',
         },
       },
     ]);
 
-    await expect(
-      resolveForwardedAgentEnv(
-        [
-          {
-            name: 'web',
-            deployId: 10,
-            devConfig: {
-              image: 'node:20',
-              command: 'pnpm dev',
-              forwardEnvVarsToAgent: ['PRIVATE_REGISTRY_TOKEN'],
-            },
+    const result = await resolveForwardedAgentEnv(
+      [
+        {
+          name: 'web',
+          deployId: 10,
+          devConfig: {
+            image: 'node:20',
+            command: 'pnpm dev',
+            forwardEnvVarsToAgent: ['PRIVATE_REGISTRY_TOKEN'],
           },
-        ],
-        'test-ns',
-        'session-123'
-      )
-    ).rejects.toThrow('requires configured secret providers');
+        },
+      ],
+      'test-ns',
+      'session-123'
+    );
+
+    expect(result).toEqual({
+      env: {
+        PRIVATE_REGISTRY_TOKEN: 'plain-token',
+      },
+      secretRefs: [],
+      secretProviders: [],
+      secretServiceName: 'agent-env-session-123',
+    });
   });
 
   it('cleans up session-scoped ExternalSecrets and synced Secrets for forwarded env', async () => {

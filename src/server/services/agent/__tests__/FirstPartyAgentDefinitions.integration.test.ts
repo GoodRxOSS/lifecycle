@@ -44,6 +44,8 @@ const mockMessageQuery = jest.fn();
 const mockInsertAndFetch = jest.fn();
 const mockGetSessionSource = jest.fn();
 const mockGetOwnedThreadWithSession = jest.fn();
+const mockSeedSystemTemplates = jest.fn();
+const mockResolveInstructionRefs = jest.fn();
 const mockWarn = jest.fn();
 
 let mockDefinitionRows: any[] = [];
@@ -91,6 +93,33 @@ jest.mock('../CapabilityService', () => ({
     resolveSessionContext: (...args: unknown[]) => mockResolveSessionContext(...args),
   },
 }));
+
+jest.mock('../InstructionTemplateService', () => {
+  class MockInstructionTemplateServiceError extends Error {
+    statusCode: number;
+    details?: Record<string, unknown>;
+
+    constructor(
+      public readonly code: string,
+      message: string,
+      options: { statusCode?: number; details?: Record<string, unknown> } = {}
+    ) {
+      super(message);
+      this.name = 'InstructionTemplateServiceError';
+      this.statusCode = options.statusCode ?? (code === 'unknown_ref' ? 404 : 400);
+      this.details = options.details;
+    }
+  }
+
+  return {
+    __esModule: true,
+    default: {
+      seedSystemTemplates: (...args: unknown[]) => mockSeedSystemTemplates(...args),
+      resolveRefs: (...args: unknown[]) => mockResolveInstructionRefs(...args),
+    },
+    InstructionTemplateServiceError: MockInstructionTemplateServiceError,
+  };
+});
 
 jest.mock('../ProviderRegistry', () => ({
   __esModule: true,
@@ -288,6 +317,16 @@ describe('First-party agent definition integration regressions', () => {
       provider: 'openai',
       modelId: 'gpt-5.4',
     });
+    mockSeedSystemTemplates.mockResolvedValue([]);
+    mockResolveInstructionRefs.mockImplementation(async (refs: string[]) =>
+      refs.map((ref) => ({
+        ref,
+        source: 'default',
+        content: `Resolved instructions for ${ref}`,
+        version: 1,
+        hash: 'a'.repeat(64),
+      }))
+    );
 
     mockGetOwnedThreadWithSession.mockImplementation(async () => ({ thread, session }));
     mockGetSessionSource.mockImplementation(async () => source);
@@ -355,6 +394,13 @@ describe('First-party agent definition integration regressions', () => {
   it('keeps Debug diagnostic and protected fix capability refs with workspaceRequired false', async () => {
     const debug = await getSystemAgentDefinition('system.debug');
 
+    expect(debug).toEqual(
+      expect.objectContaining({
+        codeOwned: true,
+        readOnly: true,
+        instructionRefs: ['system:debug'],
+      })
+    );
     expect(debug.resourcePolicy.workspaceRequired).toBe(false);
     expect(debug.requiredCapabilityRefs).toEqual(
       expect.arrayContaining([

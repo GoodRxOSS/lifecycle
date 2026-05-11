@@ -79,6 +79,12 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '403':
+ *         description: Forbidden
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
   const userIdentity = getRequestUserIdentity(req);
@@ -104,4 +110,4 @@ const getHandler = async (req: NextRequest) => {
   return successResponse(result.data, { status: 200, metadata: result.metadata }, req);
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { roles: ['admin'] });

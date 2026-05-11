@@ -85,6 +85,27 @@ describe('resolveRequestedModelSelection', () => {
       modelId: 'gemini-3-flash-preview',
     });
   });
+
+  it('keeps configured model pricing on the resolved selection', () => {
+    expect(
+      resolveRequestedModelSelection(
+        [
+          {
+            ...MODELS[0],
+            inputCostPerMillion: 1.25,
+            outputCostPerMillion: 10,
+          },
+        ],
+        'gemini',
+        'gemini-3-flash-preview'
+      )
+    ).toEqual({
+      provider: 'gemini',
+      modelId: 'gemini-3-flash-preview',
+      inputCostPerMillion: 1.25,
+      outputCostPerMillion: 10,
+    });
+  });
 });
 
 describe('AgentProviderRegistry credential resolution', () => {

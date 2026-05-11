@@ -14,6 +14,20 @@
 
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: buildkit-cache
+  namespace: lifecycle-app
+  annotations:
+    tilt.dev/down-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: buildkit-config
@@ -94,7 +108,8 @@ spec:
             name: setup-scripts
             defaultMode: 0755
         - name: buildkit-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: buildkit-cache
 ---
 apiVersion: v1
 kind: Service

@@ -16,6 +16,11 @@
 
 import type { AgentRunUsageSummary } from './types';
 
+export interface AgentModelCostEstimateConfig {
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
+}
+
 type UsageLike =
   | {
       inputTokens?: number;
@@ -47,6 +52,7 @@ type ResponseLike =
   | undefined;
 
 type ProviderMetadataLike = Record<string, unknown> | null | undefined;
+const CONFIGURED_MODEL_PRICING_COST_SOURCE = 'configured_model_pricing';
 
 function parseFiniteNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -61,6 +67,11 @@ function parseFiniteNumber(value: unknown): number | undefined {
   }
 
   return undefined;
+}
+
+function parseCostRatePerMillion(value: unknown): number | undefined {
+  const amount = parseFiniteNumber(value);
+  return amount != null && amount >= 0 ? amount : undefined;
 }
 
 function toRecord(value: unknown): Record<string, unknown> | undefined {
@@ -227,6 +238,51 @@ function extractSdkReportedTotalCostUsd({
   return {};
 }
 
+export function estimateConfiguredModelCostUsd(
+  usageSummary: AgentRunUsageSummary,
+  costEstimateConfig: AgentModelCostEstimateConfig | null | undefined
+): Pick<AgentRunUsageSummary, 'estimatedCostUsd' | 'estimatedCostSource'> {
+  const inputTokens = parseFiniteNumber(usageSummary.inputTokens);
+  const outputTokens = parseFiniteNumber(usageSummary.outputTokens);
+
+  if (inputTokens == null && outputTokens == null) {
+    return {};
+  }
+
+  const inputRate = parseCostRatePerMillion(costEstimateConfig?.inputCostPerMillion);
+  const outputRate = parseCostRatePerMillion(costEstimateConfig?.outputCostPerMillion);
+
+  if ((inputTokens != null && inputRate == null) || (outputTokens != null && outputRate == null)) {
+    return {};
+  }
+
+  const estimatedCostUsd =
+    ((inputTokens ?? 0) * (inputRate ?? 0) + (outputTokens ?? 0) * (outputRate ?? 0)) / 1_000_000;
+  if (!Number.isFinite(estimatedCostUsd)) {
+    return {};
+  }
+
+  return {
+    estimatedCostUsd,
+    estimatedCostSource: CONFIGURED_MODEL_PRICING_COST_SOURCE,
+  };
+}
+
+export function applyConfiguredModelCostEstimate(
+  usageSummary: AgentRunUsageSummary,
+  costEstimateConfig: AgentModelCostEstimateConfig | null | undefined
+): AgentRunUsageSummary {
+  const estimate = estimateConfiguredModelCostUsd(usageSummary, costEstimateConfig);
+  if (estimate.estimatedCostUsd == null) {
+    return usageSummary;
+  }
+
+  return {
+    ...usageSummary,
+    ...estimate,
+  };
+}
+
 export function normalizeSdkUsageSummary({
   usage,
   providerMetadata,
@@ -305,6 +361,7 @@ export function sumSdkUsageSummaries(left: AgentRunUsageSummary, right: AgentRun
     nonCachedInputTokens: sumField(left.nonCachedInputTokens, right.nonCachedInputTokens),
     textOutputTokens: sumField(left.textOutputTokens, right.textOutputTokens),
     totalCostUsd: sumField(left.totalCostUsd, right.totalCostUsd),
+    estimatedCostUsd: sumField(left.estimatedCostUsd, right.estimatedCostUsd),
     warningCount: sumField(left.warningCount, right.warningCount),
     steps: right.steps ?? left.steps,
     toolCalls: sumField(left.toolCalls, right.toolCalls),
@@ -314,6 +371,7 @@ export function sumSdkUsageSummaries(left: AgentRunUsageSummary, right: AgentRun
     responseModelId: right.responseModelId ?? left.responseModelId,
     responseTimestamp: right.responseTimestamp ?? left.responseTimestamp,
     costSource: right.costSource ?? left.costSource,
+    estimatedCostSource: right.estimatedCostSource ?? left.estimatedCostSource,
     providerMetadata: right.providerMetadata ?? left.providerMetadata,
     rawUsage: right.rawUsage ?? left.rawUsage,
   };
@@ -321,6 +379,12 @@ export function sumSdkUsageSummaries(left: AgentRunUsageSummary, right: AgentRun
 
 export class AgentRunObservabilityTracker {
   private summary: AgentRunUsageSummary = {};
+
+  constructor(private readonly costEstimateConfig?: AgentModelCostEstimateConfig | null) {}
+
+  private getEstimatedSummary(): AgentRunUsageSummary {
+    return applyConfiguredModelCostEstimate(this.summary, this.costEstimateConfig);
+  }
 
   updateFromStep({
     usage,
@@ -339,7 +403,7 @@ export class AgentRunObservabilityTracker {
 
     this.summary = sumSdkUsageSummaries(this.summary, stepSummary);
     this.summary.steps = Math.max(this.summary.steps ?? 0, stepNumber ?? 0) || undefined;
-    return this.summary;
+    return this.getEstimatedSummary();
   }
 
   finalize({
@@ -378,11 +442,39 @@ export class AgentRunObservabilityTracker {
       ...finalSummary,
     };
 
-    return this.summary;
+    return this.getEstimatedSummary();
+  }
+
+  addGeneration({
+    usage,
+    providerMetadata,
+    finishReason,
+    rawFinishReason,
+    warnings,
+    response,
+  }: {
+    usage?: UsageLike;
+    providerMetadata?: ProviderMetadataLike;
+    finishReason?: string | null;
+    rawFinishReason?: string | null;
+    warnings?: unknown[] | null;
+    response?: ResponseLike;
+  }): AgentRunUsageSummary {
+    const generationSummary = normalizeSdkUsageSummary({
+      usage,
+      providerMetadata,
+      finishReason,
+      rawFinishReason,
+      warnings,
+      response,
+    });
+
+    this.summary = sumSdkUsageSummaries(this.summary, generationSummary);
+    return this.getEstimatedSummary();
   }
 
   getSummary(): AgentRunUsageSummary {
-    return this.summary;
+    return this.getEstimatedSummary();
   }
 }
 

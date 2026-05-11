@@ -30,6 +30,7 @@ import AgentSandboxSessionService, {
   formatRequestedSandboxServicesLabel,
   LaunchSandboxSessionOptions,
 } from 'server/services/agentSandboxSession';
+import { AgentSessionStartupError } from 'server/services/agentSession';
 
 const logger = () => getLogger();
 
@@ -112,6 +113,7 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
         baseBuildUuid,
       }),
       error: null,
+      workspaceFailure: null,
     });
   } catch (error) {
     logger().error(
@@ -123,11 +125,35 @@ export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLa
       },
       `Sandbox: launch failed launchId=${launchId} baseBuildUuid=${baseBuildUuid} service=${requestedServiceLabel}`
     );
+    const existingState = await getSandboxLaunchState(redis, launchId);
+    const linkedFailurePatch =
+      error instanceof AgentSessionStartupError
+        ? (() => {
+            const failedBuildUuid = error.buildUuid ?? existingState?.buildUuid ?? null;
+            const failedBaseBuildUuid = existingState?.baseBuildUuid ?? baseBuildUuid;
+            return {
+              buildUuid: failedBuildUuid,
+              namespace: error.namespace ?? existingState?.namespace ?? null,
+              sessionId: error.sessionId,
+              focusUrl: failedBuildUuid
+                ? buildSandboxFocusUrl({
+                    buildUuid: failedBuildUuid,
+                    sessionId: error.sessionId,
+                    baseBuildUuid: failedBaseBuildUuid,
+                  })
+                : null,
+              workspaceFailure: error.failure,
+            };
+          })()
+        : {
+            workspaceFailure: null,
+          };
     await patchSandboxLaunchState(redis, launchId, {
       status: 'error',
       stage: 'error',
       message: error instanceof Error ? error.message : 'Sandbox launch failed unexpectedly',
       error: error instanceof Error ? error.message : 'Sandbox launch failed unexpectedly',
+      ...linkedFailurePatch,
     });
     throw error;
   }

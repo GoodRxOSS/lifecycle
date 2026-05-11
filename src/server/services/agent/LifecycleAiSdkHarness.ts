@@ -29,7 +29,11 @@ import AgentThread from 'server/models/AgentThread';
 import { getLogger } from 'server/lib/logger';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import AgentMessageStore from './MessageStore';
-import { buildMessageObservabilityMetadataPatch, normalizeSdkUsageSummary } from './observability';
+import {
+  applyConfiguredModelCostEstimate,
+  buildMessageObservabilityMetadataPatch,
+  normalizeSdkUsageSummary,
+} from './observability';
 import ApprovalService from './ApprovalService';
 import AgentRunExecutor from './RunExecutor';
 import AgentRunService from './RunService';
@@ -711,17 +715,20 @@ export default class LifecycleAiSdkHarness {
                 }
               ).totalUsage ?? undefined;
             const usageSummary = totalUsage
-              ? normalizeSdkUsageSummary({
-                  usage: totalUsage,
-                  finishReason:
-                    typeof (part as { finishReason?: unknown }).finishReason === 'string'
-                      ? (part as { finishReason: string }).finishReason
-                      : undefined,
-                  rawFinishReason:
-                    typeof (part as { rawFinishReason?: unknown }).rawFinishReason === 'string'
-                      ? (part as { rawFinishReason: string }).rawFinishReason
-                      : undefined,
-                })
+              ? applyConfiguredModelCostEstimate(
+                  normalizeSdkUsageSummary({
+                    usage: totalUsage,
+                    finishReason:
+                      typeof (part as { finishReason?: unknown }).finishReason === 'string'
+                        ? (part as { finishReason: string }).finishReason
+                        : undefined,
+                    rawFinishReason:
+                      typeof (part as { rawFinishReason?: unknown }).rawFinishReason === 'string'
+                        ? (part as { rawFinishReason: string }).rawFinishReason
+                        : undefined,
+                  }),
+                  execution.selection
+                )
               : undefined;
 
             return {

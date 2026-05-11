@@ -44,10 +44,20 @@ describe('sandboxLaunchState', () => {
       sessionId: null,
       focusUrl: null,
       error: null,
+      workspaceFailure: null,
     });
   });
 
   it('preserves launch fields when they are present', () => {
+    const workspaceFailure = {
+      stage: 'connect_runtime',
+      title: 'Workspace did not start',
+      message: 'workspace pod failed',
+      recordedAt: '2026-04-06T00:00:30.000Z',
+      retryable: false,
+      origin: 'sandbox_launch',
+    } as const;
+
     expect(
       toPublicSandboxLaunchState({
         launchId: 'launch-1',
@@ -64,6 +74,7 @@ describe('sandboxLaunchState', () => {
         sessionId: 'session-1',
         focusUrl: '/environments/sandbox-build-1/agent-session/session-1',
         error: null,
+        workspaceFailure,
       })
     ).toEqual({
       launchId: 'launch-1',
@@ -79,6 +90,7 @@ describe('sandboxLaunchState', () => {
       sessionId: 'session-1',
       focusUrl: '/environments/sandbox-build-1/agent-session/session-1',
       error: null,
+      workspaceFailure,
     });
   });
 });

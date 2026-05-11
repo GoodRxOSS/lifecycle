@@ -27,6 +27,12 @@ jest.mock('server/services/agent/BuildContextChatService', () => {
       this.name = 'BuildContextChatBuildNotFoundError';
     }
   }
+  class BuildContextChatSelectedDeployError extends Error {
+    constructor(readonly buildUuid: string, readonly selectedDeployUuid: string) {
+      super(`Selected deploy ${selectedDeployUuid} does not belong to build ${buildUuid}`);
+      this.name = 'BuildContextChatSelectedDeployError';
+    }
+  }
 
   return {
     __esModule: true,
@@ -34,6 +40,7 @@ jest.mock('server/services/agent/BuildContextChatService', () => {
       launchBuildContextChat: jest.fn(),
     },
     BuildContextChatBuildNotFoundError,
+    BuildContextChatSelectedDeployError,
   };
 });
 
@@ -64,6 +71,7 @@ import { POST } from './route';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import BuildContextChatService, {
   BuildContextChatBuildNotFoundError,
+  BuildContextChatSelectedDeployError,
 } from 'server/services/agent/BuildContextChatService';
 import { AgentModelSelectionError, MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
@@ -99,6 +107,8 @@ function mockSuccessfulLaunch(overrides: { created?: boolean; reused?: boolean }
         branchName: 'feature/sample',
         pullRequestNumber: 123,
       },
+      selectedDeployUuid: null,
+      selectedDeploy: null,
       contextFreshAt: '2026-04-30T00:00:00.000Z',
     },
   });
@@ -153,6 +163,9 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
   it.each([
     ['missing buildUuid', {}],
     ['blank buildUuid', { buildUuid: '   ' }],
+    ['blank selectedDeployUuid', { buildUuid: 'build-1', selectedDeployUuid: '   ' }],
+    ['non-string selectedDeployUuid', { buildUuid: 'build-1', selectedDeployUuid: 123 }],
+    ['unsupported selected service field', { buildUuid: 'build-1', selectedServiceUuid: 'deploy-1' }],
     ['non-string defaults.model', { buildUuid: 'build-1', defaults: { model: 123 } }],
     ['unsupported defaults key', { buildUuid: 'build-1', defaults: { model: 'gpt-5.4', provider: 'openai' } }],
     ['unsupported source field', { buildUuid: 'build-1', source: { adapter: 'blank_workspace' } }],
@@ -178,6 +191,18 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
     expect(body.error.message).toBe('Build not found: missing-build');
   });
 
+  it('maps selected deploy validation failures to 400', async () => {
+    mockLaunchBuildContextChat.mockRejectedValueOnce(
+      new BuildContextChatSelectedDeployError('build-1', 'deploy-from-other-build')
+    );
+
+    const response = await POST(makeRequest({ buildUuid: 'build-1', selectedDeployUuid: 'deploy-from-other-build' }));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Selected deploy deploy-from-other-build does not belong to build build-1');
+  });
+
   it('maps missing provider API keys to 400', async () => {
     mockLaunchBuildContextChat.mockRejectedValueOnce(new MissingAgentProviderApiKeyError('openai'));
 
@@ -197,12 +222,19 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
   });
 
   it('delegates launch requests and returns 201 for created chats with execution links', async () => {
-    const response = await POST(makeRequest({ buildUuid: ' build-1 ', defaults: { model: ' gpt-5.4 ' } }));
+    const response = await POST(
+      makeRequest({
+        buildUuid: ' build-1 ',
+        selectedDeployUuid: ' deploy-1 ',
+        defaults: { model: ' gpt-5.4 ' },
+      })
+    );
     const body = await response.json();
 
     expect(response.status).toBe(201);
     expect(mockLaunchBuildContextChat).toHaveBeenCalledWith({
       buildUuid: 'build-1',
+      selectedDeployUuid: 'deploy-1',
       userId: 'sample-user',
       userIdentity: {
         userId: 'sample-user',
@@ -224,6 +256,8 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
           repo: 'example-org/example-repo',
           branch: 'feature/sample',
           pullRequestNumber: 123,
+          selectedDeployUuid: null,
+          selectedDeploy: null,
           contextFreshAt: '2026-04-30T00:00:00.000Z',
         },
         session: {

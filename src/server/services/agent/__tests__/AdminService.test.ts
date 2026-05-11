@@ -29,6 +29,15 @@ const mockSerializeRunEvent = jest.fn();
 const mockSerializeThread = jest.fn();
 const mockSerializeCanonicalMessage = jest.fn();
 
+const canonicalStartupFailure = {
+  stage: 'connect_runtime',
+  title: 'Session workspace pod failed to start',
+  message: 'init-workspace: ImagePullBackOff',
+  recordedAt: '2026-04-05T18:30:00.000Z',
+  retryable: false,
+  origin: 'agent_session',
+};
+
 jest.mock('server/services/agentSession', () => ({
   __esModule: true,
   default: {
@@ -186,6 +195,7 @@ describe('AgentAdminService.listSessions', () => {
         repo: 'example-org/example-repo',
         primaryRepo: 'example-org/example-repo',
         services: [],
+        startupFailure: canonicalStartupFailure,
       },
       {
         ...rawSessions[1],
@@ -193,6 +203,7 @@ describe('AgentAdminService.listSessions', () => {
         repo: 'example-org/example-repo',
         primaryRepo: 'example-org/example-repo',
         services: [],
+        startupFailure: null,
       },
     ]);
 
@@ -227,6 +238,7 @@ describe('AgentAdminService.listSessions', () => {
         threadCount: 1,
         pendingActionsCount: 0,
         lastRunAt: '2026-04-05T18:00:00.000Z',
+        startupFailure: canonicalStartupFailure,
       }),
       expect.objectContaining({
         id: '3e81553b-b8d4-4d2b-88d0-8d5775bcffde',
@@ -235,6 +247,152 @@ describe('AgentAdminService.listSessions', () => {
         lastRunAt: '2026-04-05T19:00:00.000Z',
       }),
     ]);
+  });
+});
+
+describe('AgentAdminService.getSession', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSerializeThread.mockImplementation((thread, sessionId) => ({
+      id: thread.uuid,
+      sessionId,
+      title: thread.title || null,
+      lastRunAt: thread.lastRunAt || null,
+    }));
+    mockSerializeRun.mockImplementation((run) => ({
+      id: run.uuid,
+      threadId: run.threadUuid,
+      sessionId: run.sessionUuid,
+      status: run.status,
+      runPlan: run.runPlanSnapshot?.debug
+        ? {
+            debug: {
+              intent: run.runPlanSnapshot.debug.resolvedIntent,
+            },
+          }
+        : null,
+    }));
+  });
+
+  it('summarizes each non-archived thread with independent counts and latest run context', async () => {
+    const rawSession = {
+      id: 17,
+      uuid: 'session-1',
+      status: 'active',
+      buildKind: 'environment',
+      userId: 'sample-user',
+      selectedServices: [],
+      workspaceRepos: [],
+      devModeSnapshots: {},
+    };
+    mockSessionQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue(rawSession),
+    });
+    mockEnrichSessions.mockResolvedValueOnce([
+      {
+        ...rawSession,
+        repo: 'example-org/example-repo',
+        primaryRepo: 'example-org/example-repo',
+        services: [],
+        startupFailure: null,
+      },
+    ]);
+
+    const threadQuery = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          id: 7,
+          uuid: 'thread-old-debug',
+          title: 'Old Debug diagnosis',
+          lastRunAt: '2026-05-09T17:00:00.000Z',
+        },
+        {
+          id: 9,
+          uuid: 'thread-fresh-debug',
+          title: 'Fresh Debug diagnosis',
+          lastRunAt: '2026-05-09T18:00:00.000Z',
+        },
+      ]),
+    };
+    mockThreadQuery.mockReturnValueOnce(threadQuery);
+
+    mockMessageQuery.mockReturnValueOnce({
+      whereIn: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ threadId: 7 }, { threadId: 7 }, { threadId: 9 }]),
+    });
+    mockRunQuery.mockReturnValueOnce({
+      whereIn: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          uuid: 'run-fresh-diagnose',
+          threadId: 9,
+          status: 'completed',
+          runPlanSnapshot: {
+            debug: { resolvedIntent: 'diagnose' },
+          },
+        },
+        {
+          uuid: 'run-old-repair',
+          threadId: 7,
+          status: 'completed',
+          runPlanSnapshot: {
+            debug: { resolvedIntent: 'repair' },
+          },
+        },
+        {
+          uuid: 'run-old-diagnose',
+          threadId: 7,
+          status: 'completed',
+          runPlanSnapshot: {
+            debug: { resolvedIntent: 'diagnose' },
+          },
+        },
+      ]),
+    });
+    mockPendingActionQuery.mockReturnValueOnce({
+      whereIn: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ threadId: 7 }]),
+    });
+
+    const result = await AgentAdminService.getSession('session-1');
+
+    expect(threadQuery.where).toHaveBeenCalledWith({ sessionId: 17 });
+    expect(threadQuery.whereNull).toHaveBeenCalledWith('archivedAt');
+    expect(result.threads).toEqual([
+      expect.objectContaining({
+        id: 'thread-old-debug',
+        messageCount: 2,
+        runCount: 2,
+        pendingActionsCount: 1,
+        latestRun: expect.objectContaining({
+          id: 'run-old-repair',
+          threadId: 'thread-old-debug',
+          runPlan: { debug: { intent: 'repair' } },
+        }),
+      }),
+      expect.objectContaining({
+        id: 'thread-fresh-debug',
+        messageCount: 1,
+        runCount: 1,
+        pendingActionsCount: 0,
+        latestRun: expect.objectContaining({
+          id: 'run-fresh-diagnose',
+          threadId: 'thread-fresh-debug',
+          runPlan: { debug: { intent: 'diagnose' } },
+        }),
+      }),
+    ]);
+    expect(result.session).toEqual(
+      expect.objectContaining({
+        id: 'session-1',
+        threadCount: 2,
+        pendingActionsCount: 1,
+        lastRunAt: '2026-05-09T18:00:00.000Z',
+      })
+    );
   });
 });
 
@@ -446,6 +604,19 @@ describe('AgentAdminService.getThreadConversation', () => {
           runUuid: 'run-1',
           createdAt: '2026-04-11T00:00:00.000Z',
         },
+        {
+          uuid: 'message-2',
+          clientMessageId: null,
+          role: 'assistant',
+          parts: [
+            {
+              type: 'text',
+              text: 'Repair Summary\n\nCommit: https://github.com/example-org/example-repo/commit/0123456789abcdef0123456789abcdef01234567. Fresh Lifecycle state: Lifecycle picked up the repair commit.',
+            },
+          ],
+          runUuid: 'run-1',
+          createdAt: '2026-04-11T00:02:00.000Z',
+        },
       ]),
     });
     mockRunQuery.mockReturnValueOnce({
@@ -556,7 +727,24 @@ describe('AgentAdminService.getThreadConversation', () => {
         parts: [{ type: 'text', text: 'Hi' }],
         createdAt: '2026-04-11T00:00:00.000Z',
       },
+      {
+        id: 'message-2',
+        clientMessageId: null,
+        threadId: 'thread-1',
+        runId: 'run-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'text',
+            text: 'Repair Summary\n\nCommit: https://github.com/example-org/example-repo/commit/0123456789abcdef0123456789abcdef01234567. Fresh Lifecycle state: Lifecycle picked up the repair commit.',
+          },
+        ],
+        createdAt: '2026-04-11T00:02:00.000Z',
+      },
     ]);
+    expect(String((result.messages[1].parts[0] as { text?: string }).text)).toContain(
+      'Lifecycle picked up the repair commit'
+    );
     expect(result.pendingActions).toEqual([
       expect.objectContaining({
         id: 'action-1',

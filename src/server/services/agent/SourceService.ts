@@ -50,9 +50,30 @@ function toTimestampString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function buildContextSourceMetadata(session: AgentSession, buildContext?: AgentBuildContextChatMetadata) {
+  return buildContext
+    ? {
+        buildUuid: buildContext.buildUuid,
+        buildKind: buildContext.buildKind,
+        sessionKind: session.sessionKind,
+        namespace: buildContext.namespace,
+        baseBuildUuid: buildContext.baseBuildUuid,
+        revision: buildContext.revision,
+        pullRequest: buildContext.pullRequest,
+        selectedDeployUuid: buildContext.selectedDeployUuid || null,
+        selectedDeploy: buildContext.selectedDeploy || null,
+        contextFreshAt: buildContext.contextFreshAt,
+      }
+    : {
+        buildUuid: session.buildUuid,
+        buildKind: session.buildKind,
+        sessionKind: session.sessionKind,
+      };
+}
+
 export default class AgentSourceService {
   static async getSessionSource(sessionId: number, options: { trx?: Transaction } = {}): Promise<AgentSource | null> {
-    return AgentSource.query(options.trx).findOne({ sessionId });
+    return (await AgentSource.query(options.trx).findOne({ sessionId })) || null;
   }
 
   static async createSessionSource(
@@ -77,22 +98,7 @@ export default class AgentSourceService {
             repos: workspaceRepos,
             primaryPath: primaryRepo?.mountPath || SESSION_WORKSPACE_ROOT,
           };
-    const metadata = options.buildContext
-      ? {
-          buildUuid: options.buildContext.buildUuid,
-          buildKind: options.buildContext.buildKind,
-          sessionKind: session.sessionKind,
-          namespace: options.buildContext.namespace,
-          baseBuildUuid: options.buildContext.baseBuildUuid,
-          revision: options.buildContext.revision,
-          pullRequest: options.buildContext.pullRequest,
-          contextFreshAt: options.buildContext.contextFreshAt,
-        }
-      : {
-          buildUuid: session.buildUuid,
-          buildKind: session.buildKind,
-          sessionKind: session.sessionKind,
-        };
+    const metadata = buildContextSourceMetadata(session, options.buildContext);
 
     return AgentSource.query(options.trx).insertAndFetch({
       sessionId: session.id,
@@ -130,6 +136,34 @@ export default class AgentSourceService {
         status === 'cleaned_up'
           ? toTimestampString(session.endedAt) || toTimestampString(session.updatedAt) || new Date().toISOString()
           : null,
+    } as Partial<AgentSource>);
+  }
+
+  static async updateSessionBuildContext(
+    session: AgentSession,
+    buildContext: AgentBuildContextChatMetadata,
+    options: { trx?: Transaction } = {}
+  ): Promise<AgentSource | null> {
+    const existing = await this.getSessionSource(session.id, options);
+    if (!existing) {
+      return null;
+    }
+
+    const metadata = buildContextSourceMetadata(session, buildContext);
+    const input = existing.input && typeof existing.input === 'object' ? existing.input : {};
+    const preparedSource =
+      existing.preparedSource && typeof existing.preparedSource === 'object' ? existing.preparedSource : {};
+
+    return AgentSource.query(options.trx).patchAndFetchById(existing.id, {
+      input: {
+        ...input,
+        ...metadata,
+      },
+      preparedSource: {
+        ...preparedSource,
+        metadata,
+      },
+      preparedAt: toTimestampString(session.updatedAt) || new Date().toISOString(),
     } as Partial<AgentSource>);
   }
 

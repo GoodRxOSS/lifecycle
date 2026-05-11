@@ -115,6 +115,48 @@ describe('AgentUsageService', () => {
     expect(JSON.stringify(aggregate)).not.toContain('providerMetadata');
   });
 
+  it('sums exact and estimated costs into aggregate usage', () => {
+    const aggregate = AgentUsageService.aggregateRuns([
+      buildRun({
+        resolvedProvider: 'openai',
+        resolvedModel: 'gpt-5.4',
+        usageSummary: {
+          totalTokens: 100,
+          totalCostUsd: 0.012,
+          estimatedCostUsd: 0.01,
+        },
+      }),
+      buildRun({
+        resolvedProvider: 'google',
+        resolvedModel: 'gemini-3-flash-preview',
+        usageSummary: {
+          totalTokens: 50,
+          estimatedCostUsd: 0.0025,
+        },
+      }),
+    ]);
+
+    expect(aggregate.usageSummary.totalCostUsd).toBeCloseTo(0.012);
+    expect(aggregate.usageSummary.estimatedCostUsd).toBeCloseTo(0.0125);
+    expect(aggregate.usageByModel[0]).toEqual(
+      expect.objectContaining({
+        provider: 'openai',
+        model: 'gpt-5.4',
+        totalTokens: 100,
+        totalCostUsd: 0.012,
+        estimatedCostUsd: 0.01,
+      })
+    );
+    expect(aggregate.usageByModel[1]).toEqual(
+      expect.objectContaining({
+        provider: 'google',
+        model: 'gemini-3-flash-preview',
+        totalTokens: 50,
+        estimatedCostUsd: 0.0025,
+      })
+    );
+  });
+
   it('attributes usage by resolved provider and model with legacy fallback', () => {
     const aggregate = AgentUsageService.aggregateRuns([
       buildRun({

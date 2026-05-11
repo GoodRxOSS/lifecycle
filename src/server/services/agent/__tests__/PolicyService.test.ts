@@ -217,6 +217,42 @@ describe('AgentPolicyService', () => {
     );
   });
 
+  it('keeps prompt-policy boundaries code-owned for Debug capabilities', () => {
+    const debugWriteAccess = AgentPolicyService.resolveCapabilitySetAccess(['github_write', 'external_mcp_write'], {
+      definitionOwnerKind: 'system',
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(debugWriteAccess).toEqual([
+      expect.objectContaining({
+        capabilityId: 'github_write',
+        allowed: true,
+        effectiveAvailability: 'system_only',
+        approvalMode: 'require_approval',
+      }),
+      expect.objectContaining({
+        capabilityId: 'external_mcp_write',
+        allowed: true,
+        effectiveAvailability: 'admin_only',
+        approvalMode: 'require_approval',
+      }),
+    ]);
+
+    const userDiagnosticAccess = AgentPolicyService.resolveCapabilityAccess({
+      capabilityId: 'diagnostics_codefresh',
+      definitionOwnerKind: 'user',
+      sourceKind: 'build_context_chat',
+    });
+
+    expect(userDiagnosticAccess).toEqual(
+      expect.objectContaining({
+        allowed: false,
+        reason: 'system_only',
+        effectiveAvailability: 'system_only',
+      })
+    );
+  });
+
   it('derives approval mode from mapped runtime approval policy', () => {
     const result = AgentPolicyService.resolveCapabilityAccess({
       capabilityId: 'workspace_shell',

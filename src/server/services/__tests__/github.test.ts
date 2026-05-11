@@ -178,9 +178,13 @@ describe('Github Service - handlePullRequestHook', () => {
   let mockQueueManager: any;
   const mockGetYamlFileContent = githubLib.getYamlFileContent as jest.Mock;
 
-  const createMockPullRequestEvent = ({ labels = [] as { name: string }[], branchSha = 'abc123' } = {}) =>
+  const createMockPullRequestEvent = ({
+    action = 'opened',
+    labels = [] as { name: string }[],
+    branchSha = 'abc123',
+  } = {}) =>
     ({
-      action: 'opened',
+      action,
       number: 42,
       repository: {
         id: 12345,
@@ -320,6 +324,33 @@ describe('Github Service - handlePullRequestHook', () => {
       buildId: 10,
     });
     expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
+  });
+
+  test('queues a build when an open deployed PR receives a synchronize event', async () => {
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPullRequest = createMockPullRequest({
+      deployOnUpdate: true,
+      latestCommit: 'previous-commit',
+    });
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        action: 'synchronize',
+        labels: [{ name: 'lifecycle-deploy!' }],
+        branchSha: 'latest-commit',
+      })
+    );
+
+    expect(mockGetYamlFileContent).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.createBuildAndDeploys).not.toHaveBeenCalled();
+    expect(mockPullRequest.__patch).toHaveBeenCalledWith({ latestCommit: 'latest-commit' });
+    expect(mockDb.models.Build.findOne).toHaveBeenCalledWith({ pullRequestId: 1 });
+    expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
+      buildId: 10,
+    });
   });
 
   test('keeps the existing label sync flow for unlabeled autoDeploy PRs', async () => {

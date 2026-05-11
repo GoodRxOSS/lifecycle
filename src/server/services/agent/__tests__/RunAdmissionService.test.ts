@@ -174,6 +174,24 @@ const customRunPlanSnapshot = {
   },
 } as const;
 
+const resolvedInstructionRunPlanSnapshot = {
+  ...runPlanSnapshot,
+  prompt: {
+    ...runPlanSnapshot.prompt,
+    instructionRefs: ['system:freeform'],
+    resolvedInstructions: [
+      {
+        ref: 'system:freeform',
+        source: 'default',
+        version: 1,
+        hash: 'freeform-template-hash',
+        renderedText: 'Use the admitted sample Free-form instructions.',
+      },
+    ],
+    renderedHash: 'sha256:resolved-instruction-prompt',
+  },
+} as const;
+
 function buildActiveRunQuery(activeRun: unknown = null) {
   const query = {
     where: jest.fn(),
@@ -261,6 +279,75 @@ describe('AgentRunAdmissionService', () => {
       threadId: 'thread-1',
       sessionId: 'session-1',
     });
+  });
+
+  it('persists resolved instruction snapshots without recomputing prompt text', async () => {
+    const queuedRun = {
+      id: 23,
+      uuid: 'run-1',
+      status: 'queued',
+    };
+    const activeRunQuery = buildActiveRunQuery();
+    const insertRunQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue(queuedRun),
+    };
+    mockRunQuery.mockReturnValueOnce(activeRunQuery).mockReturnValueOnce(insertRunQuery);
+
+    await AgentRunAdmissionService.createQueuedRunWithMessage({
+      thread: { id: 7, uuid: 'thread-1', metadata: {} } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['thread'],
+      session: { id: 17, uuid: 'session-1' } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['session'],
+      policy: { defaultMode: 'require_approval', rules: {} } as any,
+      message: { clientMessageId: 'client-message-1', parts: [{ type: 'text', text: 'Hi' }] },
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      runPlanSnapshot: resolvedInstructionRunPlanSnapshot,
+    });
+
+    expect(insertRunQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runPlanSnapshot: resolvedInstructionRunPlanSnapshot,
+      })
+    );
+  });
+
+  it('accepts historical snapshots that do not have resolved instruction text', async () => {
+    const queuedRun = {
+      id: 23,
+      uuid: 'run-1',
+      status: 'queued',
+    };
+    const activeRunQuery = buildActiveRunQuery();
+    const insertRunQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue(queuedRun),
+    };
+    mockRunQuery.mockReturnValueOnce(activeRunQuery).mockReturnValueOnce(insertRunQuery);
+
+    await expect(
+      AgentRunAdmissionService.createQueuedRunWithMessage({
+        thread: { id: 7, uuid: 'thread-1', metadata: {} } as Parameters<
+          typeof AgentRunAdmissionService.createQueuedRunWithMessage
+        >[0]['thread'],
+        session: { id: 17, uuid: 'session-1' } as Parameters<
+          typeof AgentRunAdmissionService.createQueuedRunWithMessage
+        >[0]['session'],
+        policy: { defaultMode: 'require_approval', rules: {} } as any,
+        message: { clientMessageId: 'client-message-1', parts: [{ type: 'text', text: 'Hi' }] },
+        resolvedHarness: 'lifecycle_ai_sdk',
+        resolvedProvider: 'openai',
+        resolvedModel: 'gpt-5.4',
+        runPlanSnapshot,
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        run: queuedRun,
+        created: true,
+      })
+    );
   });
 
   it('does not persist messages when another run is active', async () => {

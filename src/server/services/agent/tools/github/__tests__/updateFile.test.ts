@@ -178,5 +178,47 @@ describe('UpdateFileTool', () => {
     });
 
     expect(result.success).toBe(true);
+    expect(result.displayContent).toEqual({
+      type: 'text',
+      content: 'Updated lifecycle.yaml\nCommit: https://github.com/org/repo/commit/new-sha',
+    });
+    expect(JSON.parse(result.agentContent)).toMatchObject({
+      commit_sha: 'new-sha',
+      commit_url: 'https://github.com/org/repo/commit/new-sha',
+      commit_message: '[Lifecycle AI] fix typo',
+      repository: 'org/repo',
+      branch: 'feature-branch',
+      file_path: 'lifecycle.yaml',
+    });
+  });
+
+  it('does not create a commit when file content is unchanged', async () => {
+    const unchangedContent = 'line1\nline2\nchanged\nline4\nline5';
+
+    mockOctokit.request.mockResolvedValueOnce({
+      data: {
+        sha: 'existing-sha',
+        content: Buffer.from(unchangedContent).toString('base64'),
+      },
+    });
+
+    const result = await tool.execute({
+      ...baseArgs,
+      new_content: unchangedContent,
+    });
+
+    expect(mockOctokit.request).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+    expect(result.displayContent).toEqual({
+      type: 'text',
+      content: 'No changes to lifecycle.yaml\nNo commit created.',
+    });
+    expect(JSON.parse(result.agentContent)).toMatchObject({
+      changed: false,
+      commit_created: false,
+      repository: 'org/repo',
+      branch: 'feature-branch',
+      file_path: 'lifecycle.yaml',
+    });
   });
 });
