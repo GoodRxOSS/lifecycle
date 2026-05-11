@@ -13,13 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# grab the CODEFRESH_API_KEY environment variables from the .env file
-export $(grep CODEFRESH_API_KEY .env | xargs -0)
+set -eu
 
-# Authenticate with Codefresh CLI
-codefresh auth create-context --api-key $CODEFRESH_API_KEY
+db_setup_fingerprint() {
+  find src/server/db/migrations src/server/db/seeds src/server/db/migration-helpers.ts -type f -print | sort | xargs sha256sum | sha256sum | awk '{print $1}'
+}
 
-pnpm db:seed
-pnpm db:migrate
+case "${CODEFRESH_API_KEY:-}" in
+  "" | "not_setup" | "replace_me")
+    echo "Codefresh: skipping auth CODEFRESH_API_KEY is not configured"
+    ;;
+  *)
+    if ! codefresh auth create-context --api-key "$CODEFRESH_API_KEY"; then
+      echo "Codefresh: auth failed; continuing without Codefresh context"
+    fi
+    ;;
+esac
 
-pnpm dev
+if [ "${LIFECYCLE_MODE:-all}" != "job" ]; then
+  db_setup_stamp="/tmp/lifecycle-db-setup-fingerprint"
+  db_setup_current="$(db_setup_fingerprint)"
+  db_setup_previous="$(cat "$db_setup_stamp" 2>/dev/null || true)"
+
+  if [ "$db_setup_current" != "$db_setup_previous" ]; then
+    pnpm db:seed
+    pnpm db:migrate
+    printf '%s\n' "$db_setup_current" > "$db_setup_stamp"
+  else
+    echo "Database: skipping setup inputs unchanged"
+  fi
+fi
+
+exec pnpm dev

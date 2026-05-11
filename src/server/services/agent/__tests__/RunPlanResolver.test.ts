@@ -1051,6 +1051,9 @@ describe('AgentRunPlanResolver', () => {
         podName: 'agent-session-pod',
         pvcName: 'agent-session-pvc',
       },
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
       thread: {
         metadata: { selectedAgentDefinitionId: 'system.develop' },
       },
@@ -1060,6 +1063,40 @@ describe('AgentRunPlanResolver', () => {
     expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(
       expect.arrayContaining(['workspace_files', 'workspace_shell', 'workspace_git'])
+    );
+  });
+
+  it('allows workspace-required custom agents when a build-context chat workspace is ready', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      capabilityRefs: ['read_context', 'workspace_files'],
+      requiredCapabilityRefs: ['workspace_files'],
+      optionalCapabilityRefs: ['read_context'],
+      resourcePolicy: {
+        sourceKinds: ['workspace_session'],
+        workspaceRequired: true,
+        sandboxRequired: true,
+      },
+    });
+
+    const result = await resolve({
+      session: {
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        podName: 'agent-session-pod',
+        pvcName: 'agent-session-pvc',
+      },
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      thread: {
+        metadata: { selectedAgentDefinitionId: 'custom.sample-agent' },
+      },
+    });
+
+    expect(result.runPlanSnapshot.agent.id).toBe('custom.sample-agent');
+    expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
+    expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(
+      expect.arrayContaining(['workspace_files'])
     );
   });
 

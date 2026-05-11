@@ -61,6 +61,18 @@ spec:
           ports:
             - containerPort: 5432
               name: pg
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - lifecycle
+                - -d
+                - lifecycle
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

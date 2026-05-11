@@ -17,7 +17,7 @@
 ##################################
 load('ext://helm_resource', 'helm_resource', 'helm_repo')
 load("ext://restart_process", "docker_build_with_restart")
-load("ext://secret", "secret_create_generic")
+load("ext://secret", "secret_create_generic", "secret_from_dict")
 load('ext://dotenv', 'dotenv')
 
 update_settings(k8s_upsert_timeout_secs=180)
@@ -61,6 +61,7 @@ local_keycloak_operator_chart = '{}/keycloak-operator'.format(helm_charts_dir)
 local_lifecycle_keycloak_chart = '{}/lifecycle-keycloak'.format(helm_charts_dir)
 lifecycle_keycloak_values = 'sysops/tilt/lifecycle-keycloak-values.yaml'
 lifecycle_local_secrets = './helm/environments/local/secrets.yaml'
+github_idp_secret_name = 'lifecycle-keycloak-github-idp'
 has_local_keycloak_charts = os.path.exists(local_keycloak_operator_chart) and os.path.exists(local_lifecycle_keycloak_chart)
 use_local_keycloak_charts = keycloak_chart_source == "local" or (keycloak_chart_source == "auto" and has_local_keycloak_charts)
 if keycloak_chart_source == "local" and not has_local_keycloak_charts:
@@ -124,6 +125,7 @@ helm_resource(
     namespace=app_namespace,
     resource_deps=['bitnami'],
     flags=[
+        '--version', '25.5.2',
         '--set', 'auth.enabled=false',
         '--set', 'replica.replicaCount=0',
         '--set', 'auth.usePasswordFiles=false',
@@ -232,6 +234,31 @@ lifecycle_keycloak_resource_deps = [
 ]
 lifecycle_keycloak_flags = []
 
+def local_secret_value(key):
+    return str(local([
+        'node',
+        '-e',
+        'const fs = require("fs"); const [file, key] = process.argv.slice(1); const text = fs.readFileSync(file, "utf8"); const escaped = key.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"); const re = new RegExp("^\\\\s*" + escaped + ":\\\\s*[\\\\\\"\\\']?([^\\\\\\"\\\'\\\\n#]+)", "m"); const match = text.match(re); process.stdout.write(match ? match[1].trim() : "");',
+        lifecycle_local_secrets,
+        key,
+    ], quiet=True))
+
+github_idp_client_id = local_secret_value('githubClientId') or os.getenv('GITHUB_CLIENT_ID', 'local-github-client-id')
+github_idp_client_secret = local_secret_value('githubClientSecret') or os.getenv('GITHUB_CLIENT_SECRET', 'local-github-client-secret')
+if github_idp_client_id == '' or github_idp_client_secret == '':
+    github_idp_client_id = 'local-github-client-id'
+    github_idp_client_secret = 'local-github-client-secret'
+    print('GitHub IDP: GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not configured; GitHub account linking will use placeholders')
+
+k8s_yaml(secret_from_dict(
+    github_idp_secret_name,
+    namespace=app_namespace,
+    inputs={
+        'clientId': github_idp_client_id,
+        'clientSecret': github_idp_client_secret,
+    },
+))
+
 if use_local_keycloak_charts:
     keycloak_operator_deps.append(keycloak_operator_chart)
     lifecycle_keycloak_deps.append(lifecycle_keycloak_chart)
@@ -293,6 +320,20 @@ helm_resource(
     labels=['infra'],
 )
 
+local_resource(
+    'lifecycle-keycloak-github-idp-sync',
+    cmd='sh sysops/tilt/scripts/sync_keycloak_github_idp.sh {namespace} {secret}'.format(
+        namespace=app_namespace,
+        secret=github_idp_secret_name,
+    ),
+    deps=[
+        lifecycle_local_secrets,
+        'sysops/tilt/scripts/sync_keycloak_github_idp.sh',
+    ],
+    resource_deps=['lifecycle-keycloak'],
+    labels=['infra'],
+)
+
 ##################################
 # Worker & Web (Helm, Single Deploy)
 ##################################
@@ -336,6 +377,7 @@ helm_set_args = [
     'keycloak.companyIdp.userInfoUrl={}/realms/company/protocol/openid-connect/userinfo'.format(internal_keycloak_origin),
     'keycloak.companyIdp.jwksUrl={}/realms/company/protocol/openid-connect/certs'.format(internal_keycloak_origin),
     'keycloak.companyIdp.issuer={}/realms/company'.format(company_idp_origin),
+    'secrets.githubAppAuthCallback={}/realms/lifecycle/broker/github/endpoint'.format(company_idp_origin),
     'secrets.aiApiKey={}'.format(os.getenv("AI_API_KEY", "")),
     'secrets.geminiApiKey={}'.format(os.getenv("GEMINI_API_KEY", "")),
 ]
@@ -382,12 +424,13 @@ for r in patched_deploy:
 
         # Don't add postgres/redis deps for keycloak resources
         if "keycloak" not in name:
-            resource_deps = ['local-postgres', 'redis', 'agent-session-workspace-image']
+            resource_deps = ['local-postgres', 'redis', 'lifecycle-keycloak-github-idp-sync', 'agent-session-workspace-image']
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']
         elif "worker" in name:
             labels = ["worker"]
+            resource_deps.append('lifecycle-web')
         k8s_resource(
             name,
             resource_deps=resource_deps,

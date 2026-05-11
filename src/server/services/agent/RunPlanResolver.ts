@@ -20,6 +20,7 @@ import type AgentSource from 'server/models/AgentSource';
 import type AgentThread from 'server/models/AgentThread';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
+import { AgentWorkspaceStatus } from 'shared/constants';
 import AgentCapabilityService from './CapabilityService';
 import AgentPolicyService from './PolicyService';
 import AgentProviderRegistry from './ProviderRegistry';
@@ -229,6 +230,39 @@ function compactSource({
       freshnessSource: source.preparedAt ? 'source' : sourceKind === 'workspace_session' ? 'session' : 'request',
     },
   };
+}
+
+function resolveSourceKindForDefinition({
+  defaultAgentDefinitionId,
+  definition,
+  session,
+  source,
+}: {
+  defaultAgentDefinitionId: SystemAgentDefinitionId;
+  definition: AgentDefinitionContract;
+  session: AgentSession;
+  source: AgentSource;
+}): AgentRunPlanSourceKind {
+  const defaultSourceKind = sourceKindForSystemAgentDefinitionId(defaultAgentDefinitionId);
+  const sourceKinds = definition.resourcePolicy.sourceKinds;
+
+  if (sourceKinds.includes(defaultSourceKind)) {
+    return defaultSourceKind;
+  }
+
+  if (session.workspaceStatus === AgentWorkspaceStatus.READY && sourceKinds.includes('workspace_session')) {
+    return 'workspace_session';
+  }
+
+  if (readString(source.input?.buildUuid) && sourceKinds.includes('build_context_chat')) {
+    return 'build_context_chat';
+  }
+
+  if (sourceKinds.includes('freeform_chat')) {
+    return 'freeform_chat';
+  }
+
+  return defaultSourceKind;
 }
 
 function uniqueCapabilityIds(capabilityIds: readonly AgentCapabilityCatalogId[]): AgentCapabilityCatalogId[] {
@@ -463,7 +497,12 @@ export default class AgentRunPlanResolver {
       userId: userIdentity.userId,
       warnings,
     });
-    const sourceKind = sourceKindForSystemAgentDefinitionId(defaultAgentDefinitionId);
+    const sourceKind = resolveSourceKindForDefinition({
+      defaultAgentDefinitionId,
+      definition,
+      session,
+      source,
+    });
     const resolvedProviderRequest =
       requestedProvider || definition.modelPreference?.provider || readSessionDefaultProvider(source) || undefined;
     const resolvedModelRequest =

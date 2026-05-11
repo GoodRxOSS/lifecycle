@@ -44,6 +44,8 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
+    - name: ENABLE_AUTH
+      value: 'true'
     - name: AGENT_SESSION_WORKSPACE_IMAGE
       value: 'lifecycle-workspace:latest'
     - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
@@ -154,7 +156,7 @@ components:
         - name: GITHUB_API_REQUEST_INTERVAL
           value: '10000'
         - name: LIFECYCLE_UI_URL
-          value: 'http://localhost:8000'
+          value: 'http://localhost:3000'
         - name: DD_TRACE_ENABLED
           value: 'false'
       ports:
