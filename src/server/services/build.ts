@@ -50,6 +50,7 @@ import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/pagin
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
 import { compactStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
+import OverrideService, { type BuildServiceOverrideState } from './override';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -64,6 +65,11 @@ export interface IngressConfiguration {
   pathPortMapping: Record<string, number>;
   readonly ingressAnnotations?: Record<string, any>;
 }
+
+type DeployServiceOverrideState = Pick<
+  BuildServiceOverrideState,
+  'name' | 'branchOrExternalUrl' | 'group' | 'editable'
+>;
 
 export default class BuildService extends BaseService {
   ingressService = new IngressService(this.db, this.redis, this.redlock, this.queueManager);
@@ -358,7 +364,48 @@ export default class BuildService extends BaseService {
         b.select('fullName');
       });
 
+    if (!build) {
+      return null;
+    }
+
+    await this.attachServiceOverrideStateToDeploys(build);
+
     return build;
+  }
+
+  private async attachServiceOverrideStateToDeploys(build: Build): Promise<void> {
+    if (!build.id || !Array.isArray(build.deploys)) {
+      return;
+    }
+
+    const buildForServiceOverrides = await this.db.models.Build.query()
+      .findOne({ id: build.id })
+      .select('id', 'uuid', 'environmentId', 'enableFullYaml')
+      .withGraphFetched('[environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
+
+    if (!buildForServiceOverrides) {
+      return;
+    }
+
+    const overrideService = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
+    const overrideStates = await overrideService.getServiceOverrideStates(
+      buildForServiceOverrides,
+      buildForServiceOverrides.deploys || []
+    );
+    const overrideStateByName = new Map(overrideStates.map((state) => [state.name, state]));
+
+    build.deploys.forEach((deploy) => {
+      const serviceName = deploy.deployable?.name || deploy.service?.name;
+      const state = serviceName ? overrideStateByName.get(serviceName) : null;
+      (deploy as Deploy & { serviceOverride: DeployServiceOverrideState | null }).serviceOverride = state
+        ? {
+            name: state.name,
+            branchOrExternalUrl: state.branchOrExternalUrl,
+            group: state.group,
+            editable: state.editable,
+          }
+        : null;
+    });
   }
 
   async redeployServiceFromBuild(buildUuid: string, serviceName: string) {

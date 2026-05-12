@@ -3404,7 +3404,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         BuildServiceOverridePatch: {
           type: 'object',
           properties: {
-            serviceName: {
+            name: {
               type: 'string',
               example: 'backend',
               description: 'The service name to update.',
@@ -3420,9 +3420,95 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               description: 'The branch name or external URL override for the service.',
             },
           },
-          required: ['serviceName'],
+          required: ['name'],
           anyOf: [{ required: ['active'] }, { required: ['branchOrExternalUrl'] }],
           additionalProperties: true,
+        },
+
+        BuildServiceOverrideState: {
+          type: 'object',
+          properties: {
+            name: {
+              type: 'string',
+              example: 'backend',
+              description: 'The service name.',
+            },
+            active: {
+              type: 'boolean',
+              example: true,
+              description: 'Whether the service is selected for the build.',
+            },
+            branchOrExternalUrl: {
+              type: 'string',
+              nullable: true,
+              example: 'feature/api',
+              description: 'The current branch, external URL, or display-only value shown for the service.',
+            },
+            status: {
+              type: 'string',
+              nullable: true,
+              example: 'deployed',
+              description: 'Current deploy status for the service.',
+            },
+            statusMessage: {
+              type: 'string',
+              nullable: true,
+              example: 'Successfully deployed',
+              description: 'Current deploy status message for the service.',
+            },
+            updatedAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: 'When the deploy was last updated.',
+            },
+            group: {
+              type: 'string',
+              enum: ['default', 'optional'],
+              description: 'Whether the service belongs to the default or optional service group.',
+            },
+            editable: {
+              type: 'boolean',
+              description: 'Whether branchOrExternalUrl can be edited for this service.',
+            },
+          },
+          required: [
+            'name',
+            'active',
+            'branchOrExternalUrl',
+            'status',
+            'statusMessage',
+            'updatedAt',
+            'group',
+            'editable',
+          ],
+        },
+
+        DeployServiceOverrideState: {
+          type: 'object',
+          properties: {
+            name: {
+              type: 'string',
+              example: 'backend',
+              description: 'The service name used when submitting service override PATCH requests.',
+            },
+            branchOrExternalUrl: {
+              type: 'string',
+              nullable: true,
+              example: 'feature/api',
+              description: 'The current branch, external URL, or display-only value shown for the service.',
+            },
+            group: {
+              type: 'string',
+              enum: ['default', 'optional'],
+              description: 'Whether the service belongs to the default or optional service group.',
+            },
+            editable: {
+              type: 'boolean',
+              description: 'Whether branchOrExternalUrl can be edited for this service.',
+            },
+          },
+          required: ['name', 'branchOrExternalUrl', 'group', 'editable'],
         },
 
         UpdateBuildServiceOverridesRequest: {
@@ -3580,6 +3666,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             initEnv: { type: 'object', example: { PORT: '8080' } },
             deployable: { $ref: '#/components/schemas/Deployable' },
             repository: { $ref: '#/components/schemas/Repository' },
+            serviceOverride: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/DeployServiceOverrideState' }],
+              description:
+                'Computed service override edit state. Present on GET /api/v2/builds/{uuid}; null for deploys that are not editable through the service override form.',
+            },
           },
           required: [
             'id',
@@ -3669,6 +3761,36 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/Build' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for the PATCH /builds/{uuid}/services endpoint.
+         */
+        UpdateBuildServiceOverridesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    serviceOverrides: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/BuildServiceOverrideState' },
+                    },
+                    queued: {
+                      type: 'boolean',
+                      example: true,
+                      description: 'Whether the build was queued for redeploy after the override update.',
+                    },
+                  },
+                  required: ['serviceOverrides', 'queued'],
+                },
               },
               required: ['data'],
             },

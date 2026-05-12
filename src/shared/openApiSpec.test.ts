@@ -35,6 +35,7 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(getOperation('/api/v2/builds/{uuid}/environment-overrides', 'patch')).toBeUndefined();
     expect(getOperation('/api/v2/builds/{uuid}/options', 'patch')).toBeUndefined();
     expect(getOperation('/api/v2/builds/{uuid}', 'patch')?.tags).toEqual(['Builds']);
+    expect(getOperation('/api/v2/builds/{uuid}/services', 'get')).toBeUndefined();
     expect(getOperation('/api/v2/builds/{uuid}/services', 'patch')?.tags).toEqual(['Builds']);
     expect(schemas.UpdateBuildConfigSuccessResponse.allOf[1].properties.data).toEqual({
       $ref: '#/components/schemas/Build',
@@ -69,11 +70,41 @@ describe('OpenAPI v2 agent session contract', () => {
       { required: ['commentRuntimeEnv'] },
       { required: ['commentInitEnv'] },
     ]);
-    expect(schemas.BuildServiceOverridePatch.required).toEqual(['serviceName']);
+    expect(schemas.BuildServiceOverridePatch.required).toEqual(['name']);
     expect(schemas.BuildServiceOverridePatch.additionalProperties).toBe(true);
+    expect(schemas.BuildServiceOverrideState.required).toEqual([
+      'name',
+      'active',
+      'branchOrExternalUrl',
+      'status',
+      'statusMessage',
+      'updatedAt',
+      'group',
+      'editable',
+    ]);
+    expect(schemas.BuildServiceOverrideState.properties.group.enum).toEqual(['default', 'optional']);
+    expect(schemas.DeployServiceOverrideState.required).toEqual(['name', 'branchOrExternalUrl', 'group', 'editable']);
+    expect(schemas.DeployServiceOverrideState.properties.group.enum).toEqual(['default', 'optional']);
+    expect(schemas.Deploy.properties.serviceOverride).toEqual({
+      nullable: true,
+      allOf: [{ $ref: '#/components/schemas/DeployServiceOverrideState' }],
+      description:
+        'Computed service override edit state. Present on GET /api/v2/builds/{uuid}; null for deploys that are not editable through the service override form.',
+    });
     expect(schemas.UpdateBuildServiceOverridesRequest.required).toEqual(['serviceOverrides']);
     expect(schemas.UpdateBuildServiceOverridesRequest.properties.serviceOverrides.minItems).toBe(1);
     expect(schemas.UpdateBuildServiceOverridesRequest.additionalProperties).toBe(true);
+    expect(schemas.GetBuildServiceOverridesSuccessResponse).toBeUndefined();
+    expect(
+      schemas.UpdateBuildServiceOverridesSuccessResponse.allOf[1].properties.data.properties.serviceOverrides
+    ).toEqual({
+      type: 'array',
+      items: { $ref: '#/components/schemas/BuildServiceOverrideState' },
+    });
+    expect(schemas.UpdateBuildServiceOverridesSuccessResponse.allOf[1].properties.data.required).toEqual([
+      'serviceOverrides',
+      'queued',
+    ]);
     expect(schemas.BuildOverrideUpdateResult.required).toEqual(['status', 'buildUuid', 'queued']);
   });
 

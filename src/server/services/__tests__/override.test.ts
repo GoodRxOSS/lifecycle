@@ -57,6 +57,7 @@ jest.mock('../build', () => ({
 }));
 
 import OverrideService, { ApplyBuildOverridesArgs, BuildConfigPatchInput, BuildOverrideInput } from '../override';
+import { DeployTypes } from 'shared/constants';
 
 const createPatchable = () => {
   const patch = jest.fn().mockResolvedValue(undefined);
@@ -107,26 +108,37 @@ function createFullYamlArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyB
     name: 'api',
     buildUUID: 'current-build',
     buildId: 42,
+    active: true,
+    type: DeployTypes.GITHUB,
     $query: deployablePatchable.model.$query,
   };
   const deploy = {
+    active: true,
+    branchName: 'main',
+    publicUrl: 'api-public-url',
     deployable,
     service: {
       id: 7,
       name: 'api',
+      type: DeployTypes.GITHUB,
     },
     $query: deployPatchable.model.$query,
   };
   const dependentDeploy = {
+    active: true,
     deployable: {
       name: 'api-worker',
       dependsOnDeployableName: 'api',
+      dependsOnServiceId: 7,
       buildUUID: 'current-build',
       buildId: 42,
+      active: true,
+      type: DeployTypes.GITHUB,
     },
     service: {
       id: 8,
       name: 'api-worker',
+      type: DeployTypes.GITHUB,
     },
     $query: dependentPatchable.model.$query,
   };
@@ -166,32 +178,50 @@ function createClassicArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyBu
     id: 42,
     uuid: 'current-build',
     enableFullYaml: false,
+    environment: {
+      defaultServices: [
+        {
+          id: 7,
+        },
+      ],
+      optionalServices: [],
+    },
     $query: buildPatchable.model.$query,
   };
   const deployable = {
     name: 'api',
     buildUUID: 'current-build',
     buildId: 42,
+    type: DeployTypes.GITHUB,
     $query: deployablePatchable.model.$query,
   };
   const deploy = {
+    serviceId: 7,
+    active: true,
+    branchName: 'main',
+    publicUrl: 'classic-public-url',
     deployable,
     service: {
       id: 7,
       name: 'api',
+      type: DeployTypes.GITHUB,
     },
     $query: deployPatchable.model.$query,
   };
   const dependentDeploy = {
+    serviceId: 8,
+    active: true,
     deployable: {
       name: 'api-worker',
       buildUUID: 'current-build',
       buildId: 42,
+      type: DeployTypes.GITHUB,
     },
     service: {
       id: 8,
       name: 'api-worker',
       dependsOnServiceId: 7,
+      type: DeployTypes.GITHUB,
     },
     $query: dependentPatchable.model.$query,
   };
@@ -428,7 +458,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           active: false,
         },
       ],
@@ -464,7 +494,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: undefined,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           active: false,
         },
       ],
@@ -495,7 +525,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           branchOrExternalUrl: 'feature/api',
         },
       ],
@@ -522,7 +552,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           active: false,
           branchOrExternalUrl: 'api.example.com',
         },
@@ -552,7 +582,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           active: false,
         },
       ],
@@ -577,12 +607,18 @@ describe('OverrideService.applyBuildOverrides', () => {
         name: 'web',
         buildUUID: 'current-build',
         buildId: 42,
+        active: true,
+        type: DeployTypes.GITHUB,
         $query: webDeployablePatchable.model.$query,
       },
       service: {
         id: 9,
         name: 'web',
+        type: DeployTypes.GITHUB,
       },
+      active: true,
+      branchName: 'main',
+      publicUrl: 'web-public-url',
       $query: webDeployPatchable.model.$query,
     };
     args.deploys.push(webDeploy as any);
@@ -593,11 +629,11 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           active: false,
         },
         {
-          serviceName: 'web',
+          name: 'web',
           branchOrExternalUrl: 'feature/web',
         },
       ],
@@ -633,11 +669,11 @@ describe('OverrideService.applyBuildOverrides', () => {
         pullRequest: args.pullRequest,
         serviceOverrides: [
           {
-            serviceName: 'api',
+            name: 'api',
             active: false,
           },
           {
-            serviceName: 'missing-service',
+            name: 'missing-service',
             active: true,
           },
         ],
@@ -663,7 +699,7 @@ describe('OverrideService.applyBuildOverrides', () => {
         pullRequest: args.pullRequest,
         serviceOverrides: [
           {
-            serviceName: 'api',
+            name: 'api',
             active: false,
           },
         ],
@@ -687,7 +723,7 @@ describe('OverrideService.applyBuildOverrides', () => {
         pullRequest: args.pullRequest,
         serviceOverrides: [
           {
-            serviceName: 'api',
+            name: 'api',
             branchOrExternalUrl: 'feature/api',
           },
         ],
@@ -716,7 +752,7 @@ describe('OverrideService.applyBuildOverrides', () => {
       pullRequest: args.pullRequest,
       serviceOverrides: [
         {
-          serviceName: 'api',
+          name: 'api',
           branchOrExternalUrl: 'feature/api',
         },
       ],
@@ -727,6 +763,140 @@ describe('OverrideService.applyBuildOverrides', () => {
       branchName: 'feature/api',
       publicUrl: 'deployable-host',
     });
+  });
+
+  it('returns full-yaml service override edit state and excludes internal dependencies', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs();
+    const dockerDeploy = {
+      active: false,
+      status: 'built',
+      statusMessage: 'Ready',
+      updatedAt: '2026-05-08T12:00:00.000Z',
+      deployable: {
+        name: 'worker',
+        active: false,
+        type: DeployTypes.DOCKER,
+        dockerImage: 'repo/worker',
+        defaultTag: 'latest',
+      },
+      service: {
+        id: 9,
+        name: 'worker',
+        type: DeployTypes.DOCKER,
+      },
+    };
+    args.deploys.push(dockerDeploy as any);
+
+    await expect(service.getServiceOverrideStates(args.build, args.deploys)).resolves.toEqual([
+      expect.objectContaining({
+        name: 'api',
+        active: true,
+        branchOrExternalUrl: 'main',
+        group: 'default',
+        editable: true,
+      }),
+      expect.objectContaining({
+        name: 'worker',
+        active: false,
+        branchOrExternalUrl: 'repo/worker@latest',
+        status: 'built',
+        statusMessage: 'Ready',
+        updatedAt: '2026-05-08T12:00:00.000Z',
+        group: 'optional',
+        editable: false,
+      }),
+    ]);
+  });
+
+  it('returns classic service override edit state grouped by environment membership', async () => {
+    const { service } = createService();
+    const args = createClassicArgs();
+    const optionalDeploy = {
+      serviceId: 9,
+      active: false,
+      branchName: 'feature/worker',
+      publicUrl: 'worker-public-url',
+      deployable: {
+        name: 'worker',
+        type: DeployTypes.HELM,
+      },
+      service: {
+        id: 9,
+        name: 'worker',
+        type: DeployTypes.HELM,
+      },
+    };
+    (args.build.environment!.optionalServices as any[]).push({ id: 9 });
+    args.deploys.push(optionalDeploy as any);
+
+    await expect(service.getServiceOverrideStates(args.build, args.deploys)).resolves.toEqual([
+      expect.objectContaining({
+        name: 'api',
+        branchOrExternalUrl: 'main',
+        group: 'default',
+        editable: true,
+      }),
+      expect.objectContaining({
+        name: 'worker',
+        branchOrExternalUrl: 'feature/worker',
+        group: 'optional',
+        editable: true,
+      }),
+    ]);
+  });
+
+  it('ignores unchanged display-only branch values while applying active changes', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs();
+    args.deploys[0]!.deployable!.type = DeployTypes.DOCKER;
+    args.deploys[0]!.deployable!.dockerImage = 'repo/api';
+    args.deploys[0]!.deployable!.defaultTag = 'latest';
+
+    await service.applyServiceOverrides({
+      build: args.build,
+      deploys: args.deploys,
+      pullRequest: args.pullRequest,
+      serviceOverrides: [
+        {
+          name: 'api',
+          active: false,
+          branchOrExternalUrl: 'repo/api@latest',
+        },
+      ],
+      runUuid: 'run-uuid',
+    });
+
+    expect(args.deploys[0]!.deployable!.$query().patch).not.toHaveBeenCalled();
+    expect(args.deploys[0]!.$query().patch).toHaveBeenCalledWith({
+      active: false,
+    });
+  });
+
+  it('rejects changed display-only branch values before patching', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs();
+    args.deploys[0]!.deployable!.type = DeployTypes.DOCKER;
+    args.deploys[0]!.deployable!.dockerImage = 'repo/api';
+    args.deploys[0]!.deployable!.defaultTag = 'latest';
+
+    await expect(
+      service.applyServiceOverrides({
+        build: args.build,
+        deploys: args.deploys,
+        pullRequest: args.pullRequest,
+        serviceOverrides: [
+          {
+            name: 'api',
+            active: false,
+            branchOrExternalUrl: 'repo/api@changed',
+          },
+        ],
+        runUuid: 'run-uuid',
+      })
+    ).rejects.toThrow('Service api branchOrExternalUrl is not editable');
+
+    expect(args.deploys[0]!.$query().patch).not.toHaveBeenCalled();
   });
 });
 
