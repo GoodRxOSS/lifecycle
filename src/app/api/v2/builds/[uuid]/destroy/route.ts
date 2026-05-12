@@ -25,8 +25,9 @@ import BuildService from 'server/services/build';
  *   put:
  *     summary: Tear down a build environment
  *     description: |
- *       Changes the status of all Deploys, Builds and Deployables associated with the specified
- *       UUID to torn_down. This effectively marks the environment as deleted.
+ *       Deletes Kubernetes resources, runs configured CLI/Codefresh destroy steps, uninstalls Helm releases,
+ *       removes the namespace, queues ingress and GitHub deployment cleanup, then marks the associated
+ *       Build and Deploy records as torn_down.
  *     tags:
  *       - Builds
  *     parameters:
@@ -67,7 +68,7 @@ const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string
 
   const buildService = new BuildService();
 
-  const response = await buildService.tearDownBuild(buildUuid);
+  const response = await buildService.destroyBuildEnvironment(buildUuid);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);

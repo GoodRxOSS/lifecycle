@@ -373,6 +373,136 @@ describe('BuildService status updates', () => {
   });
 });
 
+describe('BuildService destroyBuildEnvironment', () => {
+  function createQueueManager() {
+    return {
+      registerQueue: jest.fn(() => ({
+        add: jest.fn(),
+        process: jest.fn(),
+        on: jest.fn(),
+      })),
+    };
+  }
+
+  test('runs build cleanup before returning torn-down deploy records', async () => {
+    const build = {
+      id: 42,
+      uuid: 'sample-build',
+      isStatic: false,
+      status: BuildStatus.DEPLOYED,
+    };
+    const updatedDeploys = [{ id: 100, uuid: 'sample-deploy', status: DeployStatus.TORN_DOWN }];
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(build),
+    };
+    const deployQuery = {
+      where: jest.fn(() => deployQuery),
+      select: jest.fn().mockResolvedValue(updatedDeploys),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+          Deploy: {
+            query: jest.fn(() => deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    const result = await buildService.destroyBuildEnvironment('sample-build');
+
+    expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
+    expect(deleteBuild).toHaveBeenCalledWith(build);
+    expect(deployQuery.where).toHaveBeenCalledWith({ buildId: 42 });
+    expect(deployQuery.select).toHaveBeenCalledWith('id', 'uuid', 'status');
+    expect(deleteBuild.mock.invocationCallOrder[0]).toBeLessThan(deployQuery.where.mock.invocationCallOrder[0]);
+    expect(result).toEqual({
+      status: 'success',
+      message: 'Build sample-build has been torn down',
+      namespacesUpdated: updatedDeploys,
+    });
+  });
+
+  test('does not clean up missing builds', async () => {
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    const deployQuery = {
+      where: jest.fn(),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+          Deploy: {
+            query: jest.fn(() => deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    await expect(buildService.destroyBuildEnvironment('missing-build')).resolves.toEqual({
+      status: 'not_found',
+      message: 'Build not found for missing-build or is static environment.',
+    });
+
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(deployQuery.where).not.toHaveBeenCalled();
+  });
+
+  test('does not clean up static environments', async () => {
+    const build = {
+      id: 42,
+      uuid: 'static-build',
+      isStatic: true,
+      status: BuildStatus.DEPLOYED,
+    };
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(build),
+    };
+    const deployQuery = {
+      where: jest.fn(),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+          Deploy: {
+            query: jest.fn(() => deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    await expect(buildService.destroyBuildEnvironment('static-build')).resolves.toEqual({
+      status: 'not_found',
+      message: 'Build not found for static-build or is static environment.',
+    });
+
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(deployQuery.where).not.toHaveBeenCalled();
+  });
+});
+
 describe('BuildService stale deploy reconciliation', () => {
   let buildService: BuildService;
   let deployableQuery: any;
