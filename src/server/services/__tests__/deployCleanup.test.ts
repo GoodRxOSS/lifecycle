@@ -211,6 +211,28 @@ describe('DeployCleanupService', () => {
     expect(deploy.patch).not.toHaveBeenCalled();
   });
 
+  test('missing Helm release is treated as already cleaned up', async () => {
+    mockShellPromise.mockImplementation((command: string) => {
+      if (command.includes('helm uninstall')) {
+        return Promise.reject(new Error('Error: uninstall: Release not loaded: old-api-build-1: release: not found'));
+      }
+      return Promise.resolve('');
+    });
+    const deploy = createDeploy();
+    const service = createService();
+
+    await expect(service.cleanupDeploy(deploy, { mode: 'infra' })).resolves.toBe(true);
+
+    expect(mockMetricsIncrement).toHaveBeenCalledWith(
+      'task',
+      expect.objectContaining({ result: 'skipped_not_found', resourceType: 'helm-release' })
+    );
+    expect(deploy.patch).toHaveBeenCalledWith({
+      status: DeployStatus.TORN_DOWN,
+      statusMessage: 'Deploy infrastructure was cleaned up successfully',
+    });
+  });
+
   test('infra queue job marks deploy torn_down when cleanup succeeds', async () => {
     const deploy = createDeploy();
     const query = {
@@ -380,6 +402,52 @@ describe('DeployCleanupService', () => {
     });
   });
 
+  test('destroyServiceDeployment skips cleanup when deploy is already torn down', async () => {
+    const deploy = createDeploy({
+      id: 88,
+      uuid: 'api-build-1',
+      status: DeployStatus.TORN_DOWN,
+      statusMessage: 'Deploy infrastructure was cleaned up successfully',
+      deployable: {
+        name: 'api',
+        type: DeployTypes.DOCKER,
+        serviceDisksYaml: null,
+      },
+    });
+    const build = {
+      uuid: 'build-1',
+      enableFullYaml: true,
+      isStatic: false,
+      deploys: [deploy],
+    };
+    const buildQuery = {
+      findOne: jest.fn(() => buildQuery),
+      withGraphFetched: jest.fn().mockResolvedValue(build),
+    };
+    const service = createService({
+      models: {
+        Build: {
+          query: jest.fn(() => buildQuery),
+        },
+      },
+    });
+    const cleanupDeploy = jest.spyOn(service, 'cleanupDeploy').mockResolvedValue(true);
+
+    const result = await service.destroyServiceDeployment('build-1', 'api');
+
+    expect(cleanupDeploy).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      status: 'success',
+      message: 'Service api in build build-1 is already torn down',
+      deploy: {
+        id: 88,
+        uuid: 'api-build-1',
+        status: DeployStatus.TORN_DOWN,
+        statusMessage: 'Deploy infrastructure was cleaned up successfully',
+      },
+    });
+  });
+
   test('destroyServiceDeployment matches classic services by service name', async () => {
     const deploy = createDeploy({
       id: 89,
@@ -426,6 +494,57 @@ describe('DeployCleanupService', () => {
     expect(cleanupDeploy).toHaveBeenCalledWith(deploy, { mode: 'infra' });
     expect(result.status).toBe('success');
     expect(result.deploy).toEqual(updatedDeploy);
+  });
+
+  test('destroyServiceDeployment returns a summary when deploy refresh is missing after cleanup', async () => {
+    const deploy = createDeploy({
+      id: 92,
+      uuid: 'api-build-1',
+      deployable: {
+        name: 'api',
+        type: DeployTypes.DOCKER,
+        serviceDisksYaml: null,
+      },
+    });
+    const build = {
+      uuid: 'build-1',
+      enableFullYaml: true,
+      isStatic: false,
+      deploys: [deploy],
+    };
+    const buildQuery = {
+      findOne: jest.fn(() => buildQuery),
+      withGraphFetched: jest.fn().mockResolvedValue(build),
+    };
+    const deployQuery = {
+      findById: jest.fn(() => deployQuery),
+      select: jest.fn().mockResolvedValue(null),
+    };
+    const service = createService({
+      models: {
+        Build: {
+          query: jest.fn(() => buildQuery),
+        },
+        Deploy: {
+          query: jest.fn(() => deployQuery),
+        },
+      },
+    });
+    const cleanupDeploy = jest.spyOn(service, 'cleanupDeploy').mockResolvedValue(true);
+
+    const result = await service.destroyServiceDeployment('build-1', 'api');
+
+    expect(cleanupDeploy).toHaveBeenCalledWith(deploy, { mode: 'infra' });
+    expect(result).toEqual({
+      status: 'success',
+      message: 'Service api in build build-1 has been torn down',
+      deploy: {
+        id: 92,
+        uuid: 'api-build-1',
+        status: DeployStatus.TORN_DOWN,
+        statusMessage: 'Deploy infrastructure was cleaned up successfully',
+      },
+    });
   });
 
   test('destroyServiceDeployment allows static environments', async () => {

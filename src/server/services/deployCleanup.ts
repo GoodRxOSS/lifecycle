@@ -60,6 +60,20 @@ interface DestroyServiceDeploymentResult {
   deploy?: DestroyServiceDeploymentDeploy | null;
 }
 
+function toDestroyServiceDeploymentDeploy(deploy: {
+  id: number;
+  uuid: string;
+  status: DeployStatus;
+  statusMessage: string;
+}): DestroyServiceDeploymentDeploy {
+  return {
+    id: deploy.id,
+    uuid: deploy.uuid,
+    status: deploy.status,
+    statusMessage: deploy.statusMessage,
+  };
+}
+
 function shellQuote(value: string | number): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
@@ -91,6 +105,11 @@ function isMissingResourceTypeError(error: unknown): boolean {
     normalized.includes('the server does not have a resource type') ||
     normalized.includes('no matches for kind')
   );
+}
+
+function isHelmReleaseNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.toLowerCase().includes('release: not found');
 }
 
 export default class DeployCleanupService extends BaseService {
@@ -146,6 +165,14 @@ export default class DeployCleanupService extends BaseService {
         };
       }
 
+      if (deploy.status === DeployStatus.TORN_DOWN) {
+        return {
+          status: 'success',
+          message: `Service ${serviceName} in build ${buildUuid} is already torn down`,
+          deploy: toDestroyServiceDeploymentDeploy(deploy),
+        };
+      }
+
       const success = await this.cleanupDeploy(deploy, { mode: 'infra' });
       if (!success) {
         return {
@@ -154,14 +181,19 @@ export default class DeployCleanupService extends BaseService {
         };
       }
 
-      const updatedDeploy =
-        (await this.db.models.Deploy.query().findById(deploy.id).select('id', 'uuid', 'status', 'statusMessage')) ??
-        null;
+      const updatedDeploy = (await this.db.models.Deploy.query()
+        .findById(deploy.id)
+        .select('id', 'uuid', 'status', 'statusMessage')) ?? {
+        id: deploy.id,
+        uuid: deploy.uuid,
+        status: DeployStatus.TORN_DOWN,
+        statusMessage: 'Deploy infrastructure was cleaned up successfully',
+      };
 
       return {
         status: 'success',
         message: `Service ${serviceName} in build ${buildUuid} has been torn down`,
-        deploy: updatedDeploy,
+        deploy: toDestroyServiceDeploymentDeploy(updatedDeploy),
       };
     });
   }
@@ -401,6 +433,23 @@ export default class DeployCleanupService extends BaseService {
       });
       return true;
     } catch (error) {
+      if (task.resourceType === 'helm-release' && isHelmReleaseNotFoundError(error)) {
+        metrics.increment('task', {
+          mode,
+          result: 'skipped_not_found',
+          resourceType: task.resourceType,
+        });
+        getLogger({
+          mode,
+          deployUuid: deploy.uuid,
+          deployId: deploy.id,
+          deployableId: deploy.deployableId,
+          resourceType: task.resourceType,
+          task: task.name,
+        }).debug('Deploy cleanup: skipped missing Helm release');
+        return true;
+      }
+
       if (isMissingResourceTypeError(error)) {
         metrics.increment('task', {
           mode,
