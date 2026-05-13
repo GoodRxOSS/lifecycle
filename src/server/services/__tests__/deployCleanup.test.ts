@@ -352,7 +352,7 @@ describe('DeployCleanupService', () => {
     };
     const deployQuery = {
       findById: jest.fn(() => deployQuery),
-      select: jest.fn().mockResolvedValue(updatedDeploy),
+      withGraphFetched: jest.fn().mockResolvedValue(updatedDeploy),
     };
     const service = createService({
       models: {
@@ -372,7 +372,7 @@ describe('DeployCleanupService', () => {
     expect(buildQuery.withGraphFetched).toHaveBeenCalledWith('deploys.[build, service, deployable]');
     expect(cleanupDeploy).toHaveBeenCalledWith(deploy, { mode: 'infra' });
     expect(deployQuery.findById).toHaveBeenCalledWith(88);
-    expect(deployQuery.select).toHaveBeenCalledWith('id', 'uuid', 'status', 'statusMessage');
+    expect(deployQuery.withGraphFetched).toHaveBeenCalledWith('[service, deployable, repository]');
     expect(result).toEqual({
       status: 'success',
       message: 'Service api in build build-1 has been torn down',
@@ -407,7 +407,7 @@ describe('DeployCleanupService', () => {
     };
     const deployQuery = {
       findById: jest.fn(() => deployQuery),
-      select: jest.fn().mockResolvedValue(updatedDeploy),
+      withGraphFetched: jest.fn().mockResolvedValue(updatedDeploy),
     };
     const service = createService({
       models: {
@@ -455,7 +455,7 @@ describe('DeployCleanupService', () => {
     };
     const deployQuery = {
       findById: jest.fn(() => deployQuery),
-      select: jest.fn().mockResolvedValue(updatedDeploy),
+      withGraphFetched: jest.fn().mockResolvedValue(updatedDeploy),
     };
     const service = createService({
       models: {

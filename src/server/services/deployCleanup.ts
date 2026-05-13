@@ -148,8 +148,9 @@ export default class DeployCleanupService extends BaseService {
       }
 
       const updatedDeploy =
-        (await this.db.models.Deploy.query().findById(deploy.id).select('id', 'uuid', 'status', 'statusMessage')) ??
-        null;
+        (await this.db.models.Deploy.query()
+          .findById(deploy.id)
+          .withGraphFetched('[service, deployable, repository]')) ?? null;
 
       return {
         status: 'success',
