@@ -22,6 +22,7 @@ export type GlobalConfig = {
   helmDefaults: HelmDefaults;
   buildDefaults?: BuildDefaults;
   agentSessionDefaults?: AgentSessionDefaults;
+  sites?: SitesConfig;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -133,6 +134,41 @@ export type AgentSessionDefaults = {
   cleanup?: AgentSessionCleanupConfig;
   durability?: AgentSessionDurabilityConfig;
   controlPlane?: AgentSessionControlPlaneConfig;
+};
+
+export type SitesStorageBackend = 's3' | 'minio';
+
+export type SitesStorageConfig = {
+  backend?: SitesStorageBackend;
+  bucket?: string;
+  prefix?: string;
+  region?: string;
+  endpoint?: string | null;
+  forcePathStyle?: boolean | null;
+};
+
+export type SitesConfig = {
+  enabled?: boolean;
+  domain?: string;
+  port?: number | string | null;
+  hostPrefix?: string | null;
+  ttl?: {
+    enabled?: boolean;
+    defaultDays?: number;
+    extensionDays?: number;
+  };
+  upload?: {
+    maxUploadBytes?: number;
+    maxExtractedBytes?: number;
+    maxFiles?: number;
+    allowedExtensions?: string[];
+    allowedTypes?: string[];
+  };
+  storage?: SitesStorageConfig;
+  cleanup?: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+  };
 };
 
 export type RoleSettings = {

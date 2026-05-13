@@ -41,6 +41,8 @@ import AgentMessage from './AgentMessage';
 import AgentPendingAction from './AgentPendingAction';
 import AgentToolExecution from './AgentToolExecution';
 import UserMcpConnection from './UserMcpConnection';
+import Site from './Site';
+import SiteVersion from './SiteVersion';
 
 export interface IModels {
   Build: typeof Build;
@@ -70,6 +72,8 @@ export interface IModels {
   AgentPendingAction: typeof AgentPendingAction;
   AgentToolExecution: typeof AgentToolExecution;
   UserMcpConnection: typeof UserMcpConnection;
+  Site: typeof Site;
+  SiteVersion: typeof SiteVersion;
 }
 
 export {
@@ -100,4 +104,6 @@ export {
   AgentPendingAction,
   AgentToolExecution,
   UserMcpConnection,
+  Site,
+  SiteVersion,
 };

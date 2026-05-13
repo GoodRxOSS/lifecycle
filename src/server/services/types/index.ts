@@ -31,6 +31,7 @@ import GithubService from 'server/services/github';
 import LabelService from 'server/services/label';
 import TTLCleanupService from 'server/services/ttlCleanup';
 import DeployCleanupService from 'server/services/deployCleanup';
+import SitesService from 'server/services/sites';
 
 export interface IServices {
   BuildService: BuildService;
@@ -50,6 +51,7 @@ export interface IServices {
   LabelService: LabelService;
   TTLCleanupService: TTLCleanupService;
   DeployCleanupService: DeployCleanupService;
+  SitesService: SitesService;
 }
 
 export * from 'server/services/types/github';

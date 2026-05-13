@@ -33,7 +33,9 @@ import { parse, URL } from 'url';
 import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
+import { LIFECYCLE_MODE } from './src/shared/config';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
+import SitesService from './src/server/services/sites';
 import {
   buildWorkspaceEditorProxyHeaders,
   serializeSocketHttpResponse,
@@ -52,6 +54,7 @@ const SESSION_WORKSPACE_EDITOR_PATH_PREFIX = '/api/agent-session/workspace-edito
 const SESSION_WORKSPACE_EDITOR_COOKIE_NAME = 'lfc_session_workspace_editor_auth';
 const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
 const logger = rootLogger.child({ filename: __filename });
+let sitesGatewayService: SitesService | null = null;
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -86,6 +89,14 @@ function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<
 }
 
 type SessionWorkspaceEditorPathMatch = { sessionId: string; forwardPath: string };
+
+function getSitesGatewayService(): SitesService {
+  if (!sitesGatewayService) {
+    sitesGatewayService = new SitesService();
+  }
+
+  return sitesGatewayService;
+}
 
 function parseSessionWorkspaceEditorPath(pathname: string | null | undefined): SessionWorkspaceEditorPathMatch | null {
   const safePathname = pathname || '';
@@ -490,10 +501,63 @@ async function handleSessionWorkspaceEditorHttp(
   }
 }
 
+async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse, pathname: string) {
+  if (LIFECYCLE_MODE !== 'gateway' && LIFECYCLE_MODE !== 'all') {
+    return false;
+  }
+
+  const service = getSitesGatewayService();
+  if (!(await service.matchesGatewayHost(req.headers.host))) {
+    return false;
+  }
+
+  if (!req.method || !['GET', 'HEAD'].includes(req.method.toUpperCase())) {
+    res.statusCode = 404;
+    res.end('not found');
+    return true;
+  }
+
+  try {
+    const object = await service.getGatewayObject(req.headers.host, pathname);
+
+    res.statusCode = object.statusCode;
+    res.setHeader('Content-Type', object.contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    if (object.contentLength !== undefined) {
+      res.setHeader('Content-Length', object.contentLength.toString());
+    }
+
+    if (req.method.toUpperCase() === 'HEAD') {
+      res.end();
+      return true;
+    }
+
+    object.body.on('error', (error) => {
+      logger.error({ error, path: pathname }, 'SitesGateway: stream failed');
+      if (!res.headersSent) {
+        res.statusCode = 502;
+      }
+      res.end();
+    });
+    object.body.pipe(res);
+    return true;
+  } catch (error: any) {
+    const statusCode = typeof error?.statusCode === 'number' ? error.statusCode : 500;
+    logger.warn({ error, path: pathname, statusCode }, 'SitesGateway: request failed');
+    res.statusCode = statusCode === 404 ? 404 : 500;
+    res.end(statusCode === 404 ? 'not found' : 'internal server error');
+    return true;
+  }
+}
+
 app.prepare().then(() => {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const parsedUrl = parse(req.url!, true);
+      if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res, parsedUrl.pathname))) {
+        return;
+      }
       if (
         parsedUrl.pathname &&
         (await handleSessionWorkspaceEditorHttp(
