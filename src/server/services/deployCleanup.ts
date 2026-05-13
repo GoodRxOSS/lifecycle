@@ -47,6 +47,12 @@ interface DeployCleanupQueueJob {
   _ddTraceContext?: Record<string, string>;
 }
 
+interface DestroyServiceDeploymentResult {
+  status: 'success' | 'not_found' | 'error';
+  message: string;
+  deploy?: Deploy | null;
+}
+
 function shellQuote(value: string | number): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
@@ -108,6 +114,50 @@ export default class DeployCleanupService extends BaseService {
       }
     });
   };
+
+  async destroyServiceDeployment(buildUuid: string, serviceName: string): Promise<DestroyServiceDeploymentResult> {
+    return withLogContext({ buildUuid, serviceName }, async () => {
+      const build = await this.db.models.Build.query()
+        .findOne({ uuid: buildUuid })
+        .withGraphFetched('deploys.[build, service, deployable]');
+
+      if (!build) {
+        return {
+          status: 'not_found',
+          message: `Build not found for ${buildUuid}.`,
+        };
+      }
+
+      const deploy = build.deploys?.find((candidate) =>
+        build.enableFullYaml ? candidate.deployable?.name === serviceName : candidate.service?.name === serviceName
+      );
+
+      if (!deploy) {
+        return {
+          status: 'not_found',
+          message: `Service ${serviceName} not found for ${buildUuid}.`,
+        };
+      }
+
+      const success = await this.cleanupDeploy(deploy, { mode: 'infra' });
+      if (!success) {
+        return {
+          status: 'error',
+          message: `Service ${serviceName} cleanup failed for build ${buildUuid}.`,
+        };
+      }
+
+      const updatedDeploy =
+        (await this.db.models.Deploy.query().findById(deploy.id).select('id', 'uuid', 'status', 'statusMessage')) ??
+        null;
+
+      return {
+        status: 'success',
+        message: `Service ${serviceName} in build ${buildUuid} has been torn down`,
+        deploy: updatedDeploy,
+      };
+    });
+  }
 
   async cleanupDeploy(deployOrId: Deploy | number, { mode }: { mode: DeployCleanupMode }): Promise<boolean> {
     const deploy = await this.resolveDeploy(deployOrId);

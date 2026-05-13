@@ -168,7 +168,7 @@ describe('BuildService build response queries', () => {
   function createQueueManager() {
     return {
       registerQueue: jest.fn(() => ({
-        add: jest.fn(),
+        add: mockQueueAdd,
         process: jest.fn(),
         on: jest.fn(),
       })),
@@ -377,36 +377,32 @@ describe('BuildService destroyBuildEnvironment', () => {
   function createQueueManager() {
     return {
       registerQueue: jest.fn(() => ({
-        add: jest.fn(),
+        add: mockQueueAdd,
         process: jest.fn(),
         on: jest.fn(),
       })),
     };
   }
 
-  test('runs build cleanup before returning torn-down deploy records', async () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('queues build cleanup for worker processing', async () => {
     const build = {
       id: 42,
       uuid: 'sample-build',
       isStatic: false,
       status: BuildStatus.DEPLOYED,
     };
-    const updatedDeploys = [{ id: 100, uuid: 'sample-deploy', status: DeployStatus.TORN_DOWN }];
     const buildQuery = {
       findOne: jest.fn().mockResolvedValue(build),
-    };
-    const deployQuery = {
-      where: jest.fn(() => deployQuery),
-      select: jest.fn().mockResolvedValue(updatedDeploys),
     };
     const buildService = new BuildService(
       {
         models: {
           Build: {
             query: jest.fn(() => buildQuery),
-          },
-          Deploy: {
-            query: jest.fn(() => deployQuery),
           },
         },
       } as any,
@@ -419,14 +415,14 @@ describe('BuildService destroyBuildEnvironment', () => {
     const result = await buildService.destroyBuildEnvironment('sample-build');
 
     expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
-    expect(deleteBuild).toHaveBeenCalledWith(build);
-    expect(deployQuery.where).toHaveBeenCalledWith({ buildId: 42 });
-    expect(deployQuery.select).toHaveBeenCalledWith('id', 'uuid', 'status');
-    expect(deleteBuild.mock.invocationCallOrder[0]).toBeLessThan(deployQuery.where.mock.invocationCallOrder[0]);
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(mockQueueAdd).toHaveBeenCalledWith('delete', {
+      buildId: 42,
+      buildUuid: 'sample-build',
+    });
     expect(result).toEqual({
       status: 'success',
-      message: 'Build sample-build has been torn down',
-      namespacesUpdated: updatedDeploys,
+      message: 'Build sample-build teardown has been queued',
     });
   });
 

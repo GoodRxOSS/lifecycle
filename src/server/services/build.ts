@@ -466,16 +466,16 @@ export default class BuildService extends BaseService {
         };
       }
 
-      await this.deleteBuild(build);
+      await this.deleteQueue.add('delete', {
+        buildId: build.id,
+        buildUuid: build.uuid,
+        ...extractContextForQueue(),
+      });
 
-      const updatedDeploys = await this.db.models.Deploy.query()
-        .where({ buildId: build.id })
-        .select('id', 'uuid', 'status');
-
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: delete queued');
       return {
         status: 'success',
-        message: `Build ${uuid} has been torn down`,
-        namespacesUpdated: updatedDeploys,
+        message: `Build ${uuid} teardown has been queued`,
       };
     });
   }
