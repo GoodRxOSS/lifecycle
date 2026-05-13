@@ -24,7 +24,7 @@ const DEFAULT_OPTIONS = {
   allowedExtensions: ['html', 'zip', 'json', 'md', 'markdown', 'txt', 'js'],
 };
 
-function zip(entries: Record<string, string>): Buffer {
+function zip(entries: Record<string, string>, declaredSizeByPath: Record<string, number> = {}): Buffer {
   const localParts: Buffer[] = [];
   const centralParts: Buffer[] = [];
   let offset = 0;
@@ -57,7 +57,7 @@ function zip(entries: Record<string, string>): Buffer {
     central.writeUInt32LE(0, 12);
     central.writeUInt32LE(0, 16);
     central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(content.length, 24);
+    central.writeUInt32LE(declaredSizeByPath[entryPath] ?? content.length, 24);
     central.writeUInt16LE(name.length, 28);
     central.writeUInt16LE(0, 30);
     central.writeUInt16LE(0, 32);
@@ -154,6 +154,17 @@ describe('validateSiteUpload', () => {
         content: zip({ 'index.html': '<html>too large</html>' }),
       })
     ).toThrow('Extracted site size');
+  });
+
+  it('caps actual inflated content even when zip metadata understates size', () => {
+    expect(() =>
+      validateSiteUpload({
+        ...DEFAULT_OPTIONS,
+        fileName: 'demo.zip',
+        maxExtractedBytes: 4,
+        content: zip({ 'index.html': '<html>too large</html>' }, { 'index.html': 1 }),
+      })
+    ).toThrow(/Extracted site size|Invalid zip/);
   });
 
   it('rejects unsupported single-file and zip entry extensions', () => {

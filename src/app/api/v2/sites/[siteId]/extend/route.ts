@@ -26,6 +26,40 @@ type RouteContext = {
   };
 };
 
+/**
+ * @openapi
+ * /api/v2/sites/{siteId}/extend:
+ *   post:
+ *     summary: Extend a hosted static site's expiration
+ *     tags:
+ *       - Sites
+ *     operationId: extendSite
+ *     parameters:
+ *       - in: path
+ *         name: siteId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       '200':
+ *         description: Hosted static site expiration extended.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '400':
+ *         description: TTL is disabled for hosted sites.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const postHandler = async (req: NextRequest, { params }: RouteContext) => {
   try {
     const service = new SitesService();

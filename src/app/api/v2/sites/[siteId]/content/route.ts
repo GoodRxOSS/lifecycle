@@ -29,6 +29,47 @@ type RouteContext = {
   };
 };
 
+/**
+ * @openapi
+ * /api/v2/sites/{siteId}/content:
+ *   put:
+ *     summary: Replace hosted static site content
+ *     description: Uploads a new static file or ZIP archive and makes it the active content for the site.
+ *     tags:
+ *       - Sites
+ *     operationId: replaceSiteContent
+ *     parameters:
+ *       - in: path
+ *         name: siteId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             $ref: '#/components/schemas/SiteUploadRequest'
+ *     responses:
+ *       '200':
+ *         description: Hosted static site content replaced.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '400':
+ *         description: Invalid upload.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const putHandler = async (req: NextRequest, { params }: RouteContext) => {
   try {
     const upload = await readUploadFile(req);

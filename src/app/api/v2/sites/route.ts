@@ -23,6 +23,60 @@ import SitesService from 'server/services/sites';
 
 export const runtime = 'nodejs';
 
+/**
+ * @openapi
+ * /api/v2/sites:
+ *   get:
+ *     summary: List hosted static sites
+ *     description: Returns all non-deleted hosted static sites.
+ *     tags:
+ *       - Sites
+ *     operationId: listSites
+ *     responses:
+ *       '200':
+ *         description: Hosted static sites.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SitesListSuccessResponse'
+ *       '404':
+ *         description: Sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   post:
+ *     summary: Create a hosted static site
+ *     description: Uploads a static file or ZIP archive and publishes it as a hosted static site.
+ *     tags:
+ *       - Sites
+ *     operationId: createSite
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             $ref: '#/components/schemas/SiteUploadRequest'
+ *     responses:
+ *       '201':
+ *         description: Hosted static site created.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '400':
+ *         description: Invalid upload.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (req: NextRequest) => {
   try {
     const service = new SitesService();

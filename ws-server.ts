@@ -529,6 +529,7 @@ async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse,
     }
 
     if (req.method.toUpperCase() === 'HEAD') {
+      (object.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
       res.end();
       return true;
     }

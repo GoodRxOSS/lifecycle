@@ -188,6 +188,29 @@ export default class SitesService extends Service {
     }
   }
 
+  private async cleanupSupersededVersions(config: ResolvedSitesConfig, siteId: string, versions: SiteVersion[]) {
+    const deletedVersionIds: string[] = [];
+
+    for (const version of versions) {
+      try {
+        await new SitesStorage(config).deletePrefix(version.storagePrefix);
+        deletedVersionIds.push(version.versionId);
+      } catch (error) {
+        getLogger().warn(
+          { error, siteId, versionId: version.versionId, storagePrefix: version.storagePrefix },
+          'Sites: version cleanup deferred'
+        );
+      }
+    }
+
+    if (deletedVersionIds.length > 0) {
+      await this.db.models.SiteVersion.query()
+        .where({ siteId })
+        .whereIn('versionId', deletedVersionIds)
+        .patch({ deletedAt: new Date().toISOString() });
+    }
+  }
+
   async createSite(input: CreateOrReplaceSiteInput): Promise<SiteResponse> {
     const config = await this.getConfig();
     this.assertEnabled(config);
@@ -285,22 +308,11 @@ export default class SitesService extends Service {
           updatedByDisplayName: input.user?.displayName || site.updatedByDisplayName || null,
         })) as Site;
 
-        if (previousVersions.length > 0) {
-          await this.db.models.SiteVersion.query(trx)
-            .whereIn(
-              'versionId',
-              previousVersions.map((item) => item.versionId)
-            )
-            .patch({ deletedAt: new Date().toISOString() });
-        }
-
         return patched;
       })
     );
 
-    await Promise.all(
-      previousVersions.map((item) => new SitesStorage(config).deletePrefix(item.storagePrefix).catch(() => undefined))
-    );
+    await this.cleanupSupersededVersions(config, siteId, previousVersions);
 
     return this.serialize(updated, config);
   }
@@ -329,6 +341,8 @@ export default class SitesService extends Service {
     }
 
     const versions = (await this.db.models.SiteVersion.query().where({ siteId })) as unknown as SiteVersion[];
+    await Promise.all(versions.map((version) => new SitesStorage(config).deletePrefix(version.storagePrefix)));
+
     const deleted = (await this.db.models.Site.transact(async (trx) => {
       const timestamp = new Date().toISOString();
       const patched = (await site.$query(trx).patchAndFetch({
@@ -342,7 +356,6 @@ export default class SitesService extends Service {
       return patched;
     })) as Site;
 
-    await Promise.all(versions.map((version) => new SitesStorage(config).deletePrefix(version.storagePrefix)));
     return this.serialize(deleted, config);
   }
 
@@ -416,9 +429,11 @@ export default class SitesService extends Service {
 
     for (const site of expiredSites) {
       try {
-        const versions = (await this.db.models.SiteVersion.query()
-          .where({ siteId: site.siteId })
-          .whereNull('deletedAt')) as unknown as SiteVersion[];
+        const versions = (await this.db.models.SiteVersion.query().where({
+          siteId: site.siteId,
+        })) as unknown as SiteVersion[];
+        await Promise.all(versions.map((version) => new SitesStorage(config).deletePrefix(version.storagePrefix)));
+
         const timestamp = new Date().toISOString();
         await this.db.models.Site.transact(async (trx) => {
           await site.$query(trx).patch({ status: 'expired', deletedAt: timestamp });
@@ -427,7 +442,6 @@ export default class SitesService extends Service {
             .whereNull('deletedAt')
             .patch({ deletedAt: timestamp });
         });
-        await Promise.all(versions.map((version) => new SitesStorage(config).deletePrefix(version.storagePrefix)));
         cleaned++;
       } catch (error) {
         errors++;

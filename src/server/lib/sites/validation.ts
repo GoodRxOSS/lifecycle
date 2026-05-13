@@ -102,6 +102,19 @@ function isSymlink(externalAttributes: number): boolean {
   return (((externalAttributes >>> 16) & 0o170000) as number) === 0o120000;
 }
 
+function inflateRawWithLimit(compressed: Buffer, maxOutputBytes: number, maxExtractedBytes: number): Buffer {
+  try {
+    return zlib.inflateRawSync(compressed, { maxOutputLength: maxOutputBytes } as zlib.ZlibOptions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('maxOutputLength') || message.includes('Cannot create a Buffer larger')) {
+      reject(`Extracted site size must be ${maxExtractedBytes} bytes or less.`);
+    }
+
+    reject('Invalid zip: compressed file data could not be extracted.');
+  }
+}
+
 function parseZipEntries(buffer: Buffer, maxExtractedBytes: number, maxFiles: number): ZipEntry[] {
   const eocdOffset = findEndOfCentralDirectory(buffer);
   const entryCount = buffer.readUInt16LE(eocdOffset + 10);
@@ -163,8 +176,7 @@ function parseZipEntries(buffer: Buffer, maxExtractedBytes: number, maxFiles: nu
         reject(`Zip upload cannot contain more than ${maxFiles} files.`);
       }
 
-      extractedSize += uncompressedSize;
-      if (extractedSize > maxExtractedBytes) {
+      if (extractedSize + uncompressedSize > maxExtractedBytes) {
         reject(`Extracted site size must be ${maxExtractedBytes} bytes or less.`);
       }
 
@@ -183,10 +195,19 @@ function parseZipEntries(buffer: Buffer, maxExtractedBytes: number, maxFiles: nu
 
       const compressed = buffer.slice(dataStart, dataEnd);
       const content =
-        method === 0 ? Buffer.from(compressed) : method === 8 ? zlib.inflateRawSync(compressed) : undefined;
+        method === 0
+          ? Buffer.from(compressed)
+          : method === 8
+          ? inflateRawWithLimit(compressed, maxExtractedBytes - extractedSize, maxExtractedBytes)
+          : undefined;
 
       if (!content) {
         reject('Zip upload contains an unsupported compression method.');
+      }
+
+      extractedSize += content.length;
+      if (extractedSize > maxExtractedBytes) {
+        reject(`Extracted site size must be ${maxExtractedBytes} bytes or less.`);
       }
 
       if (content.length !== uncompressedSize) {

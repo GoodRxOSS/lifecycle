@@ -26,6 +26,58 @@ type RouteContext = {
   };
 };
 
+/**
+ * @openapi
+ * /api/v2/sites/{siteId}:
+ *   get:
+ *     summary: Get a hosted static site
+ *     tags:
+ *       - Sites
+ *     operationId: getSite
+ *     parameters:
+ *       - in: path
+ *         name: siteId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       '200':
+ *         description: Hosted static site.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   delete:
+ *     summary: Delete a hosted static site
+ *     tags:
+ *       - Sites
+ *     operationId: deleteSite
+ *     parameters:
+ *       - in: path
+ *         name: siteId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       '200':
+ *         description: Hosted static site deleted.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
 const getHandler = async (req: NextRequest, { params }: RouteContext) => {
   try {
     const service = new SitesService();
