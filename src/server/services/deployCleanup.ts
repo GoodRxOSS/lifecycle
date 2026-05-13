@@ -47,10 +47,17 @@ interface DeployCleanupQueueJob {
   _ddTraceContext?: Record<string, string>;
 }
 
+interface DestroyServiceDeploymentDeploy {
+  id: number;
+  uuid: string;
+  status: DeployStatus;
+  statusMessage: string;
+}
+
 interface DestroyServiceDeploymentResult {
   status: 'success' | 'not_found' | 'error';
   message: string;
-  deploy?: Deploy | null;
+  deploy?: DestroyServiceDeploymentDeploy | null;
 }
 
 function shellQuote(value: string | number): string {
@@ -148,9 +155,8 @@ export default class DeployCleanupService extends BaseService {
       }
 
       const updatedDeploy =
-        (await this.db.models.Deploy.query()
-          .findById(deploy.id)
-          .withGraphFetched('[service, deployable, repository]')) ?? null;
+        (await this.db.models.Deploy.query().findById(deploy.id).select('id', 'uuid', 'status', 'statusMessage')) ??
+        null;
 
       return {
         status: 'success',

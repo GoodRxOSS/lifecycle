@@ -3063,7 +3063,16 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                   properties: {
                     status: { type: 'string' },
                     message: { type: 'string' },
-                    deploy: { $ref: '#/components/schemas/Deploy' },
+                    deploy: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'integer' },
+                        uuid: { type: 'string' },
+                        status: { $ref: '#/components/schemas/DeployStatus' },
+                        statusMessage: { type: 'string' },
+                      },
+                      required: ['id', 'uuid', 'status', 'statusMessage'],
+                    },
                   },
                   required: ['status', 'message', 'deploy'],
                 },
