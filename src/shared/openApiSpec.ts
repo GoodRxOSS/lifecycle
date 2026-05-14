@@ -183,8 +183,16 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             expiresAt: { type: 'string', format: 'date-time', nullable: true },
             fileCount: { type: 'integer', minimum: 0 },
             sizeBytes: { type: 'integer', format: 'int64', minimum: 0 },
-            createdByDisplayName: { type: 'string', nullable: true },
-            updatedByDisplayName: { type: 'string', nullable: true },
+            createdBy: {
+              type: 'string',
+              nullable: true,
+              description: 'Email address of the user who created the site.',
+            },
+            updatedBy: {
+              type: 'string',
+              nullable: true,
+              description: 'Email address of the user who last updated the site.',
+            },
           },
           required: [
             'id',
@@ -196,8 +204,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'expiresAt',
             'fileCount',
             'sizeBytes',
-            'createdByDisplayName',
-            'updatedByDisplayName',
+            'createdBy',
+            'updatedBy',
           ],
         },
 
