@@ -63,8 +63,8 @@ export type SiteResponse = {
   expiresAt: string | null;
   fileCount: number;
   sizeBytes: number;
-  createdByDisplayName: string | null;
-  updatedByDisplayName: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
 };
 
 export type GatewayObjectResponse = {
@@ -106,8 +106,8 @@ export default class SitesService extends Service {
       expiresAt: site.expiresAt || null,
       fileCount: Number(site.fileCount || 0),
       sizeBytes: Number(site.sizeBytes || 0),
-      createdByDisplayName: site.createdByDisplayName || null,
-      updatedByDisplayName: site.updatedByDisplayName || null,
+      createdBy: site.createdBy || null,
+      updatedBy: site.updatedBy || null,
     };
   }
 
@@ -229,10 +229,8 @@ export default class SitesService extends Service {
           fileCount: 0,
           sizeBytes: 0,
           expiresAt,
-          createdByUserId: input.user?.userId || null,
-          createdByDisplayName: input.user?.displayName || null,
-          updatedByUserId: input.user?.userId || null,
-          updatedByDisplayName: input.user?.displayName || null,
+          createdBy: input.user?.email || null,
+          updatedBy: input.user?.email || null,
         })) as Site;
 
         const version = await this.createVersion(siteId, upload, config, uploadedStoragePrefixes, trx);
@@ -304,8 +302,7 @@ export default class SitesService extends Service {
           activeVersionId: version.versionId,
           fileCount: upload.fileCount,
           sizeBytes: upload.sizeBytes,
-          updatedByUserId: input.user?.userId || site.updatedByUserId || null,
-          updatedByDisplayName: input.user?.displayName || site.updatedByDisplayName || null,
+          updatedBy: input.user?.email || site.updatedBy || null,
         })) as Site;
 
         return patched;

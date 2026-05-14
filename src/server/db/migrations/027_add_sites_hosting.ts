@@ -92,10 +92,8 @@ export async function up(knex: Knex): Promise<void> {
     table.integer('fileCount').notNullable().defaultTo(0);
     table.bigInteger('sizeBytes').notNullable().defaultTo(0);
     table.timestamp('expiresAt').nullable();
-    table.string('createdByUserId', 255).nullable();
-    table.string('createdByDisplayName', 255).nullable();
-    table.string('updatedByUserId', 255).nullable();
-    table.string('updatedByDisplayName', 255).nullable();
+    table.string('createdBy', 255).nullable();
+    table.string('updatedBy', 255).nullable();
     table.timestamp('createdAt').notNullable().defaultTo(knex.fn.now());
     table.timestamp('updatedAt').notNullable().defaultTo(knex.fn.now());
     table.timestamp('deletedAt').nullable();

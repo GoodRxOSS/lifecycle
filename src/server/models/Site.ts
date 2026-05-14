@@ -26,10 +26,8 @@ export default class Site extends Model {
   fileCount!: number;
   sizeBytes!: number | string;
   expiresAt?: string | null;
-  createdByUserId?: string | null;
-  createdByDisplayName?: string | null;
-  updatedByUserId?: string | null;
-  updatedByDisplayName?: string | null;
+  createdBy?: string | null;
+  updatedBy?: string | null;
 
   static tableName = 'sites';
   static timestamps = true;
