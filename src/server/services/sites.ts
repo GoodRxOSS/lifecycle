@@ -33,11 +33,15 @@ import {
 import { getContentType } from 'server/lib/sites/contentType';
 import type Site from 'server/models/Site';
 import type SiteVersion from 'server/models/SiteVersion';
+import type { PaginationMetadata } from 'server/lib/paginate';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 
 const createSiteId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 const createVersionId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_LIST_PAGE = 1;
+const DEFAULT_LIST_LIMIT = 25;
+const MAX_LIST_LIMIT = 100;
 type SitesErrorStatusCode = 400 | 401 | 403 | 404 | 409 | 500 | 502 | 503;
 
 export class SitesServiceError extends Error {
@@ -51,6 +55,17 @@ export type CreateOrReplaceSiteInput = {
   content: Buffer;
   name?: string | null;
   user?: RequestUserIdentity | null;
+};
+
+export type ListSitesFilters = {
+  user?: string;
+  page?: number;
+  limit?: number;
+};
+
+export type ListSitesResult = {
+  sites: SiteResponse[];
+  pagination: PaginationMetadata;
 };
 
 export type SiteResponse = {
@@ -188,6 +203,17 @@ export default class SitesService extends Service {
     }
   }
 
+  private normalizePagination(filters: ListSitesFilters): { page: number; limit: number } {
+    const page =
+      Number.isFinite(filters.page) && Number(filters.page) > 0 ? Math.floor(Number(filters.page)) : DEFAULT_LIST_PAGE;
+    const limit =
+      Number.isFinite(filters.limit) && Number(filters.limit) > 0
+        ? Math.min(Math.floor(Number(filters.limit)), MAX_LIST_LIMIT)
+        : DEFAULT_LIST_LIMIT;
+
+    return { page, limit };
+  }
+
   private async cleanupSupersededVersions(config: ResolvedSitesConfig, siteId: string, versions: SiteVersion[]) {
     const deletedVersionIds: string[] = [];
 
@@ -245,14 +271,27 @@ export default class SitesService extends Service {
     return this.serialize(site, config);
   }
 
-  async listSites(): Promise<SiteResponse[]> {
+  async listSites(filters: ListSitesFilters = {}): Promise<ListSitesResult> {
     const config = await this.getConfig();
     this.assertEnabled(config);
+    const user = filters.user?.trim().toLowerCase();
+    const { page, limit } = this.normalizePagination(filters);
 
-    const sites = (await this.db.models.Site.query()
-      .whereNull('deletedAt')
-      .orderBy('updatedAt', 'desc')) as unknown as Site[];
-    return sites.map((site) => this.serialize(site, config));
+    const query = this.db.models.Site.query().whereNull('deletedAt');
+    if (user) {
+      query.whereRaw('(lower("createdBy") = ? or lower("updatedBy") = ?)', [user, user]);
+    }
+
+    const result = await query.orderBy('updatedAt', 'desc').page(page - 1, limit);
+    return {
+      sites: (result.results as Site[]).map((site) => this.serialize(site, config)),
+      pagination: {
+        current: page,
+        total: Math.max(Math.ceil(result.total / limit), 1),
+        items: result.total,
+        limit,
+      },
+    };
   }
 
   async getSite(siteId: string): Promise<SiteResponse> {

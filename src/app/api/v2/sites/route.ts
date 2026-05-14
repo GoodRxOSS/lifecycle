@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { successResponse } from 'server/lib/response';
-import { readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
+import { readSitesListFilters, readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
 
 export const runtime = 'nodejs';
@@ -32,6 +32,31 @@ export const runtime = 'nodejs';
  *     tags:
  *       - Sites
  *     operationId: listSites
+ *     parameters:
+ *       - name: user
+ *         in: query
+ *         required: false
+ *         description: Filters to sites created or last updated by the supplied user email.
+ *         schema:
+ *           type: string
+ *         example: user@example.com
+ *       - name: page
+ *         in: query
+ *         required: false
+ *         description: Page number for pagination.
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *           minimum: 1
+ *       - name: limit
+ *         in: query
+ *         required: false
+ *         description: Number of sites per page.
+ *         schema:
+ *           type: integer
+ *           default: 25
+ *           minimum: 1
+ *           maximum: 100
  *     responses:
  *       '200':
  *         description: Hosted static sites.
@@ -80,8 +105,8 @@ export const runtime = 'nodejs';
 const getHandler = async (req: NextRequest) => {
   try {
     const service = new SitesService();
-    const sites = await service.listSites();
-    return successResponse({ sites }, { status: 200 }, req);
+    const result = await service.listSites(readSitesListFilters(req.nextUrl.searchParams));
+    return successResponse({ sites: result.sites }, { status: 200, metadata: { pagination: result.pagination } }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);
   }

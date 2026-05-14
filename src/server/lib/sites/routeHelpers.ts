@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { errorResponse } from 'server/lib/response';
 import { SitesServiceError } from 'server/services/sites';
+import type { ListSitesFilters } from 'server/services/sites';
 
 export async function readUploadFile(req: NextRequest): Promise<{ fileName: string; content: Buffer; name?: string }> {
   const formData = await req.formData();
@@ -32,6 +33,18 @@ export async function readUploadFile(req: NextRequest): Promise<{ fileName: stri
     fileName: file.name || 'upload',
     content: Buffer.from(arrayBuffer),
     name,
+  };
+}
+
+export function readSitesListFilters(searchParams: URLSearchParams): ListSitesFilters {
+  const user = searchParams.get('user')?.trim();
+  const page = Number.parseInt(searchParams.get('page') || '', 10);
+  const limit = Number.parseInt(searchParams.get('limit') || '', 10);
+
+  return {
+    ...(user ? { user } : {}),
+    ...(Number.isNaN(page) ? {} : { page }),
+    ...(Number.isNaN(limit) ? {} : { limit }),
   };
 }
 

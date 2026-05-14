@@ -16,6 +16,46 @@ function getOperation(path: string, method: string) {
   return swaggerSpec.paths[path]?.[method];
 }
 
+describe('OpenAPI v2 sites contract', () => {
+  it('documents sites list filters and pagination', () => {
+    expect(getOperation('/api/v2/sites', 'get')?.parameters).toEqual([
+      {
+        name: 'user',
+        in: 'query',
+        required: false,
+        description: 'Filters to sites created or last updated by the supplied user email.',
+        schema: {
+          type: 'string',
+        },
+        example: 'user@example.com',
+      },
+      {
+        name: 'page',
+        in: 'query',
+        required: false,
+        description: 'Page number for pagination.',
+        schema: {
+          type: 'integer',
+          default: 1,
+          minimum: 1,
+        },
+      },
+      {
+        name: 'limit',
+        in: 'query',
+        required: false,
+        description: 'Number of sites per page.',
+        schema: {
+          type: 'integer',
+          default: 25,
+          minimum: 1,
+          maximum: 100,
+        },
+      },
+    ]);
+  });
+});
+
 describe('OpenAPI v2 agent session contract', () => {
   it('documents build metadata routes and link schemas', () => {
     expect(getOperation('/api/v2/builds/{uuid}/metadata', 'get')?.tags).toEqual(['Builds']);
