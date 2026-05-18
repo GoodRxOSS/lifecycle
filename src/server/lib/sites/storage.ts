@@ -91,7 +91,7 @@ export class SitesStorage {
 
   async putFiles(storagePrefix: string, files: SiteUploadFile[]): Promise<void> {
     await this.ensureBucket();
-    await Promise.all(
+    const results = await Promise.allSettled(
       files.map((file) =>
         this.client.send(
           new PutObjectCommand({
@@ -103,6 +103,11 @@ export class SitesStorage {
         )
       )
     );
+
+    const failedUpload = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failedUpload) {
+      throw failedUpload.reason;
+    }
   }
 
   async getObject(storagePrefix: string, filePath: string): Promise<SitesObject> {
