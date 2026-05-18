@@ -63,8 +63,14 @@ export default function bootstrapJobs(services: IServices) {
 
   /* Setup TTL cleanup job */
   services.TTLCleanupService.setupTTLCleanupJob();
+  services.SitesService.setupSitesCleanupJob();
 
   queueManager.registerWorker(QUEUE_NAMES.TTL_CLEANUP, services.TTLCleanupService.processTTLCleanupQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  queueManager.registerWorker(QUEUE_NAMES.SITES_CLEANUP, services.SitesService.processSitesCleanupQueue, {
     connection: redisClient.getConnection(),
     concurrency: 1,
   });

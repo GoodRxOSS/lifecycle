@@ -106,6 +106,7 @@ export const QUEUE_NAMES = {
   CLEANUP: `cleanup_${JOB_VERSION}`,
   // NOTE: No version suffix - singleton queue shared across app instances
   TTL_CLEANUP: 'ttl_cleanup',
+  SITES_CLEANUP: 'sites_cleanup',
   GLOBAL_CONFIG_CACHE_REFRESH: 'global_config_cache_refresh',
   GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github_client_token_cache_refresh',
   INGRESS_MANIFEST: `ingress_manifest_${JOB_VERSION}`,

@@ -428,6 +428,9 @@ for r in patched_deploy:
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']
+        elif "gateway" in name:
+            labels = ["gateway"]
+            port_forwards = ['5002:80']
         elif "worker" in name:
             labels = ["worker"]
             resource_deps.append('lifecycle-web')

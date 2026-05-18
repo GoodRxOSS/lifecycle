@@ -179,6 +179,54 @@ components:
         failureThreshold: 10
         timeoutSeconds: 10
 
+  gateway:
+    enabled: true
+    fullnameOverride: 'lifecycle-gateway'
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 80
+      targetPort: 80
+    ingress:
+      enabled: false
+    deployment:
+      replicaCount: 1
+      extraEnv:
+        - name: JOB_VERSION
+          value: default
+        - name: ENVIRONMENT
+          value: dev
+        - name: APP_ENV
+          value: dev
+        - name: NODE_ENV
+          value: development
+        - name: LIFECYCLE_MODE
+          value: gateway
+        - name: PORT
+          value: '80'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
+      ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 6
+        timeoutSeconds: 60
+      readinessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 12
+        timeoutSeconds: 60
+
 postgresql:
   enabled: false
 
@@ -187,7 +235,7 @@ redis:
 
 minio:
   enabled: false
-  defaultBuckets: 'lifecycle-logs'
+  defaultBuckets: 'lifecycle-logs,lifecycle-sites'
   auth:
     rootUser: minioadmin
     rootPassword: minioadmin

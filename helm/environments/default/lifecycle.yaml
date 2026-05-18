@@ -158,6 +158,54 @@ components:
         periodSeconds: 5
         failureThreshold: 3
 
+  gateway:
+    enabled: false
+    fullnameOverride: 'lifecycle-gateway'
+
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 80
+      targetPort: 80
+
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      annotations: {}
+      hosts:
+        - host: '*.sites.<your_domain_here>'
+          paths: ['/']
+
+    deployment:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 200Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      extraEnv:
+        - name: LIFECYCLE_MODE
+          value: gateway
+      ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /api/health
+          port: http
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        failureThreshold: 6
+      readinessProbe:
+        httpGet:
+          path: /api/health
+          port: http
+        periodSeconds: 5
+        failureThreshold: 3
+
 postgresql:
   enabled: false
 

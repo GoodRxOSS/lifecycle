@@ -171,6 +171,102 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           required: ['message'],
         },
 
+        Site: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', example: 'abc123def4' },
+            name: { type: 'string', example: 'sample-site' },
+            url: { type: 'string', format: 'uri', example: 'http://site-abc123def4.localhost:5002' },
+            status: { type: 'string', enum: ['active', 'deleted', 'expired'] },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            fileCount: { type: 'integer', minimum: 0 },
+            sizeBytes: { type: 'integer', format: 'int64', minimum: 0 },
+            createdBy: {
+              type: 'string',
+              nullable: true,
+              description: 'Email address of the user who created the site.',
+            },
+            updatedBy: {
+              type: 'string',
+              nullable: true,
+              description: 'Email address of the user who last updated the site.',
+            },
+          },
+          required: [
+            'id',
+            'name',
+            'url',
+            'status',
+            'createdAt',
+            'updatedAt',
+            'expiresAt',
+            'fileCount',
+            'sizeBytes',
+            'createdBy',
+            'updatedBy',
+          ],
+        },
+
+        SiteUploadRequest: {
+          type: 'object',
+          properties: {
+            file: {
+              type: 'string',
+              format: 'binary',
+              description: 'Static HTML file, supported asset file, or ZIP archive containing index.html.',
+            },
+            name: {
+              type: 'string',
+              description: 'Optional display name for the hosted site.',
+              example: 'sample-site',
+            },
+          },
+          required: ['file'],
+        },
+
+        SiteSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    site: { $ref: '#/components/schemas/Site' },
+                  },
+                  required: ['site'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        SitesListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    sites: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/Site' },
+                    },
+                  },
+                  required: ['sites'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
         /**
          * @description Container for response metadata, including pagination.
          */

@@ -31,6 +31,7 @@ import GlobalConfig from 'server/services/globalConfig';
 import LabelService from 'server/services/label';
 import TTLCleanupService from 'server/services/ttlCleanup';
 import DeployCleanupService from 'server/services/deployCleanup';
+import SitesService from 'server/services/sites';
 import { IServices } from 'server/services/types';
 
 export default function createAndBindServices(): IServices {
@@ -52,5 +53,6 @@ export default function createAndBindServices(): IServices {
     LabelService: new LabelService(),
     TTLCleanupService: new TTLCleanupService(),
     DeployCleanupService: new DeployCleanupService(),
+    SitesService: new SitesService(),
   };
 }
