@@ -47,31 +47,9 @@ interface DeployCleanupQueueJob {
   _ddTraceContext?: Record<string, string>;
 }
 
-interface DestroyServiceDeploymentDeploy {
-  id: number;
-  uuid: string;
-  status: DeployStatus;
-  statusMessage: string;
-}
-
 interface DestroyServiceDeploymentResult {
   status: 'success' | 'not_found' | 'error';
   message: string;
-  deploy?: DestroyServiceDeploymentDeploy | null;
-}
-
-function toDestroyServiceDeploymentDeploy(deploy: {
-  id: number;
-  uuid: string;
-  status: DeployStatus;
-  statusMessage: string;
-}): DestroyServiceDeploymentDeploy {
-  return {
-    id: deploy.id,
-    uuid: deploy.uuid,
-    status: deploy.status,
-    statusMessage: deploy.statusMessage,
-  };
 }
 
 function shellQuote(value: string | number): string {
@@ -169,31 +147,14 @@ export default class DeployCleanupService extends BaseService {
         return {
           status: 'success',
           message: `Service ${serviceName} in build ${buildUuid} is already torn down`,
-          deploy: toDestroyServiceDeploymentDeploy(deploy),
         };
       }
 
-      const success = await this.cleanupDeploy(deploy, { mode: 'infra' });
-      if (!success) {
-        return {
-          status: 'error',
-          message: `Service ${serviceName} cleanup failed for build ${buildUuid}.`,
-        };
-      }
-
-      const updatedDeploy = (await this.db.models.Deploy.query()
-        .findById(deploy.id)
-        .select('id', 'uuid', 'status', 'statusMessage')) ?? {
-        id: deploy.id,
-        uuid: deploy.uuid,
-        status: DeployStatus.TORN_DOWN,
-        statusMessage: 'Deploy infrastructure was cleaned up successfully',
-      };
+      await this.enqueueCleanup({ deployId: deploy.id, mode: 'infra' });
 
       return {
         status: 'success',
-        message: `Service ${serviceName} in build ${buildUuid} has been torn down`,
-        deploy: toDestroyServiceDeploymentDeploy(updatedDeploy),
+        message: `Service ${serviceName} in build ${buildUuid} teardown has been queued`,
       };
     });
   }

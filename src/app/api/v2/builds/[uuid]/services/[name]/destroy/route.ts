@@ -25,8 +25,8 @@ import DeployCleanupService from 'server/services/deployCleanup';
  *   put:
  *     summary: Destroy a service deployment within an environment
  *     description: |
- *       Deletes deploy-scoped infrastructure for a service in a build environment, including Kubernetes
- *       resources, secrets, Helm releases, and configured CLI/Codefresh destroy steps for the service type.
+ *       Queues deploy-scoped infrastructure teardown for a service in a build environment. The worker deletes
+ *       Kubernetes resources, secrets, Helm releases, and configured CLI/Codefresh destroy steps for the service type.
  *       Static environments are allowed. When cleanup succeeds, the Deploy record is marked torn_down.
  *     tags:
  *       - Services
@@ -45,7 +45,7 @@ import DeployCleanupService from 'server/services/deployCleanup';
  *         description: The name of the service deployment to destroy
  *     responses:
  *       200:
- *         description: Service deployment has been successfully destroyed
+ *         description: Service deployment teardown has been successfully queued
  *         content:
  *           application/json:
  *             schema:
