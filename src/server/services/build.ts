@@ -499,13 +499,11 @@ export default class BuildService extends BaseService {
     });
   }
 
-  async tearDownBuild(uuid: string) {
+  async destroyBuildEnvironment(uuid: string) {
     return withLogContext({ buildUuid: uuid }, async () => {
-      const build = await this.db.models.Build.query()
-        .findOne({
-          uuid,
-        })
-        .withGraphFetched('[deploys]');
+      const build = await this.db.models.Build.query().findOne({
+        uuid,
+      });
 
       if (!build || build.isStatic) {
         getLogger().debug('Build does not exist or is static environment');
@@ -515,25 +513,16 @@ export default class BuildService extends BaseService {
         };
       }
 
-      const deploysIds = build.deploys?.map((deploy) => deploy.id) ?? [];
-
-      await this.db.models.Build.query().findById(build.id).patch({
-        status: BuildStatus.TORN_DOWN,
-        statusMessage: 'Namespace was deleted successfully',
+      await this.deleteQueue.add('delete', {
+        buildId: build.id,
+        buildUuid: build.uuid,
+        ...extractContextForQueue(),
       });
 
-      await this.db.models.Deploy.query()
-        .whereIn('id', deploysIds)
-        .patch({ status: DeployStatus.TORN_DOWN, statusMessage: 'Namespace was deleted successfully' });
-
-      const updatedDeploys = await this.db.models.Deploy.query()
-        .whereIn('id', deploysIds)
-        .select('id', 'uuid', 'status');
-
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: delete queued');
       return {
         status: 'success',
-        message: `Build ${uuid} has been torn down`,
-        namespacesUpdated: updatedDeploys,
+        message: `Build ${uuid} teardown has been queued`,
       };
     });
   }

@@ -176,7 +176,7 @@ describe('BuildService build response queries', () => {
   function createQueueManager() {
     return {
       registerQueue: jest.fn(() => ({
-        add: jest.fn(),
+        add: mockQueueAdd,
         process: jest.fn(),
         on: jest.fn(),
       })),
@@ -467,6 +467,132 @@ describe('BuildService status updates', () => {
       status: BuildStatus.DEPLOYED,
       statusMessage: '',
     });
+  });
+});
+
+describe('BuildService destroyBuildEnvironment', () => {
+  function createQueueManager() {
+    return {
+      registerQueue: jest.fn(() => ({
+        add: mockQueueAdd,
+        process: jest.fn(),
+        on: jest.fn(),
+      })),
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('queues build cleanup for worker processing', async () => {
+    const build = {
+      id: 42,
+      uuid: 'sample-build',
+      isStatic: false,
+      status: BuildStatus.DEPLOYED,
+    };
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(build),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    const result = await buildService.destroyBuildEnvironment('sample-build');
+
+    expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(mockQueueAdd).toHaveBeenCalledWith('delete', {
+      buildId: 42,
+      buildUuid: 'sample-build',
+    });
+    expect(result).toEqual({
+      status: 'success',
+      message: 'Build sample-build teardown has been queued',
+    });
+  });
+
+  test('does not clean up missing builds', async () => {
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    const deployQuery = {
+      where: jest.fn(),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+          Deploy: {
+            query: jest.fn(() => deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    await expect(buildService.destroyBuildEnvironment('missing-build')).resolves.toEqual({
+      status: 'not_found',
+      message: 'Build not found for missing-build or is static environment.',
+    });
+
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(deployQuery.where).not.toHaveBeenCalled();
+  });
+
+  test('does not clean up static environments', async () => {
+    const build = {
+      id: 42,
+      uuid: 'static-build',
+      isStatic: true,
+      status: BuildStatus.DEPLOYED,
+    };
+    const buildQuery = {
+      findOne: jest.fn().mockResolvedValue(build),
+    };
+    const deployQuery = {
+      where: jest.fn(),
+    };
+    const buildService = new BuildService(
+      {
+        models: {
+          Build: {
+            query: jest.fn(() => buildQuery),
+          },
+          Deploy: {
+            query: jest.fn(() => deployQuery),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      createQueueManager() as any
+    );
+    const deleteBuild = jest.spyOn(buildService, 'deleteBuild').mockResolvedValue(undefined);
+
+    await expect(buildService.destroyBuildEnvironment('static-build')).resolves.toEqual({
+      status: 'not_found',
+      message: 'Build not found for static-build or is static environment.',
+    });
+
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(deployQuery.where).not.toHaveBeenCalled();
   });
 });
 

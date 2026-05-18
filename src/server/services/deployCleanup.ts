@@ -47,6 +47,11 @@ interface DeployCleanupQueueJob {
   _ddTraceContext?: Record<string, string>;
 }
 
+interface DestroyServiceDeploymentResult {
+  status: 'success' | 'not_found' | 'error';
+  message: string;
+}
+
 function shellQuote(value: string | number): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
@@ -80,6 +85,11 @@ function isMissingResourceTypeError(error: unknown): boolean {
   );
 }
 
+function isHelmReleaseNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.toLowerCase().includes('release: not found');
+}
+
 export default class DeployCleanupService extends BaseService {
   deployCleanupQueue: Queue<DeployCleanupQueueJob> = this.queueManager.registerQueue(QUEUE_NAMES.DEPLOY_CLEANUP, {
     connection: redisClient.getConnection(),
@@ -108,6 +118,46 @@ export default class DeployCleanupService extends BaseService {
       }
     });
   };
+
+  async destroyServiceDeployment(buildUuid: string, serviceName: string): Promise<DestroyServiceDeploymentResult> {
+    return withLogContext({ buildUuid, serviceName }, async () => {
+      const build = await this.db.models.Build.query()
+        .findOne({ uuid: buildUuid })
+        .withGraphFetched('deploys.[build, service, deployable]');
+
+      if (!build) {
+        return {
+          status: 'not_found',
+          message: `Build not found for ${buildUuid}.`,
+        };
+      }
+
+      const deploy = build.deploys?.find((candidate) =>
+        build.enableFullYaml ? candidate.deployable?.name === serviceName : candidate.service?.name === serviceName
+      );
+
+      if (!deploy) {
+        return {
+          status: 'not_found',
+          message: `Service ${serviceName} not found for ${buildUuid}.`,
+        };
+      }
+
+      if (deploy.status === DeployStatus.TORN_DOWN) {
+        return {
+          status: 'success',
+          message: `Service ${serviceName} in build ${buildUuid} is already torn down`,
+        };
+      }
+
+      await this.enqueueCleanup({ deployId: deploy.id, mode: 'infra' });
+
+      return {
+        status: 'success',
+        message: `Service ${serviceName} in build ${buildUuid} teardown has been queued`,
+      };
+    });
+  }
 
   async cleanupDeploy(deployOrId: Deploy | number, { mode }: { mode: DeployCleanupMode }): Promise<boolean> {
     const deploy = await this.resolveDeploy(deployOrId);
@@ -344,6 +394,23 @@ export default class DeployCleanupService extends BaseService {
       });
       return true;
     } catch (error) {
+      if (task.resourceType === 'helm-release' && isHelmReleaseNotFoundError(error)) {
+        metrics.increment('task', {
+          mode,
+          result: 'skipped_not_found',
+          resourceType: task.resourceType,
+        });
+        getLogger({
+          mode,
+          deployUuid: deploy.uuid,
+          deployId: deploy.id,
+          deployableId: deploy.deployableId,
+          resourceType: task.resourceType,
+          task: task.name,
+        }).debug('Deploy cleanup: skipped missing Helm release');
+        return true;
+      }
+
       if (isMissingResourceTypeError(error)) {
         metrics.increment('task', {
           mode,

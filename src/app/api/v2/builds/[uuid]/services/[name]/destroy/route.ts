@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,19 +17,19 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import BuildService from 'server/services/build';
+import DeployCleanupService from 'server/services/deployCleanup';
 
 /**
  * @openapi
- * /api/v2/builds/{uuid}/destroy:
+ * /api/v2/builds/{uuid}/services/{name}/destroy:
  *   put:
- *     summary: Tear down a build environment
+ *     summary: Destroy a service deployment within an environment
  *     description: |
- *       Queues teardown for the build environment. The worker deletes Kubernetes resources, runs configured
- *       CLI/Codefresh destroy steps, uninstalls Helm releases, removes the namespace, queues ingress and
- *       GitHub deployment cleanup, then marks the associated Build and Deploy records as torn_down.
+ *       Queues deploy-scoped infrastructure teardown for a service in a build environment. The worker deletes
+ *       Kubernetes resources, secrets, Helm releases, and configured CLI/Codefresh destroy steps for the service type.
+ *       Static environments are allowed. When cleanup succeeds, the Deploy record is marked torn_down.
  *     tags:
- *       - Builds
+ *       - Services
  *     parameters:
  *       - in: path
  *         name: uuid
@@ -37,21 +37,27 @@ import BuildService from 'server/services/build';
  *         schema:
  *           type: string
  *         description: The UUID of the environment
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The name of the service deployment to destroy
  *     responses:
  *       200:
- *         description: Build teardown has been successfully queued
+ *         description: Service deployment teardown has been successfully queued
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/TearDownBuildSuccessResponse'
+ *               $ref: '#/components/schemas/DestroyServiceDeploymentSuccessResponse'
  *       404:
- *         description: Build not found or is a static environment
+ *         description: Build or service not found
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *       400:
- *         description: Bad request
+ *         description: Cleanup failed
  *         content:
  *           application/json:
  *             schema:
@@ -63,12 +69,12 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
-  const { uuid: buildUuid } = params;
+const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
+  const { uuid: buildUuid, name: serviceName } = params;
 
-  const buildService = new BuildService();
+  const deployCleanupService = new DeployCleanupService();
 
-  const response = await buildService.destroyBuildEnvironment(buildUuid);
+  const response = await deployCleanupService.destroyServiceDeployment(buildUuid, serviceName);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);

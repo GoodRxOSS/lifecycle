@@ -3050,6 +3050,30 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         /**
          * @description The specific success response for
+         * PUT /api/v2/builds/{uuid}/services/{name}/destroy
+         */
+        DestroyServiceDeploymentSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string' },
+                    message: { type: 'string' },
+                  },
+                  required: ['status', 'message'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for
          * PUT /api/v2/builds/{uuid}/redeploy
          */
         RedeployBuildSuccessResponse: {
@@ -3087,15 +3111,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                   properties: {
                     status: { type: 'string' },
                     message: { type: 'string' },
-                    namespacesUpdated: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/Deploy' },
-                    },
                   },
-                  required: ['status', 'message', 'namespacesUpdated'],
+                  required: ['status', 'message'],
                 },
-                required: ['data'],
               },
+              required: ['data'],
             },
           ],
         },
