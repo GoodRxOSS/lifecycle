@@ -1094,3 +1094,66 @@ describe('BuildService queue fingerprinting', () => {
     );
   });
 });
+
+describe('BuildService running image updates', () => {
+  test('updates repo-less dependency deploys during a scoped repository deploy', async () => {
+    const appPatch = jest.fn().mockResolvedValue(undefined);
+    const dependencyPatch = jest.fn().mockResolvedValue(undefined);
+    const unrelatedPatch = jest.fn().mockResolvedValue(undefined);
+    const buildService = new BuildService(
+      { models: {}, services: {} } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({
+          add: jest.fn(),
+          process: jest.fn(),
+          on: jest.fn(),
+        })),
+      } as any
+    );
+    const build = {
+      deploys: [
+        {
+          uuid: 'api-deploy',
+          githubRepositoryId: 100,
+          dockerImage: 'api:latest',
+          deployable: {
+            name: 'api',
+            repositoryId: 100,
+          },
+          $query: jest.fn(() => ({ patch: appPatch })),
+        },
+        {
+          uuid: 'api-localstack-deploy',
+          githubRepositoryId: null,
+          dockerImage: 'localstack:latest',
+          deployable: {
+            name: 'api-localstack',
+            repositoryId: null,
+            dependsOnDeployableName: 'api',
+          },
+          $query: jest.fn(() => ({ patch: dependencyPatch })),
+        },
+        {
+          uuid: 'worker-deploy',
+          githubRepositoryId: 200,
+          dockerImage: 'worker:latest',
+          deployable: {
+            name: 'worker',
+            repositoryId: 200,
+          },
+          $query: jest.fn(() => ({ patch: unrelatedPatch })),
+        },
+      ],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await (buildService as any).updateDeploysImageDetails(build, 100);
+
+    expect(build.$fetchGraph).toHaveBeenCalledWith('deploys.[service, deployable]');
+    expect(appPatch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'api:latest' });
+    expect(dependencyPatch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'localstack:latest' });
+    expect(unrelatedPatch).not.toHaveBeenCalled();
+  });
+});

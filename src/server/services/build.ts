@@ -51,6 +51,7 @@ import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
 import { compactStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 import OverrideService, { type BuildServiceOverrideState } from './override';
+import { scopedDeployableNames } from 'server/lib/deployScope';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -121,19 +122,37 @@ export default class BuildService extends BaseService {
     return deploy.service?.name || deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
   }
 
+  private selectDeploysForRepositoryScope(deploys: Deploy[], githubRepositoryId?: number | null): Deploy[] {
+    if (!githubRepositoryId) {
+      return deploys;
+    }
+
+    const scopedNames = scopedDeployableNames(
+      deploys.map((deploy) => ({
+        name: deploy.deployable?.name || deploy.service?.name || deploy.uuid,
+        repositoryId: deploy.deployable?.repositoryId ?? deploy.githubRepositoryId,
+        dependsOnDeployableName: deploy.deployable?.dependsOnDeployableName ?? null,
+        deploymentDependsOn: deploy.deployable?.deploymentDependsOn ?? null,
+      })),
+      githubRepositoryId
+    );
+
+    return deploys.filter((deploy) =>
+      scopedNames.has(deploy.deployable?.name || deploy.service?.name || deploy.uuid || String(deploy.id || ''))
+    );
+  }
+
   private buildFingerprintPayload(build: Build, githubRepositoryId?: number) {
-    const deploys = (build.deploys || [])
-      .filter((deploy) => !githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId)
-      .map((deploy) => ({
-        key: this.getBuildFingerprintDeployKey(build, deploy),
-        githubRepositoryId: deploy.githubRepositoryId ?? null,
-        branchName: deploy.branchName ?? null,
-        active: deploy.active ?? true,
-        publicUrl: deploy.publicUrl ?? null,
-        env: deploy.env || {},
-        initEnv: deploy.initEnv || {},
-        commentBranchName: deploy.deployable?.commentBranchName ?? null,
-      }));
+    const deploys = this.selectDeploysForRepositoryScope(build.deploys || [], githubRepositoryId).map((deploy) => ({
+      key: this.getBuildFingerprintDeployKey(build, deploy),
+      githubRepositoryId: deploy.githubRepositoryId ?? null,
+      branchName: deploy.branchName ?? null,
+      active: deploy.active ?? true,
+      publicUrl: deploy.publicUrl ?? null,
+      env: deploy.env || {},
+      initEnv: deploy.initEnv || {},
+      commentBranchName: deploy.deployable?.commentBranchName ?? null,
+    }));
 
     return {
       buildId: build.id,
@@ -1419,16 +1438,15 @@ export default class BuildService extends BaseService {
     if (!buildId) {
       getLogger().error('Build: id missing for=deployCLIServices');
     }
-    const deploys = await Deploy.query()
-      .where({ buildId, ...(githubRepositoryId ? { githubRepositoryId } : {}) })
-      .withGraphFetched({ service: true, deployable: true });
-    if (!deploys || deploys.length === 0) return false;
+    const deploys = await Deploy.query().where({ buildId }).withGraphFetched({ service: true, deployable: true });
+    const scopedDeploys = this.selectDeploysForRepositoryScope(deploys, githubRepositoryId);
+    if (!scopedDeploys || scopedDeploys.length === 0) return false;
     try {
       if (build?.enableFullYaml) {
         return _.every(
           await Promise.all(
-            deploys
-              .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
+            scopedDeploys
+              .filter((d) => d.active && d.deployable && CLIDeployTypes.has(d.deployable.type))
               .map(async (deploy) => {
                 if (!deploy) {
                   getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
@@ -1451,7 +1469,7 @@ export default class BuildService extends BaseService {
       } else {
         return _.every(
           await Promise.all(
-            deploys
+            scopedDeploys
               .filter((d) => d.active && CLIDeployTypes.has(d.service.type))
               .map(async (deploy) => {
                 if (deploy === undefined) {
@@ -1492,18 +1510,19 @@ export default class BuildService extends BaseService {
     const deploys = await Deploy.query()
       .where({
         buildId,
-        ...(githubRepositoryId ? { githubRepositoryId } : {}),
       })
       .withGraphFetched({
         service: true,
         deployable: true,
       });
+    const scopedDeploys = this.selectDeploysForRepositoryScope(deploys, githubRepositoryId);
 
     if (build?.enableFullYaml) {
       try {
-        const deploysToBuild = deploys.filter((d) => {
+        const deploysToBuild = scopedDeploys.filter((d) => {
           return (
             d.active &&
+            d.deployable &&
             (d.deployable.type === DeployTypes.DOCKER ||
               d.deployable.type === DeployTypes.GITHUB ||
               d.deployable.type === DeployTypes.HELM)
@@ -1518,7 +1537,7 @@ export default class BuildService extends BaseService {
         const results = await Promise.all(
           deploysToBuild.map(async (deploy, index) => {
             if (deploy === undefined) {
-              getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
+              getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys?.length}`);
             }
             await deploy.$query().patchAndFetch({
               deployPipelineId: null,
@@ -1539,7 +1558,7 @@ export default class BuildService extends BaseService {
     } else {
       try {
         const results = await Promise.all(
-          deploys
+          scopedDeploys
             .filter((d) => {
               getLogger().debug(
                 `Check service type for docker builds: deployUuid=${d.uuid} serviceType=${d.service?.type}`
@@ -1610,7 +1629,6 @@ export default class BuildService extends BaseService {
         const allDeploys = await Deploy.query()
           .where({
             buildId,
-            ...(githubRepositoryId ? { githubRepositoryId } : {}),
           })
           .withGraphFetched({
             service: {
@@ -1619,11 +1637,16 @@ export default class BuildService extends BaseService {
             deployable: true,
           });
 
-        const activeDeploys = allDeploys.filter((d) => d.active);
+        const activeDeploys = this.selectDeploysForRepositoryScope(allDeploys, githubRepositoryId).filter(
+          (d) => d.active
+        );
 
         // Generate manifests for GitHub/Docker/CLI deploys
         for (const deploy of activeDeploys) {
-          const deployType = deploy.deployable.type;
+          const deployType = deploy.deployable?.type;
+          if (!deployType) {
+            continue;
+          }
           if (
             deployType === DeployTypes.GITHUB ||
             deployType === DeployTypes.DOCKER ||
@@ -1647,9 +1670,10 @@ export default class BuildService extends BaseService {
         // Use DeploymentManager for all active deploys (both Helm and GitHub types)
         if (activeDeploys.length > 0) {
           // we should ignore Codefresh and Configuration services here since we dont deploy anything
-          const managedDeploys = activeDeploys.filter(
-            (d) => d.deployable.type !== DeployTypes.CODEFRESH && d.deployable.type !== DeployTypes.CONFIGURATION
-          );
+          const managedDeploys = activeDeploys.filter((d) => {
+            const deployType = d.deployable?.type;
+            return deployType && deployType !== DeployTypes.CODEFRESH && deployType !== DeployTypes.CONFIGURATION;
+          });
           const deploymentManager = new DeploymentManager(managedDeploys);
           await deploymentManager.deploy();
         }
@@ -1661,12 +1685,12 @@ export default class BuildService extends BaseService {
         });
 
         // Legacy manifest generation for backwards compatibility
-        const githubTypeDeploys = activeDeploys.filter(
-          (d) =>
-            d.deployable.type === DeployTypes.GITHUB ||
-            d.deployable.type === DeployTypes.DOCKER ||
-            CLIDeployTypes.has(d.deployable.type)
-        );
+        const githubTypeDeploys = activeDeploys.filter((d) => {
+          const deployType = d.deployable?.type;
+          return deployType
+            ? deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType)
+            : false;
+        });
 
         if (githubTypeDeploys.length > 0) {
           const legacyManifest = k8s.generateManifest({
@@ -1769,11 +1793,9 @@ export default class BuildService extends BaseService {
     return environments;
   }
 
-  private async updateDeploysImageDetails(build: Build, githubRepositoryId?: number) {
-    await build?.$fetchGraph('deploys');
-    const deploys = githubRepositoryId
-      ? build.deploys.filter((d) => d.githubRepositoryId === githubRepositoryId)
-      : build.deploys;
+  private async updateDeploysImageDetails(build: Build, githubRepositoryId?: number | null) {
+    await build?.$fetchGraph('deploys.[service, deployable]');
+    const deploys = this.selectDeploysForRepositoryScope(build.deploys || [], githubRepositoryId);
     await Promise.all(
       deploys.map((deploy) => deploy.$query().patch({ isRunningLatest: true, runningImage: deploy?.dockerImage }))
     );

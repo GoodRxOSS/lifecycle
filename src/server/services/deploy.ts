@@ -42,6 +42,7 @@ import { SecretProcessor } from 'server/services/secretProcessor';
 import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 import { isNativeBuilderEngine } from 'server/lib/buildEngines';
 import { SecretProvidersConfig } from 'server/services/types/globalConfig';
+import { normalizeRepositoryId, scopedDeployableNames } from 'server/lib/deployScope';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -76,7 +77,7 @@ export default class DeployService extends BaseService {
   async findOrCreateDeploys(environment: Environment, build: Build, githubRepositoryId?: number): Promise<Deploy[]> {
     await build?.$fetchGraph('[deployables.[repository]]');
 
-    const { deployables } = build;
+    const deployables = build.deployables || [];
 
     if (build?.enableFullYaml) {
       const buildId = build?.id;
@@ -87,13 +88,14 @@ export default class DeployService extends BaseService {
 
       const existingDeploys = await this.db.models.Deploy.query().where({ buildId }).withGraphFetched('deployable');
       const existingDeployMap = new Map(existingDeploys.map((d) => [d.deployableId, d]));
+      const deployableNamesInScope = scopedDeployableNames(deployables, githubRepositoryId);
 
       await Promise.all(
         deployables.map(async (deployable) => {
           const uuid = `${deployable.name}-${build?.uuid}`;
           const patchFields: Objection.PartialModelObject<Deploy> = {};
-          const deployableRepositoryId = Number(deployable.repositoryId);
-          const isTargetRepo = !githubRepositoryId || deployableRepositoryId === githubRepositoryId;
+          const deployableRepositoryId = normalizeRepositoryId(deployable.repositoryId);
+          const isTargetRepo = !githubRepositoryId || deployableNamesInScope.has(deployable.name);
 
           let deploy = existingDeployMap.get(deployable.id) ?? null;
           if (!deploy) {
@@ -109,10 +111,11 @@ export default class DeployService extends BaseService {
             }
           }
 
+          if (!isTargetRepo) {
+            return;
+          }
+
           if (deploy != null) {
-            if (!isTargetRepo) {
-              return;
-            }
             patchFields.deployableId = deployable?.id ?? null;
             patchFields.publicUrl = this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable);
             patchFields.internalHostname = uuid;

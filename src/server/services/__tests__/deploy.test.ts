@@ -777,3 +777,169 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     });
   });
 });
+
+describe('DeployService - scoped deploy initialization', () => {
+  test('creates repo-less Docker deploys with a null githubRepositoryId', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const createdDeploy = {
+      id: 99,
+      $query: jest.fn(() => ({ patch })),
+      $setRelated: jest.fn(),
+    };
+    const deployQuery: any = {
+      where: jest.fn(() => deployQuery),
+      withGraphFetched: jest.fn().mockResolvedValue([]),
+      then: (resolve: (value: any[]) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve([]).then(resolve, reject),
+    };
+    const build = {
+      id: 1449,
+      uuid: 'good-dev-0',
+      enableFullYaml: true,
+      deployables: [
+        {
+          id: 215190,
+          name: 'sponsored-benefits',
+          serviceId: null,
+          repositoryId: 1154960313,
+          branchName: 'main',
+          defaultTag: 'main',
+          type: DeployTypes.HELM,
+          active: true,
+        },
+        {
+          id: 215191,
+          name: 'sbs-localstack',
+          serviceId: null,
+          repositoryId: null,
+          branchName: 'main',
+          defaultTag: '4.10',
+          type: DeployTypes.DOCKER,
+          active: true,
+          dependsOnDeployableName: 'sponsored-benefits',
+        },
+      ],
+      deploys: [{ deployableId: 215190 }, { deployableId: 215191 }],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const mockDb = {
+      models: {
+        Deploy: {
+          query: jest.fn(() => deployQuery),
+          findOne: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue(createdDeploy),
+        },
+      },
+      services: {
+        Deploy: {
+          hostForDeployableDeploy: jest.fn(() => 'sbs-localstack-good-dev-0.lifecycle.test'),
+        },
+      },
+    };
+
+    const deployService = new DeployService(
+      mockDb as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn().mockReturnValue({ add: jest.fn(), process: jest.fn(), on: jest.fn() }),
+      } as any
+    );
+
+    await deployService.findOrCreateDeploys({} as any, build as any, 1154960313);
+
+    expect(mockDb.models.Deploy.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        githubRepositoryId: null,
+      })
+    );
+    expect(patch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: '4.10',
+      })
+    );
+  });
+
+  test('patches repo-less Docker dependencies during a repo-scoped deploy', async () => {
+    const appPatch = jest.fn().mockResolvedValue(undefined);
+    const dependencyPatch = jest.fn().mockResolvedValue(undefined);
+    const existingDeploys = [
+      {
+        deployableId: 1,
+        $query: jest.fn(() => ({ patch: appPatch })),
+        $setRelated: jest.fn(),
+      },
+      {
+        deployableId: 2,
+        $query: jest.fn(() => ({ patch: dependencyPatch })),
+        $setRelated: jest.fn(),
+      },
+    ];
+    const deployQuery: any = {
+      where: jest.fn(() => deployQuery),
+      withGraphFetched: jest.fn().mockResolvedValue(existingDeploys),
+      then: (resolve: (value: any[]) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(existingDeploys).then(resolve, reject),
+    };
+    const build = {
+      id: 1449,
+      uuid: 'good-dev-0',
+      enableFullYaml: true,
+      deployables: [
+        {
+          id: 1,
+          name: 'sponsored-benefits',
+          repositoryId: 1154960313,
+          branchName: 'main',
+          defaultTag: 'main',
+          type: DeployTypes.HELM,
+          active: true,
+        },
+        {
+          id: 2,
+          name: 'sbs-localstack',
+          repositoryId: null,
+          branchName: 'main',
+          defaultTag: '4.10',
+          type: DeployTypes.DOCKER,
+          active: true,
+          dependsOnDeployableName: 'sponsored-benefits',
+        },
+      ],
+      deploys: existingDeploys,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const mockDb = {
+      models: {
+        Deploy: {
+          query: jest.fn(() => deployQuery),
+          findOne: jest.fn(),
+          create: jest.fn(),
+        },
+      },
+      services: {
+        Deploy: {
+          hostForDeployableDeploy: jest.fn((deploy: any, deployable: any) => `${deployable.name}.lifecycle.test`),
+        },
+      },
+    };
+
+    const deployService = new DeployService(
+      mockDb as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn().mockReturnValue({ add: jest.fn(), process: jest.fn(), on: jest.fn() }),
+      } as any
+    );
+
+    await deployService.findOrCreateDeploys({} as any, build as any, 1154960313);
+
+    expect(appPatch).toHaveBeenCalled();
+    expect(dependencyPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: '4.10',
+      })
+    );
+  });
+});
