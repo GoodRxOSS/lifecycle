@@ -25,7 +25,7 @@ import {
 } from 'shared/config';
 import type { SitesConfig } from 'server/services/types/globalConfig';
 
-export const TEN_MIB = 10 * 1024 * 1024;
+export const UPLOAD_LIMIT_MIB = 100 * 1024 * 1024;
 export const DEFAULT_HOST_PREFIX = 'site';
 export const DEFAULT_ALLOWED_EXTENSIONS = [
   'html',
@@ -158,8 +158,8 @@ export function resolveSitesConfig(config?: SitesConfig | null): ResolvedSitesCo
       extensionDays: config?.ttl?.extensionDays ?? 7,
     },
     upload: {
-      maxUploadBytes: config?.upload?.maxUploadBytes ?? TEN_MIB,
-      maxExtractedBytes: config?.upload?.maxExtractedBytes ?? TEN_MIB,
+      maxUploadBytes: config?.upload?.maxUploadBytes ?? UPLOAD_LIMIT_MIB,
+      maxExtractedBytes: config?.upload?.maxExtractedBytes ?? UPLOAD_LIMIT_MIB,
       maxFiles: config?.upload?.maxFiles ?? 500,
       allowedExtensions: normalizeAllowedExtensions(config),
     },

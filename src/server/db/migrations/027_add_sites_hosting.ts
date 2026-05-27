@@ -35,8 +35,8 @@ const DEFAULT_SITES_CONFIG = {
     extensionDays: 7,
   },
   upload: {
-    maxUploadBytes: 10 * 1024 * 1024,
-    maxExtractedBytes: 10 * 1024 * 1024,
+    maxUploadBytes: 100 * 1024 * 1024,
+    maxExtractedBytes: 100 * 1024 * 1024,
     maxFiles: 500,
     allowedExtensions: [
       'html',

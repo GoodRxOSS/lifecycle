@@ -18,8 +18,8 @@ import zlib from 'zlib';
 import { normalizeGatewayPath, validateSiteUpload } from './validation';
 
 const DEFAULT_OPTIONS = {
-  maxUploadBytes: 10 * 1024 * 1024,
-  maxExtractedBytes: 10 * 1024 * 1024,
+  maxUploadBytes: 100 * 1024 * 1024,
+  maxExtractedBytes: 100 * 1024 * 1024,
   maxFiles: 500,
   allowedExtensions: ['html', 'zip', 'json', 'md', 'markdown', 'txt', 'js'],
 };
