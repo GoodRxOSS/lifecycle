@@ -16,6 +16,7 @@
 
 import { raw, type PartialModelObject, type Transaction } from 'objection';
 import 'server/lib/dependencies';
+import { getLogger } from 'server/lib/logger';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 import AgentSession from 'server/models/AgentSession';
@@ -25,32 +26,74 @@ import AgentRunEventService from './RunEventService';
 import { isAgentRunPlanSnapshotV1, type AgentDebugRunIntent, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
 import { serializeRunPlanSummary } from './runPlanSummary';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import { ConflictError, BadRequestError } from 'server/lib/appError';
+import { classifyThrownRunError } from './runErrorClassification';
 import type { AgentRunResumeEligibility } from './RunResumeEligibilityService';
-import {
-  DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT,
-  DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS,
-  DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS,
-  resolveAgentSessionDurabilityConfig,
-} from 'server/lib/agentSession/runtimeConfig';
+import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 
 const activeRunControllers = new Map<string, AbortController>();
 const RUN_NOT_FOUND_ERROR = 'Agent run not found';
 export const TERMINAL_RUN_STATUSES: AgentRunStatus[] = ['completed', 'failed', 'cancelled'];
-export const DEFAULT_RUN_EXECUTION_LEASE_MS = DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS;
-export const DEFAULT_RUN_DISPATCH_RECOVERY_LIMIT = DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT;
-export const DEFAULT_QUEUED_RUN_DISPATCH_STALE_MS = DEFAULT_AGENT_SESSION_QUEUED_RUN_DISPATCH_STALE_MS;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export class ActiveAgentRunError extends Error {
+// Best-effort fast cross-process abort; the ownership fence still stops a missed worker.
+const RUN_CANCEL_NOTIFY_CHANNEL = 'agent_run_cancel';
+
+type PgListenConnection = {
+  on(event: 'notification', listener: (notification: { channel?: string; payload?: string }) => void): void;
+  on(event: 'error', listener: (error: unknown) => void): void;
+  query(sql: string): Promise<unknown>;
+};
+
+let cancelNotificationConnection: PgListenConnection | null = null;
+let cancelNotificationListenPromise: Promise<void> | null = null;
+
+function clearCancelNotificationConnection(): void {
+  cancelNotificationConnection = null;
+  cancelNotificationListenPromise = null;
+}
+
+function parseCancelNotification(payload: string | undefined): string | null {
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as Record<string, unknown>;
+    const runId = typeof parsed.runId === 'string' ? parsed.runId : null;
+    return runId && isUuid(runId) ? runId : null;
+  } catch (error) {
+    getLogger().warn({ error }, 'AgentExec: ignored invalid run-cancel notification');
+    return null;
+  }
+}
+
+function handleCancelNotification(notification: { channel?: string; payload?: string }): void {
+  if (notification.channel !== RUN_CANCEL_NOTIFY_CHANNEL) {
+    return;
+  }
+
+  const runUuid = parseCancelNotification(notification.payload);
+  if (runUuid) {
+    activeRunControllers.get(runUuid)?.abort();
+  }
+}
+
+function handleCancelNotificationError(error: unknown): void {
+  getLogger().warn({ error }, 'AgentExec: run-cancel notification listener failed');
+  clearCancelNotificationConnection();
+}
+
+export class ActiveAgentRunError extends ConflictError {
   constructor() {
-    super('Wait for the current agent run to finish before starting another run.');
+    super('Wait for the current agent run to finish before starting another run.', 'run_already_running');
     this.name = 'ActiveAgentRunError';
   }
 }
 
-export class InvalidAgentRunDefaultsError extends Error {
+export class InvalidAgentRunDefaultsError extends BadRequestError {
   constructor(message: string) {
-    super(message);
+    super(message, 'run_defaults_invalid');
     this.name = 'InvalidAgentRunDefaultsError';
   }
 }
@@ -70,6 +113,19 @@ function serializeRunError(error: unknown): Record<string, unknown> {
         details: {
           reason: 'ui_message_validation',
         },
+      };
+    }
+
+    // Give provider/SDK/OAuth/ownership failures a stable code + recovery action so they aren't persisted as uncoded prose.
+    const classified = classifyThrownRunError(error);
+    if (classified) {
+      return {
+        name: classified.name || 'AgentRunTerminalFailure',
+        code: classified.code,
+        message: classified.message,
+        ...(classified.details ? { details: classified.details } : {}),
+        ...(classified.retryable !== undefined ? { retryable: classified.retryable } : {}),
+        ...(classified.nextAction ? { nextAction: classified.nextAction } : {}),
       };
     }
 
@@ -138,6 +194,24 @@ function isLeaseExpired(leaseExpiresAt: string | null | undefined, now: Date): b
   }
 
   return new Date(leaseExpiresAt).getTime() <= now.getTime();
+}
+
+function resolveHeartbeatStaleMs(runExecutionLeaseMs: number): number {
+  // 3x the heartbeat interval, never exceeding the lease.
+  const intervalMs = Math.min(Math.max(Math.floor(runExecutionLeaseMs / 3), 10_000), 60_000);
+  return Math.min(runExecutionLeaseMs, intervalMs * 3);
+}
+
+function isHeartbeatStale(
+  run: Pick<AgentRun, 'heartbeatAt' | 'startedAt'>,
+  now: Date,
+  heartbeatStaleMs: number
+): boolean {
+  const reference = run.heartbeatAt || run.startedAt; // fall back to startedAt if never heartbeated
+  if (!reference) {
+    return false;
+  }
+  return new Date(reference).getTime() <= now.getTime() - heartbeatStaleMs;
 }
 
 function shouldReleaseExecution(status: AgentRunStatus): boolean {
@@ -295,47 +369,67 @@ export default class AgentRunService {
     return run;
   }
 
-  static async createRun({
-    thread,
-    session,
-    provider,
-    model,
-    policy,
-    runPlanSnapshot,
-  }: {
-    thread: AgentThread;
-    session: AgentSession;
-    provider: string;
-    model: string;
-    policy: AgentApprovalPolicy;
-    runPlanSnapshot: AgentRunPlanSnapshotV1;
-  }): Promise<AgentRun> {
-    const run = await this.createQueuedRun({
-      thread,
-      session,
-      policy,
-      requestedHarness: session.defaultHarness,
-      requestedProvider: provider,
-      requestedModel: model,
-      resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
-      resolvedProvider: provider,
-      resolvedModel: model,
-      runPlanSnapshot,
-    });
-
-    return this.startRun(run.uuid, {
-      resolvedHarness: session.defaultHarness || 'lifecycle_ai_sdk',
-      provider,
-      model,
-    });
-  }
-
   static registerAbortController(runUuid: string, controller: AbortController): void {
     activeRunControllers.set(runUuid, controller);
+    // Lazily start the cross-process cancel listener once this worker owns a controller.
+    void this.ensureCancelNotificationListener().catch(() => {});
   }
 
   static clearAbortController(runUuid: string): void {
     activeRunControllers.delete(runUuid);
+  }
+
+  // Single shared LISTEN connection per process; a connection drop clears the cache so the next caller re-listens.
+  private static async ensureCancelNotificationListener(): Promise<void> {
+    if (cancelNotificationConnection) {
+      return;
+    }
+
+    if (cancelNotificationListenPromise) {
+      return cancelNotificationListenPromise;
+    }
+
+    cancelNotificationListenPromise = (async () => {
+      const knex = AgentRun.knex() as unknown as {
+        client: {
+          acquireConnection(): Promise<PgListenConnection>;
+          releaseConnection(connection: PgListenConnection): Promise<void>;
+        };
+      };
+      const connection = await knex.client.acquireConnection();
+
+      try {
+        connection.on('notification', handleCancelNotification);
+        connection.on('error', handleCancelNotificationError);
+        await connection.query(`LISTEN ${RUN_CANCEL_NOTIFY_CHANNEL}`);
+        cancelNotificationConnection = connection;
+      } catch (error) {
+        await knex.client.releaseConnection(connection);
+        throw error;
+      }
+    })()
+      .catch((error) => {
+        clearCancelNotificationConnection();
+        getLogger().warn({ error }, 'AgentExec: run-cancel notification listener unavailable');
+        throw error;
+      })
+      .finally(() => {
+        cancelNotificationListenPromise = null;
+      });
+
+    return cancelNotificationListenPromise;
+  }
+
+  // Best-effort broadcast so workers on other replicas abort their local controller.
+  private static async notifyRunCancelled(runUuid: string): Promise<void> {
+    try {
+      await AgentRun.knex().raw('select pg_notify(?, ?)', [
+        RUN_CANCEL_NOTIFY_CHANNEL,
+        JSON.stringify({ runId: runUuid }),
+      ]);
+    } catch (error) {
+      getLogger().warn({ error, runUuid }, `AgentExec: run-cancel notify failed runId=${runUuid}`);
+    }
   }
 
   static async getRunByUuid(runUuid: string): Promise<AgentRun | undefined> {
@@ -382,12 +476,14 @@ export default class AgentRunService {
     now?: Date;
     queuedStaleMs?: number;
   } = {}): Promise<AgentRun[]> {
-    const durability =
-      limit === undefined || queuedStaleMs === undefined ? await resolveAgentSessionDurabilityConfig() : null;
-    const effectiveLimit = limit ?? durability!.dispatchRecoveryLimit;
-    const effectiveQueuedStaleMs = queuedStaleMs ?? durability!.queuedRunDispatchStaleMs;
+    // Always resolve durability: the lease is required to derive the heartbeat-staleness cutoff.
+    const durability = await resolveAgentSessionDurabilityConfig();
+    const effectiveLimit = limit ?? durability.dispatchRecoveryLimit;
+    const effectiveQueuedStaleMs = queuedStaleMs ?? durability.queuedRunDispatchStaleMs;
+    const heartbeatStaleMs = resolveHeartbeatStaleMs(durability.runExecutionLeaseMs);
     const nowIso = now.toISOString();
     const queuedCutoff = new Date(now.getTime() - effectiveQueuedStaleMs).toISOString();
+    const heartbeatCutoff = new Date(now.getTime() - heartbeatStaleMs).toISOString();
 
     return AgentRun.query()
       .where((builder) => {
@@ -398,6 +494,13 @@ export default class AgentRunService {
           .whereIn('status', ['starting', 'running'])
           .whereNotNull('leaseExpiresAt')
           .where('leaseExpiresAt', '<=', nowIso);
+      })
+      .orWhere((builder) => {
+        builder.whereIn('status', ['starting', 'running']).where((heartbeatBuilder) => {
+          heartbeatBuilder.where('heartbeatAt', '<=', heartbeatCutoff).orWhere((fallbackBuilder) => {
+            fallbackBuilder.whereNull('heartbeatAt').where('startedAt', '<=', heartbeatCutoff);
+          });
+        });
       })
       .orderBy('updatedAt', 'asc')
       .limit(Math.max(1, Math.floor(effectiveLimit)));
@@ -416,6 +519,7 @@ export default class AgentRunService {
     const nowIso = now.toISOString();
     const effectiveLeaseMs = leaseMs ?? (await resolveAgentSessionDurabilityConfig()).runExecutionLeaseMs;
     const leaseExpiresAt = new Date(now.getTime() + effectiveLeaseMs).toISOString();
+    const heartbeatStaleMs = resolveHeartbeatStaleMs(effectiveLeaseMs);
 
     return AgentRun.transaction(async (trx) => {
       const run = await AgentRun.query(trx).findOne({ uuid: runUuid }).forUpdate();
@@ -424,7 +528,8 @@ export default class AgentRunService {
       }
 
       const staleClaim =
-        (run.status === 'starting' || run.status === 'running') && isLeaseExpired(run.leaseExpiresAt, now);
+        (run.status === 'starting' || run.status === 'running') &&
+        (isLeaseExpired(run.leaseExpiresAt, now) || isHeartbeatStale(run, now, heartbeatStaleMs));
       if (run.status !== 'queued' && !staleClaim) {
         return null;
       }
@@ -523,10 +628,41 @@ export default class AgentRunService {
     const run = await this.getOwnedRun(runUuid, userId);
     activeRunControllers.get(run.uuid)?.abort();
 
-    await this.patchStatus(run.uuid, 'cancelled', {
-      cancelledAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-    } as Partial<AgentRun>);
+    const now = new Date().toISOString();
+    // Status patch and run.cancelled event MUST be atomic: a terminal status with no terminal event hangs every SSE stream forever.
+    let latestSequence: number | null = null;
+    await AgentRun.transaction(async (trx) => {
+      const lockedRun = await AgentRun.query(trx).findById(run.id).forUpdate();
+      if (!lockedRun) {
+        throw new Error(RUN_NOT_FOUND_ERROR);
+      }
+
+      if (TERMINAL_RUN_STATUSES.includes(lockedRun.status)) {
+        return;
+      }
+
+      const cancelledRun = await AgentRun.query(trx).patchAndFetchById(lockedRun.id, {
+        status: 'cancelled',
+        cancelledAt: now,
+        completedAt: now,
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+      } as Partial<AgentRun>);
+
+      latestSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+        cancelledRun,
+        statusEventType('cancelled'),
+        this.buildStatusEventPayload('cancelled', cancelledRun),
+        trx
+      );
+    });
+
+    if (latestSequence) {
+      await AgentRunEventService.notifyRunEventsInserted(run.uuid, latestSequence);
+      // Fast cross-process abort for a worker executing this run on another replica.
+      await this.notifyRunCancelled(run.uuid);
+    }
 
     this.clearAbortController(run.uuid);
     return this.getOwnedRun(run.uuid, userId);
@@ -534,35 +670,6 @@ export default class AgentRunService {
 
   static isTerminalStatus(status: AgentRunStatus): boolean {
     return TERMINAL_RUN_STATUSES.includes(status);
-  }
-
-  // Compatibility path for owner-independent control actions. Executor writes should use owner-aware helpers.
-  static async patchRun(runUuid: string, patch: Partial<AgentRun>): Promise<AgentRun> {
-    const run = await AgentRun.query().findOne({ uuid: runUuid });
-    if (!run) {
-      throw new Error(RUN_NOT_FOUND_ERROR);
-    }
-
-    return AgentRun.query().patchAndFetchById(run.id, patch);
-  }
-
-  static async patchStatus(runUuid: string, status: AgentRunStatus, patch?: Partial<AgentRun>): Promise<AgentRun> {
-    const releaseExecution = shouldReleaseExecution(status);
-    const updatedRun = await this.patchRun(runUuid, {
-      status,
-      ...patch,
-      ...(releaseExecution
-        ? {
-            executionOwner: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-          }
-        : {}),
-    } as Partial<AgentRun>);
-
-    await this.appendRunStatusEvent(runUuid, statusEventType(status), status, updatedRun);
-
-    return updatedRun;
   }
 
   static async assertRunExecutionOwner(runUuid: string, executionOwner: string): Promise<AgentRun> {
@@ -649,6 +756,8 @@ export default class AgentRunService {
     },
     eventContext: OwnerStatusEventContext = {}
   ): Promise<AgentRun> {
+    // This worker is starting generation; ensure it can hear a cross-process cancel.
+    void this.ensureCancelNotificationListener().catch(() => {});
     const now = new Date().toISOString();
     return this.patchStatusForExecutionOwner(
       runUuid,
@@ -836,15 +945,6 @@ export default class AgentRunService {
     return updatedRun;
   }
 
-  private static async appendRunStatusEvent(
-    runUuid: string,
-    eventType: string,
-    status: AgentRunStatus,
-    updatedRun: AgentRun
-  ): Promise<void> {
-    await AgentRunEventService.appendStatusEvent(runUuid, eventType, this.buildStatusEventPayload(status, updatedRun));
-  }
-
   private static buildStatusEventPayload(
     status: AgentRunStatus,
     updatedRun: AgentRun,
@@ -880,51 +980,6 @@ export default class AgentRunService {
     if (run.executionOwner !== executionOwner || TERMINAL_RUN_STATUSES.includes(run.status)) {
       throw runOwnershipLost(runUuid, executionOwner, run);
     }
-  }
-
-  static async startRun(
-    runUuid: string,
-    resolved: {
-      resolvedHarness: string;
-      provider: string;
-      model: string;
-      sandboxGeneration?: number | null;
-    }
-  ): Promise<AgentRun> {
-    const now = new Date().toISOString();
-    return this.patchStatus(runUuid, 'running', {
-      startedAt: now,
-      completedAt: null,
-      cancelledAt: null,
-      error: null,
-      resolvedHarness: resolved.resolvedHarness,
-      resolvedProvider: resolved.provider,
-      resolvedModel: resolved.model,
-      provider: resolved.provider,
-      model: resolved.model,
-      sandboxGeneration: resolved.sandboxGeneration ?? null,
-    } as Partial<AgentRun>);
-  }
-
-  static async markWaitingForApproval(runUuid: string): Promise<AgentRun> {
-    return this.patchStatus(runUuid, 'waiting_for_approval');
-  }
-
-  static async markCompleted(runUuid: string, usageSummary?: AgentRunUsageSummary): Promise<AgentRun> {
-    this.clearAbortController(runUuid);
-    return this.patchStatus(runUuid, 'completed', {
-      completedAt: new Date().toISOString(),
-      usageSummary: (usageSummary || {}) as Record<string, unknown>,
-    });
-  }
-
-  static async markFailed(runUuid: string, error: unknown, usageSummary?: AgentRunUsageSummary): Promise<AgentRun> {
-    this.clearAbortController(runUuid);
-    return this.patchStatus(runUuid, 'failed', {
-      completedAt: new Date().toISOString(),
-      usageSummary: (usageSummary || {}) as Record<string, unknown>,
-      error: serializeRunError(error),
-    });
   }
 
   static async markQueuedRunDispatchFailed(runUuid: string, error: unknown): Promise<AgentRun> {
@@ -975,6 +1030,8 @@ export default class AgentRunService {
     }
 
     const now = options.now || new Date();
+    const { runExecutionLeaseMs } = await resolveAgentSessionDurabilityConfig();
+    const heartbeatStaleMs = resolveHeartbeatStaleMs(runExecutionLeaseMs);
     let latestSequence: number | null = null;
     const pausedRun = await AgentRun.transaction(async (trx) => {
       const run = await AgentRun.query(trx).findOne({ uuid: runUuid }).forUpdate();
@@ -992,7 +1049,11 @@ export default class AgentRunService {
         }
       }
 
-      if (!options.allowActiveLease && !isLeaseExpired(run.leaseExpiresAt, now)) {
+      if (
+        !options.allowActiveLease &&
+        !isLeaseExpired(run.leaseExpiresAt, now) &&
+        !isHeartbeatStale(run, now, heartbeatStaleMs)
+      ) {
         return null;
       }
 

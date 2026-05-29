@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
 import AgentSessionService from 'server/services/agentSession';
@@ -111,8 +111,7 @@ import AgentSessionService from 'server/services/agentSession';
  *         description: Workspace action is blocked by an active run or another lifecycle action
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { sessionId } = await params;
   const sessionRecord = await AgentSessionReadService.getOwnedSessionRecord(sessionId, userIdentity.userId);
@@ -124,8 +123,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sess
 };
 
 const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { sessionId } = await params;
   const session = await AgentSessionService.getSession(sessionId);

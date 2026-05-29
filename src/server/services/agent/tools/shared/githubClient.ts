@@ -22,13 +22,55 @@ export class GitHubClient {
   private referencedFiles: Set<string> = new Set();
   private excludedFilePatterns: string[] = [];
   private allowedWritePatterns: string[] = [];
+  // SECURITY: owner/repo set this build spans; reads outside it are rejected to prevent cross-tenant access.
+  private allowedRepos: Set<string> | null = null;
 
   private normalizeFilePath(filePath: string): string {
     return filePath.trim().replace(/^\/+/, '').replace(/^\.\//, '');
   }
 
+  private normalizeRepoKey(owner: string, repo: string): string {
+    return `${owner}/${repo}`.trim().toLowerCase();
+  }
+
   setAllowedBranch(branch: string) {
     this.allowedBranch = branch;
+  }
+
+  setAllowedRepos(repos: string[] | null | undefined): void {
+    if (!repos || repos.length === 0) {
+      this.allowedRepos = null;
+      return;
+    }
+
+    this.allowedRepos = new Set(
+      repos.map((entry) => entry?.trim().toLowerCase()).filter((entry): entry is string => Boolean(entry))
+    );
+  }
+
+  isRepoAllowed(owner: string, repo: string): boolean {
+    if (!this.allowedRepos) {
+      return true;
+    }
+
+    return this.allowedRepos.has(this.normalizeRepoKey(owner, repo));
+  }
+
+  getAllowedRepos(): string[] {
+    return this.allowedRepos ? [...this.allowedRepos] : [];
+  }
+
+  /**
+   * Throws a FILE_ACCESS_DENIED-style error when owner/repo is outside the build scope.
+   */
+  assertRepoAllowed(owner: string, repo: string): void {
+    if (!this.isRepoAllowed(owner, repo)) {
+      throw new Error(
+        `Repository "${owner}/${repo}" is outside this environment's repositories (${this.getAllowedRepos().join(
+          ', '
+        )}) and cannot be accessed.`
+      );
+    }
   }
 
   setReferencedFiles(files: string[]) {

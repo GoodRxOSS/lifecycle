@@ -17,8 +17,8 @@
 import { NextRequest } from 'next/server';
 import { fetchGitHubAuthenticatedUser, resolveRequestGitHubUserToken } from 'server/lib/agentSession/githubToken';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
-import { errorResponse, successResponse } from 'server/lib/response';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import { successResponse } from 'server/lib/response';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,14 +46,9 @@ interface GitHubTokenCheck {
  *         description: GitHub token check result
  *       '401':
  *         description: Unauthorized
- *       '403':
- *         description: Forbidden
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  requireRequestUserIdentity(req);
 
   const { githubUsername, githubToken } = await resolveRequestGitHubUserToken(req);
 
@@ -94,4 +89,5 @@ const getHandler = async (req: NextRequest) => {
   );
 };
 
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
+// Per-user self-check: requires user identity (enforced in-handler), NOT admin.
+export const GET = createApiHandler(getHandler);

@@ -45,7 +45,6 @@ import {
   DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_SIZE,
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS,
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
-  mergeAgentSessionReadiness,
   mergeAgentSessionReadinessForServices,
   mergeAgentSessionResources,
   resolveAgentSessionControlPlaneConfig,
@@ -448,17 +447,6 @@ describe('runtimeConfig', () => {
           memory: '512Mi',
         },
       },
-    });
-  });
-
-  it('merges direct readiness overrides over runtime defaults', () => {
-    expect(
-      mergeAgentSessionReadiness(resolveAgentSessionReadinessFromDefaults({ timeoutMs: 60000, pollMs: 1000 }), {
-        timeoutMs: 120000,
-      })
-    ).toEqual({
-      timeoutMs: 120000,
-      pollMs: 1000,
     });
   });
 

@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentSessionService from 'server/services/agentSession';
 import { loadAgentSessionServiceCandidates } from 'server/services/agentSessionCandidates';
 
@@ -106,8 +106,7 @@ export const dynamic = 'force-dynamic';
  *         description: Build or lifecycle config not found
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { searchParams } = new URL(req.url);
   const buildUuid = searchParams.get('buildUuid');

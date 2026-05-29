@@ -20,6 +20,7 @@ import AgentThread from 'server/models/AgentThread';
 import type AgentSession from 'server/models/AgentSession';
 import type AgentSource from 'server/models/AgentSource';
 import type { RequestUserIdentity } from 'server/lib/get-user';
+import { ConflictError } from 'server/lib/appError';
 import AgentCapabilityService from './CapabilityService';
 import * as AgentDefinitionRegistry from './AgentDefinitionRegistry';
 import { customAgentDefinitionService } from './CustomAgentDefinitionService';
@@ -46,14 +47,12 @@ export type AgentSelectionUnavailableReason =
   | 'source_incompatible'
   | 'disabled_by_policy';
 
-export class AgentThreadAgentSwitchError extends Error {
-  constructor(
-    public readonly reason: AgentSelectionUnavailableReason,
-    message: string,
-    public readonly details: Record<string, unknown> = {}
-  ) {
-    super(message);
+export class AgentThreadAgentSwitchError extends ConflictError {
+  readonly reason: AgentSelectionUnavailableReason;
+  constructor(reason: AgentSelectionUnavailableReason, message: string, extra: Record<string, unknown> = {}) {
+    super(message, 'agent_switch_blocked', { reason, ...extra });
     this.name = 'AgentThreadAgentSwitchError';
+    this.reason = reason;
   }
 }
 

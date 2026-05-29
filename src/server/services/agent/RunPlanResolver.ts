@@ -20,6 +20,7 @@ import type AgentSource from 'server/models/AgentSource';
 import type AgentThread from 'server/models/AgentThread';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
+import { AppError, ConflictError } from 'server/lib/appError';
 import { AgentWorkspaceStatus } from 'shared/constants';
 import AgentCapabilityService from './CapabilityService';
 import AgentPolicyService from './PolicyService';
@@ -53,33 +54,48 @@ type FindPriorCompletedDebugIntentRun = (input: {
   intents: AgentDebugRunIntent[];
 }) => Promise<boolean>;
 
-export class AgentRunPlanCapabilityUnavailableError extends Error {
-  constructor(public readonly capabilityId: string, public readonly reason: string | undefined) {
-    super(`Agent capability "${capabilityId}" is unavailable${reason ? `: ${reason}` : ''}.`);
+export class AgentRunPlanCapabilityUnavailableError extends ConflictError {
+  readonly capabilityId: string;
+  readonly reason: string | undefined;
+  constructor(capabilityId: string, reason: string | undefined) {
+    super(
+      `Agent capability "${capabilityId}" is unavailable${reason ? `: ${reason}` : ''}.`,
+      'capability_unavailable',
+      {
+        capabilityId,
+        ...(reason ? { reason } : {}),
+      }
+    );
     this.name = 'AgentRunPlanCapabilityUnavailableError';
+    this.capabilityId = capabilityId;
+    this.reason = reason;
   }
 }
 
-export class AgentRunPlanAgentUnavailableError extends Error {
-  constructor(
-    public readonly agentId: string,
-    public readonly reason: string,
-    public readonly details?: Record<string, unknown>
-  ) {
-    super(`Agent "${agentId}" is unavailable: ${reason}.`);
+export class AgentRunPlanAgentUnavailableError extends ConflictError {
+  readonly agentId: string;
+  readonly reason: string;
+  constructor(agentId: string, reason: string, extra?: Record<string, unknown>) {
+    super(`Agent "${agentId}" is unavailable: ${reason}.`, 'agent_unavailable', { agentId, reason, ...extra });
     this.name = 'AgentRunPlanAgentUnavailableError';
+    this.agentId = agentId;
+    this.reason = reason;
   }
 }
 
-export class AgentRunPlanInstructionTemplateError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly statusCode?: number,
-    public readonly details?: Record<string, unknown>
-  ) {
-    super(`Agent instruction template configuration is invalid: ${message}`);
+export class AgentRunPlanInstructionTemplateError extends AppError {
+  readonly templateCode: string;
+  readonly statusCode?: number;
+  constructor(templateCode: string, message: string, statusCode?: number, details?: Record<string, unknown>) {
+    super({
+      httpStatus: 422,
+      code: 'instruction_template_invalid',
+      message: `Agent instruction template configuration is invalid: ${message}`,
+      details: { templateCode, ...(details || {}) },
+    });
     this.name = 'AgentRunPlanInstructionTemplateError';
+    this.templateCode = templateCode;
+    this.statusCode = statusCode;
   }
 }
 
@@ -158,7 +174,12 @@ async function resolveInstructionSnapshots(
     return resolved.map(toResolvedInstructionSnapshot);
   } catch (error) {
     if (error instanceof InstructionTemplateServiceError) {
-      throw new AgentRunPlanInstructionTemplateError(error.code, error.message, error.statusCode, error.details);
+      throw new AgentRunPlanInstructionTemplateError(
+        error.templateCode,
+        error.message,
+        error.statusCode,
+        error.details
+      );
     }
 
     throw error;
@@ -420,7 +441,7 @@ async function resolveSelectedDefinition({
       definition: await customAgentDefinitionService.getUserDefinition(selectedAgentDefinitionId, userId),
     };
   } catch (error) {
-    if (!(error instanceof CustomAgentDefinitionServiceError) || error.code !== 'not_found') {
+    if (!(error instanceof CustomAgentDefinitionServiceError) || error.reason !== 'not_found') {
       throw error;
     }
 

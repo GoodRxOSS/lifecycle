@@ -21,19 +21,31 @@ jest.mock('server/lib/dependencies', () => ({
   defaultRedis: {},
 }));
 
-jest.mock('server/lib/get-user', () => ({
-  getRequestUserIdentity: jest.fn(),
-}));
+jest.mock('server/lib/get-user', () => {
+  const getRequestUserIdentity = jest.fn();
+  return {
+    getRequestUserIdentity,
+    // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+    requireRequestUserIdentity: (...args: unknown[]) => {
+      const id = getRequestUserIdentity(...args);
+      if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+      return id;
+    },
+  };
+});
 
 jest.mock('server/services/agent/ThreadService', () => {
   class AgentThreadCreateNotFoundError extends Error {
-    constructor(public readonly code: 'session_not_found' | 'source_thread_not_found', message: string) {
+    readonly httpStatus = 404;
+    readonly code = 'thread_target_not_found';
+    constructor(public readonly reason: 'session_not_found' | 'source_thread_not_found', message: string) {
       super(message);
       this.name = 'AgentThreadCreateNotFoundError';
     }
   }
 
   class AgentThreadCreateConflictError extends Error {
+    readonly httpStatus = 409;
     constructor(
       public readonly code:
         | 'inactive_session'
@@ -69,6 +81,8 @@ jest.mock('server/services/agent/ThreadService', () => {
 
 jest.mock('server/services/agent/WorkspaceRuntimeStateService', () => {
   class WorkspaceActionBlockedError extends Error {
+    readonly httpStatus = 409;
+    readonly code = 'workspace_action_blocked';
     constructor(
       public readonly reason: 'active_run' | 'action_in_progress',
       message: string,
@@ -451,7 +465,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     const body = await response.json();
 
     expect(response.status).toBe(401);
-    expect(body.error.message).toBe('Unauthorized');
+    expect(body.error.message).toBe('Authentication is required.');
     expect(mockCreateThread).not.toHaveBeenCalled();
     expect(mockSerializeThread).not.toHaveBeenCalled();
   });

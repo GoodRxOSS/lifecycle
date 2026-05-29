@@ -16,8 +16,8 @@
 
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { successResponse } from 'server/lib/response';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentSettingsService from 'server/services/agent/SettingsService';
 
 export const dynamic = 'force-dynamic';
@@ -56,10 +56,7 @@ export const dynamic = 'force-dynamic';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const repo = req.nextUrl.searchParams.get('repo') || undefined;
   const settings = await AgentSettingsService.getSettingsSnapshot(userIdentity, repo);

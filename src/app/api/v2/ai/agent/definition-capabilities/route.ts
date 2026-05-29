@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import {
   customAgentDefinitionService,
@@ -98,10 +98,7 @@ function serializeCapability(capability: UserAgentDefinitionCapability): UserAge
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const resourceBehavior = parseResourceBehavior(req);
   if (resourceBehavior instanceof Error) {

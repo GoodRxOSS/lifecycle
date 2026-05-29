@@ -27,7 +27,7 @@ moduleAlias.addAliases({
   scripts: join(__dirname, 'scripts'),
 });
 
-import { createServer, IncomingMessage, ServerResponse, request as httpRequest } from 'http';
+import { createServer, IncomingMessage, ServerResponse, request as httpRequest, STATUS_CODES } from 'http';
 import type { Socket } from 'net';
 import { parse, URL } from 'url';
 import next from 'next';
@@ -39,6 +39,15 @@ import SitesService from './src/server/services/sites';
 import {
   buildWorkspaceEditorProxyHeaders,
   serializeSocketHttpResponse,
+  EDITOR_PROXY_TIMEOUT_MS,
+  EDITOR_PROXY_PING_INTERVAL_MS,
+  EDITOR_PROXY_PONG_DEADLINE_MS,
+  editorProxyConnections,
+  classifyEditorProxyFailure,
+  resolveEditorProxyFailureMapping,
+  buildWorkspaceEditorErrorPage,
+  isEditorNavigationRequest,
+  type EditorProxyFailureContext,
 } from './src/server/lib/agentSession/workspaceEditorProxy';
 
 const dev = process.env.NODE_ENV !== 'production';
@@ -121,6 +130,33 @@ function getSessionWorkspaceEditorCookiePath(sessionId: string): string {
   return `${SESSION_WORKSPACE_EDITOR_PATH_PREFIX}${encodeURIComponent(sessionId)}`;
 }
 
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const payloadSegment = token.split('.')[1];
+  if (!payloadSegment) {
+    return null;
+  }
+
+  try {
+    const normalizedPayload = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
+    const paddedPayload = normalizedPayload.padEnd(
+      normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4),
+      '='
+    );
+    return JSON.parse(Buffer.from(paddedPayload, 'base64').toString('utf8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getJwtCookieMaxAgeSeconds(token: string): number | null {
+  const exp = decodeJwtPayload(token)?.exp;
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) {
+    return null;
+  }
+
+  return Math.max(Math.floor(exp - Date.now() / 1000), 0);
+}
+
 function isSendableCloseCode(code?: number): code is number {
   if (typeof code !== 'number') {
     return false;
@@ -136,9 +172,11 @@ function isSendableCloseCode(code?: number): code is number {
 function buildSessionWorkspaceEditorCookie(request: IncomingMessage, sessionId: string, token: string): string {
   const isSecure =
     request.headers['x-forwarded-proto'] === 'https' || (request.socket as { encrypted?: boolean }).encrypted === true;
+  const maxAgeSeconds = getJwtCookieMaxAgeSeconds(token);
   const cookieParts = [
     `${SESSION_WORKSPACE_EDITOR_COOKIE_NAME}=${encodeURIComponent(token)}`,
     `Path=${getSessionWorkspaceEditorCookiePath(sessionId)}`,
+    ...(maxAgeSeconds === null ? [] : [`Max-Age=${maxAgeSeconds}`]),
     'HttpOnly',
     'SameSite=Lax',
   ];
@@ -205,24 +243,6 @@ function buildProxyHeaders(request: IncomingMessage, target: URL, forwardedPrefi
   });
 }
 
-function resolveSessionWorkspaceEditorErrorStatus(error: unknown): number {
-  const message = error instanceof Error ? error.message : String(error);
-
-  if (message === 'Authentication token is required') {
-    return 401;
-  }
-
-  if (message === 'Forbidden: you do not own this session') {
-    return 403;
-  }
-
-  if (message === 'Session not found or not active') {
-    return 404;
-  }
-
-  return 502;
-}
-
 async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
   const parsedUrl = parse(request.url || '', true);
   const match = parseSessionWorkspaceEditorPath(parsedUrl.pathname);
@@ -240,10 +260,38 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
 
   let upstreamSocket: Socket | null = null;
   let proxyReq: ReturnType<typeof httpRequest> | null = null;
+  // rh-2: track this socket pair as a live connection.
+  const registryToken = {};
+  let registered = false;
+  // Once the pipe is live, release-on-close owns the registry slot; finally must not release it.
+  let pipeEstablished = false;
+  let clientClosedEarly = false;
+
+  // rh-2: bind client close/error before the connect await so a disconnect aborts the pending proxyReq.
+  const onEarlyClientClose = () => {
+    clientClosedEarly = true;
+    if (proxyReq) {
+      proxyReq.destroy();
+    }
+    if (upstreamSocket && !upstreamSocket.destroyed) {
+      upstreamSocket.destroy();
+    }
+  };
+  socket.on('close', onEarlyClientClose);
+  socket.on('error', onEarlyClientClose);
 
   try {
     const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
     const session = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
+
+    if (clientClosedEarly) {
+      return;
+    }
+    if (!editorProxyConnections.tryRegister(match.sessionId, registryToken)) {
+      throw new EditorProxyError('editor-proxy-capacity');
+    }
+    registered = true;
+
     const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
     const targetUrl = buildSessionWorkspaceEditorServiceUrl(
       session,
@@ -268,8 +316,23 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
         headers: proxyHeaders,
       });
 
+      // rh-2: bound the connect/upgrade phase so a half-open upstream can't hold it open indefinitely.
+      proxyReq.setTimeout(EDITOR_PROXY_TIMEOUT_MS, () => {
+        proxyReq?.destroy(new EditorProxyError('editor-proxy-timeout'));
+      });
+
       proxyReq.on('upgrade', (upstreamRes, proxiedSocket, upstreamHead) => {
         upstreamSocket = proxiedSocket as Socket;
+
+        // Hand off from the early connect-phase guards to steady-state pipe teardown.
+        socket.removeListener('close', onEarlyClientClose);
+        socket.removeListener('error', onEarlyClientClose);
+
+        if (clientClosedEarly || socket.destroyed) {
+          upstreamSocket.destroy();
+          resolve();
+          return;
+        }
 
         socket.write(
           serializeSocketHttpResponse({
@@ -286,6 +349,23 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
         if (head.length > 0) {
           upstreamSocket.write(head);
         }
+
+        // rh-2: a byte-pipe can't parse WS frames, so enforce liveness via a bidirectional idle timeout (any traffic resets it).
+        const idleMs = EDITOR_PROXY_PING_INTERVAL_MS + EDITOR_PROXY_PONG_DEADLINE_MS;
+        const reapIdle = (source: 'client' | 'upstream') => {
+          logger.warn(
+            { ...editorLogCtx, sessionId: match.sessionId, source, idleMs },
+            `SessionEditor: idle timeout source=${source} sessionId=${match.sessionId}`
+          );
+          if (!socket.destroyed) {
+            socket.destroy();
+          }
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.destroy();
+          }
+        };
+        socket.setTimeout(idleMs, () => reapIdle('client'));
+        upstreamSocket.setTimeout(idleMs, () => reapIdle('upstream'));
 
         socket.on('error', (error) => {
           logger.warn(
@@ -308,6 +388,10 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
         });
 
         socket.on('close', () => {
+          if (registered) {
+            registered = false;
+            editorProxyConnections.release(match.sessionId, registryToken);
+          }
           if (upstreamSocket && !upstreamSocket.destroyed) {
             upstreamSocket.end();
           }
@@ -319,6 +403,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
           }
         });
 
+        pipeEstablished = true;
         socket.pipe(upstreamSocket);
         upstreamSocket.pipe(socket);
         socket.resume();
@@ -353,9 +438,12 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
       proxyReq.end();
     });
   } catch (error: any) {
+    const ctx = extractEditorFailureContext(error);
+    const reason = classifyEditorProxyFailure(error, ctx);
+    const mapping = resolveEditorProxyFailureMapping(reason);
     logger.error(
-      { ...editorLogCtx, error, sessionId: match.sessionId },
-      `SessionEditor: websocket setup failed sessionId=${match.sessionId}`
+      { ...editorLogCtx, error, sessionId: match.sessionId, reason, status: mapping.status },
+      `SessionEditor: websocket setup failed sessionId=${match.sessionId} reason=${reason}`
     );
 
     if (proxyReq) {
@@ -366,15 +454,35 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
       upstreamSocket.destroy();
     }
 
+    // WS handshakes aren't browser navigations; reply with a coded status line on the raw socket, not HTML.
     if (!socket.destroyed) {
       socket.end(
         serializeSocketHttpResponse({
-          statusCode: resolveSessionWorkspaceEditorErrorStatus(error),
-          statusMessage: 'Bad Gateway',
-          body: error instanceof Error ? error.message : String(error),
+          statusCode: mapping.status,
+          statusMessage: STATUS_CODES[mapping.status] || 'Bad Gateway',
+          headers: { 'X-Editor-Proxy-Reason': reason },
+          body: mapping.message,
         })
       );
     }
+  } finally {
+    socket.removeListener('close', onEarlyClientClose);
+    socket.removeListener('error', onEarlyClientClose);
+    // Release only when the pipe never went live; a live pipe's slot is released by its socket 'close' handler.
+    if (registered && !pipeEstablished) {
+      registered = false;
+      editorProxyConnections.release(match.sessionId, registryToken);
+    }
+  }
+}
+
+// err-4: coded error carrying failure context so callers can map suspended vs pod-gone vs auth.
+class EditorProxyError extends Error {
+  failureContext: EditorProxyFailureContext;
+  constructor(message: string, failureContext: EditorProxyFailureContext = {}) {
+    super(message);
+    this.name = 'EditorProxyError';
+    this.failureContext = failureContext;
   }
 }
 
@@ -386,13 +494,21 @@ async function resolveOwnedAgentSession(
   const AgentSessionService = (await import('./src/server/services/agentSession')).default;
   const session = await AgentSessionService.getSession(sessionId);
   if (!session || session.status !== 'active') {
-    throw new Error('Session not found or not active');
+    throw new EditorProxyError('Session not found or not active', { podMissing: true });
+  }
+
+  // sr-3 guard: a crashed suspend can leave status=active over a dead pod; treat not-ready as unavailable to emit a coded page, not a 502.
+  if (session.workspaceStatus !== 'ready') {
+    throw new EditorProxyError('Workspace is not ready', { workspaceUnavailable: true });
+  }
+  if (!session.podName || !session.namespace) {
+    throw new EditorProxyError('Workspace runtime is gone', { podMissing: true });
   }
 
   if (process.env.ENABLE_AUTH === 'true') {
     const headerToken = request.headers.authorization?.split(' ')[1];
     const cookieToken = parseCookieHeader(request.headers.cookie)[SESSION_WORKSPACE_EDITOR_COOKIE_NAME];
-    const rawToken = headerToken || cookieToken || queryToken;
+    const rawToken = headerToken || queryToken || cookieToken;
 
     if (!rawToken) {
       throw new Error('Authentication token is required');
@@ -422,6 +538,22 @@ function closeSocket(ws: WebSocket, code: number, reason: string) {
   ws.close(1000, safeReason);
 }
 
+// Same-origin deep-link back to the Lifecycle session for the branded error page CTA.
+function buildEditorSessionDeepLink(request: IncomingMessage, sessionId: string): string {
+  const proto =
+    (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
+    ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http');
+  const host =
+    (typeof request.headers['x-forwarded-host'] === 'string' && request.headers['x-forwarded-host']) ||
+    request.headers.host;
+  const path = `/new/${encodeURIComponent(sessionId)}`;
+  return host ? `${proto}://${host}${path}` : path;
+}
+
+function extractEditorFailureContext(error: unknown): EditorProxyFailureContext {
+  return error instanceof EditorProxyError ? error.failureContext : {};
+}
+
 async function handleSessionWorkspaceEditorHttp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -433,9 +565,19 @@ async function handleSessionWorkspaceEditorHttp(
     return false;
   }
 
+  // rh-2: track this in-flight HTTP proxy as a live connection and cap it.
+  const registryToken = {};
+  let registered = false;
+
   try {
     const queryToken = typeof query.token === 'string' ? query.token : null;
     const session = await resolveOwnedAgentSession(req, match.sessionId, queryToken);
+
+    if (!editorProxyConnections.tryRegister(match.sessionId, registryToken)) {
+      throw new EditorProxyError('editor-proxy-capacity');
+    }
+    registered = true;
+
     const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
     const targetUrl = buildSessionWorkspaceEditorServiceUrl(session, match.forwardPath, query);
     const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix);
@@ -475,6 +617,12 @@ async function handleSessionWorkspaceEditorHttp(
         }
       );
 
+      // rh-2: bound the upstream so a half-open code-server can't hang the request; surface as a coded timeout.
+      proxyReq.setTimeout(EDITOR_PROXY_TIMEOUT_MS, () => {
+        proxyReq.destroy(new EditorProxyError('editor-proxy-timeout'));
+      });
+      // rh-2: an early client disconnect must abort the upstream request.
+      req.on('close', () => proxyReq.destroy());
       proxyReq.on('error', reject);
 
       if (req.method && !['GET', 'HEAD'].includes(req.method.toUpperCase())) {
@@ -486,18 +634,33 @@ async function handleSessionWorkspaceEditorHttp(
 
     return true;
   } catch (error: any) {
+    const ctx = extractEditorFailureContext(error);
+    const reason = classifyEditorProxyFailure(error, ctx);
+    const mapping = resolveEditorProxyFailureMapping(reason);
     logger.error(
-      { error, path: pathname, sessionId: match.sessionId },
-      `SessionEditor: proxy failed sessionId=${match.sessionId} path=${pathname}`
+      { error, path: pathname, sessionId: match.sessionId, reason, status: mapping.status },
+      `SessionEditor: proxy failed sessionId=${match.sessionId} path=${pathname} reason=${reason}`
     );
-    res.statusCode =
-      error?.message?.includes('Forbidden') || error?.message?.includes('Authentication')
-        ? 401
-        : error?.message?.includes('Session not found')
-        ? 404
-        : 502;
-    res.end(error?.message || 'Editor proxy failed');
+
+    if (!res.headersSent) {
+      res.statusCode = mapping.status;
+      // err-4: navigation failures get a branded HTML page with a deep-link; assets keep a coded status + plain body.
+      if (isEditorNavigationRequest(req.headers)) {
+        const sessionUrl = buildEditorSessionDeepLink(req, match.sessionId);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(buildWorkspaceEditorErrorPage({ reason, sessionUrl }));
+      } else {
+        res.setHeader('X-Editor-Proxy-Reason', reason);
+        res.end(mapping.message);
+      }
+    } else if (!(res as ServerResponse & { writableEnded?: boolean }).writableEnded) {
+      res.end();
+    }
     return true;
+  } finally {
+    if (registered) {
+      editorProxyConnections.release(match.sessionId, registryToken);
+    }
   }
 }
 
@@ -690,6 +853,15 @@ app.prepare().then(() => {
   });
 
   httpServer.listen(port);
+
+  // rh-2: log the live editor-proxy connection gauge so leaked sockets surface; unref so it never holds the process.
+  const editorProxyGauge = setInterval(() => {
+    const live = editorProxyConnections.size();
+    if (live > 0) {
+      logger.info({ liveEditorProxyConnections: live }, 'SessionEditor: live connection gauge');
+    }
+  }, 60_000);
+  editorProxyGauge.unref();
 
   httpServer.on('error', (error) => {
     logger.error({ err: error }, 'HTTP Server Error');

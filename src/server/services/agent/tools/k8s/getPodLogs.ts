@@ -55,13 +55,22 @@ export class GetPodLogsTool extends BaseTool {
 
   constructor(private k8sClient: K8sClient) {
     super(
-      'Fetch recent logs from a specific pod. Use this to diagnose application errors.',
+      "Fetch logs from a pod in THIS environment's namespace. For a crashing or restarting pod (CrashLoopBackOff, non-zero restart count), set previous=true to read the crashed instance — the current container is often empty or pre-crash. Pass container for multi-container pods. The namespace defaults to this environment's namespace; any other namespace is rejected.",
       {
         type: 'object',
         properties: {
           pod_name: { type: 'string', description: 'The pod name' },
-          namespace: { type: 'string', description: 'The Kubernetes namespace' },
+          namespace: {
+            type: 'string',
+            description:
+              "Optional. Defaults to this environment's namespace. If provided, it MUST equal the environment's namespace; any other value is rejected.",
+          },
           container: { type: 'string', description: 'Optional specific container name' },
+          previous: {
+            type: 'boolean',
+            description:
+              'Read logs from the PREVIOUS (crashed/restarted) container instance. Essential for CrashLoopBackOff: the current instance is usually empty; the previous one holds the crash output.',
+          },
           tail_lines: { type: 'number', description: 'Number of lines from the end of logs (default: 100)' },
           head_lines: {
             type: 'number',
@@ -69,7 +78,7 @@ export class GetPodLogsTool extends BaseTool {
               'Number of lines from the start of logs (default: 50). Combined with tail_lines for head+tail truncation.',
           },
         },
-        required: ['pod_name', 'namespace'],
+        required: ['pod_name'],
       },
       ToolSafetyLevel.SAFE,
       'k8s'
@@ -81,9 +90,17 @@ export class GetPodLogsTool extends BaseTool {
       return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
     }
 
+    let namespace: string;
+    try {
+      // SECURITY: lock to the build's namespace; reject any foreign namespace.
+      namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
+    } catch (error: any) {
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+    }
+
+    const previous = args.previous === true;
     try {
       const podName = args.pod_name as string;
-      const namespace = args.namespace as string;
       const container = args.container as string | undefined;
       const tailLines = (args.tail_lines as number) || 100;
       const headLines = (args.head_lines as number) || 50;
@@ -96,7 +113,7 @@ export class GetPodLogsTool extends BaseTool {
         undefined,
         undefined,
         undefined,
-        undefined,
+        previous,
         undefined,
         tailLines
       );
@@ -119,16 +136,27 @@ export class GetPodLogsTool extends BaseTool {
 
       const processedLogs = OutputLimiter.truncateLogOutput(finalLines.join('\n'), 30000, headLines, tailLines);
 
-      const displayContent = `Pod logs: ${finalLines.length} lines from ${podName} (${dedupedLines.length} total, head=${headLines} tail=${tailLines})`;
+      const displayContent = `Pod logs: ${finalLines.length} lines from ${podName}${
+        previous ? ' (previous instance)' : ''
+      } (${dedupedLines.length} total, head=${headLines} tail=${tailLines})`;
 
       const result = {
         success: true,
+        previous,
         logs: processedLogs,
       };
 
       return this.createSuccessResult(JSON.stringify(result), displayContent);
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Failed to fetch pod logs', 'EXECUTION_ERROR');
+      const message: string = error?.message || 'Failed to fetch pod logs';
+      if (previous && /previous terminated container|not found/i.test(message)) {
+        return this.createErrorResult(
+          'No previous (crashed) container instance found — the pod has not restarted yet, or kept no prior instance. Read current logs (omit previous), or check container status and events for the waiting/terminated reason.',
+          'NO_PREVIOUS_CONTAINER',
+          false
+        );
+      }
+      return this.createErrorResult(message, 'EXECUTION_ERROR');
     }
   }
 }

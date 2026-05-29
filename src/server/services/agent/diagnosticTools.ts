@@ -29,7 +29,7 @@ import { GetLifecycleLogsTool } from 'server/services/agent/tools/k8s/getLifecyc
 import { PatchK8sResourceTool } from 'server/services/agent/tools/k8s/patchK8sResource';
 import { GetPodLogsTool } from 'server/services/agent/tools/k8s/getPodLogs';
 import { QueryDatabaseTool } from 'server/services/agent/tools/k8s/queryDatabase';
-import { DatabaseClient } from 'server/services/agent/tools/shared/databaseClient';
+import { DatabaseClient, type DatabaseBuildScope } from 'server/services/agent/tools/shared/databaseClient';
 import { GitHubClient } from 'server/services/agent/tools/shared/githubClient';
 import { K8sClient } from 'server/services/agent/tools/shared/k8sClient';
 import type { Tool } from 'server/services/agent/tools/types';
@@ -85,6 +85,12 @@ export type LifecycleDiagnosticGithubSafety = {
   referencedFiles?: string[];
   excludedFilePatterns?: string[];
   allowedWritePatterns?: string[];
+  // SECURITY: the build's resolved scope. Every diagnostic tool is locked to these.
+  allowedNamespace?: string | null;
+  allowedRepos?: string[];
+  buildUuid?: string | null;
+  pullRequestId?: number | null;
+  databaseScope?: DatabaseBuildScope | null;
 };
 
 function resolveToolMode({
@@ -123,7 +129,15 @@ function configureGithubClient(client: GitHubClient, safety?: LifecycleDiagnosti
   client.setReferencedFiles(safety?.referencedFiles || []);
   client.setExcludedFilePatterns(safety?.excludedFilePatterns || []);
   client.setAllowedWritePatterns(safety?.allowedWritePatterns || []);
+  // SECURITY: lock GitHub reads/writes to the build's repositories.
+  client.setAllowedRepos(safety?.allowedRepos || null);
 
+  return client;
+}
+
+function configureK8sClient(client: K8sClient, safety?: LifecycleDiagnosticGithubSafety): K8sClient {
+  // SECURITY: lock k8s reads/patches to the build's namespace.
+  client.setAllowedNamespace(safety?.allowedNamespace || null);
   return client;
 }
 
@@ -161,15 +175,20 @@ export async function shouldRequestUpdateFileApproval(
 function createLifecycleDiagnosticReadToolSpecs(
   safety?: LifecycleDiagnosticGithubSafety
 ): LifecycleDiagnosticToolSpec[] {
-  const k8sClient = new K8sClient();
+  const k8sClient = configureK8sClient(new K8sClient(), safety);
   const githubClient = configureGithubClient(new GitHubClient(), safety);
   const databaseClient = new DatabaseClient({ models });
+  // SECURITY: constrain DB reads to the build's own records.
+  databaseClient.setBuildScope(safety?.databaseScope || null);
+
+  const lifecycleLogsTool = new GetLifecycleLogsTool(k8sClient);
+  lifecycleLogsTool.setAllowedBuildUuid(safety?.buildUuid || null);
 
   const specs: Array<{ tool: Tool; catalogCapabilityId: AgentCapabilityCatalogId }> = [
     { tool: new GetCodefreshLogsTool(), catalogCapabilityId: 'diagnostics_codefresh' },
     { tool: new GetK8sResourcesTool(k8sClient), catalogCapabilityId: 'diagnostics_kubernetes' },
     { tool: new GetPodLogsTool(k8sClient), catalogCapabilityId: 'diagnostics_logs' },
-    { tool: new GetLifecycleLogsTool(k8sClient), catalogCapabilityId: 'diagnostics_logs' },
+    { tool: lifecycleLogsTool, catalogCapabilityId: 'diagnostics_logs' },
     { tool: new QueryDatabaseTool(databaseClient), catalogCapabilityId: 'diagnostics_database' },
     { tool: new GetFileTool(githubClient), catalogCapabilityId: 'github_read' },
     { tool: new ListDirectoryTool(githubClient), catalogCapabilityId: 'github_read' },
@@ -363,7 +382,7 @@ export async function buildUpdateFilePreview(
 function createLifecycleDiagnosticFixToolSpecs(
   safety?: LifecycleDiagnosticGithubSafety
 ): LifecycleDiagnosticToolSpec[] {
-  const k8sClient = new K8sClient();
+  const k8sClient = configureK8sClient(new K8sClient(), safety);
   const githubClient = configureGithubClient(new GitHubClient(), safety);
 
   return [

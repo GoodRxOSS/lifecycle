@@ -16,8 +16,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
-import { errorResponse, successResponse } from 'server/lib/response';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import { successResponse } from 'server/lib/response';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
@@ -129,10 +129,7 @@ import UserMcpConnectionService from 'server/services/userMcpConnection';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';
@@ -256,10 +253,7 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
 };
 
 const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';

@@ -150,6 +150,51 @@ describe('AgentRunResumeEligibilityService', () => {
     );
   });
 
+  it('keeps active leases replay-only when the heartbeat is fresh', () => {
+    // Fresh heartbeat (30s ago) within the 3-minute staleness window => still lease_active.
+    expect(
+      evaluate(
+        { leaseExpiresAt: activeLease, heartbeatAt: '2026-05-08T11:59:30.000Z' },
+        { heartbeatStaleMs: 3 * 60 * 1000 }
+      )
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'replay_only',
+        reason: 'lease_active',
+      })
+    );
+  });
+
+  it('does not treat a heartbeat-stale run as lease_active even when the lease is active', () => {
+    // Stale heartbeat (5m ago) past the 3-min window: orphaned read-only run is auto-resume-eligible, not lease_active.
+    expect(
+      evaluate(
+        { leaseExpiresAt: activeLease, heartbeatAt: '2026-05-08T11:55:00.000Z' },
+        { heartbeatStaleMs: 3 * 60 * 1000 }
+      )
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
+  it('falls back to startedAt when a run never heartbeated', () => {
+    // No heartbeat; stale startedAt (5m) marks the run orphaned despite the active lease.
+    expect(
+      evaluate(
+        { leaseExpiresAt: activeLease, heartbeatAt: null, startedAt: '2026-05-08T11:55:00.000Z' },
+        { heartbeatStaleMs: 3 * 60 * 1000 }
+      )
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
   it('keeps approval-waiting runs out of stale recovery', () => {
     expect(evaluate({ status: 'waiting_for_approval' })).toEqual(
       expect.objectContaining({

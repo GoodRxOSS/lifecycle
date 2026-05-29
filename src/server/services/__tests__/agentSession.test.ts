@@ -2348,6 +2348,39 @@ describe('AgentSessionService', () => {
     recordFailureSpy.mockRestore();
   });
 
+  it('nulls podName in the suspend claim before deleting the pod so a crash never leaves READY + a live pod (sr-3)', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      sessionKind: AgentSessionKind.CHAT,
+      status: 'active',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      chatStatus: AgentChatStatus.READY,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({ ...chatSession, workspaceStatus: AgentWorkspaceStatus.HIBERNATED, podName: null });
+
+    await AgentSessionService.suspendChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+    });
+
+    // The claim (first session patch) clears podName before the pod is deleted.
+    const claimPatch = mockSessionQuery.patchAndFetchById.mock.calls[0][1] as Record<string, unknown>;
+    expect(claimPatch).toMatchObject({ workspaceStatus: AgentWorkspaceStatus.READY, podName: null });
+    expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
+      (deleteSessionWorkspacePod as jest.Mock).mock.invocationCallOrder[0]
+    );
+    // The pod is still deleted using the captured original podName.
+    expect(deleteSessionWorkspacePod).toHaveBeenCalledWith('chat-aaaaaaaa', 'agent-aaaaaaaa');
+  });
+
   it.each([AgentSessionKind.ENVIRONMENT, AgentSessionKind.SANDBOX])(
     'rejects %s sessions during chat runtime resume provisioning',
     async (sessionKind) => {
@@ -2530,7 +2563,117 @@ describe('AgentSessionService', () => {
       })
     ).rejects.toThrow('resume pod failed');
 
-    expectSandboxFailure({ stage: 'resume', origin: 'resume' });
+    // Resume failures are retryable (sr-2), so assert retryable:true inline.
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({ stage: 'resume', origin: 'resume', retryable: true }),
+      })
+    );
+    // sr-1: a failed resume reuses the persisted PVC + namespace, so neither may be deleted.
+    expect(deleteAgentPvc).not.toHaveBeenCalled();
+    expect(mockDeleteNamespace).not.toHaveBeenCalled();
+  });
+
+  it('records resume failures as retryable so the UI can offer retry (sr-2/NDE-3)', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: 'chat-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('resume pod failed'));
+
+    await expect(
+      AgentSessionService.resumeChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: {
+          userId: 'sample-user',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('resume pod failed');
+
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({
+          stage: 'resume',
+          origin: 'resume',
+          retryable: true,
+        }),
+      })
+    );
+  });
+
+  it('deletes genuinely-owned fresh resources on a non-resume provision failure', async () => {
+    const chatSession = {
+      id: 321,
+      uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      ownerGithubUsername: 'sample-user',
+      sessionKind: 'chat',
+      podName: null,
+      namespace: null,
+      pvcName: null,
+      model: 'claude-sonnet-4-6',
+      buildKind: null,
+      status: 'active',
+      chatStatus: 'ready',
+      workspaceStatus: 'none',
+      devModeSnapshots: {},
+      forwardedAgentSecretProviders: [],
+      workspaceRepos: [],
+      selectedServices: [],
+      skillPlan: { version: 1, skills: [] },
+    };
+    mockSessionQuery.findOne.mockResolvedValue(chatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession({
+      ...chatSession,
+      workspaceStatus: AgentWorkspaceStatus.FAILED,
+    });
+    (createSessionWorkspacePod as jest.Mock).mockRejectedValueOnce(new Error('pod creation failed'));
+
+    await expect(
+      AgentSessionService.provisionChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'user-123',
+        userIdentity: {
+          userId: 'user-123',
+          githubUsername: 'sample-user',
+        } as any,
+        githubToken: 'sample-gh-token',
+      })
+    ).rejects.toThrow('pod creation failed');
+
+    // Fresh provision owns the PVC/namespace, so a failure must clean them up.
+    expect(deleteAgentPvc).toHaveBeenCalledWith('chat-aaaaaaaa', 'agent-pvc-aaaaaaaa');
+    expect(mockDeleteNamespace).toHaveBeenCalledWith('chat-aaaaaaaa');
   });
 
   it('publishes a chat session HTTP port through ingress', async () => {
@@ -6136,6 +6279,8 @@ describe('AgentSessionService', () => {
             id: 123,
             namespace: 'test-ns',
             buildUuid: 'build-123',
+            workspaceStatus: AgentWorkspaceStatus.READY,
+            podName: 'agent-test',
           }),
         }),
       });
@@ -6148,13 +6293,15 @@ describe('AgentSessionService', () => {
         buildUuid: 'build-123',
       });
       expect(systemPrompt.buildAgentSessionDynamicSystemPrompt).toHaveBeenCalled();
+      const dynamicArgs = (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mock.calls[0][0];
+      expect(dynamicArgs.toolLines.length).toBeGreaterThan(0);
       expect(systemPrompt.combineAgentSessionAppendSystemPrompt).toHaveBeenCalledWith(
         'Use concise responses.',
         'Session context:\n- namespace: test-ns'
       );
     });
 
-    it('appends dynamic build context for chat sessions without a namespace', async () => {
+    it('appends dynamic build context without workspace tool inventory for build-context chats', async () => {
       mockGetEffectiveAgentSessionConfig.mockResolvedValue({
         appendSystemPrompt: 'Use concise responses.',
       });
@@ -6162,7 +6309,8 @@ describe('AgentSessionService', () => {
         namespace: null,
         buildUuid: 'build-123',
         services: [],
-        build: { uuid: 'build-123', status: 'build_failed' },
+        build: { uuid: 'build-123', status: 'build_failed', namespace: 'env-build-123' },
+        lifecycleConfig: { status: 'missing', path: 'lifecycle.yaml' },
       });
       (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mockReturnValue(
         'Session context:\n- buildUuid: build-123\nBuild context:\n- buildUuid=build-123: status=build_failed'
@@ -6176,6 +6324,8 @@ describe('AgentSessionService', () => {
             namespace: null,
             buildUuid: 'build-123',
             skillPlan: { skills: [] },
+            workspaceStatus: AgentWorkspaceStatus.NONE,
+            podName: null,
           }),
         }),
       });
@@ -6186,12 +6336,34 @@ describe('AgentSessionService', () => {
         namespace: null,
         buildUuid: 'build-123',
       });
-      expect(systemPrompt.buildAgentSessionDynamicSystemPrompt).toHaveBeenCalledWith(
-        expect.objectContaining({
-          namespace: null,
-          buildUuid: 'build-123',
-          toolLines: [],
-        })
+      const dynamicArgs = (systemPrompt.buildAgentSessionDynamicSystemPrompt as jest.Mock).mock.calls[0][0];
+      expect(dynamicArgs.toolLines).toEqual([]);
+      // Top-level namespace falls back to build.namespace.
+      expect(dynamicArgs.namespace).toBe('env-build-123');
+      expect(dynamicArgs.lifecycleConfig).toEqual({ status: 'missing', path: 'lifecycle.yaml' });
+    });
+
+    it('emits the UNAVAILABLE snapshot when prompt context resolution fails', async () => {
+      mockGetEffectiveAgentSessionConfig.mockResolvedValue({
+        appendSystemPrompt: 'Use concise responses.',
+      });
+      (systemPrompt.resolveAgentSessionPromptContext as jest.Mock).mockRejectedValue(new Error('lookup failed'));
+
+      (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
+        findOne: jest.fn().mockReturnValue({
+          select: jest.fn().mockResolvedValue({
+            id: 123,
+            namespace: null,
+            buildUuid: 'build-123',
+            skillPlan: { skills: [] },
+          }),
+        }),
+      });
+
+      const prompt = await AgentSessionService.getSessionAppendSystemPrompt('sess-1');
+      expect(prompt).toContain('Use concise responses.');
+      expect(prompt).toContain(
+        'Initial Lifecycle snapshot: UNAVAILABLE (context lookup failed) — gather build/deploy/k8s state via tools and note in your answer that baseline context was unavailable.'
       );
     });
 

@@ -16,7 +16,7 @@
 
 import { BaseTool } from '../baseTool';
 import { ToolResult, ToolSafetyLevel } from '../types';
-import { getLogs } from 'server/lib/codefresh';
+import { getLogsResult } from 'server/lib/codefresh';
 import { OutputLimiter } from '../outputLimiter';
 
 function deduplicateLines(lines: string[]): string[] {
@@ -85,7 +85,19 @@ export class GetCodefreshLogsTool extends BaseTool {
 
       const maxLines = lines || 500;
 
-      const logs = await getLogs(pipelineId);
+      const fetched = await getLogsResult(pipelineId);
+
+      // Never report no-data as clean: a failed fetch or blank output is retryable-unavailable.
+      const hasContent = fetched.ok && fetched.output.replace(/\s/g, '').length > 0;
+      if (!hasContent) {
+        return this.createErrorResult(
+          `No logs returned for pipeline_id ${pipelineId}. It may be wrong, expired, or the build has not started. Verify the buildPipelineId/deployPipelineId from the DEPLOYS section and retry; do NOT assume the build is clean.`,
+          'LOGS_UNAVAILABLE',
+          true
+        );
+      }
+
+      const logs = fetched.output;
 
       const sanitizedLogs = String(logs)
         .replace(/\r\n/g, '\n')

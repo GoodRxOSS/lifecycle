@@ -554,6 +554,10 @@ function createEagerApprovalRequestSync({
   };
 }
 
+// Coalesce chunk flushes to avoid a per-token insert+notify storm.
+const STREAM_FLUSH_BATCH_SIZE = 10;
+const STREAM_FLUSH_INTERVAL_MS = 50;
+
 async function consumeStream(
   runUuid: string,
   executionOwner: string,
@@ -562,6 +566,18 @@ async function consumeStream(
 ): Promise<void> {
   const reader = stream.getReader();
   const batch: AgentUiMessageChunk[] = [];
+  let lastFlushAt = Date.now();
+
+  const flushBatch = async () => {
+    if (batch.length === 0) {
+      return;
+    }
+    const chunks = batch.splice(0, batch.length);
+    await AgentRunService.appendStreamChunksForExecutionOwner(runUuid, executionOwner, chunks, {
+      beforeAppendChunks: ({ trx, run }) => beforeAppendChunks?.(chunks, { trx, run }),
+    });
+    lastFlushAt = Date.now();
+  };
 
   try {
     let streamDone = false;
@@ -577,20 +593,12 @@ async function consumeStream(
       }
 
       batch.push(value);
-      if (batch.length >= 10) {
-        const chunks = batch.splice(0, batch.length);
-        await AgentRunService.appendStreamChunksForExecutionOwner(runUuid, executionOwner, chunks, {
-          beforeAppendChunks: ({ trx, run }) => beforeAppendChunks?.(chunks, { trx, run }),
-        });
+      if (batch.length >= STREAM_FLUSH_BATCH_SIZE || Date.now() - lastFlushAt >= STREAM_FLUSH_INTERVAL_MS) {
+        await flushBatch();
       }
     }
 
-    if (batch.length > 0) {
-      const chunks = batch.splice(0, batch.length);
-      await AgentRunService.appendStreamChunksForExecutionOwner(runUuid, executionOwner, chunks, {
-        beforeAppendChunks: ({ trx, run }) => beforeAppendChunks?.(chunks, { trx, run }),
-      });
-    }
+    await flushBatch();
   } finally {
     reader.releaseLock();
   }

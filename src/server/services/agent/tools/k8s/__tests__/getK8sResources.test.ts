@@ -16,6 +16,9 @@
 
 import { GetK8sResourcesTool } from '../getK8sResources';
 
+// Namespace scope state shared by the mock's resolveNamespace; mirrors K8sClient.
+let mockAllowedNamespace: string | null = null;
+
 const mockK8sClient = {
   coreApi: {
     listNamespacedPod: jest.fn(),
@@ -42,6 +45,23 @@ const mockK8sClient = {
   networkingApi: {
     listNamespacedIngress: jest.fn(),
   },
+  setAllowedNamespace: (ns: string | null | undefined) => {
+    mockAllowedNamespace = ns?.trim() || null;
+  },
+  resolveNamespace: (requested?: string | null) => {
+    const requestedTrimmed = requested?.trim() || null;
+    if (!mockAllowedNamespace) {
+      if (!requestedTrimmed) throw new Error('namespace is required');
+      return requestedTrimmed;
+    }
+    if (!requestedTrimmed) return mockAllowedNamespace;
+    if (requestedTrimmed !== mockAllowedNamespace) {
+      throw new Error(
+        `namespace "${requestedTrimmed}" is outside this environment's namespace "${mockAllowedNamespace}" and cannot be accessed.`
+      );
+    }
+    return mockAllowedNamespace;
+  },
 } as any;
 
 describe('GetK8sResourcesTool', () => {
@@ -49,6 +69,7 @@ describe('GetK8sResourcesTool', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAllowedNamespace = null;
     tool = new GetK8sResourcesTool(mockK8sClient);
   });
 
@@ -190,5 +211,128 @@ describe('GetK8sResourcesTool', () => {
     const result = await tool.execute({ namespace: 'test-ns', resource_type: 'pods' });
     expect(result.success).toBe(false);
     expect(result.agentContent).toContain('Forbidden');
+  });
+
+  it('rejects a namespace outside the build scope', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+
+    const result = await tool.execute({ namespace: 'env-other', resource_type: 'pods' });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('NAMESPACE_NOT_ALLOWED');
+    expect(result.agentContent).toContain('env-other');
+    expect(result.agentContent).toContain('env-mine');
+    expect(mockK8sClient.coreApi.listNamespacedPod).not.toHaveBeenCalled();
+  });
+
+  it('defaults to the build namespace when none is supplied', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+    mockK8sClient.coreApi.listNamespacedPod.mockResolvedValue({ body: { items: [] } });
+
+    const result = await tool.execute({ resource_type: 'pods' });
+    expect(result.success).toBe(true);
+    expect(mockK8sClient.coreApi.listNamespacedPod).toHaveBeenCalledWith(
+      'env-mine',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+  });
+
+  it('allows the matching build namespace', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+    mockK8sClient.coreApi.listNamespacedPod.mockResolvedValue({ body: { items: [] } });
+
+    const result = await tool.execute({ namespace: 'env-mine', resource_type: 'pods' });
+    expect(result.success).toBe(true);
+    expect(mockK8sClient.coreApi.listNamespacedPod).toHaveBeenCalled();
+  });
+
+  it('never returns secret values, only metadata/keys', async () => {
+    mockK8sClient.coreApi.listNamespacedSecret.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: { name: 'db-creds' },
+            type: 'Opaque',
+            data: { DB_PASSWORD: 'c3VwZXItc2VjcmV0', DB_USER: 'YWRtaW4=' },
+          },
+        ],
+      },
+    });
+
+    const result = await tool.execute({ namespace: 'test-ns', resource_type: 'secrets' });
+    expect(result.success).toBe(true);
+    const data = JSON.parse(result.agentContent as string);
+    expect(data.secrets[0].name).toBe('db-creds');
+    expect(data.secrets[0].keys).toEqual(['DB_PASSWORD', 'DB_USER']);
+    expect(result.agentContent).not.toContain('c3VwZXItc2VjcmV0');
+    expect(result.agentContent).not.toContain('super-secret');
+  });
+
+  it('surfaces waiting reason for non-running containers (ImagePullBackOff)', async () => {
+    mockK8sClient.coreApi.listNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: { name: 'pod-bad', creationTimestamp: '2025-01-01T00:00:00Z' },
+            status: {
+              phase: 'Pending',
+              containerStatuses: [
+                {
+                  name: 'app',
+                  ready: false,
+                  restartCount: 0,
+                  state: {
+                    waiting: { reason: 'ImagePullBackOff', message: 'Back-off pulling image "nope:latest"' },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await tool.execute({ namespace: 'test-ns', resource_type: 'pods' });
+    expect(result.success).toBe(true);
+    const data = JSON.parse(result.agentContent as string);
+    expect(data.pods[0].containers[0].waiting).toEqual({
+      reason: 'ImagePullBackOff',
+      message: 'Back-off pulling image "nope:latest"',
+    });
+    expect((result.displayContent as { content: string }).content).toContain('ImagePullBackOff');
+  });
+
+  it('surfaces terminated reason and lastState (OOMKilled / CrashLoop)', async () => {
+    mockK8sClient.coreApi.listNamespacedPod.mockResolvedValue({
+      body: {
+        items: [
+          {
+            metadata: { name: 'pod-crash', creationTimestamp: '2025-01-01T00:00:00Z' },
+            status: {
+              phase: 'Running',
+              containerStatuses: [
+                {
+                  name: 'app',
+                  ready: false,
+                  restartCount: 7,
+                  state: { waiting: { reason: 'CrashLoopBackOff', message: 'back-off restarting' } },
+                  lastState: { terminated: { reason: 'OOMKilled', exitCode: 137 } },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await tool.execute({ namespace: 'test-ns', resource_type: 'pods' });
+    expect(result.success).toBe(true);
+    const data = JSON.parse(result.agentContent as string);
+    const container = data.pods[0].containers[0];
+    expect(container.waiting.reason).toBe('CrashLoopBackOff');
+    expect(container.lastState.terminated).toEqual({ reason: 'OOMKilled', exitCode: 137 });
   });
 });

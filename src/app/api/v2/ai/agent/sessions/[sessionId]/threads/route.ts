@@ -18,12 +18,8 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
-import AgentThreadService, {
-  AgentThreadCreateConflictError,
-  AgentThreadCreateNotFoundError,
-} from 'server/services/agent/ThreadService';
-import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import AgentThreadService from 'server/services/agent/ThreadService';
 
 type CreateThreadBody = {
   title?: string;
@@ -77,19 +73,8 @@ async function readCreateThreadBody(req: NextRequest): Promise<CreateThreadBody 
   return parseCreateThreadBody(body);
 }
 
+// Typed AppErrors self-map via createApiHandler; only plain not-found Errors still need mapping here.
 function mapCreateThreadError(error: unknown, req: NextRequest) {
-  if (error instanceof WorkspaceActionBlockedError) {
-    return errorResponse(error, { status: 409 }, req);
-  }
-
-  if (error instanceof AgentThreadCreateNotFoundError) {
-    return errorResponse(error, { status: 404 }, req);
-  }
-
-  if (error instanceof AgentThreadCreateConflictError) {
-    return errorResponse(error, { status: 409 }, req);
-  }
-
   if (
     error instanceof Error &&
     (error.message === 'Agent session not found' ||
@@ -97,17 +82,6 @@ function mapCreateThreadError(error: unknown, req: NextRequest) {
       error.message === 'Source agent thread not found')
   ) {
     return errorResponse(error, { status: 404 }, req);
-  }
-
-  if (
-    error instanceof Error &&
-    (error.message === 'Cannot create a thread for an inactive session' ||
-      error.message === 'Wait for the session to finish starting before sending a message.' ||
-      error.message === 'This session is no longer available for new messages.' ||
-      error.message === 'Wait for the current agent run to finish before starting a new thread.' ||
-      error.message === 'Resolve pending approvals before starting a new thread.')
-  ) {
-    return errorResponse(error, { status: 409 }, req);
   }
 
   throw error;
@@ -206,10 +180,7 @@ function mapCreateThreadError(error: unknown, req: NextRequest) {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   try {
     const threads = await AgentThreadService.listThreadHistoryForSession(params.sessionId, userIdentity.userId);
@@ -224,10 +195,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { sessionId: s
 };
 
 const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await readCreateThreadBody(req);
   if (body instanceof Error) {

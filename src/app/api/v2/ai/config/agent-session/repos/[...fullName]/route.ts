@@ -155,5 +155,6 @@ const deleteHandler = async (req: NextRequest, { params }: { params: { fullName:
 };
 
 export const GET = createApiHandler(getHandler);
-export const PUT = createApiHandler(putHandler);
-export const DELETE = createApiHandler(deleteHandler);
+// Repo-level control-plane mutations — admin only (matches runtime-config repo twin).
+export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
+export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });

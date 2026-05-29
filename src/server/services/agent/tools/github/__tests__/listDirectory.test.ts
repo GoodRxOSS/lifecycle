@@ -21,6 +21,7 @@ const mockGithubClient = {
   getOctokit: jest.fn().mockResolvedValue(mockOctokit),
   isFilePathAllowed: jest.fn().mockReturnValue(true),
   isFileExcluded: jest.fn().mockReturnValue(false),
+  isRepoAllowed: jest.fn().mockReturnValue(true),
 } as any;
 
 describe('ListDirectoryTool', () => {
@@ -37,6 +38,7 @@ describe('ListDirectoryTool', () => {
     jest.clearAllMocks();
     mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
     mockGithubClient.isFileExcluded.mockReturnValue(false);
+    mockGithubClient.isRepoAllowed.mockReturnValue(true);
     tool = new ListDirectoryTool(mockGithubClient);
   });
 
@@ -70,6 +72,16 @@ describe('ListDirectoryTool', () => {
     const data = JSON.parse(result.agentContent);
     expect(data.items).toHaveLength(1);
     expect(data.items[0].name).toBe('index.ts');
+  });
+
+  it('rejects repositories outside the build scope', async () => {
+    mockGithubClient.isRepoAllowed.mockReturnValue(false);
+
+    const result = await tool.execute({ ...baseArgs, repository_owner: 'other-org', repository_name: 'other-repo' });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FILE_ACCESS_DENIED');
+    expect(result.agentContent).toContain('other-org/other-repo');
+    expect(mockOctokit.request).not.toHaveBeenCalled();
   });
 
   it('returns error for non-directory path', async () => {

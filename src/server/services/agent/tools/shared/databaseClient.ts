@@ -27,6 +27,7 @@ interface QueryOptions {
 interface QueryResult {
   records: any[];
   totalCount: number;
+  warnings?: string[];
 }
 
 interface TableSchema {
@@ -36,8 +37,59 @@ interface TableSchema {
   relations: Record<string, string>;
 }
 
+/** SECURITY: the single build a session is scoped to; every query is constrained to its rows so a model can't read other tenants'. */
+export interface DatabaseBuildScope {
+  buildId: number;
+  buildUuid: string;
+  pullRequestId?: number | null;
+  environmentId?: number | null;
+  repositoryIds?: number[];
+}
+
 export class DatabaseClient {
+  // SECURITY: when set, a mandatory per-table WHERE is ANDed onto every query and can't be widened by model filters.
+  private buildScope: DatabaseBuildScope | null = null;
+
   constructor(private db: any) {}
+
+  setBuildScope(scope: DatabaseBuildScope | null | undefined): void {
+    this.buildScope = scope ?? null;
+  }
+
+  /** Mandatory scope clause for a table; throws if the build doesn't constrain it (table not queryable) or scope is unresolved. */
+  private buildScopeClause(table: string): { column: string; value?: any; in?: any[] } {
+    const scope = this.buildScope;
+    if (!scope) {
+      // Without a resolved build scope these tools must not expose any rows.
+      throw new Error('Database access is not scoped to a build; query rejected.');
+    }
+
+    switch (table) {
+      case 'builds':
+        return { column: 'uuid', value: scope.buildUuid };
+      case 'deploys':
+        return { column: 'buildId', value: scope.buildId };
+      case 'deployables':
+        return { column: 'buildId', value: scope.buildId };
+      case 'pull_requests':
+        if (scope.pullRequestId == null) {
+          throw new Error('This build has no associated pull request; pull_requests is not queryable.');
+        }
+        return { column: 'id', value: scope.pullRequestId };
+      case 'repositories':
+        if (!scope.repositoryIds || scope.repositoryIds.length === 0) {
+          throw new Error('This build has no associated repositories; repositories is not queryable.');
+        }
+        return { column: 'id', in: scope.repositoryIds };
+      case 'environments':
+        if (scope.environmentId == null) {
+          throw new Error('This build has no associated environment; environments is not queryable.');
+        }
+        return { column: 'id', value: scope.environmentId };
+      default:
+        throw new Error(`Table '${table}' cannot be scoped to a build; query rejected.`);
+    }
+  }
 
   async queryTable(options: QueryOptions): Promise<QueryResult>;
   async queryTable(
@@ -81,6 +133,16 @@ export class DatabaseClient {
     let query = Model.query();
     let countQuery = Model.query();
 
+    // SECURITY: build scope applied first and ANDed with all model filters, which can only narrow within it.
+    const scopeClause = this.buildScopeClause(opts.table);
+    if (scopeClause.in !== undefined) {
+      query = query.whereIn(scopeClause.column, scopeClause.in);
+      countQuery = countQuery.whereIn(scopeClause.column, scopeClause.in);
+    } else {
+      query = query.where(scopeClause.column, scopeClause.value);
+      countQuery = countQuery.where(scopeClause.column, scopeClause.value);
+    }
+
     if (opts.filters) {
       const validFilters: Record<string, any> = {};
       const likeFilters: Array<{ column: string; pattern: string }> = [];
@@ -89,6 +151,13 @@ export class DatabaseClient {
         const column = this.normalizeColumnName(schema, key);
         if (schema.columns.includes(column)) {
           if (typeof value === 'string' && (value.includes('%') || value.includes('_'))) {
+            // SECURITY: reject wildcard-only / empty LIKE patterns that would match every row.
+            const literal = value.replace(/[%_]/g, '').trim();
+            if (literal.length === 0) {
+              throw new Error(
+                `Filter for '${key}' is a wildcard-only pattern ("${value}") which would match all rows. Provide a specific value.`
+              );
+            }
             likeFilters.push({ column, pattern: value });
           } else {
             validFilters[column] = value;
@@ -126,7 +195,18 @@ export class DatabaseClient {
 
     const totalCount = await countQuery.resultSize();
 
+    const warnings: string[] = [];
     if (opts.select && opts.select.length > 0) {
+      const unknownSelectColumns = opts.select.filter(
+        (col: string) => !schema.columns.includes(this.normalizeColumnName(schema, col))
+      );
+      if (unknownSelectColumns.length > 0) {
+        warnings.push(
+          `Ignored unknown select columns: ${unknownSelectColumns.join(', ')}. Valid columns for ${
+            opts.table
+          }: ${schema.columns.join(', ')}`
+        );
+      }
       const validColumns = opts.select
         .map((col: string) => this.normalizeColumnName(schema, col))
         .filter(
@@ -166,7 +246,7 @@ export class DatabaseClient {
         ? records.map((record: any) => this.compactRelations(record, topLevelRelations))
         : records;
 
-    return { records: compactedRecords, totalCount };
+    return { records: compactedRecords, totalCount, ...(warnings.length > 0 ? { warnings } : {}) };
   }
 
   private compactRelations(record: any, relationNames: string[]): any {

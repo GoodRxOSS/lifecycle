@@ -39,6 +39,9 @@ jest.mock('server/services/agent/WorkspaceRuntimeStateService', () => {
   return {
     __esModule: true,
     WorkspaceActionBlockedError,
+    WorkspaceRuntimeStateService: {
+      recordWorkspaceFailure: jest.fn(),
+    },
   };
 });
 jest.mock('server/lib/logger', () => ({
@@ -66,7 +69,63 @@ import AgentSession from 'server/models/AgentSession';
 import AgentSessionService from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
 import { processAgentSessionCleanup } from '../agentSessionCleanup';
-import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
+import {
+  WorkspaceActionBlockedError,
+  WorkspaceRuntimeStateService,
+} from 'server/services/agent/WorkspaceRuntimeStateService';
+
+const mockRecordWorkspaceFailure = WorkspaceRuntimeStateService.recordWorkspaceFailure as jest.Mock;
+
+// idle-active cohort: 3 chained .where (status, lastActivity, callback) resolving on the 3rd.
+function buildIdleActiveQuery(result: unknown[]) {
+  const query = { where: jest.fn() };
+  query.where
+    .mockImplementationOnce(() => query)
+    .mockImplementationOnce(() => query)
+    .mockImplementationOnce((callback: (b: unknown) => void) => {
+      callback({
+        whereNot: jest.fn().mockReturnValue({ orWhereNot: jest.fn() }),
+      });
+      return Promise.resolve(result);
+    });
+  return query;
+}
+
+// provisioning-timeout cohort: 4 chained .where (status, sessionKind, workspaceStatus, updatedAt).
+function buildFourWhereQuery(result: unknown[]) {
+  const query = { where: jest.fn() };
+  query.where
+    .mockImplementationOnce(() => query)
+    .mockImplementationOnce(() => query)
+    .mockImplementationOnce(() => query)
+    .mockImplementationOnce(() => Promise.resolve(result));
+  return query;
+}
+
+// stale-starting cohort: 2 chained .where (status, updatedAt).
+function buildTwoWhereQuery(result: unknown[]) {
+  const query = { where: jest.fn() };
+  query.where.mockImplementationOnce(() => query).mockImplementationOnce(() => Promise.resolve(result));
+  return query;
+}
+
+/**
+ * Wires AgentSession.query in source-call order:
+ *   1) idle-active, 2) provisioning-timeout, 3) stale-starting, 4) hibernated-expiry.
+ */
+function mockCleanupQueries(opts: {
+  idleActive?: unknown[];
+  provisioningTimeout?: unknown[];
+  staleStarting?: unknown[];
+  hibernatedExpiry?: unknown[];
+}) {
+  (AgentSession.query as jest.Mock) = jest
+    .fn()
+    .mockReturnValueOnce(buildIdleActiveQuery(opts.idleActive ?? []))
+    .mockReturnValueOnce(buildFourWhereQuery(opts.provisioningTimeout ?? []))
+    .mockReturnValueOnce(buildTwoWhereQuery(opts.staleStarting ?? []))
+    .mockReturnValueOnce(buildFourWhereQuery(opts.hibernatedExpiry ?? []));
+}
 
 describe('agentSessionCleanup', () => {
   const mockLogger = {
@@ -104,41 +163,12 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const startingQuery = { where: jest.fn() };
-    startingQuery.where
-      .mockImplementationOnce(() => startingQuery)
-      .mockImplementationOnce(() => Promise.resolve(startingSessions));
-
-    const suspendedQuery = { where: jest.fn() };
-    suspendedQuery.where
-      .mockImplementationOnce(() => suspendedQuery)
-      .mockImplementationOnce(() => suspendedQuery)
-      .mockImplementationOnce(() => suspendedQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(startingQuery)
-      .mockReturnValueOnce(suspendedQuery);
+    mockCleanupQueries({ idleActive: activeSessions, staleStarting: startingSessions });
     (AgentSessionService.endSession as jest.Mock).mockResolvedValue(undefined);
 
     await processAgentSessionCleanup();
 
-    expect(AgentSession.query).toHaveBeenCalledTimes(3);
+    expect(AgentSession.query).toHaveBeenCalledTimes(4);
     expect(AgentSessionService.endSession).toHaveBeenCalledTimes(2);
     expect(AgentSessionService.endSession).toHaveBeenNthCalledWith(1, 'active-session');
     expect(AgentSessionService.endSession).toHaveBeenNthCalledWith(2, 'starting-session');
@@ -161,36 +191,7 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
     (AgentSessionService.suspendChatRuntime as jest.Mock).mockResolvedValue(undefined);
 
     await processAgentSessionCleanup();
@@ -243,36 +244,7 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
     (AgentSessionService.endSession as jest.Mock).mockResolvedValue(undefined);
 
     await processAgentSessionCleanup();
@@ -300,36 +272,7 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
     (AgentSessionService.endSession as jest.Mock).mockRejectedValue(
       new WorkspaceActionBlockedError('active_run', 'Active run')
     );
@@ -359,36 +302,7 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
     (AgentSessionService.endSession as jest.Mock).mockRejectedValue(
       new WorkspaceActionBlockedError('action_in_progress', 'Action in progress', {
         currentAction: 'resume',
@@ -421,98 +335,65 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
 
     await processAgentSessionCleanup();
 
     expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
     expect(AgentSessionService.endSession).not.toHaveBeenCalled();
+    expect(mockRecordWorkspaceFailure).not.toHaveBeenCalled();
     expect(mockLogger.info).toHaveBeenCalledWith(
       'Session: cleanup skipped sessionId=provisioning-chat-session reason=runtime_provisioning'
     );
   });
 
-  it('ends an idle chat session when runtime provisioning is stale', async () => {
-    const activeSessions = [
-      {
-        id: 1,
-        uuid: 'stale-provisioning-chat-session',
-        userId: 'sample-user',
-        sessionKind: 'chat',
-        workspaceStatus: 'provisioning',
-        status: 'active',
-        namespace: 'sample-namespace',
-        pvcName: 'sample-pvc',
-        lastActivity: '2026-03-23T11:00:00.000Z',
-        updatedAt: '2026-03-23T11:40:00.000Z',
-      },
-    ];
+  it('transitions a stale provisioning chat session to a retryable failure instead of ending it', async () => {
+    // Stale provision (updatedAt past the 15-min starting cutoff) lands in the provisioning-timeout cohort.
+    const timedOutSession = {
+      id: 1,
+      uuid: 'stale-provisioning-chat-session',
+      userId: 'sample-user',
+      sessionKind: 'chat',
+      workspaceStatus: 'provisioning',
+      status: 'active',
+      namespace: 'sample-namespace',
+      pvcName: 'sample-pvc',
+      lastActivity: '2026-03-23T11:00:00.000Z',
+      updatedAt: '2026-03-23T11:40:00.000Z',
+    };
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ provisioningTimeout: [timedOutSession] });
     (AgentSessionService.endSession as jest.Mock).mockResolvedValue(undefined);
+    mockRecordWorkspaceFailure.mockResolvedValue(undefined);
 
     await processAgentSessionCleanup();
 
+    // Recovered to retryable FAILED, never ended/destroyed and never suspended.
+    expect(AgentSessionService.endSession).not.toHaveBeenCalled();
     expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
-    expect(AgentSessionService.endSession).toHaveBeenCalledWith('stale-provisioning-chat-session');
+    expect(mockRecordWorkspaceFailure).toHaveBeenCalledTimes(1);
+
+    const [sessionIdArg, stateArg] = mockRecordWorkspaceFailure.mock.calls[0];
+    expect(sessionIdArg).toBe(1);
+    expect(stateArg.sessionPatch).toEqual(
+      expect.objectContaining({
+        status: 'active',
+        workspaceStatus: 'failed',
+      })
+    );
+    // Lifecycle claim released so the FAILED -> retry path is unblocked.
+    expect(stateArg.runtimeLifecycle).toBeNull();
+    expect(stateArg.failure).toEqual(
+      expect.objectContaining({
+        code: 'workspace_provisioning_timeout',
+        retryable: true,
+        stage: 'connect_runtime',
+        origin: 'chat_runtime',
+      })
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Session: cleanup provisioning timed out sessionId=stale-provisioning-chat-session')
+    );
   });
 
   it('skips idle chat suspension when a run is still active', async () => {
@@ -532,36 +413,7 @@ describe('agentSessionCleanup', () => {
       },
     ];
 
-    const activeQuery = { where: jest.fn() };
-    activeQuery.where
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce(() => activeQuery)
-      .mockImplementationOnce((callback) => {
-        callback({
-          whereNot: jest.fn().mockReturnValue({
-            orWhereNot: jest.fn(),
-          }),
-        });
-        return Promise.resolve(activeSessions);
-      });
-
-    const emptyTwoWhereQuery = { where: jest.fn() };
-    emptyTwoWhereQuery.where
-      .mockImplementationOnce(() => emptyTwoWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    const emptyFourWhereQuery = { where: jest.fn() };
-    emptyFourWhereQuery.where
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => emptyFourWhereQuery)
-      .mockImplementationOnce(() => Promise.resolve([]));
-
-    (AgentSession.query as jest.Mock) = jest
-      .fn()
-      .mockReturnValueOnce(activeQuery)
-      .mockReturnValueOnce(emptyTwoWhereQuery)
-      .mockReturnValueOnce(emptyFourWhereQuery);
+    mockCleanupQueries({ idleActive: activeSessions });
     (AgentSessionService.suspendChatRuntime as jest.Mock).mockRejectedValue(
       new WorkspaceActionBlockedError('active_run', 'Active run')
     );
@@ -575,5 +427,33 @@ describe('agentSessionCleanup', () => {
     expect(AgentSessionService.endSession).not.toHaveBeenCalled();
     expect(mockLogger.error).not.toHaveBeenCalled();
     expect(mockLogger.info).toHaveBeenCalledWith('Session: cleanup skipped sessionId=chat-session reason=active_run');
+  });
+
+  it('logs but does not end the session when the provisioning-timeout failure write fails', async () => {
+    const timedOutSession = {
+      id: 7,
+      uuid: 'reaper-error-chat-session',
+      userId: 'sample-user',
+      sessionKind: 'chat',
+      workspaceStatus: 'provisioning',
+      status: 'active',
+      namespace: 'sample-namespace',
+      pvcName: 'sample-pvc',
+      lastActivity: '2026-03-23T11:00:00.000Z',
+      updatedAt: '2026-03-23T11:40:00.000Z',
+    };
+
+    mockCleanupQueries({ provisioningTimeout: [timedOutSession] });
+    mockRecordWorkspaceFailure.mockRejectedValue(new Error('db write failed'));
+
+    await processAgentSessionCleanup();
+
+    expect(mockRecordWorkspaceFailure).toHaveBeenCalledTimes(1);
+    // A failed failure-write must never fall back to destroying the recoverable session.
+    expect(AgentSessionService.endSession).not.toHaveBeenCalled();
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'reaper-error-chat-session' }),
+      expect.stringContaining('Session: cleanup provisioning-timeout failed')
+    );
   });
 });

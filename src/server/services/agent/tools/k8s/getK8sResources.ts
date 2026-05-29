@@ -24,15 +24,19 @@ export class GetK8sResourcesTool extends BaseTool {
 
   constructor(private k8sClient: K8sClient) {
     super(
-      'Get any Kubernetes resource type in a namespace. Supports: pods, deployments, services, ingresses, secrets, configmaps, jobs, statefulsets, daemonsets, replicasets, events. Use this to discover what resources exist in the namespace.',
+      "Get any Kubernetes resource type in THIS environment's namespace. Supports: pods, deployments, services, ingresses, secrets (metadata/keys only — values are never returned), configmaps, jobs, statefulsets, daemonsets, replicasets, events. The namespace defaults to this environment's namespace; you do not need to pass it, and any other namespace is rejected.",
       {
         type: 'object',
         properties: {
-          namespace: { type: 'string', description: 'The Kubernetes namespace' },
+          namespace: {
+            type: 'string',
+            description:
+              "Optional. Defaults to this environment's namespace. If provided, it MUST equal the environment's namespace; any other value is rejected.",
+          },
           resource_type: {
             type: 'string',
             description:
-              'Resource type to list (e.g., "pods", "deployments", "services", "ingresses", "secrets", "configmaps", "jobs", "statefulsets", "events"). Accepts singular or plural forms.',
+              'Resource type to list (e.g., "pods", "deployments", "services", "ingresses", "secrets", "configmaps", "jobs", "statefulsets", "events"). Accepts singular or plural forms. "secrets" returns only name/type/keys — never values.',
             enum: [
               'pods',
               'deployments',
@@ -61,7 +65,7 @@ export class GetK8sResourcesTool extends BaseTool {
               'Optional: Filter by field selector (e.g., "involvedObject.name=mypod"). Primarily used for events.',
           },
         },
-        required: ['namespace', 'resource_type'],
+        required: ['resource_type'],
       },
       ToolSafetyLevel.SAFE,
       'k8s'
@@ -73,8 +77,15 @@ export class GetK8sResourcesTool extends BaseTool {
       return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
     }
 
+    let namespace: string;
     try {
-      const namespace = args.namespace as string;
+      // SECURITY: lock to the build's namespace; reject any foreign namespace.
+      namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
+    } catch (error: any) {
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+    }
+
+    try {
       const resourceType = args.resource_type as string;
       const name = args.name as string | undefined;
       const labelSelector = args.label_selector as string | undefined;
@@ -146,6 +157,47 @@ export class GetK8sResourcesTool extends BaseTool {
     }
   }
 
+  /** Compact container status with waiting/terminated reason+exitCode and lastState, so one call reveals why a pod is unhealthy. */
+  static summarizeContainerStatus(c: any): any {
+    const stateKey = Object.keys(c.state || {})[0];
+    const waiting = c.state?.waiting;
+    const terminated = c.state?.terminated;
+    const lastTerminated = c.lastState?.terminated;
+
+    const summary: any = {
+      name: c.name,
+      ready: c.ready,
+      state: stateKey,
+      restarts: c.restartCount,
+    };
+
+    if (waiting && (waiting.reason || waiting.message)) {
+      summary.waiting = {
+        reason: waiting.reason,
+        message: waiting.message,
+      };
+    }
+
+    if (terminated) {
+      summary.terminated = {
+        reason: terminated.reason,
+        message: terminated.message,
+        exitCode: terminated.exitCode,
+      };
+    }
+
+    if (lastTerminated && (lastTerminated.reason || lastTerminated.exitCode !== undefined)) {
+      summary.lastState = {
+        terminated: {
+          reason: lastTerminated.reason,
+          exitCode: lastTerminated.exitCode,
+        },
+      };
+    }
+
+    return summary;
+  }
+
   private async getPods(namespace: string, labelSelector?: string): Promise<any> {
     const response = await this.k8sClient.coreApi.listNamespacedPod(
       namespace,
@@ -166,12 +218,7 @@ export class GetK8sResourcesTool extends BaseTool {
         ? pod.status.containerStatuses.reduce((sum, c) => sum + c.restartCount, 0)
         : 0,
       age: pod.metadata?.creationTimestamp,
-      containers: pod.status?.containerStatuses?.map((c) => ({
-        name: c.name,
-        ready: c.ready,
-        state: Object.keys(c.state || {})[0],
-        restarts: c.restartCount,
-      })),
+      containers: pod.status?.containerStatuses?.map((c) => GetK8sResourcesTool.summarizeContainerStatus(c)),
     }));
 
     const isUnhealthy = (pod: any) =>
@@ -560,10 +607,37 @@ export class GetK8sResourcesTool extends BaseTool {
     };
   }
 
+  private static podContainerReasons(pod: any): string {
+    const reasons: string[] = [];
+    for (const c of pod.containers || []) {
+      if (c.waiting?.reason) {
+        reasons.push(`${c.name}: ${c.waiting.reason}`);
+      } else if (c.terminated?.reason) {
+        reasons.push(
+          `${c.name}: ${c.terminated.reason}${
+            c.terminated.exitCode !== undefined ? ` (exit ${c.terminated.exitCode})` : ''
+          }`
+        );
+      } else if (c.lastState?.terminated?.reason) {
+        reasons.push(
+          `${c.name}: last ${c.lastState.terminated.reason}${
+            c.lastState.terminated.exitCode !== undefined ? ` (exit ${c.lastState.terminated.exitCode})` : ''
+          }`
+        );
+      }
+    }
+    return reasons.length > 0 ? ` [${reasons.join('; ')}]` : '';
+  }
+
   private formatDisplay(resourceType: string, result: any): string {
     if (resourceType === 'pod' && result.total && result.unhealthyPods) {
       const unhealthyList = result.unhealthyPods
-        .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
+        .map(
+          (p: any) =>
+            `  - ${p.name}: ${p.phase} (${p.ready} ready, ${
+              p.restarts
+            } restarts)${GetK8sResourcesTool.podContainerReasons(p)}`
+        )
         .join('\n');
       return `${result.total} pods (${result.unhealthyCount} unhealthy, ${result.healthyCount} healthy)${
         unhealthyList ? `\nUnhealthy:\n${unhealthyList}` : ''
@@ -572,7 +646,12 @@ export class GetK8sResourcesTool extends BaseTool {
 
     if (resourceType === 'pod' && result.pods) {
       return `Found ${result.pods.length} pods:\n${result.pods
-        .map((p: any) => `  - ${p.name}: ${p.phase} (${p.ready} ready, ${p.restarts} restarts)`)
+        .map(
+          (p: any) =>
+            `  - ${p.name}: ${p.phase} (${p.ready} ready, ${
+              p.restarts
+            } restarts)${GetK8sResourcesTool.podContainerReasons(p)}`
+        )
         .join('\n')}`;
     }
 

@@ -22,7 +22,9 @@ import type { McpDiscoveredTool, McpOauthAuthConfig, McpStoredUserConnectionStat
 type PersistedOAuthState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
 
 export class OAuthAuthorizationRequiredError extends Error {
-  constructor(message = 'OAuth authorization is required for this MCP connection') {
+  constructor(
+    message = 'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.'
+  ) {
     super(message);
     this.name = 'OAuthAuthorizationRequiredError';
   }

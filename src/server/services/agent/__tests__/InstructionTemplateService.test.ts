@@ -167,20 +167,16 @@ describe('InstructionTemplateService', () => {
 
     expect([...SYSTEM_INSTRUCTION_TEMPLATE_REFS].sort()).toEqual(builtInRefs);
     expect(SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS).toHaveLength(3);
-    expect(debugDefinition?.defaultVersion).toBe(3);
+    expect(debugDefinition?.defaultVersion).toBe(4);
     expect(developDefinition?.defaultVersion).toBe(1);
     expect(freeformDefinition?.defaultVersion).toBe(1);
 
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Lifecycle debugging profile:'));
-    expect(debugDefinition?.defaultContent).toEqual(
-      expect.stringContaining('Compare desired config state with actual runtime state')
-    );
-    expect(debugDefinition?.defaultContent).toEqual(
-      expect.stringContaining('Investigate build failures before deploy failures')
-    );
-    expect(debugDefinition?.defaultContent).toEqual(
-      expect.stringContaining('Cite specific evidence before diagnosing a root cause')
-    );
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('You are the Lifecycle Debug Agent'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('comparing desired vs actual'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Investigation order:'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Failure playbooks'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('previous:true'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Cite the specific evidence'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Repair'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Investigate more'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Open workspace'));
@@ -287,7 +283,7 @@ describe('InstructionTemplateService', () => {
     expect(template.override).toEqual(
       expect.objectContaining({
         content: 'Keep this sample admin override.',
-        baseDefaultVersion: 3,
+        baseDefaultVersion: 4,
       })
     );
     expect(template.effective).toEqual(
@@ -338,7 +334,7 @@ describe('InstructionTemplateService', () => {
     expect(template.default).toEqual(
       expect.objectContaining({
         content: debugV2Default,
-        version: 3,
+        version: 4,
         hash: computeInstructionTemplateContentHash(debugV2Default as string),
       })
     );
@@ -361,7 +357,7 @@ describe('InstructionTemplateService', () => {
     expect(reset.effective).toEqual(
       expect.objectContaining({
         source: 'default',
-        version: 3,
+        version: 4,
         content: debugV2Default,
         hash: computeInstructionTemplateContentHash(debugV2Default as string),
       })
@@ -397,19 +393,24 @@ describe('InstructionTemplateService', () => {
 
     await expect(InstructionTemplateService.resolveRefs([''])).rejects.toMatchObject({
       name: InstructionTemplateServiceError.name,
-      code: 'invalid_ref',
+      code: 'instruction_template_ref_invalid',
+      templateCode: 'invalid_ref',
+      httpStatus: 400,
       statusCode: 400,
     });
 
     await expect(InstructionTemplateService.getTemplate('system:missing')).rejects.toMatchObject({
       name: InstructionTemplateServiceError.name,
-      code: 'unknown_ref',
+      code: 'instruction_template_not_found',
+      templateCode: 'unknown_ref',
+      httpStatus: 404,
       statusCode: 404,
       details: { ref: 'system:missing' },
     });
 
     await expect(InstructionTemplateService.resolveRefs(['system:debug', 'system:missing'])).rejects.toMatchObject({
-      code: 'unknown_ref',
+      code: 'instruction_template_not_found',
+      templateCode: 'unknown_ref',
       details: { ref: 'system:missing' },
     });
   });

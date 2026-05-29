@@ -24,20 +24,19 @@ import type { WorkspaceRuntimePlanMetadata } from 'server/lib/agentSession/works
 import type AgentSandbox from 'server/models/AgentSandbox';
 import AgentRun from 'server/models/AgentRun';
 import AgentSession from 'server/models/AgentSession';
+import { ConflictError } from 'server/lib/appError';
 import AgentSandboxService, { type AgentSandboxRuntimeLifecycleMetadata } from './SandboxService';
 import { TERMINAL_RUN_STATUSES } from './RunService';
 
 export type WorkspaceRuntimeAction = 'provision' | 'resume' | 'suspend' | 'end' | 'cleanup' | 'retry';
 export type WorkspaceActionBlockedReason = 'active_run' | 'action_in_progress';
 
-export class WorkspaceActionBlockedError extends Error {
-  constructor(
-    public readonly reason: WorkspaceActionBlockedReason,
-    message: string,
-    public readonly details: Record<string, unknown> = {}
-  ) {
-    super(message);
+export class WorkspaceActionBlockedError extends ConflictError {
+  readonly reason: WorkspaceActionBlockedReason;
+  constructor(reason: WorkspaceActionBlockedReason, message: string, extra: Record<string, unknown> = {}) {
+    super(message, 'workspace_action_blocked', { reason, ...extra });
     this.name = 'WorkspaceActionBlockedError';
+    this.reason = reason;
   }
 }
 

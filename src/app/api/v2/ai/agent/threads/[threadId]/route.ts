@@ -17,8 +17,8 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { successResponse } from 'server/lib/response';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentThreadService from 'server/services/agent/ThreadService';
 
 /**
@@ -50,10 +50,7 @@ import AgentThreadService from 'server/services/agent/ThreadService';
  *                       $ref: '#/components/schemas/AgentThread'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { thread, session } = await AgentThreadService.getOwnedThreadWithSession(params.threadId, userIdentity.userId);
   return successResponse(AgentThreadService.serializeThread(thread, session.uuid), { status: 200 }, req);

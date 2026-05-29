@@ -46,6 +46,7 @@ import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
 import { isReadOnlyDebugIntent, resolveDebugIntent, resolveDebugToolLoopControls } from './debugToolLoopControls';
 import { buildDebugRepairObservationText } from './debugRepairObservation';
 import { assistantRunHasText, sanitizeDebugRepairAssistantMessages } from './debugResponseSanitizer';
+import { resolveThinkingProviderOptions } from './thinkingProviderOptions';
 
 const DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT = [
   'You are completing a read-only Debug diagnosis after the evidence-gathering tool loop reached its tool-step budget.',
@@ -56,6 +57,16 @@ const DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT = [
 
 const DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT =
   'Write the final diagnostic answer now. Do not continue investigating or call tools.';
+
+const DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT = [
+  'You are closing out a Debug repair run after the tool loop reached its step budget without a confirmed fix.',
+  'Summarize what (if anything) was changed, the current environment state, and the single next step.',
+  'Do NOT call tools and do NOT claim an unverified fix.',
+  'Use only the evidence already present in the transcript.',
+].join(' ');
+
+const DEBUG_REPAIR_SYNTHESIS_USER_PROMPT =
+  'Write the final repair summary now: what was changed, what is still blocking, and the single next step. Do not call tools and do not claim an unverified fix.';
 
 function buildSystemPrompt(parts: Array<string | undefined>): string | undefined {
   const normalized = parts.map((part) => part?.trim()).filter(Boolean) as string[];
@@ -306,6 +317,8 @@ export default class AgentRunExecutor {
       selection,
       userIdentity,
     });
+    // Reasoning is for the streaming ToolLoopAgent path only; synthesis fallbacks discard it.
+    const thinkingProviderOptions = resolveThinkingProviderOptions(selection.provider, selection.modelId);
     const observabilityTracker = new AgentRunObservabilityTracker(selection);
     const touchSessionActivity = async () => {
       try {
@@ -328,7 +341,7 @@ export default class AgentRunExecutor {
       repoFullName,
       runControlPlaneConfig.appendSystemPrompt
     );
-    let run: Awaited<ReturnType<typeof AgentRunService.createRun>> | null = null;
+    let run: AgentRun | null = null;
     let heartbeatTimer: NodeJS.Timeout | null = null;
 
     const requireRun = () => {
@@ -523,9 +536,14 @@ export default class AgentRunExecutor {
         maxIterations: runControlPlaneConfig.maxIterations,
       });
       const resolvedInstructionTexts = readResolvedInstructionTexts(executionRunPlan);
-      const synthesizeReadOnlyDebugAnswer = async (messages: AgentUIMessage[]): Promise<string | null> => {
-        const debugIntent = resolveDebugIntent(executionRunPlan);
-        if (!debugIntent || !isReadOnlyDebugIntent(debugIntent)) {
+      // Tools-off synthesis of the final answer after the loop hits its step budget.
+      const synthesizeDebugFinalAnswer = async (
+        messages: AgentUIMessage[],
+        synthesisSystemPrompt: string,
+        synthesisUserPrompt: string,
+        abortSignal?: AbortSignal
+      ): Promise<string | null> => {
+        if (abortSignal?.aborted) {
           return null;
         }
 
@@ -544,10 +562,11 @@ export default class AgentRunExecutor {
               ...resolvedInstructionTexts,
               executionRunPlan?.prompt.instructionAddendum || undefined,
               sessionPrompt,
-              DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT,
+              synthesisSystemPrompt,
             ]),
-            messages: [...modelMessages, { role: 'user', content: DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT }],
+            messages: [...modelMessages, { role: 'user', content: synthesisUserPrompt }],
             toolChoice: 'none',
+            abortSignal,
           });
           observabilityTracker.addGeneration({
             usage: result.totalUsage,
@@ -568,8 +587,41 @@ export default class AgentRunExecutor {
           return null;
         }
       };
+      const synthesizeReadOnlyDebugAnswer = async (
+        messages: AgentUIMessage[],
+        abortSignal?: AbortSignal
+      ): Promise<string | null> => {
+        const debugIntent = resolveDebugIntent(executionRunPlan);
+        if (!debugIntent || !isReadOnlyDebugIntent(debugIntent)) {
+          return null;
+        }
+
+        return synthesizeDebugFinalAnswer(
+          messages,
+          DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT,
+          DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT,
+          abortSignal
+        );
+      };
+      const synthesizeRepairSummaryAnswer = async (
+        messages: AgentUIMessage[],
+        abortSignal?: AbortSignal
+      ): Promise<string | null> => {
+        const debugIntent = resolveDebugIntent(executionRunPlan);
+        if (debugIntent !== 'repair') {
+          return null;
+        }
+
+        return synthesizeDebugFinalAnswer(
+          messages,
+          DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT,
+          DEBUG_REPAIR_SYNTHESIS_USER_PROMPT,
+          abortSignal
+        );
+      };
       const agent = new ToolLoopAgent({
         model,
+        providerOptions: thinkingProviderOptions,
         instructions: buildSystemPrompt([
           runControlPlaneConfig.systemPrompt,
           ...resolvedInstructionTexts,
@@ -653,13 +705,15 @@ export default class AgentRunExecutor {
         onStreamFinish: async ({
           messages: updatedMessages,
           finishReason,
-          isAborted: _isAborted,
+          isAborted,
         }: {
           messages: AgentUIMessage[];
           finishReason?: string;
           isAborted: boolean;
         }) => {
           let observabilitySummary = observabilityTracker.getSummary();
+          // No graceful synthesis if the run was cancelled or ownership was lost.
+          const synthesisAllowed = !isAborted && !controller.signal.aborted;
           try {
             if (!activeExecutionOwner) {
               throw new Error('Agent run execution owner is required.');
@@ -667,8 +721,8 @@ export default class AgentRunExecutor {
 
             let effectiveMessages = updatedMessages;
             let effectiveFinishReason = finishReason;
-            if (finishReason === 'tool-calls') {
-              const synthesizedAnswer = await synthesizeReadOnlyDebugAnswer(updatedMessages);
+            if (finishReason === 'tool-calls' && synthesisAllowed) {
+              const synthesizedAnswer = await synthesizeReadOnlyDebugAnswer(updatedMessages, controller.signal);
               if (synthesizedAnswer) {
                 effectiveMessages = appendAssistantTextForRun(updatedMessages, activeRun.uuid, synthesizedAnswer);
                 effectiveFinishReason = 'stop';
@@ -703,19 +757,32 @@ export default class AgentRunExecutor {
             if (hasDebugRepairObservation && effectiveFinishReason === 'tool-calls') {
               effectiveFinishReason = 'stop';
             }
+            // Repair run hit its budget with no commit observation: synthesize a summary instead of failing blank.
+            if (!hasDebugRepairObservation && effectiveFinishReason === 'tool-calls' && synthesisAllowed) {
+              const repairSummary = await synthesizeRepairSummaryAnswer(effectiveMessages, controller.signal);
+              if (repairSummary) {
+                effectiveMessages = appendAssistantTextForRun(effectiveMessages, activeRun.uuid, repairSummary);
+                effectiveFinishReason = 'stop';
+              }
+            }
 
             observabilitySummary = observabilityTracker.getSummary();
+            const completedAt = new Date().toISOString();
             const messagesWithApprovalStages = applyApprovalResponsesToFileChangeParts(effectiveMessages);
+            // Stamp run start/end onto the assistant message so the read API exposes a thinking duration.
             const messagesWithObservability = applyFinalObservabilityToMessages(
               messagesWithApprovalStages,
               activeRun.uuid,
-              buildMessageObservabilityMetadataPatch(observabilitySummary)
+              {
+                ...buildMessageObservabilityMetadataPatch(observabilitySummary),
+                createdAt: activeRun.startedAt || completedAt,
+                completedAt,
+              }
             );
             const terminalFailure = classifyTerminalRunFailure({
               finishReason: effectiveFinishReason,
               maxIterations: loopControls.effectiveMaxIterations,
             });
-            const completedAt = new Date().toISOString();
 
             const finalizedRun = await AgentRunService.finalizeRunForExecutionOwner(
               activeRun.uuid,

@@ -46,6 +46,12 @@ jest.mock('server/services/userMcpConnection', () => ({
 
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 jest.mock('server/lib/logger', () => ({

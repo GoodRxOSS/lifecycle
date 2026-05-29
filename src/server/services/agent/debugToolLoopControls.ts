@@ -19,10 +19,7 @@ import type { AgentRuntimeToolMetadata } from './CapabilityService';
 import type { AgentDebugRunIntent, AgentRunPlanSnapshotV1 } from './runPlanTypes';
 import { isApprovalGatedWriteRuntimeTool, isReadOnlyRuntimeTool } from './toolMetadata';
 
-const DEBUG_READ_ONLY_MAX_STEPS = 8;
-const DEBUG_REPAIR_MAX_STEPS = 9;
-
-export type DebugToolLoopControls = {
+type DebugToolLoopControls = {
   activeTools?: string[];
   stopWhen: StopCondition<ToolSet>;
   effectiveMaxIterations: number;
@@ -41,6 +38,23 @@ function isBuildContextWorkspaceTool(metadata: AgentRuntimeToolMetadata): boolea
   );
 }
 
+// Build-context chats have no workspace, so any workspace/sandbox/git tool would provision one on first call. Strip them by source kind, independent of agent id or debug intent.
+function buildContextWorkspaceToolKeys(tools: ToolSet, toolMetadata: AgentRuntimeToolMetadata[]): Set<string> {
+  const registered = new Set(Object.keys(tools));
+  const excluded = new Set<string>();
+  for (const toolKey of registered) {
+    if (toolKey.startsWith('mcp__sandbox__')) {
+      excluded.add(toolKey);
+    }
+  }
+  for (const metadata of toolMetadata) {
+    if (registered.has(metadata.toolKey) && isBuildContextWorkspaceTool(metadata)) {
+      excluded.add(metadata.toolKey);
+    }
+  }
+  return excluded;
+}
+
 function isToolActiveForIntent(
   intent: AgentDebugRunIntent,
   metadata: AgentRuntimeToolMetadata,
@@ -55,19 +69,6 @@ function isToolActiveForIntent(
   }
 
   return isReadOnlyRuntimeTool(metadata) || isApprovalGatedWriteRuntimeTool(metadata);
-}
-
-function resolveDebugMaxIterations(intent: AgentDebugRunIntent | undefined, maxIterations: number): number {
-  if (!intent || !isReadOnlyDebugIntent(intent)) {
-    return intent === 'repair' ? Math.min(maxIterations, DEBUG_REPAIR_MAX_STEPS + 1) : maxIterations;
-  }
-
-  return Math.min(maxIterations, DEBUG_READ_ONLY_MAX_STEPS + 1);
-}
-
-function resolveDebugToolStepLimit(intent: AgentDebugRunIntent, maxIterations: number): number {
-  const maxSteps = isReadOnlyDebugIntent(intent) ? DEBUG_READ_ONLY_MAX_STEPS : DEBUG_REPAIR_MAX_STEPS;
-  return Math.max(0, Math.min(maxIterations, maxSteps + 1) - 1);
 }
 
 export function resolveDebugIntent(runPlanSnapshot?: AgentRunPlanSnapshotV1 | null): AgentDebugRunIntent | null {
@@ -95,12 +96,22 @@ export function resolveDebugToolLoopControls({
   toolMetadata: AgentRuntimeToolMetadata[];
   maxIterations: number;
 }): DebugToolLoopControls {
+  // maxIterations is the only budget knob; Debug adds intent-based tool scoping + a tools-off final step so the agent always writes a diagnosis.
   const intent = resolveDebugIntent(runPlanSnapshot);
-  const effectiveMaxIterations = resolveDebugMaxIterations(intent, maxIterations);
+  const effectiveMaxIterations = maxIterations;
   const stopWhen = stepCountIs(effectiveMaxIterations);
 
   if (!intent) {
-    return { stopWhen, effectiveMaxIterations };
+    // No debug intent (e.g. a custom agent), but build-context chats must still never be offered workspace-provisioning tools.
+    if (runPlanSnapshot?.agent.sourceKind !== 'build_context_chat') {
+      return { stopWhen, effectiveMaxIterations };
+    }
+    const excluded = buildContextWorkspaceToolKeys(tools, toolMetadata);
+    if (excluded.size === 0) {
+      return { stopWhen, effectiveMaxIterations };
+    }
+    const activeTools = Object.keys(tools).filter((toolKey) => !excluded.has(toolKey));
+    return { activeTools, stopWhen, effectiveMaxIterations };
   }
 
   const registeredToolKeys = new Set(Object.keys(tools));
@@ -113,7 +124,7 @@ export function resolveDebugToolLoopControls({
     ),
   ];
 
-  const toolStepLimit = resolveDebugToolStepLimit(intent, maxIterations);
+  const toolStepLimit = Math.max(0, effectiveMaxIterations - 1);
 
   return {
     activeTools,

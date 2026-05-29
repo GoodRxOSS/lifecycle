@@ -16,6 +16,7 @@
 
 import type { NextRequest } from 'next/server';
 import type { JWTPayload } from 'jose';
+import { UnauthorizedError } from './appError';
 
 const decode = <T = JWTPayload>(raw: string | null): T | null => {
   if (!raw) return null;
@@ -138,4 +139,13 @@ export function getRequestUserIdentity(req: NextRequest): RequestUserIdentity | 
   }
 
   return buildUserIdentity(null, getLocalDevUserId());
+}
+
+/** Resolve the request identity or throw UnauthorizedError; the handler wrapper maps it to a coded 401. */
+export function requireRequestUserIdentity(req: NextRequest): RequestUserIdentity {
+  const identity = getRequestUserIdentity(req);
+  if (!identity) {
+    throw new UnauthorizedError();
+  }
+  return identity;
 }

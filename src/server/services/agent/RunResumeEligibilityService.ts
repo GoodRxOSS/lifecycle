@@ -16,6 +16,10 @@
 
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import type AgentRun from 'server/models/AgentRun';
+import {
+  DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS,
+  resolveAgentSessionDurabilityConfig,
+} from 'server/lib/agentSession/runtimeConfig';
 import { isAgentRunPlanSnapshotV1, type AgentRunPlanResolvedCapabilityAccess } from './runPlanTypes';
 import type { AgentCapabilityKey, AgentRunStatus } from './types';
 
@@ -56,13 +60,18 @@ export interface AgentRunPendingActionSummary {
 }
 
 export interface EvaluateRunResumeEligibilityInput {
-  run: Pick<AgentRun, 'status' | 'executionOwner' | 'leaseExpiresAt' | 'runPlanSnapshot'> & {
+  run: Pick<
+    AgentRun,
+    'status' | 'executionOwner' | 'leaseExpiresAt' | 'heartbeatAt' | 'startedAt' | 'runPlanSnapshot'
+  > & {
     id?: number;
   };
   pendingActions?: AgentRunPendingActionSummary | null;
   now?: Date;
   eventHistoryExhausted?: boolean;
   savedStateInvalid?: boolean;
+  // Heartbeat-staleness window: a starting/running run older than this is orphaned even with an unexpired lease. Defaults to the derived 3x-heartbeat-interval.
+  heartbeatStaleMs?: number;
 }
 
 const TERMINAL_STATUSES = new Set<AgentRunStatus>(['completed', 'failed', 'cancelled']);
@@ -89,6 +98,24 @@ function decision(
 
 function isLeaseExpired(leaseExpiresAt: string | null | undefined, now: Date): boolean {
   return Boolean(leaseExpiresAt) && new Date(leaseExpiresAt as string).getTime() <= now.getTime();
+}
+
+function resolveHeartbeatStaleMs(runExecutionLeaseMs: number): number {
+  // 3x the heartbeat interval, never exceeding the lease.
+  const intervalMs = Math.min(Math.max(Math.floor(runExecutionLeaseMs / 3), 10_000), 60_000);
+  return Math.min(runExecutionLeaseMs, intervalMs * 3);
+}
+
+function isHeartbeatStale(
+  run: Pick<AgentRun, 'heartbeatAt' | 'startedAt'>,
+  now: Date,
+  heartbeatStaleMs: number
+): boolean {
+  const reference = run.heartbeatAt || run.startedAt; // fall back to startedAt if never heartbeated
+  if (!reference) {
+    return false;
+  }
+  return new Date(reference).getTime() <= now.getTime() - heartbeatStaleMs;
 }
 
 function unsafeCapability(access: AgentRunPlanResolvedCapabilityAccess): {
@@ -190,7 +217,10 @@ export default class AgentRunResumeEligibilityService {
       return decision(input, 'manual_recovery_required', 'ambiguous_ownership');
     }
 
-    if (!isLeaseExpired(input.run.leaseExpiresAt, now)) {
+    // A stale heartbeat means the run is orphaned (worker died/OOM) even with an unexpired lease, so it must NOT count as lease_active.
+    const heartbeatStaleMs =
+      input.heartbeatStaleMs ?? resolveHeartbeatStaleMs(DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS);
+    if (!isLeaseExpired(input.run.leaseExpiresAt, now) && !isHeartbeatStale(input.run, now, heartbeatStaleMs)) {
       return decision(input, 'replay_only', 'lease_active');
     }
 
@@ -221,11 +251,16 @@ export default class AgentRunResumeEligibilityService {
     run: AgentRun & { id?: number },
     options: Omit<EvaluateRunResumeEligibilityInput, 'run' | 'pendingActions'> = {}
   ): Promise<AgentRunResumeEligibility> {
+    const heartbeatStaleMs =
+      options.heartbeatStaleMs ??
+      resolveHeartbeatStaleMs((await resolveAgentSessionDurabilityConfig()).runExecutionLeaseMs);
+
     if (!Number.isInteger(run.id)) {
       return this.evaluate({
         run,
         pendingActions: null,
         ...options,
+        heartbeatStaleMs,
       });
     }
 
@@ -251,6 +286,7 @@ export default class AgentRunResumeEligibilityService {
       run,
       pendingActions,
       ...options,
+      heartbeatStaleMs,
     });
   }
 }

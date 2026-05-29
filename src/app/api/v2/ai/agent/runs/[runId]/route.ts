@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentRunService from 'server/services/agent/RunService';
 
 /**
@@ -53,10 +53,7 @@ import AgentRunService from 'server/services/agent/RunService';
  *         description: Agent run not found
  */
 const getHandler = async (req: NextRequest, { params }: { params: { runId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   try {
     const run = await AgentRunService.getOwnedRun(params.runId, userIdentity.userId);

@@ -23,7 +23,7 @@ export class QueryDatabaseTool extends BaseTool {
 
   constructor(private databaseClient: DatabaseClient) {
     super(
-      'Read-only database query to fetch fresh Lifecycle data. Use this to get current build/deploy status, check deployables, or verify configuration. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like "deploys.repository".',
+      "Read-only database query to fetch fresh Lifecycle data for THIS build only. Every query is automatically scoped to this build's own records (builds.uuid = this build, deploys/deployables of this build, this build's pull request / environment / repositories); you cannot read other tenants' rows. Use this to get current build/deploy status, check deployables, or verify configuration. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like \"deploys.repository\".",
       {
         type: 'object',
         properties: {
@@ -51,7 +51,7 @@ export class QueryDatabaseTool extends BaseTool {
           select: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Columns to return (default: all). Invalid column names are silently ignored.',
+            description: 'Columns to return (default: all). Use exact column names from the table schema.',
           },
           orderBy: {
             type: 'string',
@@ -84,7 +84,7 @@ export class QueryDatabaseTool extends BaseTool {
       const orderBy = args.orderBy as string | undefined;
       const offset = args.offset as number | undefined;
 
-      const { records, totalCount } = await this.databaseClient.queryTable({
+      const { records, totalCount, warnings } = await this.databaseClient.queryTable({
         table,
         filters,
         relations,
@@ -100,6 +100,7 @@ export class QueryDatabaseTool extends BaseTool {
         count: records.length,
         totalCount,
         records,
+        ...(warnings && warnings.length > 0 ? { warnings } : {}),
       };
 
       const displayContent = `Found ${records.length} ${table} (${totalCount} total)`;

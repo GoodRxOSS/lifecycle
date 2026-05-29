@@ -96,6 +96,45 @@ describe('OutputLimiter', () => {
       const result = OutputLimiter.truncateLogOutput(content, 5000, 50, 100);
       expect(result.length).toBeLessThanOrEqual(5000);
     });
+
+    it('retains an error signal that falls in the dropped middle', () => {
+      const lines = Array.from({ length: 500 }, (_, i) =>
+        i === 250 ? 'Error: something exploded at runtime' : `line${i}`
+      );
+      const content = lines.join('\n');
+      const result = OutputLimiter.truncateLogOutput(content, 100000, 50, 100);
+      expect(result).toContain('Error: something exploded at runtime');
+      expect(result).toContain('retained error region');
+      // head + tail still present
+      expect(result).toContain('line0');
+      expect(result).toContain('line499');
+    });
+
+    it('does not add an error region when no signal is in the middle', () => {
+      const lines = Array.from({ length: 500 }, (_, i) => `line${i}`);
+      const content = lines.join('\n');
+      const result = OutputLimiter.truncateLogOutput(content, 100000, 50, 100);
+      expect(result).not.toContain('retained error region');
+      expect(result).toContain('lines omitted of 500 total');
+    });
+
+    it('keeps the error region within the byte cap by trimming head/tail', () => {
+      const lines = Array.from({ length: 400 }, (_, i) =>
+        i === 200 ? `${'E'.repeat(200)} panic: boom` : `${'x'.repeat(200)}-line${i}`
+      );
+      const content = lines.join('\n');
+      const result = OutputLimiter.truncateLogOutput(content, 8000, 50, 100);
+      expect(result.length).toBeLessThanOrEqual(8000);
+      expect(result).toContain('panic: boom');
+    });
+
+    it('respects retainErrorRegion=false (legacy behavior)', () => {
+      const lines = Array.from({ length: 500 }, (_, i) => (i === 250 ? 'Error: hidden in the middle' : `line${i}`));
+      const content = lines.join('\n');
+      const result = OutputLimiter.truncateLogOutput(content, 100000, 50, 100, false);
+      expect(result).not.toContain('Error: hidden in the middle');
+      expect(result).not.toContain('retained error region');
+    });
   });
 
   describe('truncateJsonSafely', () => {

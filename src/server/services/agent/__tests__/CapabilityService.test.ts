@@ -33,15 +33,19 @@ const mockEnsureChatSandbox = jest.fn();
 const mockDiagnosticToolExecute = jest.fn();
 const mockParseYamlConfigFromBranch = jest.fn();
 const mockGithubOctokitRequest = jest.fn();
+const mockBuildFindOne = jest.fn();
 const mockGithubClientInstances: Array<{
   setAllowedBranch: jest.Mock;
   setReferencedFiles: jest.Mock;
   setExcludedFilePatterns: jest.Mock;
   setAllowedWritePatterns: jest.Mock;
+  setAllowedRepos: jest.Mock;
   isFilePathAllowed: jest.Mock;
   validateBranch: jest.Mock;
   getOctokit: jest.Mock;
 }> = [];
+const mockK8sClientInstances: Array<{ setAllowedNamespace: jest.Mock }> = [];
+const mockDatabaseClientInstances: Array<{ setBuildScope: jest.Mock }> = [];
 
 let currentTransport: Record<string, unknown> | null = null;
 
@@ -53,6 +57,8 @@ function mockMakeDiagnosticToolClass(name: string, description = `${name} descri
       type: 'object',
       properties: {},
     },
+    // get_lifecycle_logs is scoped to the build's UUID at registration; expose the setter.
+    setAllowedBuildUuid: jest.fn(),
     execute: (args: Record<string, unknown>, signal?: AbortSignal) => mockDiagnosticToolExecute(name, args, signal),
   }));
 }
@@ -107,7 +113,14 @@ jest.mock('server/services/agentRuntime/mcp/client', () => ({
 }));
 
 jest.mock('server/services/agent/tools/shared/k8sClient', () => ({
-  K8sClient: jest.fn(),
+  K8sClient: jest.fn().mockImplementation(() => {
+    const client = {
+      setAllowedNamespace: jest.fn(),
+      resolveNamespace: jest.fn(),
+    };
+    mockK8sClientInstances.push(client);
+    return client;
+  }),
 }));
 jest.mock('server/services/agent/tools/shared/githubClient', () => ({
   GitHubClient: jest.fn().mockImplementation(() => {
@@ -116,6 +129,7 @@ jest.mock('server/services/agent/tools/shared/githubClient', () => ({
       setReferencedFiles: jest.fn(),
       setExcludedFilePatterns: jest.fn(),
       setAllowedWritePatterns: jest.fn(),
+      setAllowedRepos: jest.fn(),
       isFilePathAllowed: jest.fn(),
       validateBranch: jest.fn(),
       getOctokit: jest.fn().mockResolvedValue({ request: mockGithubOctokitRequest }),
@@ -131,7 +145,25 @@ jest.mock('server/lib/yamlConfigParser', () => ({
   })),
 }));
 jest.mock('server/services/agent/tools/shared/databaseClient', () => ({
-  DatabaseClient: jest.fn(),
+  DatabaseClient: jest.fn().mockImplementation(() => {
+    const client = {
+      setBuildScope: jest.fn(),
+      queryTable: jest.fn(),
+    };
+    mockDatabaseClientInstances.push(client);
+    return client;
+  }),
+}));
+
+jest.mock('server/models/Build', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(() => ({
+      findOne: jest.fn(() => ({
+        withGraphFetched: (...args: unknown[]) => mockBuildFindOne(...args),
+      })),
+    })),
+  },
 }));
 jest.mock('server/services/agent/tools/codefresh/getCodefreshLogs', () => ({
   GetCodefreshLogsTool: mockMakeDiagnosticToolClass('get_codefresh_logs'),
@@ -298,6 +330,9 @@ describe('AgentCapabilityService.buildToolSet', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGithubClientInstances.length = 0;
+    mockK8sClientInstances.length = 0;
+    mockDatabaseClientInstances.length = 0;
+    mockBuildFindOne.mockResolvedValue(null);
     mockGithubOctokitRequest.mockResolvedValue({
       data: {
         sha: 'existing-file-sha',
@@ -1261,6 +1296,78 @@ describe('AgentCapabilityService.buildToolSet', () => {
     expect(tools.mcp__lifecycle__update_file).toBeUndefined();
     expect(tools.mcp__lifecycle__update_pr_labels).toEqual(expect.objectContaining({ needsApproval: true }));
     expect(tools.mcp__lifecycle__patch_k8s_resource).toEqual(expect.objectContaining({ needsApproval: true }));
+  });
+
+  it('locks diagnostic tools to the build namespace, repos, and DB scope resolved from the Build', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockBuildFindOne.mockResolvedValue({
+      id: 99,
+      uuid: 'sample-build-1',
+      namespace: 'env-sample-build-1',
+      environmentId: 5,
+      pullRequestId: 21,
+      pullRequest: {
+        id: 21,
+        fullName: 'example-org/example-repo',
+        repository: { id: 100, fullName: 'example-org/example-repo' },
+      },
+      deploys: [
+        { repository: { id: 100, fullName: 'example-org/example-repo' } },
+        { repository: { id: 200, fullName: 'example-org/secondary-repo' } },
+      ],
+    });
+
+    await buildToolSetForTest({
+      session: {
+        uuid: 'session-build-context',
+        sessionKind: 'chat',
+        buildUuid: 'sample-build-1',
+        workspaceStatus: 'none',
+        status: 'active',
+        podName: null,
+        namespace: null,
+        workspaceRepos: [
+          {
+            repo: 'example-org/example-repo',
+            repoUrl: 'https://github.com/example-org/example-repo.git',
+            branch: 'feature/sample',
+            revision: null,
+            mountPath: '/workspace',
+            primary: true,
+          },
+        ],
+      } as any,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    // k8s clients (read + fix factories) locked to the build's namespace.
+    expect(mockK8sClientInstances.length).toBeGreaterThan(0);
+    for (const client of mockK8sClientInstances) {
+      expect(client.setAllowedNamespace).toHaveBeenCalledWith('env-sample-build-1');
+    }
+
+    // github clients locked to the FULL set of repos the build spans (multi-repo).
+    for (const client of mockGithubClientInstances) {
+      expect(client.setAllowedRepos).toHaveBeenCalledWith(
+        expect.arrayContaining(['example-org/example-repo', 'example-org/secondary-repo'])
+      );
+    }
+
+    // database client scoped to this build's records.
+    expect(mockDatabaseClientInstances.length).toBeGreaterThan(0);
+    expect(mockDatabaseClientInstances[0].setBuildScope).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildId: 99,
+        buildUuid: 'sample-build-1',
+        pullRequestId: 21,
+        environmentId: 5,
+        repositoryIds: expect.arrayContaining([100, 200]),
+      })
+    );
   });
 
   it('redacts MCP default args from tool audit hooks while preserving runtime execution args', async () => {

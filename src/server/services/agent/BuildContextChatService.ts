@@ -21,6 +21,7 @@ import AgentThread from 'server/models/AgentThread';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { AgentChatStatus, AgentSessionKind } from 'shared/constants';
+import { NotFoundError, BadRequestError } from 'server/lib/appError';
 import AgentChatSessionService, {
   type AgentBuildContextChatMetadata,
   type AgentBuildContextSelectedDeployMetadata,
@@ -29,17 +30,27 @@ import AgentThreadService from './ThreadService';
 
 const ACTIVE_BUILD_CONTEXT_CHAT_UNIQUE_CONSTRAINT = 'agent_sessions_active_build_context_chat_unique';
 
-export class BuildContextChatBuildNotFoundError extends Error {
-  constructor(readonly buildUuid: string) {
-    super(`Build not found: ${buildUuid}`);
+export class BuildContextChatBuildNotFoundError extends NotFoundError {
+  readonly buildUuid: string;
+  constructor(buildUuid: string) {
+    super(`Build not found: ${buildUuid}`, 'build_not_found', { buildUuid });
     this.name = 'BuildContextChatBuildNotFoundError';
+    this.buildUuid = buildUuid;
   }
 }
 
-export class BuildContextChatSelectedDeployError extends Error {
-  constructor(readonly buildUuid: string, readonly selectedDeployUuid: string) {
-    super(`Selected deploy ${selectedDeployUuid} does not belong to build ${buildUuid}`);
+export class BuildContextChatSelectedDeployError extends BadRequestError {
+  readonly buildUuid: string;
+  readonly selectedDeployUuid: string;
+  constructor(buildUuid: string, selectedDeployUuid: string) {
+    super(
+      `Selected deploy ${selectedDeployUuid} does not belong to build ${buildUuid}`,
+      'build_selected_deploy_invalid',
+      { buildUuid, selectedDeployUuid }
+    );
     this.name = 'BuildContextChatSelectedDeployError';
+    this.buildUuid = buildUuid;
+    this.selectedDeployUuid = selectedDeployUuid;
   }
 }
 

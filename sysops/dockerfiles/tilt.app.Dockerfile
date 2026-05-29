@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Copyright 2025 GoodRx, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,6 +65,12 @@ ENV APP_DB_SSL=${APP_DB_SSL}
 ENV APP_REDIS_HOST=${APP_REDIS_HOST}
 ENV APP_REDIS_PORT=${APP_REDIS_PORT}
 ENV APP_REDIS_PASSWORD=${APP_REDIS_PASSWORD}
+
+# LIFECYCLE_BUILD=prod: bake a bundle for `pnpm start`; dev runs `pnpm dev` via the entrypoint instead.
+ARG LIFECYCLE_BUILD=dev
+# build:local (LOCAL ONLY) skips ESLint and reuses the BuildKit-cached .next/cache; prod CI still runs `pnpm build`.
+RUN --mount=type=cache,target=/app/.next/cache,id=lifecycle-next-cache \
+    if [ "$LIFECYCLE_BUILD" = "prod" ]; then pnpm build:local; fi
 
 # Expose the required port
 ENV PORT 3000

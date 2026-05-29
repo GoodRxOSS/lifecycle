@@ -79,6 +79,14 @@ function normalizeMessageId(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+// Joined run.startedAt/completedAt aliases come back as Date (they skip the model's timestamp->ISO serialization).
+function normalizeTimestamp(value: unknown): string | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function isAgentSwitchMessage(message: AgentMessage): boolean {
   return message.role === 'system' && message.metadata?.kind === AGENT_SWITCH_METADATA_KIND;
 }
@@ -207,6 +215,8 @@ function serializeCanonicalAgentMessage(
 
   const enrichedMessage = message as AgentMessage & {
     runUuid?: string | null;
+    runStartedAt?: Date | string | null;
+    runCompletedAt?: Date | string | null;
     createdAt?: string | null;
   };
 
@@ -219,9 +229,57 @@ function serializeCanonicalAgentMessage(
     runId: runUuid || normalizeMessageId(enrichedMessage.runUuid),
     role: message.role as CanonicalAgentMessage['role'],
     parts,
-    ...(isAgentSwitchMessage(message) ? { metadata: message.metadata || {} } : {}),
+    ...resolveSerializedMetadata(message, enrichedMessage),
     createdAt: enrichedMessage.createdAt || null,
   };
+}
+
+// Assistant messages carry run start/end timestamps in metadata so the read API can render a thinking duration.
+function resolveSerializedMetadata(
+  message: AgentMessage,
+  enrichedMessage: AgentMessage & {
+    runStartedAt?: Date | string | null;
+    runCompletedAt?: Date | string | null;
+    createdAt?: string | null;
+  }
+): { metadata?: Record<string, unknown> } {
+  if (isAgentSwitchMessage(message)) {
+    return { metadata: message.metadata || {} };
+  }
+
+  if (message.role !== 'assistant') {
+    return {};
+  }
+
+  const metadata = message.metadata || {};
+  // run.startedAt is the authoritative thinking start; stored metadata.createdAt is a buggy ~completion value.
+  const createdAt =
+    normalizeTimestamp(enrichedMessage.runStartedAt) ||
+    normalizeTimestamp(metadata.createdAt) ||
+    normalizeTimestamp(enrichedMessage.createdAt);
+  const completedAt =
+    normalizeTimestamp(enrichedMessage.runCompletedAt) || normalizeTimestamp(metadata.completedAt) || createdAt;
+
+  return {
+    metadata: {
+      ...metadata,
+      ...(createdAt ? { createdAt: clampStartBeforeEnd(createdAt, completedAt) } : {}),
+      ...(completedAt ? { completedAt } : {}),
+    },
+  };
+}
+
+// Keep the served start strictly before the end so the UI renders a real positive duration.
+function clampStartBeforeEnd(start: string, end: string | null): string {
+  if (!end) {
+    return start;
+  }
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    return start;
+  }
+  return startMs <= endMs ? start : end;
 }
 
 function normalizeLimit(limit?: number): number {
@@ -230,6 +288,64 @@ function normalizeLimit(limit?: number): number {
   }
 
   return Math.min(Math.max(1, Math.trunc(limit)), MAX_AGENT_MESSAGE_PAGE_LIMIT);
+}
+
+// Build the messageId -> row index used by every upsert path.
+function buildExistingByMessageId(rows: AgentMessage[]): Map<string, AgentMessage> {
+  const existingByMessageId = new Map<string, AgentMessage>();
+  for (const message of rows) {
+    for (const messageId of getStoredMessageIds(message)) {
+      existingByMessageId.set(messageId, message);
+    }
+  }
+
+  return existingByMessageId;
+}
+
+// Shared insert-or-patch loop; `reAddPatchedRow` keeps the index current after a patch for callers that rely on it.
+async function applyCanonicalMessageUpserts(
+  threadId: number,
+  messages: CanonicalAgentInputMessage[],
+  existingByMessageId: Map<string, AgentMessage>,
+  options: {
+    runId?: number | null;
+    trx?: Transaction;
+    metadataFor?: (message: CanonicalAgentInputMessage) => Record<string, unknown> | undefined;
+    reAddPatchedRow?: boolean;
+  } = {}
+): Promise<void> {
+  for (const message of messages) {
+    const incomingMessageId = getIncomingMessageId(message);
+    const row = incomingMessageId ? existingByMessageId.get(incomingMessageId) : undefined;
+    const stored = buildStoredCanonicalMessage(message, options.metadataFor?.(message), row);
+    const patch: PartialModelObject<AgentMessage> = {
+      role: message.role,
+      parts: stored.parts as unknown as Record<string, unknown>[],
+      uiMessage: null,
+      clientMessageId: stored.clientMessageId,
+      metadata: toJsonRecord(stored.metadata),
+      runId: resolveStoredRunId(message.role, row, options.runId),
+    };
+
+    if (!row) {
+      const inserted = await AgentMessage.query(options.trx).insert({
+        uuid: stored.uuid,
+        threadId,
+        ...patch,
+      });
+      for (const messageId of getStoredMessageIds(inserted)) {
+        existingByMessageId.set(messageId, inserted);
+      }
+      continue;
+    }
+
+    const updated = await AgentMessage.query(options.trx).patchAndFetchById(row.id, patch);
+    if (options.reAddPatchedRow) {
+      for (const messageId of getStoredMessageIds(updated)) {
+        existingByMessageId.set(messageId, updated);
+      }
+    }
+  }
 }
 
 export default class AgentMessageStore {
@@ -295,7 +411,7 @@ export default class AgentMessageStore {
             .whereRaw('"message"."metadata"->>? = ?', ['kind', AGENT_SWITCH_METADATA_KIND]);
         });
       })
-      .select('message.*', 'run.uuid as runUuid')
+      .select('message.*', 'run.uuid as runUuid', 'run.startedAt as runStartedAt', 'run.completedAt as runCompletedAt')
       .orderBy('message.createdAt', 'desc')
       .orderBy('message.id', 'desc')
       .limit(limit + 1);
@@ -423,47 +539,16 @@ export default class AgentMessageStore {
   ): Promise<AgentUIMessage[]> {
     const thread = await AgentThreadService.getOwnedThread(threadUuid, userId);
     const run = runUuid ? await AgentRun.query().findOne({ uuid: runUuid, threadId: thread.id }) : null;
-    const runId = run?.id ?? null;
     const existing = await AgentMessage.query().where({ threadId: thread.id });
-    const existingByMessageId = new Map<string, AgentMessage>();
-    for (const message of existing) {
-      for (const messageId of getStoredMessageIds(message)) {
-        existingByMessageId.set(messageId, message);
-      }
-    }
+    const existingByMessageId = buildExistingByMessageId(existing);
 
     const nonEmptyMessages = messages.filter(
       (message) => normalizeCanonicalAgentMessageParts(message.parts).length > 0
     );
 
-    for (const message of nonEmptyMessages) {
-      const incomingMessageId = getIncomingMessageId(message);
-      const row = incomingMessageId ? existingByMessageId.get(incomingMessageId) : undefined;
-      const stored = buildStoredCanonicalMessage(message, undefined, row);
-      const metadata = toJsonRecord(stored.metadata);
-      const patch: PartialModelObject<AgentMessage> = {
-        role: message.role,
-        parts: stored.parts as unknown as Record<string, unknown>[],
-        uiMessage: null,
-        clientMessageId: stored.clientMessageId,
-        metadata,
-        runId: resolveStoredRunId(message.role, row, runId),
-      };
-
-      if (!row) {
-        const inserted = await AgentMessage.query().insert({
-          uuid: stored.uuid,
-          threadId: thread.id,
-          ...patch,
-        });
-        for (const messageId of getStoredMessageIds(inserted)) {
-          existingByMessageId.set(messageId, inserted);
-        }
-        continue;
-      }
-
-      await AgentMessage.query().patchAndFetchById(row.id, patch);
-    }
+    await applyCanonicalMessageUpserts(thread.id, nonEmptyMessages, existingByMessageId, {
+      runId: run?.id ?? null,
+    });
 
     const reloaded = await AgentMessage.query().where({ threadId: thread.id }).orderBy('createdAt', 'asc');
     return reloaded.flatMap((row) => {
@@ -488,43 +573,13 @@ export default class AgentMessageStore {
     }
 
     const existing = await loadExistingMessagesForIncomingIds(thread.id, nonEmptyMessages, options?.trx);
-    const existingByMessageId = new Map<string, AgentMessage>();
-    for (const message of existing) {
-      for (const messageId of getStoredMessageIds(message)) {
-        existingByMessageId.set(messageId, message);
-      }
-    }
+    const existingByMessageId = buildExistingByMessageId(existing);
 
-    for (const message of nonEmptyMessages) {
-      const incomingMessageId = getIncomingMessageId(message);
-      const row = incomingMessageId ? existingByMessageId.get(incomingMessageId) : undefined;
-      const stored = buildStoredCanonicalMessage(message, undefined, row);
-      const patch: PartialModelObject<AgentMessage> = {
-        role: message.role,
-        parts: stored.parts as unknown as Record<string, unknown>[],
-        uiMessage: null,
-        clientMessageId: stored.clientMessageId,
-        metadata: toJsonRecord(stored.metadata),
-        runId: resolveStoredRunId(message.role, row, options?.runId),
-      };
-
-      if (!row) {
-        const inserted = await AgentMessage.query(options?.trx).insert({
-          uuid: stored.uuid,
-          threadId: thread.id,
-          ...patch,
-        });
-        for (const messageId of getStoredMessageIds(inserted)) {
-          existingByMessageId.set(messageId, inserted);
-        }
-        continue;
-      }
-
-      const updated = await AgentMessage.query(options?.trx).patchAndFetchById(row.id, patch);
-      for (const messageId of getStoredMessageIds(updated)) {
-        existingByMessageId.set(messageId, updated);
-      }
-    }
+    await applyCanonicalMessageUpserts(thread.id, nonEmptyMessages, existingByMessageId, {
+      runId: options?.runId,
+      trx: options?.trx,
+      reAddPatchedRow: true,
+    });
   }
 
   static async syncCanonicalMessagesFromUiMessages(
@@ -568,43 +623,15 @@ export default class AgentMessageStore {
       .filter((message) => message.parts.length > 0);
 
     const existing = await AgentMessage.query(options?.trx).where({ threadId: thread.id });
-    const existingByMessageId = new Map<string, AgentMessage>();
-    for (const message of existing) {
-      for (const messageId of getStoredMessageIds(message)) {
-        existingByMessageId.set(messageId, message);
-      }
-    }
+    const existingByMessageId = buildExistingByMessageId(existing);
 
-    for (const message of canonicalMessages) {
-      const incomingMessageId = getIncomingMessageId(message);
-      const row = incomingMessageId ? existingByMessageId.get(incomingMessageId) : undefined;
-      const stored = buildStoredCanonicalMessage(
-        message,
-        incomingMessageId ? metadataById.get(incomingMessageId) : undefined,
-        row
-      );
-      const patch: PartialModelObject<AgentMessage> = {
-        role: message.role,
-        parts: stored.parts as unknown as Record<string, unknown>[],
-        uiMessage: null,
-        clientMessageId: stored.clientMessageId,
-        metadata: toJsonRecord(stored.metadata),
-        runId: resolveStoredRunId(message.role, row, options?.runId),
-      };
-
-      if (!row) {
-        const inserted = await AgentMessage.query(options?.trx).insert({
-          uuid: stored.uuid,
-          threadId: thread.id,
-          ...patch,
-        });
-        for (const messageId of getStoredMessageIds(inserted)) {
-          existingByMessageId.set(messageId, inserted);
-        }
-        continue;
-      }
-
-      await AgentMessage.query(options?.trx).patchAndFetchById(row.id, patch);
-    }
+    await applyCanonicalMessageUpserts(thread.id, canonicalMessages, existingByMessageId, {
+      runId: options?.runId,
+      trx: options?.trx,
+      metadataFor: (message) => {
+        const incomingMessageId = getIncomingMessageId(message);
+        return incomingMessageId ? metadataById.get(incomingMessageId) : undefined;
+      },
+    });
   }
 }

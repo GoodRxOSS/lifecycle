@@ -1272,7 +1272,7 @@ describe('AgentRunExecutor', () => {
     expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
   });
 
-  it('reports the effective Debug repair loop cap when repair stops on tool-calls', async () => {
+  it('uses the configured global budget and synthesizes a summary when repair stops on tool-calls', async () => {
     const debugRepairRunPlanSnapshot = {
       ...runPlanSnapshot,
       agent: {
@@ -1290,11 +1290,113 @@ describe('AgentRunExecutor', () => {
     mockGetEffectiveSessionConfig.mockResolvedValueOnce({
       systemPrompt: 'DB prompt as stored',
       appendSystemPrompt: undefined,
-      maxIterations: 350,
+      maxIterations: 14,
       workspaceToolDiscoveryTimeoutMs: 3000,
       workspaceToolExecutionTimeoutMs: 15000,
       toolRules: [],
     });
+    mockResolveForRunAdmission.mockResolvedValueOnce({
+      approvalPolicy: 'on-request',
+      requestedHarness: null,
+      requestedProvider: null,
+      requestedModel: null,
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      sandboxRequirement: { filesystem: 'persistent' },
+      runtimeOptions: {},
+      runPlanSnapshot: debugRepairRunPlanSnapshot,
+    });
+    mockConvertToModelMessages.mockResolvedValueOnce([{ role: 'user', content: 'repair this' }]);
+    mockGenerateText.mockResolvedValueOnce({
+      text: 'Updated the Dockerfile; build is still failing on missing base image. Next: confirm the base image tag.',
+      totalUsage: { inputTokens: 5, outputTokens: 7, totalTokens: 12 },
+      finishReason: 'stop',
+      rawFinishReason: 'STOP',
+      warnings: [],
+      response: {
+        id: 'repair-synthesis-response-1',
+        modelId: 'gpt-5.4',
+        timestamp: '2026-05-07T00:00:00.000Z',
+      },
+      providerMetadata: undefined,
+    });
+
+    const execution = await AgentRunExecutor.execute({
+      session: { uuid: 'sess-1', id: 17 } as any,
+      thread: { id: 7, uuid: 'thread-1' } as any,
+      userIdentity: { userId: 'sample-user' } as any,
+      messages: [],
+    });
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Still repairing' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    // Effective budget now equals the configured global maxIterations (no debug-specific cap).
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+    // Repair stopping on tool-calls without a commit observation gets a graceful summary, not a blank max_iterations failure.
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        system: expect.stringContaining(
+          'You are closing out a Debug repair run after the tool loop reached its step budget without a confirmed fix.'
+        ),
+        toolChoice: 'none',
+      })
+    );
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        patch: expect.objectContaining({
+          usageSummary: expect.objectContaining({
+            finishReason: 'stop',
+          }),
+        }),
+      })
+    );
+    expect(mockUpsertCanonicalUiMessagesForThread).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'assistant-1',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              type: 'text',
+              text: expect.stringContaining(
+                'Updated the Dockerfile; build is still failing on missing base image. Next: confirm the base image tag.'
+              ),
+            }),
+          ]),
+        }),
+      ]),
+      expect.anything()
+    );
+  });
+
+  it('does not synthesize a repair summary when the run was aborted', async () => {
+    const debugRepairRunPlanSnapshot = {
+      ...runPlanSnapshot,
+      agent: {
+        id: 'system.debug',
+        label: 'Debug',
+        sourceKind: 'build_context_chat',
+      },
+      debug: {
+        requestedIntent: 'repair',
+        resolvedIntent: 'repair',
+        decisionSource: 'client_request',
+        reasonCode: 'repair_requested',
+      },
+    };
     mockResolveForRunAdmission.mockResolvedValueOnce({
       approvalPolicy: 'on-request',
       requestedHarness: null,
@@ -1325,23 +1427,18 @@ describe('AgentRunExecutor', () => {
         } as any,
       ],
       finishReason: 'tool-calls',
-      isAborted: false,
+      isAborted: true,
     });
 
-    expect(mockStepCountIs).toHaveBeenCalledWith(10);
+    expect(mockGenerateText).not.toHaveBeenCalled();
     expect(mockLastFinalizeResult).toEqual(
       expect.objectContaining({
         status: 'failed',
         error: expect.objectContaining({
           code: 'max_iterations_exceeded',
-          details: expect.objectContaining({
-            finishReason: 'tool-calls',
-            maxIterations: 10,
-          }),
         }),
       })
     );
-    expect(mockGenerateText).not.toHaveBeenCalled();
   });
 
   it('completes a Debug repair tool-calls run when the repair commit observation is the final answer', async () => {

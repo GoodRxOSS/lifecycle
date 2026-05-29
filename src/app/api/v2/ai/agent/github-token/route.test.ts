@@ -16,10 +16,19 @@
 
 import { NextRequest } from 'next/server';
 
-jest.mock('server/lib/get-user', () => ({
-  getUser: jest.fn(),
-  getRequestUserIdentity: jest.fn(),
-}));
+jest.mock('server/lib/get-user', () => {
+  const getRequestUserIdentity = jest.fn();
+  return {
+    getUser: jest.fn(),
+    getRequestUserIdentity,
+    // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+    requireRequestUserIdentity: (...args: unknown[]) => {
+      const id = getRequestUserIdentity(...args);
+      if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+      return id;
+    },
+  };
+});
 
 jest.mock('server/lib/agentSession/githubToken', () => ({
   fetchGitHubAuthenticatedUser: jest.fn(),
@@ -77,19 +86,23 @@ describe('GET /api/v2/ai/agent/github-token', () => {
     expect(response.status).toBe(401);
   });
 
-  it('returns 403 when the user is not an admin', async () => {
+  it('allows a normal (non-admin) user to check their own token', async () => {
+    // Per-user self-check: must NOT be admin-gated.
     mockGetUser.mockReturnValue({
       sub: 'user-123',
       realm_access: {
         roles: ['user'],
       },
     });
+    mockResolveRequestGitHubUserToken.mockResolvedValue({
+      githubUsername: 'sample-user',
+      githubToken: null,
+    });
 
     const response = await GET(makeRequest());
 
-    expect(response.status).toBe(403);
-    expect(mockResolveRequestGitHubUserToken).not.toHaveBeenCalled();
-    expect(mockFetchGitHubAuthenticatedUser).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(mockResolveRequestGitHubUserToken).toHaveBeenCalled();
   });
 
   it('returns a safe failed check when no GitHub token can be fetched', async () => {

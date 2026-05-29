@@ -135,13 +135,22 @@ export async function kubeContextStep({ context, cluster }: { context: string; c
   };
 }
 
-export const getLogs = async (id: string) => {
+// Typed result so callers can tell "fetched (maybe empty)" from "fetch failed".
+export type GetLogsResult = { ok: true; output: string } | { ok: false; reason: string };
+
+export const getLogsResult = async (id: string): Promise<GetLogsResult> => {
   try {
     const command = `codefresh logs ${id}`;
     const output = await shellPromise(command);
-    return output;
+    return { ok: true, output: output ?? '' };
   } catch (error) {
     getLogger().error({ error }, `Codefresh: getLogs failed pipelineId=${id}`);
-    return '';
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
+};
+
+// Back-compat string wrapper: failures collapse to '' (existing deploy.ts behavior).
+export const getLogs = async (id: string): Promise<string> => {
+  const result = await getLogsResult(id);
+  return result.ok ? result.output : '';
 };

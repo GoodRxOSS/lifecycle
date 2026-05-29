@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import { v4 as uuid } from 'uuid';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import {
   AgentSessionRuntimeConfigError,
@@ -347,8 +347,7 @@ const sandboxLaunchQueue = QueueManager.getInstance().registerQueue(QUEUE_NAMES.
  *         description: Base build not found
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  requireRequestUserIdentity(req);
 
   const { searchParams } = new URL(req.url);
   const baseBuildUuid = searchParams.get('baseBuildUuid');
@@ -380,8 +379,7 @@ const getHandler = async (req: NextRequest) => {
 };
 
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   let body: CreateSandboxSessionBody;
   try {

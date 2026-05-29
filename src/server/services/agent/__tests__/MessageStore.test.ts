@@ -80,6 +80,141 @@ describe('AgentMessageStore', () => {
       });
     });
 
+    it('prefers run.startedAt for assistant createdAt over a buggy ~completion stored metadata.createdAt', () => {
+      expect(
+        AgentMessageStore.serializeCanonicalMessage(
+          {
+            uuid: '44444444-4444-4444-8444-444444444444',
+            clientMessageId: null,
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Done' }],
+            // Buggy stored values were set near completion, yielding ~0/negative durations.
+            metadata: {
+              runId: 'run-1',
+              createdAt: '2026-04-25T00:00:08.900Z',
+              completedAt: '2026-04-25T00:00:09.000Z',
+            },
+            runStartedAt: '2026-04-25T00:00:01.000Z',
+            runCompletedAt: '2026-04-25T00:00:09.000Z',
+            createdAt: '2026-04-25T00:00:08.950Z',
+          } as any,
+          'thread-uuid'
+        )
+      ).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          metadata: {
+            runId: 'run-1',
+            createdAt: '2026-04-25T00:00:01.000Z',
+            completedAt: '2026-04-25T00:00:09.000Z',
+          },
+        })
+      );
+    });
+
+    it('handles run timestamps returned as Date objects from the join (not ISO strings)', () => {
+      expect(
+        AgentMessageStore.serializeCanonicalMessage(
+          {
+            uuid: '44444444-4444-4444-8444-444444444444',
+            clientMessageId: null,
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Done' }],
+            metadata: {
+              runId: 'run-1',
+              createdAt: '2026-04-25T00:00:08.900Z',
+              completedAt: '2026-04-25T00:00:09.000Z',
+            },
+            runStartedAt: new Date('2026-04-25T00:00:01.000Z'),
+            runCompletedAt: new Date('2026-04-25T00:00:09.000Z'),
+            createdAt: '2026-04-25T00:00:08.950Z',
+          } as any,
+          'thread-uuid'
+        )
+      ).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          metadata: {
+            runId: 'run-1',
+            createdAt: '2026-04-25T00:00:01.000Z',
+            completedAt: '2026-04-25T00:00:09.000Z',
+          },
+        })
+      );
+    });
+
+    it('falls back to stored metadata, then the row created time, when run.startedAt is absent', () => {
+      expect(
+        AgentMessageStore.serializeCanonicalMessage(
+          {
+            uuid: '44444444-4444-4444-8444-444444444444',
+            clientMessageId: null,
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Done' }],
+            metadata: { runId: 'run-1', createdAt: '2026-04-25T00:00:02.000Z' },
+            runCompletedAt: '2026-04-25T00:00:09.000Z',
+            createdAt: '2026-04-25T00:00:05.000Z',
+          } as any,
+          'thread-uuid'
+        )
+      ).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          metadata: {
+            runId: 'run-1',
+            createdAt: '2026-04-25T00:00:02.000Z',
+            completedAt: '2026-04-25T00:00:09.000Z',
+          },
+        })
+      );
+    });
+
+    it('clamps the served createdAt to completedAt when run.startedAt is later than completion', () => {
+      expect(
+        AgentMessageStore.serializeCanonicalMessage(
+          {
+            uuid: '44444444-4444-4444-8444-444444444444',
+            clientMessageId: null,
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Done' }],
+            metadata: { runId: 'run-1' },
+            runStartedAt: '2026-04-25T00:00:10.000Z',
+            runCompletedAt: '2026-04-25T00:00:09.000Z',
+            createdAt: '2026-04-25T00:00:08.000Z',
+          } as any,
+          'thread-uuid'
+        )
+      ).toEqual(
+        expect.objectContaining({
+          role: 'assistant',
+          metadata: {
+            runId: 'run-1',
+            createdAt: '2026-04-25T00:00:09.000Z',
+            completedAt: '2026-04-25T00:00:09.000Z',
+          },
+        })
+      );
+    });
+
+    it('falls back to the assistant row created time when no run timestamps exist', () => {
+      const serialized = AgentMessageStore.serializeCanonicalMessage(
+        {
+          uuid: '55555555-5555-4555-8555-555555555555',
+          clientMessageId: null,
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Done' }],
+          metadata: {},
+          createdAt: '2026-04-25T00:00:00.000Z',
+        } as any,
+        'thread-uuid'
+      );
+
+      expect(serialized.metadata).toEqual({
+        createdAt: '2026-04-25T00:00:00.000Z',
+        completedAt: '2026-04-25T00:00:00.000Z',
+      });
+    });
+
     it('returns typed agent switch system messages but rejects unrelated system messages', () => {
       const switchMessage = AgentMessageStore.serializeCanonicalMessage(
         {

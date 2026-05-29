@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import ApprovalService from 'server/services/agent/ApprovalService';
 
@@ -84,10 +84,7 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const postHandler = async (req: NextRequest, { params }: { params: { actionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => null);
   const responseBody = ApprovalService.normalizePendingActionResponseBody(body);

@@ -23,12 +23,18 @@ export class ListDirectoryTool extends BaseTool {
 
   constructor(private githubClient: GitHubClient) {
     super(
-      'List files and directories in ANY repository path. PROACTIVE USE: When you see "no such file or directory" errors in build/deploy logs, IMMEDIATELY call this to discover the correct filename. Example: If logs show "sysops/dockerfiles/app.dockerfile: no such file", call list_directory("sysops/dockerfiles") to find the actual file.',
+      'List files and directories in a path of one of THIS environment\'s repositories. PROACTIVE USE: When you see "no such file or directory" errors in build/deploy logs, IMMEDIATELY call this to discover the correct filename. Example: If logs show "sysops/dockerfiles/app.dockerfile: no such file", call list_directory("sysops/dockerfiles") to find the actual file. Default repository_owner/repository_name to this build\'s primary repository; repositories outside this environment are rejected.',
       {
         type: 'object',
         properties: {
-          repository_owner: { type: 'string', description: 'Repository owner' },
-          repository_name: { type: 'string', description: 'Repository name' },
+          repository_owner: {
+            type: 'string',
+            description: "Repository owner. Defaults to this build's primary repo owner.",
+          },
+          repository_name: {
+            type: 'string',
+            description: "Repository name. Defaults to this build's primary repo name.",
+          },
           branch: { type: 'string', description: 'Branch name' },
           directory_path: {
             type: 'string',
@@ -53,6 +59,15 @@ export class ListDirectoryTool extends BaseTool {
       const repo = args.repository_name as string;
       const branch = args.branch as string;
       const directoryPath = args.directory_path as string;
+
+      // SECURITY: lock to the build's repositories; reject out-of-scope repos.
+      if (!this.githubClient.isRepoAllowed(owner, repo)) {
+        return this.createErrorResult(
+          `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be accessed.`,
+          'FILE_ACCESS_DENIED',
+          false
+        );
+      }
 
       const octokit = await this.githubClient.getOctokit('agent-runtime-list-directory');
 

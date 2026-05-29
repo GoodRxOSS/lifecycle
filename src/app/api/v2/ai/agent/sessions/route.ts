@@ -18,20 +18,16 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import type { DevConfig } from 'server/models/yaml/YamlService';
 import type { LifecycleConfig } from 'server/models/yaml';
 import AgentChatSessionService from 'server/services/agent/ChatSessionService';
-import { MissingAgentProviderApiKeyError } from 'server/services/agent/ProviderRegistry';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import {
   DEFAULT_AGENT_SESSION_LIST_LIMIT,
   MAX_AGENT_SESSION_LIST_LIMIT,
 } from 'server/services/agent/SessionReadService';
-import {
-  AgentThreadRuntimeControlsError,
-  type AgentThreadRuntimeControlChoiceInput,
-} from 'server/services/agent/ThreadRuntimeControlsService';
+import { type AgentThreadRuntimeControlChoiceInput } from 'server/services/agent/ThreadRuntimeControlsService';
 import { AgentSessionKind, BuildKind } from 'shared/constants';
 
 interface RequestedAgentSessionServiceRef {
@@ -157,21 +153,6 @@ function parseRuntimeControlChoices(value: unknown): AgentThreadRuntimeControlCh
   }
 
   return { agentId, toolChoiceIds, mcpChoiceIds };
-}
-
-function mapRuntimeControlsError(error: unknown, req: NextRequest) {
-  if (error instanceof AgentThreadRuntimeControlsError) {
-    const statusByCode: Record<AgentThreadRuntimeControlsError['code'], number> = {
-      invalid_input: 400,
-      unknown_choice: 400,
-      policy_denied: 403,
-      not_found: 404,
-      active_run: 409,
-    };
-    return errorResponse(error, { status: statusByCode[error.code] }, req);
-  }
-
-  return null;
 }
 
 async function resolveLifecycleConfigForSession({
@@ -410,8 +391,7 @@ async function resolveRequestedServices(
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   const includeEnded = req.nextUrl.searchParams.get('includeEnded') === 'true';
   const page = parseInt(req.nextUrl.searchParams.get('page') || '1', 10);
@@ -439,8 +419,7 @@ const getHandler = async (req: NextRequest) => {
 };
 
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
+  const userIdentity = requireRequestUserIdentity(req);
 
   let body: CreateSessionBody;
   try {
@@ -522,18 +501,12 @@ const postHandler = async (req: NextRequest) => {
       const { AgentSessionRuntimeConfigError, AgentSessionWorkspaceStorageConfigError } = await import(
         'server/lib/agentSession/runtimeConfig'
       );
-      if (err instanceof MissingAgentProviderApiKeyError) {
-        return errorResponse(err, { status: 400 }, req);
-      }
+      // Config errors aren't AppErrors yet, so map them here; the AppErrors self-map via createApiHandler.
       if (err instanceof AgentSessionRuntimeConfigError || err instanceof AgentSessionWorkspaceStorageConfigError) {
         return errorResponse(err, { status: 400 }, req);
       }
-      const runtimeControlsResponse = mapRuntimeControlsError(err, req);
-      if (runtimeControlsResponse) {
-        return runtimeControlsResponse;
-      }
 
-      return errorResponse(err, { status: 500 }, req);
+      throw err;
     }
   }
 
@@ -652,9 +625,7 @@ const postHandler = async (req: NextRequest) => {
     if (err instanceof ActiveEnvironmentSessionError) {
       return errorResponse(err, { status: 409 }, req);
     }
-    if (err instanceof MissingAgentProviderApiKeyError) {
-      return errorResponse(err, { status: 400 }, req);
-    }
+    // MissingAgentProviderApiKeyError is an AppError (400) and self-maps via createApiHandler.
     if (err instanceof AgentSessionRuntimeConfigError) {
       return errorResponse(err, { status: 503 }, req);
     }

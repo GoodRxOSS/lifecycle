@@ -36,6 +36,8 @@ githubIdp:
   githubJsonFormat: true
 
 internalIdp:
+  internalUrl: http://lifecycle-keycloak-service.lifecycle-app.svc.cluster.local:8080
+  mapAdminRole: true
   users:
     bootstrapUser:
       username: lifecycle

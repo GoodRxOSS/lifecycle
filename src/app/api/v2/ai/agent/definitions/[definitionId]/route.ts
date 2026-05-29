@@ -17,10 +17,9 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import {
-  CustomAgentDefinitionServiceError,
   customAgentDefinitionService,
   serializeUserAgentDefinition,
 } from 'server/services/agent/CustomAgentDefinitionService';
@@ -45,26 +44,6 @@ const RESOURCE_BEHAVIORS = new Set<UserAgentDefinitionResourceBehavior>([
   'chat_only',
   'current_workspace_when_available',
 ]);
-
-function mapDefinitionError(error: unknown, req: NextRequest) {
-  if (error instanceof CustomAgentDefinitionServiceError) {
-    if (error.code === 'not_found') {
-      return errorResponse(error, { status: 404 }, req);
-    }
-
-    if (error.code === 'model_unavailable') {
-      return errorResponse(error, { status: 409 }, req);
-    }
-
-    if (error.code === 'creation_unavailable') {
-      return errorResponse(error, { status: 403 }, req);
-    }
-
-    return errorResponse(error, { status: 400 }, req);
-  }
-
-  throw error;
-}
 
 async function readRequestBody(req: NextRequest): Promise<Record<string, unknown> | Error> {
   let body: unknown;
@@ -316,25 +295,16 @@ function parseUpsertBody(body: Record<string, unknown>): UserAgentDefinitionUpse
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
+// CustomAgentDefinitionServiceError is an AppError; createApiHandler maps its httpStatus/code.
 const getHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
-  try {
-    const definition = await customAgentDefinitionService.getUserDefinition(params.definitionId, userIdentity.userId);
-    return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
-  } catch (error) {
-    return mapDefinitionError(error, req);
-  }
+  const definition = await customAgentDefinitionService.getUserDefinition(params.definitionId, userIdentity.userId);
+  return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
 };
 
 const patchHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await readRequestBody(req);
   if (body instanceof Error) {
@@ -346,37 +316,19 @@ const patchHandler = async (req: NextRequest, { params }: { params: { definition
     return errorResponse(input, { status: 400 }, req);
   }
 
-  try {
-    const definition = await customAgentDefinitionService.updateUserDefinition(
-      params.definitionId,
-      userIdentity,
-      input
-    );
-    return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
-  } catch (error) {
-    return mapDefinitionError(error, req);
-  }
+  const definition = await customAgentDefinitionService.updateUserDefinition(params.definitionId, userIdentity, input);
+  return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
 };
 
 const deleteHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
-  try {
-    const definition = await customAgentDefinitionService.archiveUserDefinition(
-      params.definitionId,
-      userIdentity.userId
-    );
-    return successResponse(
-      { archived: true, definition: serializeUserAgentDefinition(definition) },
-      { status: 200 },
-      req
-    );
-  } catch (error) {
-    return mapDefinitionError(error, req);
-  }
+  const definition = await customAgentDefinitionService.archiveUserDefinition(params.definitionId, userIdentity.userId);
+  return successResponse(
+    { archived: true, definition: serializeUserAgentDefinition(definition) },
+    { status: 200 },
+    req
+  );
 };
 
 export const GET = createApiHandler(getHandler);
