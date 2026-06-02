@@ -17,6 +17,7 @@
 import { merge, cloneDeep } from 'lodash';
 import { mergeKeyValueArrays } from 'shared/utils';
 import {
+  NativeBuildRegistryAuth,
   NativeHelmConfig as GlobalNativeHelmConfig,
   NativeHelmPostRendererConfig as GlobalNativeHelmPostRendererConfig,
 } from 'server/services/types/globalConfig';
@@ -43,6 +44,7 @@ export interface BuildConfig {
   engine?: BuilderEngine;
   serviceAccount?: string;
   jobTimeout?: number;
+  registryAuth?: NativeBuildRegistryAuth[];
   resources?: {
     requests?: Record<string, string>;
     limits?: Record<string, string>;

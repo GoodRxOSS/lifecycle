@@ -252,11 +252,17 @@ export type NativeHelmConfig = {
   postRenderer?: NativeHelmPostRendererConfig;
 };
 
+export type NativeBuildRegistryAuth = {
+  type: 'gar';
+  registry: string;
+};
+
 export type BuildDefaults = {
   engine?: BuilderEngine;
   jobTimeout?: number;
   serviceAccount?: string;
   cacheRegistry?: string;
+  registryAuth?: NativeBuildRegistryAuth[];
   podAnnotations?: Record<string, string>;
   resources?: {
     buildkit?: ResourceRequirements;

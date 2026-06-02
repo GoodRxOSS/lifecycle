@@ -25,6 +25,7 @@ module.exports = {
       'dd-trace',
       'knex',
       '@aws-sdk/client-s3',
+      'google-auth-library',
     ],
   },
   env: {

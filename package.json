@@ -51,6 +51,7 @@
     "fastly": "^7.0.1",
     "flatted": "^3.0.4",
     "framer-motion": "^12.23.24",
+    "google-auth-library": "^10.6.2",
     "haikunator": "^2.1.2",
     "hot-shots": "^10.0.0",
     "ioredis": "^4.27.3",

@@ -18,6 +18,7 @@ import { buildkitBuild, NativeBuildOptions, generateSecretArgsScript } from '../
 import { shellPromise } from '../../shell';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
+import { createNativeBuildRegistryAuthSecret, deleteNativeBuildRegistryAuthSecret } from '../registryAuth';
 
 // Mock dependencies
 jest.mock('../../shell');
@@ -35,6 +36,14 @@ jest.mock('../utils', () => {
   };
 });
 jest.mock('../../../services/globalConfig');
+jest.mock('../registryAuth', () => {
+  const actual = jest.requireActual('../registryAuth');
+  return {
+    ...actual,
+    createNativeBuildRegistryAuthSecret: jest.fn(),
+    deleteNativeBuildRegistryAuthSecret: jest.fn(),
+  };
+});
 jest.mock('../../../models', () => ({
   Build: {
     query: jest.fn().mockReturnValue({
@@ -109,6 +118,8 @@ describe('buildkitBuild', () => {
     });
 
     (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
 
     (shellPromise as jest.Mock).mockResolvedValue('');
 
@@ -260,6 +271,27 @@ describe('buildkitBuild', () => {
     expect(fullCommand).toContain('export AWS_RETRY_MODE=adaptive');
   });
 
+  it('preserves the existing ECR output login flow', async () => {
+    await buildkitBuild(mockDeploy, mockOptions);
+
+    const kubectlCalls = (shellPromise as jest.Mock).mock.calls;
+    const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"123456789.dkr.ecr.us-east-1.amazonaws.com\\"');
+    expect(fullCommand).toContain('Detected AWS ECR registry');
+    expect(fullCommand).toContain('AWS_REGION=$(echo \\"${REGISTRY_DOMAIN}\\" | sed');
+    expect(fullCommand).toContain('aws sts get-caller-identity');
+    expect(fullCommand).toContain('aws ecr get-login-password --region ${AWS_REGION}');
+    expect(fullCommand).toContain(
+      'echo \\"$ECR_PASSWORD\\" | docker login --username AWS --password-stdin ${REGISTRY_DOMAIN}'
+    );
+    expect(fullCommand).toContain('export DOCKER_CONFIG=~/.docker');
+    expect(fullCommand).toContain(
+      'type=image,name=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:v1.0.0,push=true'
+    );
+  });
+
   it('renders registry domain safely for non-ECR buildkit targets', async () => {
     const optionsWithCustomRegistry = {
       ...mockOptions,
@@ -342,6 +374,207 @@ describe('buildkitBuild', () => {
   });
 });
 
+describe('native build GAR registry auth', () => {
+  const garRegistry = 'us-central1-docker.pkg.dev';
+  const mockDeploy = {
+    deployable: { name: 'test-service' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  const baseOptions: NativeBuildOptions = {
+    ecrRepo: 'test-repo',
+    ecrDomain: 'registry.internal.svc.cluster.local',
+    envVars: { NODE_ENV: 'production' },
+    dockerfilePath: 'Dockerfile',
+    tag: 'v1.0.0',
+    revision: 'abc123def456789',
+    repo: 'owner/repo',
+    branch: 'main',
+    namespace: 'env-test-123',
+    buildId: '456',
+    buildUuid: 'abc123',
+    deployUuid: 'test-service-abc123',
+    jobTimeout: 1800,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        buildDefaults: {
+          cacheRegistry: `${garRegistry}/project/cache`,
+          registryAuth: [{ type: 'gar', registry: garRegistry }],
+        },
+      }),
+    });
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'Build completed successfully',
+      success: true,
+    });
+  });
+
+  it('seeds BuildKit with GAR credentials while keeping Distribution output insecure', async () => {
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const createSecretArgs = (createNativeBuildRegistryAuthSecret as jest.Mock).mock.calls[0][0];
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(createSecretArgs).toEqual(
+      expect.objectContaining({
+        namespace: 'env-test-123',
+        registryAuth: [{ type: 'gar', registry: garRegistry }],
+        buildUuid: 'abc123',
+        deployUuid: 'test-service-abc123',
+      })
+    );
+    expect(createSecretArgs.secretName).toMatch(/-registry-auth$/);
+    expect(fullCommand).toContain('name: "registry-auth-copy"');
+    expect(fullCommand).toContain(`secretName: "${createSecretArgs.secretName}"`);
+    expect(fullCommand).toContain('mountPath: "/root/.docker"');
+    expect(fullCommand).toContain(
+      'type=image,name=registry.internal.svc.cluster.local/test-repo:v1.0.0,push=true,registry.insecure=true'
+    );
+    expect(fullCommand).toContain(`type=registry,ref=${garRegistry}/project/cache/test-repo/test-service/abc123:cache`);
+    expect(fullCommand).not.toContain(
+      `type=registry,ref=${garRegistry}/project/cache/test-repo/test-service/abc123:cache,insecure=true`
+    );
+    expect(fullCommand).not.toContain('gar-access-token');
+    expect(deleteNativeBuildRegistryAuthSecret).toHaveBeenCalledWith('env-test-123', createSecretArgs.secretName);
+  });
+
+  it('keeps GAR output and cache transport secure for BuildKit', async () => {
+    await buildkitBuild(mockDeploy, {
+      ...baseOptions,
+      ecrDomain: garRegistry,
+      ecrRepo: 'project/output',
+    });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain(
+      `type=image,name=${garRegistry}/project/output:v1.0.0,push=true,oci-mediatypes=false`
+    );
+    expect(fullCommand).not.toContain(
+      `type=image,name=${garRegistry}/project/output:v1.0.0,push=true,registry.insecure=true`
+    );
+    expect(fullCommand).not.toContain(
+      `type=registry,ref=${garRegistry}/project/cache/test-repo/test-service/abc123:cache,insecure=true`
+    );
+  });
+
+  it('keeps BuildKit ECR destination login when GAR credentials are configured', async () => {
+    await buildkitBuild(mockDeploy, {
+      ...baseOptions,
+      ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('name: "registry-auth-copy"');
+    expect(fullCommand).toContain('mountPath: "/root/.docker"');
+    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"123456789.dkr.ecr.us-east-1.amazonaws.com\\"');
+    expect(fullCommand).toContain('Detected AWS ECR registry');
+    expect(fullCommand).toContain(
+      'echo \\"$ECR_PASSWORD\\" | docker login --username AWS --password-stdin ${REGISTRY_DOMAIN}'
+    );
+    expect(fullCommand).toContain(
+      'type=image,name=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:v1.0.0,push=true,registry.insecure=true'
+    );
+  });
+
+  it('cleans the temporary Secret when Job creation fails', async () => {
+    (shellPromise as jest.Mock).mockRejectedValue(new Error('kubectl apply failed'));
+
+    await expect(buildkitBuild(mockDeploy, baseOptions)).rejects.toThrow('kubectl apply failed');
+
+    const createSecretArgs = (createNativeBuildRegistryAuthSecret as jest.Mock).mock.calls[0][0];
+    expect(deleteNativeBuildRegistryAuthSecret).toHaveBeenCalledWith('env-test-123', createSecretArgs.secretName);
+  });
+
+  it('does not create a Job when temporary Secret creation fails', async () => {
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockRejectedValue(new Error('secret creation failed'));
+
+    await expect(buildkitBuild(mockDeploy, baseOptions)).rejects.toThrow('secret creation failed');
+
+    expect(shellPromise).not.toHaveBeenCalled();
+    expect(deleteNativeBuildRegistryAuthSecret).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid GAR configuration before creating a Secret or Job', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        buildDefaults: {
+          registryAuth: [{ type: 'gar', registry: 'https://us-central1-docker.pkg.dev/project/repo' }],
+        },
+      }),
+    });
+
+    await expect(buildkitBuild(mockDeploy, baseOptions)).rejects.toThrow('Build: invalid GAR registry');
+
+    expect(createNativeBuildRegistryAuthSecret).not.toHaveBeenCalled();
+    expect(shellPromise).not.toHaveBeenCalled();
+  });
+
+  it('seeds Kaniko with GAR credentials without overwriting them for Distribution output', async () => {
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, baseOptions);
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('name: "registry-auth-copy"');
+    expect(fullCommand).not.toContain('name: "registry-login"');
+    expect(fullCommand).toContain('mountPath: "/kaniko/.docker"');
+    expect(fullCommand).toContain('--insecure-registry=registry.internal.svc.cluster.local');
+    expect(fullCommand).not.toContain(`--insecure-registry=${garRegistry}`);
+  });
+
+  it('keeps GAR output and cache transport secure for Kaniko', async () => {
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, {
+      ...baseOptions,
+      ecrDomain: garRegistry,
+      ecrRepo: 'project/output',
+    });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).not.toContain('--insecure-registry');
+    expect(fullCommand).not.toContain('name: "registry-login"');
+    expect(fullCommand).toContain(`--destination=${garRegistry}/project/output:v1.0.0`);
+  });
+
+  it('merges GAR credentials with ECR output credentials for Kaniko only when GAR is configured', async () => {
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, {
+      ...baseOptions,
+      ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(fullCommand).toContain('name: "registry-auth-copy"');
+    expect(fullCommand).toContain('name: "registry-login"');
+    expect(fullCommand).toContain('> /docker-config/ecr-config.json');
+    expect(fullCommand).toContain('name: "registry-auth-merge"');
+    expect(fullCommand).toContain('apk add --no-cache jq');
+    expect(fullCommand).toContain(
+      "jq -s '.[0] * .[1]' /docker-config/config.json /docker-config/ecr-config.json > /docker-config/config.json.tmp"
+    );
+    expect(fullCommand).not.toContain('--insecure-registry');
+  });
+});
+
 describe('build resource precedence', () => {
   const mockDeploy = {
     deployable: { name: 'test-service' },
@@ -367,6 +600,8 @@ describe('build resource precedence', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
     (shellPromise as jest.Mock).mockResolvedValue('');
     (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
       logs: 'Build completed successfully',
@@ -542,6 +777,8 @@ describe('build pod annotations', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
     (shellPromise as jest.Mock).mockResolvedValue('');
     (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
       logs: 'Build completed successfully',
@@ -732,6 +969,13 @@ describe('kaniko registry login bootstrap', () => {
     expect(fullCommand).toContain('export AWS_MAX_ATTEMPTS=5');
     expect(fullCommand).toContain('export AWS_RETRY_MODE=adaptive');
     expect(fullCommand).toContain('aws ecr get-login-password --region us-east-1');
+    expect(fullCommand).toContain(
+      'echo \'{\\"auths\\":{\\"123456789.dkr.ecr.us-east-1.amazonaws.com\\":{\\"auth\\":\\"\'$(echo -n \\"AWS:$PASSWORD\\" | base64)\'\\"}}}\' > /workspace/.docker/config.json'
+    );
+    expect(fullCommand).toContain('mountPath: "/kaniko/.docker"');
+    expect(fullCommand).toContain('subPath: ".docker"');
+    expect(fullCommand).toContain('name: "DOCKER_CONFIG"');
+    expect(fullCommand).toContain('value: "/kaniko/.docker"');
   });
 
   it('keeps non-ECR login bootstrap generic', async () => {

@@ -28,6 +28,21 @@ import { createBuildJob } from '../kubernetes/jobFactory';
 import { buildNativeBuildJobName } from '../kubernetes/jobNames';
 import * as yaml from 'js-yaml';
 import { getLogArchivalService } from '../../services/logArchival';
+import {
+  buildNativeBuildRegistryAuthSecretName,
+  createKanikoRegistryAuthMergeInitContainer,
+  createNativeBuildRegistryAuthSecret,
+  createRegistryAuthCopyInitContainer,
+  createRegistryAuthVolumes,
+  deleteNativeBuildRegistryAuthSecret,
+  DOCKER_CONFIG_MOUNT_PATH,
+  DOCKER_CONFIG_VOLUME_NAME,
+  GarRegistryAuth,
+  getKanikoInsecureRegistries,
+  isConfiguredGarRegistry,
+  KANIKO_DOCKER_CONFIG_MOUNT_PATH,
+  normalizeNativeBuildRegistryAuth,
+} from './registryAuth';
 
 export interface NativeBuildOptions {
   ecrRepo: string;
@@ -64,7 +79,7 @@ interface BuildEngine {
   createArgs: (options: BuildArgOptions) => string[];
   envVars?: Record<string, string>;
   // eslint-disable-next-line no-unused-vars
-  getCacheRef: (cacheRegistry: string, ecrRepo: string) => string;
+  getCacheRef: (cacheRegistry: string | undefined, ecrRepo: string) => string;
 }
 
 interface BuildArgOptions {
@@ -74,6 +89,7 @@ interface BuildArgOptions {
   cacheRef: string;
   buildArgs: Record<string, string>;
   ecrDomain: string;
+  registryAuth?: GarRegistryAuth[];
   secretEnvKeys?: string[];
 }
 
@@ -94,7 +110,18 @@ const ENGINES: Record<string, BuildEngine> = {
     name: 'buildkit',
     image: 'moby/buildkit:v0.29.0',
     command: ['/bin/sh', '-c'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, ecrDomain, secretEnvKeys }) => {
+    createArgs: ({
+      contextPath,
+      dockerfilePath,
+      destination,
+      cacheRef,
+      buildArgs,
+      ecrDomain,
+      registryAuth = [],
+      secretEnvKeys,
+    }) => {
+      const outputInsecureOption = isConfiguredGarRegistry(destination, registryAuth) ? '' : ',registry.insecure=true';
+      const cacheInsecureOption = isConfiguredGarRegistry(cacheRef, registryAuth) ? '' : ',insecure=true';
       const buildctlArgs = [
         'build',
         '--frontend',
@@ -106,11 +133,11 @@ const ENGINES: Record<string, BuildEngine> = {
         '--opt',
         `filename=${dockerfilePath}`,
         '--output',
-        `type=image,name=${destination},push=true,registry.insecure=true,oci-mediatypes=false`,
+        `type=image,name=${destination},push=true${outputInsecureOption},oci-mediatypes=false`,
         '--export-cache',
-        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true,insecure=true`,
+        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true${cacheInsecureOption}`,
         '--import-cache',
-        `type=registry,ref=${cacheRef},insecure=true`,
+        `type=registry,ref=${cacheRef}${cacheInsecureOption}`,
       ];
 
       Object.entries(buildArgs).forEach(([key, value]) => {
@@ -176,14 +203,20 @@ buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
     name: 'kaniko',
     image: 'gcr.io/kaniko-project/executor:v1.9.2',
     command: ['/kaniko/executor'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs }) => {
+    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, registryAuth = [] }) => {
+      const insecureRegistryArgs =
+        registryAuth.length === 0
+          ? ['--insecure-registry']
+          : getKanikoInsecureRegistries([destination, cacheRef], registryAuth).map(
+              (registry) => `--insecure-registry=${registry}`
+            );
       const args = [
         `--context=${contextPath}`,
         `--dockerfile=${contextPath}/${dockerfilePath}`,
         `--destination=${destination}`,
         '--cache=true',
         `--cache-repo=${cacheRef}`,
-        '--insecure-registry',
+        ...insecureRegistryArgs,
         '--push-retry=3',
         '--snapshot-mode=time',
       ];
@@ -216,7 +249,8 @@ function createBuildContainer(
   buildArgs: Record<string, string>,
   ecrDomain: string,
   secretRefs?: string[],
-  secretEnvKeys?: string[]
+  secretEnvKeys?: string[],
+  registryAuth: GarRegistryAuth[] = []
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -225,6 +259,7 @@ function createBuildContainer(
     cacheRef,
     buildArgs,
     ecrDomain,
+    registryAuth,
     secretEnvKeys,
   });
 
@@ -237,13 +272,22 @@ function createBuildContainer(
     },
   ];
 
-  if (engine.name === 'kaniko') {
+  if (engine.name === 'kaniko' && registryAuth.length === 0) {
     volumeMounts.push({
       name: 'workspace',
-      mountPath: '/kaniko/.docker',
+      mountPath: KANIKO_DOCKER_CONFIG_MOUNT_PATH,
       subPath: '.docker',
     } as any);
-    containerEnvVars['DOCKER_CONFIG'] = '/kaniko/.docker';
+    containerEnvVars['DOCKER_CONFIG'] = KANIKO_DOCKER_CONFIG_MOUNT_PATH;
+  } else if (registryAuth.length > 0) {
+    volumeMounts.push({
+      name: DOCKER_CONFIG_VOLUME_NAME,
+      mountPath: engine.name === 'kaniko' ? KANIKO_DOCKER_CONFIG_MOUNT_PATH : '/root/.docker',
+    } as any);
+
+    if (engine.name === 'kaniko') {
+      containerEnvVars['DOCKER_CONFIG'] = KANIKO_DOCKER_CONFIG_MOUNT_PATH;
+    }
   }
 
   const container: any = {
@@ -276,6 +320,7 @@ export async function buildWithEngine(
   const engine = ENGINES[engineName];
   const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
   const buildDefaults = globalConfig.buildDefaults || {};
+  const registryAuth = normalizeNativeBuildRegistryAuth(buildDefaults.registryAuth);
 
   const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
@@ -297,6 +342,14 @@ export async function buildWithEngine(
     jobId,
     shortSha,
   });
+  const registryAuthSecretName =
+    registryAuth.length > 0
+      ? buildNativeBuildRegistryAuthSecretName({
+          deployUuid: options.deployUuid,
+          jobId,
+          shortSha,
+        })
+      : undefined;
   const contextPath = `/workspace/repo-${shortRepoName}`;
 
   getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath}`);
@@ -319,12 +372,15 @@ export async function buildWithEngine(
   const ecrMatch = registryDomain.match(ecrRegex);
   if (ecrMatch) {
     const region = ecrMatch[1] || 'us-west-2';
+    const dockerConfigDirectory = registryAuth.length > 0 ? DOCKER_CONFIG_MOUNT_PATH : '/workspace/.docker';
+    const dockerConfigPath =
+      registryAuth.length > 0 ? `${DOCKER_CONFIG_MOUNT_PATH}/ecr-config.json` : '/workspace/.docker/config.json';
     registryLoginScript = [
       'set -e',
       'export AWS_MAX_ATTEMPTS=5',
       'export AWS_RETRY_MODE=adaptive',
-      `aws ecr get-login-password --region ${region} | { read PASSWORD; mkdir -p /workspace/.docker && ` +
-        `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > /workspace/.docker/config.json; }`,
+      `aws ecr get-login-password --region ${region} | { read PASSWORD; mkdir -p ${dockerConfigDirectory} && ` +
+        `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > ${dockerConfigPath}; }`,
     ].join('\n');
   } else {
     registryLoginScript =
@@ -340,8 +396,8 @@ export async function buildWithEngine(
     env: [{ name: 'AWS_REGION', value: process.env.AWS_REGION || 'us-west-2' }],
     volumeMounts: [
       {
-        name: 'workspace',
-        mountPath: '/workspace',
+        name: registryAuth.length > 0 ? DOCKER_CONFIG_VOLUME_NAME : 'workspace',
+        mountPath: registryAuth.length > 0 ? DOCKER_CONFIG_MOUNT_PATH : '/workspace',
       },
     ],
   };
@@ -362,7 +418,7 @@ export async function buildWithEngine(
     };
   }
 
-  const containers = [];
+  const containers: any[] = [];
   let cacheRef = engine.getCacheRef(cacheRegistry, options.ecrRepo);
 
   // Scope cache per service + build-uuid to prevent concurrent PR builds from corrupting shared cache entries
@@ -384,7 +440,8 @@ export async function buildWithEngine(
       options.envVars,
       options.ecrDomain,
       options.secretRefs,
-      options.secretEnvKeys
+      options.secretEnvKeys,
+      registryAuth
     )
   );
 
@@ -403,7 +460,8 @@ export async function buildWithEngine(
         options.envVars,
         options.ecrDomain,
         options.secretRefs,
-        options.secretEnvKeys
+        options.secretEnvKeys,
+        registryAuth
       )
     );
     getLogger().debug('Build: including init image');
@@ -412,8 +470,23 @@ export async function buildWithEngine(
   await deploy.$fetchGraph('build');
   const isStatic = deploy.build?.isStatic || false;
 
-  // For buildkit, only git clone is needed. For kaniko, we need registry login too.
-  const initContainers = engineName === 'buildkit' ? [gitCloneContainer] : [gitCloneContainer, registryLoginContainer];
+  const registryAuthInitContainers = registryAuthSecretName ? [createRegistryAuthCopyInitContainer()] : [];
+  let initContainers;
+
+  if (engineName === 'buildkit') {
+    initContainers = [gitCloneContainer, ...registryAuthInitContainers];
+  } else if (registryAuth.length === 0) {
+    initContainers = [gitCloneContainer, registryLoginContainer];
+  } else if (ecrMatch) {
+    initContainers = [
+      gitCloneContainer,
+      ...registryAuthInitContainers,
+      registryLoginContainer,
+      createKanikoRegistryAuthMergeInitContainer(),
+    ];
+  } else {
+    initContainers = [gitCloneContainer, ...registryAuthInitContainers];
+  }
 
   const job = createBuildJob({
     jobName,
@@ -436,93 +509,115 @@ export async function buildWithEngine(
         name: 'workspace',
         emptyDir: {},
       },
+      ...(registryAuthSecretName ? createRegistryAuthVolumes(registryAuthSecretName) : []),
     ],
     podAnnotations,
   });
 
   const jobYaml = yaml.dump(job, { quotingType: '"', forceQuotes: true });
-  await shellPromise(`cat <<'EOF' | kubectl apply -f -
-${jobYaml}
-EOF`);
-  getLogger().debug(`Job: created ${jobName}`);
-
   const logArchivalEnabled = globalConfig.logArchival?.enabled;
+  let registryAuthSecretCreated = false;
 
   try {
-    const { logs, success, startedAt, completedAt, duration } = await waitForJobAndGetLogs(
-      jobName,
-      options.namespace,
-      jobTimeout
-    );
-
-    if (logArchivalEnabled) {
-      try {
-        const archivalService = getLogArchivalService();
-        await archivalService.archiveLogs(
-          {
-            jobName,
-            jobType: 'build',
-            serviceName,
-            namespace: options.namespace,
-            status: success ? 'Complete' : 'Failed',
-            sha: options.revision,
-            deployUuid: options.deployUuid,
-            buildUuid: options.buildId,
-            engine: engineName,
-            startedAt,
-            completedAt,
-            duration,
-            archivedAt: new Date().toISOString(),
-          },
-          logs
-        );
-      } catch (archiveError) {
-        getLogger().warn({ error: archiveError }, `LogArchival: failed to archive build logs jobName=${jobName}`);
-      }
+    if (registryAuthSecretName) {
+      await createNativeBuildRegistryAuthSecret({
+        namespace: options.namespace,
+        secretName: registryAuthSecretName,
+        registryAuth,
+        buildUuid: options.buildUuid,
+        deployUuid: options.deployUuid,
+      });
+      registryAuthSecretCreated = true;
     }
 
-    return { success, logs, jobName };
-  } catch (error) {
-    getLogger({ error }).error(`Job: log retrieval failed name=${jobName}`);
+    await shellPromise(`cat <<'EOF' | kubectl apply -f -
+${jobYaml}
+EOF`);
+    getLogger().debug(`Job: created ${jobName}`);
 
     try {
-      const jobStatus = await shellPromise(
-        `kubectl get job ${jobName} -n ${options.namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'`
+      const { logs, success, startedAt, completedAt, duration } = await waitForJobAndGetLogs(
+        jobName,
+        options.namespace,
+        jobTimeout
       );
-      const jobSucceeded = jobStatus.trim() === 'True';
 
-      if (jobSucceeded) {
-        getLogger().debug(`Job: completed (logs unavailable) job=${jobName}`);
-        return { success: true, logs: 'Log retrieval failed but job completed successfully', jobName };
+      if (logArchivalEnabled) {
+        try {
+          const archivalService = getLogArchivalService();
+          await archivalService.archiveLogs(
+            {
+              jobName,
+              jobType: 'build',
+              serviceName,
+              namespace: options.namespace,
+              status: success ? 'Complete' : 'Failed',
+              sha: options.revision,
+              deployUuid: options.deployUuid,
+              buildUuid: options.buildId,
+              engine: engineName,
+              startedAt,
+              completedAt,
+              duration,
+              archivedAt: new Date().toISOString(),
+            },
+            logs
+          );
+        } catch (archiveError) {
+          getLogger().warn({ error: archiveError }, `LogArchival: failed to archive build logs jobName=${jobName}`);
+        }
       }
-    } catch (statusError) {
-      getLogger({ error: statusError }).error(`Job: status check failed name=${jobName}`);
-    }
 
-    if (logArchivalEnabled) {
+      return { success, logs, jobName };
+    } catch (error) {
+      getLogger({ error }).error(`Job: log retrieval failed name=${jobName}`);
+
       try {
-        const archivalService = getLogArchivalService();
-        await archivalService.archiveLogs(
-          {
-            jobName,
-            jobType: 'build',
-            serviceName,
-            namespace: options.namespace,
-            status: 'Failed',
-            sha: options.revision,
-            deployUuid: options.deployUuid,
-            buildUuid: options.buildId,
-            engine: engineName,
-            archivedAt: new Date().toISOString(),
-          },
-          `Build failed: ${error.message}`
+        const jobStatus = await shellPromise(
+          `kubectl get job ${jobName} -n ${options.namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}'`
         );
-      } catch (archiveError) {
-        getLogger().warn({ error: archiveError }, `LogArchival: failed to archive build error logs jobName=${jobName}`);
-      }
-    }
+        const jobSucceeded = jobStatus.trim() === 'True';
 
-    return { success: false, logs: `Build failed: ${error.message}`, jobName };
+        if (jobSucceeded) {
+          getLogger().debug(`Job: completed (logs unavailable) job=${jobName}`);
+          return { success: true, logs: 'Log retrieval failed but job completed successfully', jobName };
+        }
+      } catch (statusError) {
+        getLogger({ error: statusError }).error(`Job: status check failed name=${jobName}`);
+      }
+
+      if (logArchivalEnabled) {
+        try {
+          const archivalService = getLogArchivalService();
+          await archivalService.archiveLogs(
+            {
+              jobName,
+              jobType: 'build',
+              serviceName,
+              namespace: options.namespace,
+              status: 'Failed',
+              sha: options.revision,
+              deployUuid: options.deployUuid,
+              buildUuid: options.buildId,
+              engine: engineName,
+              archivedAt: new Date().toISOString(),
+            },
+            `Build failed: ${error.message}`
+          );
+        } catch (archiveError) {
+          getLogger().warn(
+            { error: archiveError },
+            `LogArchival: failed to archive build error logs jobName=${jobName}`
+          );
+        }
+      }
+
+      return { success: false, logs: `Build failed: ${error.message}`, jobName };
+    }
+  } finally {
+    if (registryAuthSecretCreated && registryAuthSecretName) {
+      await deleteNativeBuildRegistryAuthSecret(options.namespace, registryAuthSecretName);
+    }
   }
 }
 
