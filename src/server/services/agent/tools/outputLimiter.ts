@@ -17,6 +17,11 @@
 const DEFAULT_MAX_CHARS = 30000;
 const MARKER_RESERVE = 200;
 
+// Signals that usually carry the actual failure in long logs.
+const ERROR_SIGNAL_RE =
+  /\b(error|fatal|exception|panic|traceback|failed|cannot|denied|segfault|oom(killed)?|exit code|stack trace|unhandled)\b/i;
+const ERROR_WINDOW = 20; // lines retained around the last error signal
+
 function makeMarker(kept: number, total: number): string {
   return `\n[Truncated: showing ${kept} of ${total} chars — use tighter filters to get specific data]`;
 }
@@ -84,7 +89,9 @@ export class OutputLimiter {
     content: string,
     maxChars: number = DEFAULT_MAX_CHARS,
     headLines: number = 50,
-    tailLines: number = 100
+    tailLines: number = 100,
+    // Retain a window around the last error signal in the dropped middle.
+    retainErrorRegion: boolean = true
   ): string {
     const lines = content.split('\n');
     if (lines.length <= headLines + tailLines) {
@@ -92,16 +99,73 @@ export class OutputLimiter {
       return OutputLimiter.truncate(content, maxChars);
     }
 
-    const head = lines.slice(0, headLines);
-    const tail = lines.slice(-tailLines);
-    const omitted = lines.length - headLines - tailLines;
-    const marker = `\n... [Truncated: ${omitted} lines omitted of ${lines.length} total] ...\n`;
-    const result = head.join('\n') + marker + tail.join('\n');
+    const headEnd = headLines;
+    const tailStart = lines.length - tailLines;
 
-    if (result.length > maxChars) {
-      return OutputLimiter.truncate(result, maxChars);
+    // Find the last error-signal line that falls in the omitted middle.
+    let errorIdx = -1;
+    if (retainErrorRegion) {
+      for (let i = tailStart - 1; i >= headEnd; i--) {
+        if (ERROR_SIGNAL_RE.test(lines[i])) {
+          errorIdx = i;
+          break;
+        }
+      }
     }
-    return result;
+
+    if (errorIdx === -1) {
+      const head = lines.slice(0, headLines);
+      const tail = lines.slice(-tailLines);
+      const omitted = lines.length - headLines - tailLines;
+      const marker = `\n... [Truncated: ${omitted} lines omitted of ${lines.length} total] ...\n`;
+      const result = head.join('\n') + marker + tail.join('\n');
+      return result.length > maxChars ? OutputLimiter.truncate(result, maxChars) : result;
+    }
+
+    return OutputLimiter.buildWithErrorRegion(lines, headLines, tailLines, errorIdx, maxChars);
+  }
+
+  // Splice an error-region window between head and tail, trimming head/tail to stay under the cap.
+  private static buildWithErrorRegion(
+    lines: string[],
+    headLines: number,
+    tailLines: number,
+    errorIdx: number,
+    maxChars: number
+  ): string {
+    const half = Math.floor(ERROR_WINDOW / 2);
+    const total = lines.length;
+
+    const render = (h: number, t: number): string => {
+      const errStart = Math.max(h, errorIdx - half);
+      const errEnd = Math.min(total - t, errorIdx + half + 1);
+      const head = lines.slice(0, h);
+      const errRegion = lines.slice(errStart, errEnd);
+      const tail = lines.slice(total - t);
+
+      const headOmitted = errStart - h;
+      const tailOmitted = total - t - errEnd;
+      const errMarker = `\n... [retained error region — ${errRegion.length} lines around last error signal] ...\n`;
+      const parts = [head.join('\n')];
+      if (headOmitted > 0) parts.push(`\n... [Truncated: ${headOmitted} lines omitted] ...`);
+      parts.push(errMarker + errRegion.join('\n'));
+      if (tailOmitted > 0) parts.push(`\n... [Truncated: ${tailOmitted} lines omitted] ...\n`);
+      else parts.push('\n');
+      parts.push(tail.join('\n'));
+      return parts.join('');
+    };
+
+    let h = headLines;
+    let t = tailLines;
+    let result = render(h, t);
+    // Trim head/tail proportionally until under the cap (error region is never dropped).
+    while (result.length > maxChars && (h > 5 || t > 5)) {
+      if (h > 5) h = Math.max(5, h - Math.ceil(h * 0.25));
+      if (t > 5) t = Math.max(5, t - Math.ceil(t * 0.25));
+      result = render(h, t);
+    }
+
+    return result.length > maxChars ? OutputLimiter.truncate(result, maxChars) : result;
   }
 
   static truncateJsonSafely(jsonString: string, maxChars: number = DEFAULT_MAX_CHARS): string {

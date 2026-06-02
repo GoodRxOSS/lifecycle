@@ -19,6 +19,7 @@ const mockListTools = jest.fn();
 const mockClose = jest.fn();
 const mockListMaskedStatesByScopes = jest.fn();
 const mockListDecryptedConnectionsByScopes = jest.fn();
+const mockUpsertConnection = jest.fn();
 
 jest.mock('../client', () => ({
   McpClientManager: jest.fn().mockImplementation(() => ({
@@ -37,6 +38,7 @@ jest.mock('server/services/userMcpConnection', () => ({
   default: {
     listMaskedStatesByScopes: (...args: unknown[]) => mockListMaskedStatesByScopes(...args),
     listDecryptedConnectionsByScopes: (...args: unknown[]) => mockListDecryptedConnectionsByScopes(...args),
+    upsertConnection: (...args: unknown[]) => mockUpsertConnection(...args),
   },
 }));
 
@@ -353,6 +355,102 @@ describe('McpConfigService', () => {
       } as any);
 
       expect(result).toEqual([]);
+    });
+
+    it('persists refreshed OAuth tokens through the resolved auth provider', async () => {
+      const globalConfig = {
+        slug: 'sample-oauth',
+        name: 'Sample OAuth',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+        sharedConfig: {},
+        authConfig: {
+          mode: 'oauth',
+          provider: 'generic-oauth2.1',
+          scope: 'sample.read',
+        },
+        timeout: 30000,
+        sharedDiscoveredTools: [],
+      };
+      const discoveredTools = [{ name: 'userTool', inputSchema: {} }];
+
+      MockModel.query
+        .mockReturnValueOnce({
+          where: jest.fn().mockReturnValue({
+            whereNull: jest.fn().mockResolvedValue([globalConfig]),
+          }),
+        })
+        .mockReturnValueOnce({
+          where: jest.fn().mockReturnValue({
+            whereNull: jest.fn().mockResolvedValue([]),
+          }),
+        });
+
+      mockListDecryptedConnectionsByScopes.mockResolvedValue(
+        new Map([
+          [
+            'global:sample-oauth',
+            {
+              state: {
+                type: 'oauth',
+                tokens: {
+                  access_token: 'expired-access-token',
+                  refresh_token: 'sample-refresh-token',
+                  token_type: 'Bearer',
+                },
+                clientInformation: {
+                  client_id: 'sample-client-id',
+                  client_secret: 'sample-client-secret',
+                },
+              },
+              discoveredTools,
+              validationError: null,
+              validatedAt: '2026-04-06T16:00:00.000Z',
+              updatedAt: '2026-04-06T16:00:00.000Z',
+            },
+          ],
+        ])
+      );
+
+      const result = await service.resolveServersForRepo('example-org/example-repo', undefined, {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+      } as any);
+      const authProvider = result[0]?.transport.type === 'http' ? result[0].transport.authProvider : undefined;
+
+      expect(authProvider).toBeDefined();
+      await expect(authProvider?.tokens()).resolves.toMatchObject({
+        access_token: 'expired-access-token',
+        refresh_token: 'sample-refresh-token',
+      });
+
+      await authProvider?.saveTokens({
+        access_token: 'fresh-access-token',
+        refresh_token: 'sample-refresh-token',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      });
+
+      expect(mockUpsertConnection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'sample-user',
+          ownerGithubUsername: 'sample-user',
+          scope: 'global',
+          slug: 'sample-oauth',
+          discoveredTools,
+          validationError: null,
+          validatedAt: '2026-04-06T16:00:00.000Z',
+          state: expect.objectContaining({
+            type: 'oauth',
+            tokens: expect.objectContaining({
+              access_token: 'fresh-access-token',
+              refresh_token: 'sample-refresh-token',
+              token_type: 'Bearer',
+              expires_in: 3600,
+            }),
+          }),
+        })
+      );
     });
   });
 

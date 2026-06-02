@@ -55,6 +55,13 @@ describe('DatabaseClient diagnostic schema', () => {
     const countQuery = createQuery(records);
     const dataQuery = createQuery(records);
     const { client } = createClientWithQueries(dataQuery, countQuery);
+    client.setBuildScope({
+      buildId: 1,
+      buildUuid: 'sample-build',
+      pullRequestId: 11,
+      environmentId: 1,
+      repositoryIds: [1],
+    });
 
     await client.queryTable({
       table: 'builds',
@@ -73,6 +80,13 @@ describe('DatabaseClient diagnostic schema', () => {
     const countQuery = createQuery([]);
     const dataQuery = createQuery([]);
     const { client } = createClientWithQueries(dataQuery, countQuery);
+    client.setBuildScope({
+      buildId: 1,
+      buildUuid: 'sample-build',
+      pullRequestId: 11,
+      environmentId: 1,
+      repositoryIds: [1],
+    });
 
     await expect(
       client.queryTable({
@@ -87,6 +101,13 @@ describe('DatabaseClient diagnostic schema', () => {
     const countQuery = createQuery([]);
     const dataQuery = createQuery([]);
     const { client } = createClientWithQueries(dataQuery, countQuery);
+    client.setBuildScope({
+      buildId: 1,
+      buildUuid: 'sample-build',
+      pullRequestId: 11,
+      environmentId: 1,
+      repositoryIds: [1],
+    });
 
     await expect(
       client.queryTable({

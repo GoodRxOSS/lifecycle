@@ -18,14 +18,11 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
-import AgentSelectionService, { AgentThreadAgentSwitchError } from 'server/services/agent/AgentSelectionService';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import AgentSelectionService from 'server/services/agent/AgentSelectionService';
 
+// AgentThreadAgentSwitchError self-maps via createApiHandler; only plain not-found Errors need mapping here.
 function mapAgentSelectionError(error: unknown, req: NextRequest) {
-  if (error instanceof AgentThreadAgentSwitchError) {
-    return errorResponse(error, { status: error.reason === 'unknown_agent' ? 400 : 409 }, req);
-  }
-
   if (
     error instanceof Error &&
     (error.message === 'Agent thread not found' || error.message === 'Agent session not found')
@@ -97,10 +94,7 @@ function mapAgentSelectionError(error: unknown, req: NextRequest) {
  *                       $ref: '#/components/schemas/SwitchAgentSelectionResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   try {
     const state = await AgentSelectionService.getThreadAgentState({ threadId: params.threadId, userIdentity });
@@ -111,10 +105,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { threadId: st
 };
 
 const patchHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => ({}));
   if (!body || typeof body !== 'object' || Array.isArray(body)) {

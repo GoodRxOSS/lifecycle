@@ -31,10 +31,10 @@ jest.mock('server/models/AgentRunEvent', () => ({
 }));
 
 jest.mock('server/lib/agentSession/runtimeConfig', () => {
-  const actual = jest.requireActual('server/lib/agentSession/runtimeConfig');
   return {
     __esModule: true,
-    ...actual,
+    DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES: 64 * 1024,
+    DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES: 16 * 1024,
     resolveAgentSessionDurabilityConfig: jest.fn().mockResolvedValue({
       runExecutionLeaseMs: 30 * 60 * 1000,
       queuedRunDispatchStaleMs: 30 * 1000,
@@ -48,7 +48,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 
 import AgentRun from 'server/models/AgentRun';
 import AgentRunEvent from 'server/models/AgentRunEvent';
-import AgentRunEventService from '../RunEventService';
+import AgentRunEventService, { RUN_EVENT_STREAM_POLL_INTERVAL_MS } from '../RunEventService';
 import { AgentRunOwnershipLostError } from '../AgentRunOwnershipLostError';
 
 const mockRunQuery = AgentRun.query as jest.Mock;
@@ -67,6 +67,10 @@ describe('AgentRunEventService', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('keeps the fallback stream poll cadence live enough for reasoning chunks', () => {
+    expect(RUN_EVENT_STREAM_POLL_INTERVAL_MS).toBeLessThanOrEqual(500);
   });
 
   it('loads run events after a sequence cursor with one extra row for hasMore', async () => {
@@ -731,7 +735,7 @@ describe('AgentRunEventService', () => {
     expect(text).toContain('id: 2\nevent: run.completed');
   });
 
-  it('waits once for the terminal event when terminal status is visible first', async () => {
+  it('drains the terminal event and closes without polling when terminal status is visible', async () => {
     const terminalEvent = {
       uuid: 'event-2',
       runUuid: 'run-1',
@@ -746,113 +750,18 @@ describe('AgentRunEventService', () => {
       createdAt: null,
       updatedAt: null,
     } as any;
-    const listRunEventsPage = jest
-      .spyOn(AgentRunEventService, 'listRunEventsPage')
-      .mockResolvedValueOnce({
-        events: [],
-        nextSequence: 1,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'running',
-        },
-        limit: 100,
-        maxLimit: 500,
-      })
-      .mockResolvedValueOnce({
-        events: [],
-        nextSequence: 1,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'completed',
-        },
-        limit: 100,
-        maxLimit: 500,
-      })
-      .mockResolvedValueOnce({
-        events: [terminalEvent],
-        nextSequence: 2,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'completed',
-        },
-        limit: 100,
-        maxLimit: 500,
-      });
-    const waitForRunEventNotification = jest
-      .spyOn(AgentRunEventService, 'waitForRunEventNotification')
-      .mockResolvedValue(true);
-    mockRunQuery.mockReturnValue({
-      findOne: jest.fn().mockResolvedValue({
-        uuid: 'run-1',
+    // Terminal status + event are atomic, so the first drain emits the terminal event and closes without waiting.
+    const listRunEventsPage = jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue({
+      events: [terminalEvent],
+      nextSequence: 2,
+      hasMore: false,
+      run: {
+        id: 'run-1',
         status: 'completed',
-      }),
-    });
-
-    const text = await new Response(
-      AgentRunEventService.createCanonicalRunEventStream('run-1', 1, { pollIntervalMs: 10 })
-    ).text();
-
-    expect(waitForRunEventNotification).toHaveBeenCalledWith('run-1', 1, 10);
-    expect(listRunEventsPage).toHaveBeenNthCalledWith(3, 'run-1', {
-      afterSequence: 1,
+      },
       limit: 100,
+      maxLimit: 500,
     });
-    expect(text).toContain('id: 2\nevent: run.completed');
-  });
-
-  it('keeps following terminal runs until a terminal event is available', async () => {
-    const terminalEvent = {
-      uuid: 'event-2',
-      runUuid: 'run-1',
-      threadUuid: 'thread-1',
-      sessionUuid: 'session-1',
-      runId: 17,
-      sequence: 2,
-      eventType: 'run.completed',
-      payload: {
-        status: 'completed',
-      },
-      createdAt: null,
-      updatedAt: null,
-    } as any;
-    const listRunEventsPage = jest
-      .spyOn(AgentRunEventService, 'listRunEventsPage')
-      .mockResolvedValueOnce({
-        events: [],
-        nextSequence: 1,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'running',
-        },
-        limit: 100,
-        maxLimit: 500,
-      })
-      .mockResolvedValueOnce({
-        events: [],
-        nextSequence: 1,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'completed',
-        },
-        limit: 100,
-        maxLimit: 500,
-      })
-      .mockResolvedValueOnce({
-        events: [terminalEvent],
-        nextSequence: 2,
-        hasMore: false,
-        run: {
-          id: 'run-1',
-          status: 'completed',
-        },
-        limit: 100,
-        maxLimit: 500,
-      });
     const waitForRunEventNotification = jest
       .spyOn(AgentRunEventService, 'waitForRunEventNotification')
       .mockResolvedValue(false);
@@ -867,8 +776,50 @@ describe('AgentRunEventService', () => {
       AgentRunEventService.createCanonicalRunEventStream('run-1', 1, { pollIntervalMs: 10 })
     ).text();
 
-    expect(waitForRunEventNotification).toHaveBeenCalledWith('run-1', 1, 10);
-    expect(listRunEventsPage).toHaveBeenCalledTimes(3);
+    expect(waitForRunEventNotification).not.toHaveBeenCalled();
+    expect(listRunEventsPage).toHaveBeenCalledTimes(1);
     expect(text).toContain('id: 2\nevent: run.completed');
+  });
+
+  it('self-heals a terminal run that is missing its terminal event, then closes', async () => {
+    // Terminal status with no terminal event (crash / legacy non-atomic write) must not poll forever: repair and close.
+    const ensureTerminal = jest
+      .spyOn(
+        AgentRunEventService as unknown as {
+          ensureTerminalEventForTerminalRun: (runUuid: string) => Promise<boolean>;
+        },
+        'ensureTerminalEventForTerminalRun'
+      )
+      .mockResolvedValue(false);
+    const listRunEventsPage = jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue({
+      events: [],
+      nextSequence: 1,
+      hasMore: false,
+      run: {
+        id: 'run-1',
+        status: 'completed',
+      },
+      limit: 100,
+      maxLimit: 500,
+    });
+    const waitForRunEventNotification = jest
+      .spyOn(AgentRunEventService, 'waitForRunEventNotification')
+      .mockResolvedValue(false);
+    mockRunQuery.mockReturnValue({
+      findOne: jest.fn().mockResolvedValue({
+        uuid: 'run-1',
+        status: 'completed',
+      }),
+    });
+
+    const text = await new Response(
+      AgentRunEventService.createCanonicalRunEventStream('run-1', 1, { pollIntervalMs: 10 })
+    ).text();
+
+    expect(ensureTerminal).toHaveBeenCalledWith('run-1');
+    expect(waitForRunEventNotification).not.toHaveBeenCalled();
+    expect(listRunEventsPage).toHaveBeenCalled();
+    expect(typeof text).toBe('string');
+    ensureTerminal.mockRestore();
   });
 });

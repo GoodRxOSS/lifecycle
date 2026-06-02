@@ -44,4 +44,10 @@ if [ "${LIFECYCLE_MODE:-all}" != "job" ]; then
   fi
 fi
 
+# LIFECYCLE_SERVE=prod: serve the built bundle for incremental SSE; dev's on-demand compile batches reasoning replays.
+if [ "${LIFECYCLE_SERVE:-dev}" = "prod" ]; then
+  echo "Lifecycle: LIFECYCLE_SERVE=prod -> starting production server (pnpm start)..."
+  exec pnpm start
+fi
+
 exec pnpm dev

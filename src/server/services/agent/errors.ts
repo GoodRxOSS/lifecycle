@@ -26,15 +26,39 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+interface AgentRunFailureAction {
+  kind: 'continue' | 'retry' | 'reconnect' | 'update_key' | 'navigate';
+  label: string;
+  href?: string;
+}
+
 export class AgentRunTerminalFailure extends Error {
   readonly code: string;
   readonly details?: Record<string, unknown>;
+  /** Whether retrying the same run as-is is worthwhile (rate limit / transient overload). */
+  readonly retryable?: boolean;
+  /** Suggested recovery affordance surfaced to the user. */
+  readonly nextAction?: AgentRunFailureAction;
 
-  constructor({ code, message, details }: { code: string; message: string; details?: Record<string, unknown> }) {
+  constructor({
+    code,
+    message,
+    details,
+    retryable,
+    nextAction,
+  }: {
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+    retryable?: boolean;
+    nextAction?: AgentRunFailureAction;
+  }) {
     super(message);
     this.name = 'AgentRunTerminalFailure';
     this.code = code;
     this.details = details;
+    this.retryable = retryable;
+    this.nextAction = nextAction;
   }
 }
 

@@ -19,6 +19,7 @@ jest.mock('server/models/AgentRun', () => ({
   default: {
     query: jest.fn(),
     transaction: jest.fn(),
+    knex: jest.fn(),
   },
 }));
 
@@ -66,6 +67,7 @@ import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/run
 
 const mockRunQuery = AgentRun.query as jest.Mock;
 const mockRunTransaction = AgentRun.transaction as jest.Mock;
+const mockRunKnex = AgentRun.knex as jest.Mock;
 const mockSessionQuery = AgentSession.query as jest.Mock;
 const mockAppendStatusEvent = AgentRunEventService.appendStatusEvent as jest.Mock;
 const mockAppendStatusEventForRunInTransaction = AgentRunEventService.appendStatusEventForRunInTransaction as jest.Mock;
@@ -144,6 +146,7 @@ describe('AgentRunService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockRunTransaction.mockImplementation(async (callback) => callback({ trx: true }));
+    mockRunKnex.mockReturnValue({ raw: jest.fn().mockResolvedValue(undefined) });
     mockResolveDurabilityConfig.mockResolvedValue({
       runExecutionLeaseMs: 30 * 60 * 1000,
       queuedRunDispatchStaleMs: 30 * 1000,
@@ -466,7 +469,7 @@ describe('AgentRunService', () => {
   });
 
   describe('listRunsNeedingDispatch', () => {
-    it('finds stale queued runs and expired execution leases', async () => {
+    it('finds stale queued runs, expired execution leases, and heartbeat-stale runs', async () => {
       const staleQueuedBuilder: any = {
         where: jest.fn().mockReturnThis(),
       };
@@ -475,6 +478,26 @@ describe('AgentRunService', () => {
         whereNotNull: jest.fn().mockReturnThis(),
         where: jest.fn().mockReturnThis(),
       };
+      // Heartbeat-stale branch: starting/running runs past the staleness cutoff by heartbeat (or startedAt fallback).
+      const heartbeatFallbackBuilder: any = {
+        whereNull: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+      };
+      const heartbeatPredicateBuilder: any = {
+        where: jest.fn().mockReturnThis(),
+        orWhere: jest.fn((callback) => {
+          callback(heartbeatFallbackBuilder);
+          return heartbeatPredicateBuilder;
+        }),
+      };
+      const heartbeatStaleBuilder: any = {
+        whereIn: jest.fn().mockReturnThis(),
+        where: jest.fn((callback) => {
+          callback(heartbeatPredicateBuilder);
+          return heartbeatStaleBuilder;
+        }),
+      };
+      const orWhereBuilders = [expiredLeaseBuilder, heartbeatStaleBuilder];
       const runs = [{ uuid: VALID_RUN_UUID }];
       const query: any = {
         where: jest.fn((callback) => {
@@ -482,7 +505,7 @@ describe('AgentRunService', () => {
           return query;
         }),
         orWhere: jest.fn((callback) => {
-          callback(expiredLeaseBuilder);
+          callback(orWhereBuilders.shift());
           return query;
         }),
         orderBy: jest.fn().mockReturnThis(),
@@ -504,13 +527,18 @@ describe('AgentRunService', () => {
       expect(expiredLeaseBuilder.whereIn).toHaveBeenCalledWith('status', ['starting', 'running']);
       expect(expiredLeaseBuilder.whereNotNull).toHaveBeenCalledWith('leaseExpiresAt');
       expect(expiredLeaseBuilder.where).toHaveBeenCalledWith('leaseExpiresAt', '<=', '2026-04-24T12:00:00.000Z');
+      // Cutoff = now - heartbeatStaleMs; 30-min lease derives a 3-min window, so 12:00:00 - 3m = 11:57:00.
+      expect(heartbeatStaleBuilder.whereIn).toHaveBeenCalledWith('status', ['starting', 'running']);
+      expect(heartbeatPredicateBuilder.where).toHaveBeenCalledWith('heartbeatAt', '<=', '2026-04-24T11:57:00.000Z');
+      expect(heartbeatFallbackBuilder.whereNull).toHaveBeenCalledWith('heartbeatAt');
+      expect(heartbeatFallbackBuilder.where).toHaveBeenCalledWith('startedAt', '<=', '2026-04-24T11:57:00.000Z');
       expect(query.orderBy).toHaveBeenCalledWith('updatedAt', 'asc');
       expect(query.limit).toHaveBeenCalledWith(25);
     });
   });
 
   describe('cancelRun', () => {
-    it('records cancellation through the shared status patch path', async () => {
+    it('records cancellation atomically with a recovery status event when the run is still active', async () => {
       const runningRun = {
         id: 1,
         uuid: VALID_RUN_UUID,
@@ -524,66 +552,108 @@ describe('AgentRunService', () => {
         .spyOn(AgentRunService, 'getOwnedRun')
         .mockResolvedValueOnce(runningRun as Awaited<ReturnType<typeof AgentRunService.getOwnedRun>>)
         .mockResolvedValueOnce(cancelledRun as Awaited<ReturnType<typeof AgentRunService.getOwnedRun>>);
-      const patchStatus = jest
-        .spyOn(AgentRunService, 'patchStatus')
-        .mockResolvedValue(cancelledRun as Awaited<ReturnType<typeof AgentRunService.patchStatus>>);
+      const findById = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(runningRun),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(cancelledRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(7);
+      mockRunQuery.mockReturnValueOnce({ findById }).mockReturnValueOnce({ patchAndFetchById });
+      const raw = jest.fn().mockResolvedValue(undefined);
+      mockRunKnex.mockReturnValue({ raw });
 
       await expect(AgentRunService.cancelRun(VALID_RUN_UUID, 'sample-user')).resolves.toBe(cancelledRun);
 
-      expect(patchStatus).toHaveBeenCalledWith(
-        VALID_RUN_UUID,
-        'cancelled',
+      expect(findById).toHaveBeenCalledWith(1);
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        1,
         expect.objectContaining({
+          status: 'cancelled',
           cancelledAt: expect.any(String),
           completedAt: expect.any(String),
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
         })
       );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        cancelledRun,
+        'run.cancelled',
+        expect.objectContaining({
+          status: 'cancelled',
+        }),
+        { trx: true }
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 7);
+      // Fast cross-process abort is broadcast on the dedicated cancel channel.
+      expect(raw).toHaveBeenCalledWith('select pg_notify(?, ?)', [
+        'agent_run_cancel',
+        JSON.stringify({ runId: VALID_RUN_UUID }),
+      ]);
+      expect(mockAppendStatusEvent).not.toHaveBeenCalled();
+      expect(getOwnedRun).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not rewrite a terminal run as cancelled when completion wins the race', async () => {
+      const completedRun = {
+        id: 1,
+        uuid: VALID_RUN_UUID,
+        status: 'completed',
+      };
+      const getOwnedRun = jest
+        .spyOn(AgentRunService, 'getOwnedRun')
+        .mockResolvedValueOnce(completedRun as Awaited<ReturnType<typeof AgentRunService.getOwnedRun>>)
+        .mockResolvedValueOnce(completedRun as Awaited<ReturnType<typeof AgentRunService.getOwnedRun>>);
+      const patchAndFetchById = jest.fn();
+      const findById = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(completedRun),
+      });
+      mockRunQuery.mockReturnValueOnce({ findById });
+      const raw = jest.fn().mockResolvedValue(undefined);
+      mockRunKnex.mockReturnValue({ raw });
+
+      await expect(AgentRunService.cancelRun(VALID_RUN_UUID, 'sample-user')).resolves.toBe(completedRun);
+
+      expect(mockRunQuery).toHaveBeenCalledTimes(1);
+      expect(findById).toHaveBeenCalledWith(1);
+      expect(patchAndFetchById).not.toHaveBeenCalled();
+      expect(mockAppendStatusEvent).not.toHaveBeenCalled();
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+      expect(mockNotifyRunEventsInserted).not.toHaveBeenCalled();
+      // No cancellation transition occurred, so no cross-process abort is broadcast.
+      expect(raw).not.toHaveBeenCalled();
       expect(getOwnedRun).toHaveBeenCalledTimes(2);
     });
   });
 
-  describe('markFailed', () => {
-    it('uses the same serialized error on the run and run.failed event payload', async () => {
-      const findOne = jest.fn().mockResolvedValue({
-        id: 17,
-        uuid: VALID_RUN_UUID,
-      });
-      const patchAndFetchById = jest.fn().mockImplementation((_id, patch) =>
-        Promise.resolve({
-          id: 17,
-          uuid: VALID_RUN_UUID,
-          status: 'failed',
-          ...patch,
-        })
-      );
-      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
-      const error = Object.assign(new Error('Sample run failure.'), {
-        name: 'SampleRunError',
-        code: 'sample_failure',
-        details: {
-          reason: 'sample',
-        },
-      });
+  describe('cross-process cancel listener', () => {
+    it('listens on the cancel channel and aborts the local controller on a cancel notification', async () => {
+      const listeners: Record<string, (arg: any) => void> = {};
+      const connection = {
+        on: jest.fn((event: string, listener: (arg: any) => void) => {
+          listeners[event] = listener;
+        }),
+        query: jest.fn().mockResolvedValue(undefined),
+      };
+      const acquireConnection = jest.fn().mockResolvedValue(connection);
+      mockRunKnex.mockReturnValue({ client: { acquireConnection, releaseConnection: jest.fn() } });
 
-      const failedRun = await AgentRunService.markFailed(VALID_RUN_UUID, error, {
-        totalTokens: 12,
-      });
-      const patch = patchAndFetchById.mock.calls[0][1];
-      const eventPayload = mockAppendStatusEvent.mock.calls[0][2];
+      const controller = new AbortController();
+      const abortSpy = jest.spyOn(controller, 'abort');
+      // registerAbortController lazily opens the (first) shared listen connection.
+      AgentRunService.registerAbortController(VALID_RUN_UUID, controller);
+      await new Promise((resolve) => setImmediate(resolve));
 
-      expect(failedRun.error).toEqual(patch.error);
-      expect(eventPayload.error).toEqual(failedRun.error);
-      expect(mockAppendStatusEvent).toHaveBeenCalledWith(
-        VALID_RUN_UUID,
-        'run.failed',
-        expect.objectContaining({
-          status: 'failed',
-          error: failedRun.error,
-          usageSummary: {
-            totalTokens: 12,
-          },
-        })
-      );
+      expect(acquireConnection).toHaveBeenCalledTimes(1);
+      expect(connection.query).toHaveBeenCalledWith('LISTEN agent_run_cancel');
+
+      // A cancel notification for the registered run aborts its controller.
+      listeners['notification']({
+        channel: 'agent_run_cancel',
+        payload: JSON.stringify({ runId: VALID_RUN_UUID }),
+      });
+      expect(abortSpy).toHaveBeenCalled();
+
+      AgentRunService.clearAbortController(VALID_RUN_UUID);
     });
   });
 
@@ -694,6 +764,84 @@ describe('AgentRunService', () => {
       expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
     });
 
+    it('pauses a heartbeat-stale run whose lease has not yet expired', async () => {
+      // Active lease (1m out) but heartbeat 5m stale past the 3-min window: orphaned run must pause without waiting for lease expiry.
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+        leaseExpiresAt: '2026-05-08T12:01:00.000Z',
+        heartbeatAt: '2026-05-08T11:55:00.000Z',
+        usageSummary: {},
+      };
+      const pausedRun = {
+        ...run,
+        status: 'waiting_for_input',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        error: {
+          code: 'run_auto_resume_ineligible',
+          message:
+            'Lifecycle paused this run because automatic recovery is not safe. Review the run and continue manually.',
+          details: {
+            recovery: expect.any(Object),
+          },
+        },
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(pausedRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(46);
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility, {
+          now: new Date('2026-05-08T12:00:00.000Z'),
+          expectedExecutionOwner: 'worker-1',
+          resumeAttemptId: 'resume-1',
+        })
+      ).resolves.toBe(pausedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'waiting_for_input',
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+        })
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 46);
+    });
+
+    it('does not pause a run with an active lease and a fresh heartbeat', async () => {
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+        leaseExpiresAt: '2026-05-08T12:01:00.000Z',
+        heartbeatAt: '2026-05-08T11:59:30.000Z',
+        usageSummary: {},
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      mockRunQuery.mockReturnValueOnce({ findOne });
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility, {
+          now: new Date('2026-05-08T12:00:00.000Z'),
+          expectedExecutionOwner: 'worker-1',
+        })
+      ).resolves.toBeNull();
+
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+
     it('can pause an owner-fenced resume run before the active lease expires', async () => {
       const run = {
         id: 17,
@@ -754,49 +902,6 @@ describe('AgentRunService', () => {
         })
       );
       expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 45);
-    });
-  });
-
-  describe('patchStatus', () => {
-    it('emits canonical run status event names for approval waits and resumed runs', async () => {
-      const findOne = jest.fn().mockResolvedValue({
-        id: 17,
-        uuid: VALID_RUN_UUID,
-      });
-      const patchAndFetchById = jest.fn().mockImplementation((_id, patch) =>
-        Promise.resolve({
-          id: 17,
-          uuid: VALID_RUN_UUID,
-          usageSummary: {},
-          error: null,
-          ...patch,
-        })
-      );
-      mockRunQuery
-        .mockReturnValueOnce({ findOne })
-        .mockReturnValueOnce({ patchAndFetchById })
-        .mockReturnValueOnce({ findOne })
-        .mockReturnValueOnce({ patchAndFetchById });
-
-      await AgentRunService.patchStatus(VALID_RUN_UUID, 'waiting_for_approval');
-      await AgentRunService.patchStatus(VALID_RUN_UUID, 'queued');
-
-      expect(mockAppendStatusEvent).toHaveBeenNthCalledWith(
-        1,
-        VALID_RUN_UUID,
-        'run.waiting_for_approval',
-        expect.objectContaining({
-          status: 'waiting_for_approval',
-        })
-      );
-      expect(mockAppendStatusEvent).toHaveBeenNthCalledWith(
-        2,
-        VALID_RUN_UUID,
-        'run.queued',
-        expect.objectContaining({
-          status: 'queued',
-        })
-      );
     });
   });
 
@@ -1073,6 +1178,7 @@ describe('AgentRunService', () => {
         sessionId: 23,
         status: 'running',
         leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        heartbeatAt: new Date(Date.now() - 30_000).toISOString(),
       };
       const findOne = jest.fn().mockReturnValue({
         forUpdate: jest.fn().mockResolvedValue(run),
@@ -1082,6 +1188,51 @@ describe('AgentRunService', () => {
       await expect(
         AgentRunService.claimQueuedRunForExecution(VALID_RUN_UUID, 'worker-1', 30 * 60 * 1000)
       ).resolves.toBeNull();
+    });
+
+    it('reclaims a heartbeat-stale running run even when its lease is still active', async () => {
+      // Active lease (10m out) but heartbeat 5m stale past the 3-min window: orphaned run must be reclaimable without waiting for lease expiry.
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        sessionId: 23,
+        status: 'running',
+        leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        heartbeatAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(run),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue({
+        ...run,
+        status: 'starting',
+        executionOwner: 'worker-2',
+      });
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+      mockSessionQuery.mockReturnValue({
+        findById: jest.fn().mockReturnValue({
+          forUpdate: jest.fn().mockResolvedValue({ id: 23 }),
+        }),
+      });
+
+      await expect(
+        AgentRunService.claimQueuedRunForExecution(VALID_RUN_UUID, 'worker-2', 30 * 60 * 1000)
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: 'starting',
+          executionOwner: 'worker-2',
+        })
+      );
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'starting',
+          executionOwner: 'worker-2',
+          leaseExpiresAt: expect.any(String),
+          heartbeatAt: expect.any(String),
+        })
+      );
     });
   });
 });

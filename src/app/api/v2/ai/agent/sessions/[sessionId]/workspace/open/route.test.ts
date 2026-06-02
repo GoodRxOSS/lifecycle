@@ -26,6 +26,12 @@ jest.mock('server/lib/dependencies', () => ({}));
 
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 jest.mock('server/lib/agentSession/githubToken', () => ({
@@ -206,7 +212,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     const body = await response.json();
 
     expect(response.status).toBe(401);
-    expect(body.error.message).toBe('Unauthorized');
+    expect(body.error.message).toBe('Authentication is required.');
     expect(mockResolveRequestGitHubToken).not.toHaveBeenCalled();
     expect(mockOpenChatRuntime).not.toHaveBeenCalled();
     expect(mockSerializeSessionRecord).not.toHaveBeenCalled();

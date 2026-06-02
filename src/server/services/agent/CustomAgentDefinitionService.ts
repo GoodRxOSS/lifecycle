@@ -15,6 +15,7 @@
  */
 
 import type { RequestUserIdentity } from 'server/lib/get-user';
+import { AppError } from 'server/lib/appError';
 import AgentDefinition from 'server/models/AgentDefinition';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import { v4 as uuid } from 'uuid';
@@ -93,13 +94,28 @@ export interface UserAgentDefinitionPublicContract {
   status: 'active' | 'archived';
 }
 
-export class CustomAgentDefinitionServiceError extends Error {
-  code: CustomAgentDefinitionErrorCode;
+// Maps each service-error discriminant to {httpStatus, stable contract code} so routes never re-map.
+const CUSTOM_AGENT_ERROR_CONTRACT: Record<CustomAgentDefinitionErrorCode, { httpStatus: number; code: string }> = {
+  not_found: { httpStatus: 404, code: 'custom_agent_not_found' },
+  invalid_input: { httpStatus: 400, code: 'custom_agent_invalid' },
+  model_unavailable: { httpStatus: 409, code: 'custom_agent_conflict' },
+  creation_unavailable: { httpStatus: 403, code: 'custom_agent_creation_unavailable' },
+  creator_capability_reserved: { httpStatus: 400, code: 'custom_agent_invalid' },
+  unknown_capability: { httpStatus: 400, code: 'custom_agent_invalid' },
+  admin_only: { httpStatus: 400, code: 'custom_agent_invalid' },
+  system_only: { httpStatus: 400, code: 'custom_agent_invalid' },
+  disabled: { httpStatus: 400, code: 'custom_agent_invalid' },
+  source_incompatible: { httpStatus: 400, code: 'custom_agent_invalid' },
+};
 
-  constructor(code: CustomAgentDefinitionErrorCode, message: string) {
-    super(message);
+export class CustomAgentDefinitionServiceError extends AppError {
+  readonly reason: CustomAgentDefinitionErrorCode;
+
+  constructor(reason: CustomAgentDefinitionErrorCode, message: string) {
+    const contract = CUSTOM_AGENT_ERROR_CONTRACT[reason];
+    super({ httpStatus: contract.httpStatus, code: contract.code, message, details: { reason } });
     this.name = 'CustomAgentDefinitionServiceError';
-    this.code = code;
+    this.reason = reason;
   }
 }
 

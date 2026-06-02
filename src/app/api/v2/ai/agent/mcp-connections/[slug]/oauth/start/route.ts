@@ -17,7 +17,7 @@
 import { auth } from '@ai-sdk/mcp';
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { APP_HOST } from 'shared/config';
 import {
@@ -121,10 +121,7 @@ function resolveAppOrigin(req: NextRequest): string | null {
  *               $ref: '#/components/schemas/StartAgentMcpConnectionOAuthSuccessResponse'
  */
 const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const { slug } = await params;
   const scope = req.nextUrl.searchParams.get('scope') || 'global';

@@ -22,13 +22,29 @@ const mockCreateUserDefinition = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 jest.mock('server/services/agent/CustomAgentDefinitionService', () => {
+  const CONTRACT: Record<string, { httpStatus: number; code: string }> = {
+    not_found: { httpStatus: 404, code: 'custom_agent_not_found' },
+    model_unavailable: { httpStatus: 409, code: 'custom_agent_conflict' },
+    creation_unavailable: { httpStatus: 403, code: 'custom_agent_creation_unavailable' },
+  };
   class CustomAgentDefinitionServiceError extends Error {
-    constructor(public readonly code: string, message: string) {
+    readonly httpStatus: number;
+    readonly code: string;
+    constructor(public readonly reason: string, message: string) {
       super(message);
       this.name = 'CustomAgentDefinitionServiceError';
+      const contract = CONTRACT[reason] || { httpStatus: 400, code: 'custom_agent_invalid' };
+      this.httpStatus = contract.httpStatus;
+      this.code = contract.code;
     }
   }
 

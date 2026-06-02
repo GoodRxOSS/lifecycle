@@ -29,6 +29,12 @@ jest.mock('server/services/agent/AdminService', () => ({
 jest.mock('server/lib/get-user', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 import { GET } from './route';

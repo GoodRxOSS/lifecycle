@@ -316,6 +316,7 @@ helm_resource(
         '--set', 'companyIdp.jwksUrl={}/realms/internal/protocol/openid-connect/certs'.format(internal_keycloak_origin),
         '--set', 'companyIdp.logoutUrl={}/realms/internal/protocol/openid-connect/logout'.format(company_idp_origin),
         '--set', 'companyIdp.issuer={}/realms/internal'.format(company_idp_origin),
+        '--set', 'internalIdp.internalUrl={}'.format(internal_keycloak_origin),
     ],
     labels=['infra'],
 )
@@ -338,26 +339,40 @@ local_resource(
 # Worker & Web (Helm, Single Deploy)
 ##################################
 
-docker_build_with_restart(
-    lifecycle_app,
-    ".",
-    entrypoint=["/app_setup_entrypoint.sh"],
-    dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
-    build_args={
-        "APP_DB_HOST": "local-postgres.{}.svc.cluster.local".format(app_namespace),
-        "APP_DB_PORT": "5432",
-        "APP_DB_USER": "lifecycle",
-        "APP_DB_PASSWORD": "lifecycle",
-        "APP_DB_NAME": "lifecycle",
-        "APP_DB_SSL": "false",
-        "APP_REDIS_HOST": "redis-master.{}.svc.cluster.local".format(app_namespace),
-        "APP_REDIS_PORT": "6379",
-        "APP_REDIS_PASSWORD": "",
-    },
-    live_update=[
-        sync("./src", "/app/src"),
-    ],
-)
+# LIFECYCLE_PROD=1: build+`pnpm start` for incremental SSE; dev's on-demand compile batches reasoning replays. Trade-off: no HMR.
+lifecycle_prod = str(os.getenv("LIFECYCLE_PROD", "")).lower() in ("1", "true", "yes", "on")
+
+lifecycle_app_build_args = {
+    "APP_DB_HOST": "local-postgres.{}.svc.cluster.local".format(app_namespace),
+    "APP_DB_PORT": "5432",
+    "APP_DB_USER": "lifecycle",
+    "APP_DB_PASSWORD": "lifecycle",
+    "APP_DB_NAME": "lifecycle",
+    "APP_DB_SSL": "false",
+    "APP_REDIS_HOST": "redis-master.{}.svc.cluster.local".format(app_namespace),
+    "APP_REDIS_PORT": "6379",
+    "APP_REDIS_PASSWORD": "",
+}
+
+if lifecycle_prod:
+    print("LIFECYCLE_PROD=on -> building production lifecycle image; web/worker/gateway run `pnpm start` (no HMR; slower first build)")
+    docker_build(
+        lifecycle_app,
+        ".",
+        dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
+        build_args=dict(lifecycle_app_build_args, LIFECYCLE_BUILD="prod"),
+    )
+else:
+    docker_build_with_restart(
+        lifecycle_app,
+        ".",
+        entrypoint=["/app_setup_entrypoint.sh"],
+        dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
+        build_args=lifecycle_app_build_args,
+        live_update=[
+            sync("./src", "/app/src"),
+        ],
+    )
 
 helm_set_args = [
     'namespace={}'.format(app_namespace),
@@ -410,6 +425,15 @@ for r in lifecycle_deployment:
                 "subPath": "credentials",
                 "readOnly": False
             })
+            # Force LOG_LEVEL=debug: `pnpm start` (unlike `pnpm dev`) inherits it from the env.
+            if lifecycle_prod and "keycloak" not in r["metadata"]["name"]:
+                container["env"] = [
+                    e for e in (container.get("env") or [])
+                    if e.get("name") not in ("LIFECYCLE_SERVE", "LOG_LEVEL")
+                ] + [
+                    {"name": "LIFECYCLE_SERVE", "value": "prod"},
+                    {"name": "LOG_LEVEL", "value": "debug"},
+                ]
     patched_deploy.append(r)
 
 k8s_yaml(encode_yaml_stream(patched_deploy))
@@ -423,8 +447,9 @@ for r in patched_deploy:
         resource_deps = []
 
         # Don't add postgres/redis deps for keycloak resources
-        if "keycloak" not in name:
-            resource_deps = ['local-postgres', 'redis', 'lifecycle-keycloak-github-idp-sync', 'agent-session-workspace-image']
+        if "keycloak" not in name and not lifecycle_prod:
+            resource_deps = ['local-postgres', 'redis', 'lifecycle-keycloak-github-idp-sync']
+        # Prod: ungated so the slow build starts at t=0; web pod may crash-loop until Postgres is up on a cached rebuild.
         if "web" in name:
             labels = ["web"]
             port_forwards = ['5001:80']
@@ -484,8 +509,11 @@ k8s_resource(
 k8s_resource(
     'lifecycle-keycloak',
     port_forwards=['8081:8080'],
+    extra_pod_selectors=[{'app': 'keycloak'}],
+    discovery_strategy="selectors-only",
     labels=["infra"]
 )
+
 
 ##################################
 # DISTRIBUTION

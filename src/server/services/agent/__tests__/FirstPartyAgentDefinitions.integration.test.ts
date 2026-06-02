@@ -409,9 +409,11 @@ describe('First-party agent definition integration regressions', () => {
         'diagnostics_kubernetes',
         'diagnostics_database',
         'github_write',
-        'external_mcp_write',
       ])
     );
+    // Debug repairs go through github_write, not external MCP writes (least privilege).
+    expect(debug.requiredCapabilityRefs).not.toContain('read_context');
+    expect(debug.requiredCapabilityRefs).not.toContain('external_mcp_write');
 
     const result = await resolveRunPlan({
       source: {
@@ -434,13 +436,7 @@ describe('First-party agent definition integration regressions', () => {
         approvalMode: 'require_approval',
       })
     );
-    expect(getCapabilityAccess(result, 'external_mcp_write')).toEqual(
-      expect.objectContaining({
-        allowed: true,
-        availability: 'admin_only',
-        approvalMode: 'require_approval',
-      })
-    );
+    expect(getCapabilityAccess(result, 'external_mcp_write')?.allowed).not.toBe(true);
   });
 
   it('fails Develop without prepared workspace/source resources and keeps Free-form minimal capabilities', async () => {

@@ -16,6 +16,7 @@
 
 import { createHash } from 'crypto';
 import type { RequestUserIdentity } from 'server/lib/get-user';
+import { AppError } from 'server/lib/appError';
 import type AgentThread from 'server/models/AgentThread';
 import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
 import type { AgentMcpConnection } from 'server/services/agentRuntime/mcp/types';
@@ -93,9 +94,18 @@ export type ResolvedRunAdmissionRuntimeChoices = {
 
 type RuntimeControlsErrorCode = 'invalid_input' | 'unknown_choice' | 'policy_denied' | 'active_run' | 'not_found';
 
-export class AgentThreadRuntimeControlsError extends Error {
-  constructor(public readonly code: RuntimeControlsErrorCode, message: string) {
-    super(message);
+// Each discriminant carries its own HTTP status so routes never re-map it.
+const RUNTIME_CONTROLS_HTTP_STATUS: Record<RuntimeControlsErrorCode, number> = {
+  invalid_input: 400,
+  unknown_choice: 400,
+  policy_denied: 403,
+  not_found: 404,
+  active_run: 409,
+};
+
+export class AgentThreadRuntimeControlsError extends AppError {
+  constructor(code: RuntimeControlsErrorCode, message: string) {
+    super({ httpStatus: RUNTIME_CONTROLS_HTTP_STATUS[code], code, message });
     this.name = 'AgentThreadRuntimeControlsError';
   }
 }

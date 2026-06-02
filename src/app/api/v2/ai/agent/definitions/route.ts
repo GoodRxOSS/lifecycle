@@ -17,10 +17,9 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import {
-  CustomAgentDefinitionServiceError,
   customAgentDefinitionService,
   serializeUserAgentDefinition,
 } from 'server/services/agent/CustomAgentDefinitionService';
@@ -45,26 +44,6 @@ const RESOURCE_BEHAVIORS = new Set<UserAgentDefinitionResourceBehavior>([
   'chat_only',
   'current_workspace_when_available',
 ]);
-
-function mapDefinitionError(error: unknown, req: NextRequest) {
-  if (error instanceof CustomAgentDefinitionServiceError) {
-    if (error.code === 'not_found') {
-      return errorResponse(error, { status: 404 }, req);
-    }
-
-    if (error.code === 'model_unavailable') {
-      return errorResponse(error, { status: 409 }, req);
-    }
-
-    if (error.code === 'creation_unavailable') {
-      return errorResponse(error, { status: 403 }, req);
-    }
-
-    return errorResponse(error, { status: 400 }, req);
-  }
-
-  throw error;
-}
 
 async function readRequestBody(req: NextRequest): Promise<Record<string, unknown> | Error> {
   let body: unknown;
@@ -262,20 +241,14 @@ function parseUpsertBody(body: Record<string, unknown>): UserAgentDefinitionUpse
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const definitions = await customAgentDefinitionService.listUserDefinitions({ userId: userIdentity.userId });
   return successResponse({ definitions: definitions.map(serializeUserAgentDefinition) }, { status: 200 }, req);
 };
 
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await readRequestBody(req);
   if (body instanceof Error) {
@@ -287,12 +260,9 @@ const postHandler = async (req: NextRequest) => {
     return errorResponse(input, { status: 400 }, req);
   }
 
-  try {
-    const definition = await customAgentDefinitionService.createUserDefinition(userIdentity, input);
-    return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 201 }, req);
-  } catch (error) {
-    return mapDefinitionError(error, req);
-  }
+  // CustomAgentDefinitionServiceError is an AppError; createApiHandler maps its httpStatus/code.
+  const definition = await customAgentDefinitionService.createUserDefinition(userIdentity, input);
+  return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 201 }, req);
 };
 
 export const GET = createApiHandler(getHandler);

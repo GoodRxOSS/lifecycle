@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, errorResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
 import AgentProviderRegistry from 'server/services/agent/ProviderRegistry';
@@ -269,10 +269,7 @@ async function buildProviderStateWithSharedFallback(
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const providerParam = getSearchParam(req, 'provider');
   const requestedProvider = providerParam == null ? null : normalizeProvider(providerParam);
@@ -305,10 +302,7 @@ const getHandler = async (req: NextRequest) => {
 };
 
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => ({}));
   const provider = normalizeProvider(body?.provider);
@@ -333,10 +327,7 @@ const postHandler = async (req: NextRequest) => {
 };
 
 const deleteHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const provider = normalizeProvider(getSearchParam(req, 'provider'));
   if (!provider) {

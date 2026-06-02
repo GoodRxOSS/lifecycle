@@ -167,6 +167,22 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             message: { type: 'string' },
+            code: {
+              type: 'string',
+              description: 'Stable, machine-readable error discriminant. UIs switch on this, not on the message.',
+            },
+            details: { type: 'object', additionalProperties: true, nullable: true },
+            nextAction: {
+              type: 'object',
+              nullable: true,
+              description: 'Suggested recovery affordance for the user.',
+              properties: {
+                kind: { type: 'string', enum: ['continue', 'retry', 'reconnect', 'update_key', 'navigate'] },
+                label: { type: 'string' },
+                href: { type: 'string' },
+              },
+              required: ['kind', 'label'],
+            },
           },
           required: ['message'],
         },
@@ -224,6 +240,104 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           required: ['file'],
+        },
+
+        SitesStorageBackend: {
+          type: 'string',
+          enum: ['s3', 'minio'],
+        },
+
+        SitesTtlConfig: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            defaultDays: { type: 'integer', minimum: 1 },
+            extensionDays: { type: 'integer', minimum: 1 },
+          },
+          required: ['enabled', 'defaultDays', 'extensionDays'],
+          additionalProperties: false,
+        },
+
+        SitesUploadConfig: {
+          type: 'object',
+          properties: {
+            maxUploadBytes: { type: 'integer', minimum: 1 },
+            maxExtractedBytes: { type: 'integer', minimum: 1 },
+            maxFiles: { type: 'integer', minimum: 1 },
+            allowedExtensions: {
+              type: 'array',
+              minItems: 1,
+              items: { type: 'string' },
+            },
+            allowedTypes: {
+              type: 'array',
+              minItems: 1,
+              items: { type: 'string' },
+              deprecated: true,
+            },
+          },
+          required: ['maxUploadBytes', 'maxExtractedBytes', 'maxFiles', 'allowedExtensions'],
+          additionalProperties: false,
+        },
+
+        SitesStorageConfig: {
+          type: 'object',
+          properties: {
+            backend: { $ref: '#/components/schemas/SitesStorageBackend' },
+            bucket: { type: 'string' },
+            prefix: { type: 'string' },
+            region: { type: 'string' },
+            endpoint: { type: 'string', nullable: true },
+            forcePathStyle: { type: 'boolean', nullable: true },
+          },
+          required: ['backend', 'bucket', 'prefix', 'region', 'endpoint', 'forcePathStyle'],
+          additionalProperties: false,
+        },
+
+        SitesCleanupConfig: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            intervalMinutes: { type: 'integer', minimum: 1 },
+          },
+          required: ['enabled', 'intervalMinutes'],
+          additionalProperties: false,
+        },
+
+        SitesConfig: {
+          type: 'object',
+          description: 'Global Sites hosting configuration stored in global_config under the sites key.',
+          properties: {
+            enabled: { type: 'boolean' },
+            domain: { type: 'string', example: 'sites.example.com' },
+            port: { type: 'integer', nullable: true, minimum: 1, maximum: 65535 },
+            hostPrefix: { type: 'string', minLength: 1, example: 'site' },
+            ttl: { $ref: '#/components/schemas/SitesTtlConfig' },
+            upload: { $ref: '#/components/schemas/SitesUploadConfig' },
+            storage: { $ref: '#/components/schemas/SitesStorageConfig' },
+            cleanup: { $ref: '#/components/schemas/SitesCleanupConfig' },
+          },
+          required: ['enabled', 'domain', 'port', 'hostPrefix', 'ttl', 'upload', 'storage', 'cleanup'],
+          additionalProperties: false,
+        },
+
+        SitesConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    config: { $ref: '#/components/schemas/SitesConfig' },
+                  },
+                  required: ['config'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
         },
 
         SiteSuccessResponse: {
@@ -1575,6 +1689,22 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             recordedAt: { type: 'string', format: 'date-time' },
             retryable: { type: 'boolean' },
             origin: { $ref: '#/components/schemas/WorkspaceRuntimeFailureOrigin' },
+            code: {
+              type: 'string',
+              description:
+                'Stable, machine-readable failure discriminant so durable failures honor the coded error contract.',
+            },
+            nextAction: {
+              type: 'object',
+              nullable: true,
+              description: 'Suggested recovery affordance for the user.',
+              properties: {
+                kind: { type: 'string', enum: ['continue', 'retry', 'reconnect', 'update_key', 'navigate'] },
+                label: { type: 'string' },
+                href: { type: 'string' },
+              },
+              required: ['kind', 'label'],
+            },
           },
           required: ['stage', 'title', 'message', 'recordedAt', 'retryable', 'origin'],
           additionalProperties: false,

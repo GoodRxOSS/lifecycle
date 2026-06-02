@@ -135,16 +135,16 @@ describe('CustomAgentDefinitionService', () => {
     mockFindOne.mockResolvedValue(null);
 
     await expect(service.getUserDefinition('custom.other-user', 'sample-user')).rejects.toMatchObject({
-      code: 'not_found',
+      reason: 'not_found',
     });
     await expect(service.getUserDefinition('custom.archived', 'sample-user')).rejects.toBeInstanceOf(
       CustomAgentDefinitionServiceError
     );
     await expect(service.getUserDefinition('system.freeform', 'sample-user')).rejects.toMatchObject({
-      code: 'not_found',
+      reason: 'not_found',
     });
     await expect(service.getUserDefinition('system.debug', 'sample-user')).rejects.toMatchObject({
-      code: 'not_found',
+      reason: 'not_found',
     });
 
     expect(mockFindOne).toHaveBeenCalledWith({
@@ -291,7 +291,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: 'unknown_capability',
+      reason: 'unknown_capability',
       message: 'Some selected capabilities are no longer available. Review the list and save again.',
     });
 
@@ -313,7 +313,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: reason,
+      reason: reason,
       message: 'Some selected capabilities are no longer available. Review the list and save again.',
     });
 
@@ -347,7 +347,7 @@ describe('CustomAgentDefinitionService', () => {
           resourceBehavior: 'chat_only',
         })
       ).rejects.toMatchObject({
-        code: reason,
+        reason: reason,
         message: 'Some selected capabilities are no longer available. Review the list and save again.',
       });
 
@@ -392,7 +392,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: 'source_incompatible',
+      reason: 'source_incompatible',
       message: 'Some selected capabilities are no longer available. Review the list and save again.',
     });
   });
@@ -414,7 +414,7 @@ describe('CustomAgentDefinitionService', () => {
           resourceBehavior: 'chat_only',
         })
       ).rejects.toMatchObject({
-        code: 'creation_unavailable',
+        reason: 'creation_unavailable',
         message: 'Custom agent creation is not available. Ask an admin for access.',
       });
 
@@ -503,7 +503,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: 'creation_unavailable',
+      reason: 'creation_unavailable',
     });
 
     expect(mockPatchAndFetchById).not.toHaveBeenCalled();
@@ -551,7 +551,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: 'creator_capability_reserved',
+      reason: 'creator_capability_reserved',
       message: 'Some selected capabilities are no longer available. Review the list and save again.',
     });
 
@@ -568,7 +568,7 @@ describe('CustomAgentDefinitionService', () => {
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
-      code: 'model_unavailable',
+      reason: 'model_unavailable',
       message: 'Selected model is no longer available. Choose another model and save again.',
     });
     expect(mockListAvailableModelsForUser).toHaveBeenCalledWith({ userIdentity });

@@ -16,9 +16,18 @@
 
 import { NextRequest } from 'next/server';
 
-jest.mock('server/lib/get-user', () => ({
-  getRequestUserIdentity: jest.fn(),
-}));
+jest.mock('server/lib/get-user', () => {
+  const getRequestUserIdentity = jest.fn();
+  return {
+    getRequestUserIdentity,
+    // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+    requireRequestUserIdentity: (...args: unknown[]) => {
+      const id = getRequestUserIdentity(...args);
+      if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+      return id;
+    },
+  };
+});
 
 jest.mock('server/services/agent/RunService', () => ({
   __esModule: true,
@@ -98,7 +107,7 @@ describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
     const body = await response.json();
 
     expect(response.status).toBe(401);
-    expect(body.error.message).toBe('Unauthorized');
+    expect(body.error.message).toBe('Authentication is required.');
     expect(mockCancelRun).not.toHaveBeenCalled();
   });
 });

@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import BuildContextChatService, {
   BuildContextChatBuildNotFoundError,
   BuildContextChatSelectedDeployError,
@@ -156,10 +156,7 @@ function parseCreateBuildContextChatBody(body: unknown): CreateBuildContextChatB
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   let requestBody: CreateBuildContextChatBody;
   try {

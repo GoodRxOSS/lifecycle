@@ -15,6 +15,7 @@
  */
 
 import type { Redis } from 'ioredis';
+import { isAppError, type AppErrorAction } from 'server/lib/appError';
 
 const AGENT_SESSION_STARTUP_FAILURE_REDIS_PREFIX = 'lifecycle:agent:session:startup-failure:';
 const AGENT_SESSION_STARTUP_FAILURE_TTL_SECONDS = 60 * 60;
@@ -53,6 +54,42 @@ export interface WorkspaceRuntimeFailure {
   recordedAt: string;
   retryable: boolean;
   origin: WorkspaceRuntimeFailureOrigin;
+  /** Machine-readable failure code so durable failures honor the coded error contract. Optional for back-compat. */
+  code?: string;
+  /** Optional coded next-step affordance (mirrors AppError.nextAction). */
+  nextAction?: AppErrorAction;
+}
+
+/** Stable fallback codes per failure stage when the originating error carries no AppError code. */
+const DEFAULT_CODE_BY_STAGE: Record<WorkspaceRuntimeFailureStage, string> = {
+  create_session: 'workspace_create_session_failed',
+  prepare_infrastructure: 'workspace_prepare_infrastructure_failed',
+  connect_runtime: 'workspace_connect_runtime_failed',
+  attach_services: 'workspace_attach_services_failed',
+  suspend: 'workspace_suspend_failed',
+  resume: 'workspace_resume_failed',
+  cleanup: 'workspace_cleanup_failed',
+};
+
+function deriveFailureCode(error: unknown, stage: WorkspaceRuntimeFailureStage, explicitCode?: string): string {
+  if (explicitCode) {
+    return explicitCode;
+  }
+  // Prefer the originating typed AppError's code when present.
+  if (isAppError(error)) {
+    return error.code;
+  }
+  return DEFAULT_CODE_BY_STAGE[stage];
+}
+
+function deriveNextAction(error: unknown, explicit?: AppErrorAction): AppErrorAction | undefined {
+  if (explicit) {
+    return explicit;
+  }
+  if (isAppError(error) && error.nextAction) {
+    return error.nextAction;
+  }
+  return undefined;
 }
 
 export type AgentSessionStartupFailureStage = WorkspaceRuntimeFailureStage;
@@ -87,6 +124,24 @@ function isWorkspaceRuntimeFailureOrigin(value: unknown): value is WorkspaceRunt
   return (
     typeof value === 'string' && WORKSPACE_RUNTIME_FAILURE_ORIGINS.includes(value as WorkspaceRuntimeFailureOrigin)
   );
+}
+
+const APP_ERROR_ACTION_KINDS = ['continue', 'retry', 'reconnect', 'update_key', 'navigate'] as const;
+
+function readNextAction(value: unknown): AppErrorAction | undefined {
+  if (
+    isRecord(value) &&
+    typeof value.kind === 'string' &&
+    (APP_ERROR_ACTION_KINDS as readonly string[]).includes(value.kind) &&
+    typeof value.label === 'string'
+  ) {
+    return {
+      kind: value.kind as AppErrorAction['kind'],
+      label: value.label,
+      ...(typeof value.href === 'string' ? { href: value.href } : {}),
+    };
+  }
+  return undefined;
 }
 
 function normalizeFailureMessage(error: unknown): string {
@@ -254,10 +309,14 @@ export function buildWorkspaceRuntimeFailure(params: {
   origin?: WorkspaceRuntimeFailureOrigin;
   retryable?: boolean;
   recordedAt?: string;
+  /** Explicit stable code; otherwise derived from the AppError code or the stage default. */
+  code?: string;
+  nextAction?: AppErrorAction;
 }): WorkspaceRuntimeFailure {
   const stage = params.stage || 'connect_runtime';
   const message = sanitizeFailureText(normalizeFailureMessage(params.error), DEFAULT_STARTUP_FAILURE_MESSAGE);
   const classified = classifyFailure(message, stage);
+  const nextAction = deriveNextAction(params.error, params.nextAction);
 
   return {
     stage,
@@ -266,6 +325,8 @@ export function buildWorkspaceRuntimeFailure(params: {
     recordedAt: normalizeRecordedAt(params.recordedAt),
     retryable: params.retryable === true,
     origin: params.origin || 'agent_session',
+    code: deriveFailureCode(params.error, stage, params.code),
+    ...(nextAction ? { nextAction } : {}),
   };
 }
 
@@ -287,6 +348,7 @@ export function normalizeWorkspaceRuntimeFailure(
     typeof failure.title === 'string' &&
     typeof failure.message === 'string'
   ) {
+    const nextAction = readNextAction(failure.nextAction);
     return {
       stage: failure.stage,
       title: sanitizeFailureText(failure.title, defaultTitleForStage(failure.stage)),
@@ -294,6 +356,8 @@ export function normalizeWorkspaceRuntimeFailure(
       recordedAt: normalizeRecordedAt(failure.recordedAt ?? fallback.recordedAt),
       retryable: typeof failure.retryable === 'boolean' ? failure.retryable : fallback.retryable === true,
       origin: isWorkspaceRuntimeFailureOrigin(failure.origin) ? failure.origin : fallback.origin || 'legacy',
+      ...(typeof failure.code === 'string' && failure.code ? { code: failure.code } : {}),
+      ...(nextAction ? { nextAction } : {}),
     };
   }
 

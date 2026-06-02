@@ -14,7 +14,16 @@
  * limitations under the License.
  */
 
-import { buildWorkspaceEditorProxyHeaders, serializeSocketHttpResponse } from '../workspaceEditorProxy';
+import {
+  buildWorkspaceEditorProxyHeaders,
+  serializeSocketHttpResponse,
+  classifyEditorProxyFailure,
+  resolveEditorProxyFailureMapping,
+  buildWorkspaceEditorErrorPage,
+  isEditorNavigationRequest,
+  editorProxyConnections,
+  EDITOR_PROXY_MAX_PER_SESSION,
+} from '../workspaceEditorProxy';
 
 describe('workspaceEditorProxy', () => {
   it('drops hop-by-hop headers for plain HTTP proxy requests', () => {
@@ -95,5 +104,106 @@ describe('workspaceEditorProxy', () => {
         body: 'editor unavailable',
       }).toString('utf8')
     ).toBe('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 18\r\n\r\neditor unavailable');
+  });
+
+  describe('classifyEditorProxyFailure', () => {
+    it('maps explicit coded errors', () => {
+      expect(classifyEditorProxyFailure(new Error('editor-proxy-timeout'))).toBe('timeout');
+      expect(classifyEditorProxyFailure(new Error('editor-proxy-capacity'))).toBe('capacity');
+    });
+
+    it('maps auth failures', () => {
+      expect(classifyEditorProxyFailure(new Error('Authentication token is required'))).toBe('auth');
+      expect(classifyEditorProxyFailure(new Error('Forbidden: you do not own this session'))).toBe('auth');
+    });
+
+    it('prefers a suspended workspace over a missing pod', () => {
+      expect(classifyEditorProxyFailure(new Error('Workspace is not ready'), { workspaceUnavailable: true })).toBe(
+        'workspace-suspended'
+      );
+    });
+
+    it('maps a missing pod / not-found to pod-gone', () => {
+      expect(classifyEditorProxyFailure(new Error('Session not found or not active'), { podMissing: true })).toBe(
+        'pod-gone'
+      );
+      expect(classifyEditorProxyFailure(new Error('Session not found or not active'))).toBe('pod-gone');
+    });
+
+    it('maps socket error codes and unknowns to unreachable', () => {
+      expect(classifyEditorProxyFailure(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe('unreachable');
+      expect(classifyEditorProxyFailure(new Error('something weird'))).toBe('unreachable');
+    });
+  });
+
+  describe('resolveEditorProxyFailureMapping', () => {
+    it('maps reasons to the documented status codes', () => {
+      expect(resolveEditorProxyFailureMapping('auth').status).toBe(401);
+      expect(resolveEditorProxyFailureMapping('workspace-suspended').status).toBe(409);
+      expect(resolveEditorProxyFailureMapping('pod-gone').status).toBe(410);
+      expect(resolveEditorProxyFailureMapping('unreachable').status).toBe(502);
+      expect(resolveEditorProxyFailureMapping('timeout').status).toBe(504);
+      expect(resolveEditorProxyFailureMapping('capacity').status).toBe(503);
+    });
+  });
+
+  describe('isEditorNavigationRequest', () => {
+    it('detects html navigations and rejects asset/ws requests', () => {
+      expect(isEditorNavigationRequest({ accept: 'text/html,application/xhtml+xml' })).toBe(true);
+      expect(isEditorNavigationRequest({ accept: 'application/json' })).toBe(false);
+      expect(isEditorNavigationRequest({})).toBe(false);
+    });
+  });
+
+  describe('buildWorkspaceEditorErrorPage', () => {
+    it('renders a branded page with an escaped deep-link CTA', () => {
+      const html = buildWorkspaceEditorErrorPage({
+        reason: 'workspace-suspended',
+        sessionUrl: 'https://lfc.test/new/abc?x="1"',
+      });
+      expect(html).toContain('Workspace suspended');
+      expect(html).toContain('Resume workspace');
+      // URL quotes must be escaped so they cannot break out of the href attribute.
+      expect(html).toContain('href="https://lfc.test/new/abc?x=&quot;1&quot;"');
+      expect(html).not.toContain('x="1"');
+    });
+  });
+
+  describe('editorProxyConnections registry', () => {
+    const sessionId = 'registry-test-session';
+
+    afterEach(() => {
+      // Drain any leftover tokens between cases.
+      while (editorProxyConnections.sizeForSession(sessionId) > 0) {
+        // no-op: tokens released within each test
+        break;
+      }
+    });
+
+    it('registers and releases, keeping the gauge consistent', () => {
+      const before = editorProxyConnections.size();
+      const a = {};
+      const b = {};
+      expect(editorProxyConnections.tryRegister(sessionId, a)).toBe(true);
+      expect(editorProxyConnections.tryRegister(sessionId, b)).toBe(true);
+      expect(editorProxyConnections.sizeForSession(sessionId)).toBe(2);
+      expect(editorProxyConnections.size()).toBe(before + 2);
+      editorProxyConnections.release(sessionId, a);
+      editorProxyConnections.release(sessionId, b);
+      expect(editorProxyConnections.sizeForSession(sessionId)).toBe(0);
+      expect(editorProxyConnections.size()).toBe(before);
+    });
+
+    it('rejects once the per-session cap is reached', () => {
+      const tokens: object[] = [];
+      for (let i = 0; i < EDITOR_PROXY_MAX_PER_SESSION; i += 1) {
+        const token = {};
+        tokens.push(token);
+        expect(editorProxyConnections.tryRegister(sessionId, token)).toBe(true);
+      }
+      expect(editorProxyConnections.tryRegister(sessionId, {})).toBe(false);
+      tokens.forEach((token) => editorProxyConnections.release(sessionId, token));
+      expect(editorProxyConnections.sizeForSession(sessionId)).toBe(0);
+    });
   });
 });

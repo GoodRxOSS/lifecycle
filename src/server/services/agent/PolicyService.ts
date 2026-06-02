@@ -25,7 +25,7 @@ import {
   type AgentCapabilitySourceKind,
 } from './capabilityCatalog';
 import type { AgentApprovalMode, AgentApprovalPolicy, AgentCapabilityKey } from './types';
-import { DEFAULT_AGENT_APPROVAL_POLICY } from './types';
+import { AGENT_CAPABILITY_KEYS, DEFAULT_AGENT_APPROVAL_POLICY } from './types';
 
 type McpAnnotations = {
   readOnlyHint?: boolean;
@@ -70,11 +70,19 @@ export default class AgentPolicyService {
   static async getEffectivePolicy(repoFullName?: string): Promise<AgentApprovalPolicy> {
     const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     const configured = (config as { approvalPolicy?: ApprovalPolicyConfig }).approvalPolicy;
+    const configuredDefaultMode = configured?.defaultMode;
+    const defaultMode = configuredDefaultMode || DEFAULT_AGENT_APPROVAL_POLICY.defaultMode;
+    const baseRules = configuredDefaultMode
+      ? AGENT_CAPABILITY_KEYS.reduce<Record<AgentCapabilityKey, AgentApprovalMode>>((acc, capabilityKey) => {
+          acc[capabilityKey] = configuredDefaultMode;
+          return acc;
+        }, {} as Record<AgentCapabilityKey, AgentApprovalMode>)
+      : DEFAULT_AGENT_APPROVAL_POLICY.rules;
 
     return {
-      defaultMode: configured?.defaultMode || DEFAULT_AGENT_APPROVAL_POLICY.defaultMode,
+      defaultMode,
       rules: {
-        ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+        ...baseRules,
         ...(configured?.rules || {}),
       },
     };

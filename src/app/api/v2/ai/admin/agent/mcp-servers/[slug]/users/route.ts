@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentAdminService from 'server/services/agent/AdminService';
 
 /**
@@ -72,10 +72,7 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { slug: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  requireRequestUserIdentity(req);
 
   const scope = req.nextUrl.searchParams.get('scope');
   if (!scope) {

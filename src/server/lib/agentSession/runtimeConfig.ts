@@ -108,7 +108,7 @@ export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT = [
   'When a tool execution is not approved, do not retry the denied action. Use the denial reason as updated guidance and continue from there.',
   'When showing multi-line exact text such as file contents, command output, diffs, or JSON, use a fenced code block instead of inline code.',
 ].join('\n');
-export const DEFAULT_AGENT_SESSION_MAX_ITERATIONS = 8;
+export const DEFAULT_AGENT_SESSION_MAX_ITERATIONS = 20;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS = 3000;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS = 15000;
 export const DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE = true;
@@ -290,16 +290,6 @@ export function resolveAgentSessionReadinessFromDefaults(
   return {
     timeoutMs: normalizeNonNegativeInteger(readinessDefaults?.timeoutMs) ?? defaults.timeoutMs,
     pollMs: normalizeNonNegativeInteger(readinessDefaults?.pollMs) ?? defaults.pollMs,
-  };
-}
-
-export function mergeAgentSessionReadiness(
-  baseReadiness: ResolvedAgentSessionReadinessConfig,
-  overrides?: AgentSessionReadinessConfig | null
-): ResolvedAgentSessionReadinessConfig {
-  return {
-    timeoutMs: normalizeNonNegativeInteger(overrides?.timeoutMs) ?? baseReadiness.timeoutMs,
-    pollMs: normalizeNonNegativeInteger(overrides?.pollMs) ?? baseReadiness.pollMs,
   };
 }
 

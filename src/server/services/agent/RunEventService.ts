@@ -21,12 +21,9 @@ import { sanitizeAgentRunStreamChunks, type AgentUiMessageChunk } from './stream
 import { limitDurablePayloadRecord } from './payloadLimits';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import { readString } from './runEventUtils';
+import { toChunkEvents, chunkFromEvent, type ChunkEvent } from './runEventChunkCodec';
 import type { Transaction } from 'objection';
-
-type ChunkEvent = {
-  eventType: string;
-  payload: Record<string, unknown>;
-};
 
 type RunEventAppendTarget = Pick<AgentRun, 'id'> & Partial<Pick<AgentRun, 'uuid'>>;
 
@@ -39,7 +36,8 @@ type RunEventAppendOptions = {
 export const DEFAULT_RUN_EVENT_PAGE_LIMIT = 100;
 export const MAX_RUN_EVENT_PAGE_LIMIT = 500;
 export const RUN_EVENT_STREAM_PAGE_LIMIT = 100;
-export const RUN_EVENT_STREAM_POLL_INTERVAL_MS = 2000;
+// Polling fallback when LISTEN/notify is unavailable; tight so short reasoning bursts still stream live.
+export const RUN_EVENT_STREAM_POLL_INTERVAL_MS = 250;
 const AGENT_RUN_EVENT_VERSION = 1;
 const RUN_EVENT_NOTIFY_CHANNEL = 'agent_run_events';
 const RUN_EVENT_TERMINAL_STATUSES = new Set<AgentRun['status']>(['completed', 'failed', 'cancelled']);
@@ -94,28 +92,25 @@ type PgListenConnection = {
 
 type RunEventNotificationSubscriber = (notification: RunEventNotification) => void;
 
-const notificationSubscribers = new Map<string, Set<RunEventNotificationSubscriber>>();
-let notificationConnection: PgListenConnection | null = null;
-let notificationListenPromise: Promise<void> | null = null;
+// Pinned to globalThis so LISTEN state survives Next.js dev module re-eval.
+type RunEventNotifyGlobal = typeof globalThis & {
+  __lifecycleRunEventNotify?: {
+    subscribers: Map<string, Set<RunEventNotificationSubscriber>>;
+    connection: PgListenConnection | null;
+    listenPromise: Promise<void> | null;
+  };
+};
 
-function cloneValue<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-function readBoolean(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined;
+function runEventNotifyState() {
+  const globalScope = globalThis as RunEventNotifyGlobal;
+  if (!globalScope.__lifecycleRunEventNotify) {
+    globalScope.__lifecycleRunEventNotify = {
+      subscribers: new Map(),
+      connection: null,
+      listenPromise: null,
+    };
+  }
+  return globalScope.__lifecycleRunEventNotify;
 }
 
 function isRunEventStreamOpen(run: Pick<AgentRun, 'status'>): boolean {
@@ -132,29 +127,8 @@ function encodeCanonicalSseEvent(event: SerializedRunEvent): Uint8Array {
   );
 }
 
-function pickDefined(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
-  const picked: Record<string, unknown> = {};
-
-  for (const key of keys) {
-    if (source[key] !== undefined) {
-      picked[key] = cloneValue(source[key]);
-    }
-  }
-
-  return picked;
-}
-
-function compactChunk(fields: Record<string, unknown>): AgentUiMessageChunk {
-  const chunk: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(fields)) {
-    if (value !== undefined) {
-      chunk[key] = value;
-    }
-  }
-
-  return chunk as AgentUiMessageChunk;
-}
+// SSE comment frame keeps idle connections warm so proxies/LBs don't idle-kill the stream.
+const SSE_KEEPALIVE_FRAME = textEncoder.encode(': keepalive\n\n');
 
 function parseRunEventNotification(payload: string | undefined): RunEventNotification | null {
   if (!payload) {
@@ -180,7 +154,7 @@ function parseRunEventNotification(payload: string | undefined): RunEventNotific
 }
 
 function notifySubscribers(notification: RunEventNotification): void {
-  const subscribers = notificationSubscribers.get(notification.runId);
+  const subscribers = runEventNotifyState().subscribers.get(notification.runId);
   if (!subscribers) {
     return;
   }
@@ -191,8 +165,9 @@ function notifySubscribers(notification: RunEventNotification): void {
 }
 
 function clearNotificationConnection(): void {
-  notificationConnection = null;
-  notificationListenPromise = null;
+  const state = runEventNotifyState();
+  state.connection = null;
+  state.listenPromise = null;
 }
 
 function handleNotification(notification: { channel?: string; payload?: string }): void {
@@ -209,511 +184,6 @@ function handleNotification(notification: { channel?: string; payload?: string }
 function handleNotificationError(error: unknown): void {
   getLogger().warn({ error }, 'AgentExec: run-event notification listener failed');
   clearNotificationConnection();
-}
-
-function toChunkEvents(chunk: AgentUiMessageChunk): ChunkEvent[] {
-  const chunkRecord = chunk as unknown as Record<string, unknown>;
-
-  switch (chunk.type) {
-    case 'start':
-      return [
-        {
-          eventType: 'message.created',
-          payload: {
-            messageId: chunk.messageId,
-            metadata: chunk.messageMetadata || {},
-          },
-        },
-      ];
-    case 'message-metadata':
-      return [
-        {
-          eventType: 'message.metadata',
-          payload: {
-            metadata: cloneValue(chunk.messageMetadata || {}),
-          },
-        },
-      ];
-    case 'text-start':
-      return [
-        {
-          eventType: 'message.part.started',
-          payload: {
-            partType: 'text',
-            partId: chunk.id,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'text-delta':
-      return [
-        {
-          eventType: 'message.delta',
-          payload: {
-            partType: 'text',
-            partId: chunk.id,
-            delta: chunk.delta,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'text-end':
-      return [
-        {
-          eventType: 'message.part.completed',
-          payload: {
-            partType: 'text',
-            partId: chunk.id,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'reasoning-start':
-      return [
-        {
-          eventType: 'message.part.started',
-          payload: {
-            partType: 'reasoning',
-            partId: chunk.id,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'reasoning-delta':
-      return [
-        {
-          eventType: 'message.delta',
-          payload: {
-            partType: 'reasoning',
-            partId: chunk.id,
-            delta: chunk.delta,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'reasoning-end':
-      return [
-        {
-          eventType: 'message.part.completed',
-          payload: {
-            partType: 'reasoning',
-            partId: chunk.id,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'tool-input-start':
-      return [
-        {
-          eventType: 'tool.call.input.started',
-          payload: {
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName,
-            ...pickDefined(chunkRecord, ['providerExecuted', 'providerMetadata', 'dynamic', 'title']),
-          },
-        },
-      ];
-    case 'tool-input-delta':
-      return [
-        {
-          eventType: 'tool.call.input.delta',
-          payload: {
-            toolCallId: chunk.toolCallId,
-            inputTextDelta: chunk.inputTextDelta,
-          },
-        },
-      ];
-    case 'tool-input-available':
-    case 'tool-input-error':
-      return [
-        {
-          eventType: 'tool.call.started',
-          payload: {
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName,
-            inputStatus: chunk.type === 'tool-input-error' ? 'error' : 'available',
-            input: 'input' in chunk ? chunk.input : null,
-            errorText: 'errorText' in chunk ? chunk.errorText : null,
-            ...pickDefined(chunkRecord, ['providerExecuted', 'providerMetadata', 'dynamic', 'title']),
-          },
-        },
-      ];
-    case 'tool-output-available':
-    case 'tool-output-error':
-    case 'tool-output-denied':
-      return [
-        {
-          eventType: 'tool.call.completed',
-          payload: {
-            toolCallId: chunk.toolCallId,
-            output: 'output' in chunk ? chunk.output : null,
-            errorText: 'errorText' in chunk ? chunk.errorText : null,
-            status:
-              chunk.type === 'tool-output-available'
-                ? 'completed'
-                : chunk.type === 'tool-output-denied'
-                ? 'denied'
-                : 'failed',
-            ...pickDefined(chunkRecord, ['providerExecuted', 'providerMetadata', 'dynamic', 'preliminary']),
-          },
-        },
-      ];
-    case 'tool-approval-request':
-      return [
-        {
-          eventType: 'approval.requested',
-          payload: {
-            ...pickDefined(chunkRecord, ['actionId']),
-            approvalId: chunk.approvalId,
-            toolCallId: chunk.toolCallId,
-          },
-        },
-      ];
-    case 'data-file-change':
-      return [
-        {
-          eventType: 'tool.file_change',
-          payload: {
-            id: chunk.id,
-            data: cloneValue(chunk.data),
-            transient: chunk.transient,
-          },
-        },
-      ];
-    case 'source-url':
-      return [
-        {
-          eventType: 'message.source',
-          payload: {
-            sourceType: 'url',
-            sourceId: chunk.sourceId,
-            url: chunk.url,
-            ...pickDefined(chunkRecord, ['title', 'providerMetadata']),
-          },
-        },
-      ];
-    case 'source-document':
-      return [
-        {
-          eventType: 'message.source',
-          payload: {
-            sourceType: 'document',
-            sourceId: chunk.sourceId,
-            mediaType: chunk.mediaType,
-            title: chunk.title,
-            ...pickDefined(chunkRecord, ['filename', 'providerMetadata']),
-          },
-        },
-      ];
-    case 'file':
-      return [
-        {
-          eventType: 'message.file',
-          payload: {
-            url: chunk.url,
-            mediaType: chunk.mediaType,
-            ...pickDefined(chunkRecord, ['providerMetadata']),
-          },
-        },
-      ];
-    case 'start-step':
-      return [
-        {
-          eventType: 'run.step.started',
-          payload: {},
-        },
-      ];
-    case 'finish-step':
-      return [
-        {
-          eventType: 'run.step.completed',
-          payload: {},
-        },
-      ];
-    case 'finish':
-      return [
-        {
-          eventType: 'run.finished',
-          payload: {
-            finishReason: chunk.finishReason,
-            metadata: chunk.messageMetadata || {},
-          },
-        },
-      ];
-    case 'abort':
-      return [
-        {
-          eventType: 'run.aborted',
-          payload: {
-            reason: chunk.reason,
-          },
-        },
-      ];
-    case 'error':
-      return [
-        {
-          eventType: 'run.error',
-          payload: {
-            errorText: chunk.errorText,
-          },
-        },
-      ];
-  }
-
-  return [];
-}
-
-function chunkFromMessagePartEvent(eventType: string, payload: Record<string, unknown>): AgentUiMessageChunk | null {
-  const partType = readString(payload.partType);
-  const partId = readString(payload.partId) || readString(payload.messageId);
-  if ((partType !== 'text' && partType !== 'reasoning') || !partId) {
-    return null;
-  }
-
-  const providerMetadata = payload.providerMetadata;
-
-  if (eventType === 'message.part.started') {
-    return compactChunk({
-      type: partType === 'text' ? 'text-start' : 'reasoning-start',
-      id: partId,
-      providerMetadata,
-    });
-  }
-
-  if (eventType === 'message.delta') {
-    return compactChunk({
-      type: partType === 'text' ? 'text-delta' : 'reasoning-delta',
-      id: partId,
-      delta: readString(payload.delta) || '',
-      providerMetadata,
-    });
-  }
-
-  if (eventType === 'message.part.completed') {
-    return compactChunk({
-      type: partType === 'text' ? 'text-end' : 'reasoning-end',
-      id: partId,
-      providerMetadata,
-    });
-  }
-
-  return null;
-}
-
-function chunkFromToolStartedEvent(payload: Record<string, unknown>): AgentUiMessageChunk | null {
-  const toolCallId = readString(payload.toolCallId);
-  const toolName = readString(payload.toolName);
-  if (!toolCallId || !toolName) {
-    return null;
-  }
-
-  const inputStatus = readString(payload.inputStatus);
-  return compactChunk({
-    type: inputStatus === 'error' ? 'tool-input-error' : 'tool-input-available',
-    toolCallId,
-    toolName,
-    input: payload.input,
-    errorText: inputStatus === 'error' ? readString(payload.errorText) || 'Tool input failed.' : undefined,
-    providerExecuted: readBoolean(payload.providerExecuted),
-    providerMetadata: payload.providerMetadata,
-    dynamic: readBoolean(payload.dynamic),
-    title: readString(payload.title),
-  });
-}
-
-function chunkFromToolCompletedEvent(payload: Record<string, unknown>): AgentUiMessageChunk | null {
-  const toolCallId = readString(payload.toolCallId);
-  if (!toolCallId) {
-    return null;
-  }
-
-  const status = readString(payload.status);
-  if (status === 'denied') {
-    return compactChunk({
-      type: 'tool-output-denied',
-      toolCallId,
-    });
-  }
-
-  if (status === 'failed') {
-    return compactChunk({
-      type: 'tool-output-error',
-      toolCallId,
-      errorText: readString(payload.errorText) || 'Tool execution failed.',
-      providerExecuted: readBoolean(payload.providerExecuted),
-      providerMetadata: payload.providerMetadata,
-      dynamic: readBoolean(payload.dynamic),
-    });
-  }
-
-  return compactChunk({
-    type: 'tool-output-available',
-    toolCallId,
-    output: payload.output,
-    providerExecuted: readBoolean(payload.providerExecuted),
-    providerMetadata: payload.providerMetadata,
-    dynamic: readBoolean(payload.dynamic),
-    preliminary: readBoolean(payload.preliminary),
-  });
-}
-
-function chunkFromEvent(event: AgentRunEvent): AgentUiMessageChunk | null {
-  const payload = asRecord(event.payload);
-
-  switch (event.eventType) {
-    case 'message.created':
-      return compactChunk({
-        type: 'start',
-        messageId: readString(payload.messageId),
-        messageMetadata: payload.metadata,
-      });
-    case 'message.metadata':
-      return compactChunk({
-        type: 'message-metadata',
-        messageMetadata: payload.metadata || {},
-      });
-    case 'message.part.started':
-    case 'message.delta':
-    case 'message.part.completed':
-      return chunkFromMessagePartEvent(event.eventType, payload);
-    case 'tool.call.input.started': {
-      const toolCallId = readString(payload.toolCallId);
-      const toolName = readString(payload.toolName);
-      if (!toolCallId || !toolName) {
-        return null;
-      }
-
-      return compactChunk({
-        type: 'tool-input-start',
-        toolCallId,
-        toolName,
-        providerExecuted: readBoolean(payload.providerExecuted),
-        providerMetadata: payload.providerMetadata,
-        dynamic: readBoolean(payload.dynamic),
-        title: readString(payload.title),
-      });
-    }
-    case 'tool.call.input.delta': {
-      const toolCallId = readString(payload.toolCallId);
-      if (!toolCallId) {
-        return null;
-      }
-
-      return compactChunk({
-        type: 'tool-input-delta',
-        toolCallId,
-        inputTextDelta: readString(payload.inputTextDelta) || '',
-      });
-    }
-    case 'tool.call.started':
-      return chunkFromToolStartedEvent(payload);
-    case 'tool.call.completed':
-      return chunkFromToolCompletedEvent(payload);
-    case 'approval.requested': {
-      const approvalId = readString(payload.approvalId);
-      const toolCallId = readString(payload.toolCallId);
-      if (!approvalId || !toolCallId) {
-        return null;
-      }
-
-      return compactChunk({
-        type: 'tool-approval-request',
-        actionId: readString(payload.actionId),
-        approvalId,
-        toolCallId,
-      });
-    }
-    case 'tool.file_change':
-      if (!payload.data) {
-        return null;
-      }
-
-      return compactChunk({
-        type: 'data-file-change',
-        id: readString(payload.id),
-        data: payload.data,
-        transient: readBoolean(payload.transient),
-      });
-    case 'message.source':
-      if (payload.sourceType === 'url') {
-        const sourceId = readString(payload.sourceId);
-        const url = readString(payload.url);
-        if (!sourceId || !url) {
-          return null;
-        }
-
-        return compactChunk({
-          type: 'source-url',
-          sourceId,
-          url,
-          title: readString(payload.title),
-          providerMetadata: payload.providerMetadata,
-        });
-      }
-
-      if (payload.sourceType === 'document') {
-        const sourceId = readString(payload.sourceId);
-        const mediaType = readString(payload.mediaType);
-        const title = readString(payload.title);
-        if (!sourceId || !mediaType || !title) {
-          return null;
-        }
-
-        return compactChunk({
-          type: 'source-document',
-          sourceId,
-          mediaType,
-          title,
-          filename: readString(payload.filename),
-          providerMetadata: payload.providerMetadata,
-        });
-      }
-
-      return null;
-    case 'message.file': {
-      const url = readString(payload.url);
-      const mediaType = readString(payload.mediaType);
-      if (!url || !mediaType) {
-        return null;
-      }
-
-      return compactChunk({
-        type: 'file',
-        url,
-        mediaType,
-        providerMetadata: payload.providerMetadata,
-      });
-    }
-    case 'run.step.started':
-      return compactChunk({ type: 'start-step' });
-    case 'run.step.completed':
-      return compactChunk({ type: 'finish-step' });
-    case 'run.finished':
-      return compactChunk({
-        type: 'finish',
-        finishReason: readString(payload.finishReason),
-        messageMetadata: payload.metadata,
-      });
-    case 'run.aborted':
-      return compactChunk({
-        type: 'abort',
-        reason: readString(payload.reason),
-      });
-    case 'run.error':
-      return compactChunk({
-        type: 'error',
-        errorText: readString(payload.errorText) || 'Agent run failed.',
-      });
-    case 'run.failed': {
-      const error = asRecord(payload.error);
-      return compactChunk({
-        type: 'error',
-        errorText: readString(error.message) || readString(payload.errorText) || 'Agent run failed.',
-      });
-    }
-    default:
-      return null;
-  }
 }
 
 export function normalizeRunEventPageLimit(limit?: number | null): number {
@@ -734,15 +204,16 @@ function normalizeRunEventAfterSequence(afterSequence?: number | null): number {
 
 export default class AgentRunEventService {
   private static async ensureNotificationListener(): Promise<void> {
-    if (notificationConnection) {
+    const state = runEventNotifyState();
+    if (state.connection) {
       return;
     }
 
-    if (notificationListenPromise) {
-      return notificationListenPromise;
+    if (state.listenPromise) {
+      return state.listenPromise;
     }
 
-    notificationListenPromise = (async () => {
+    state.listenPromise = (async () => {
       const knex = AgentRunEvent.knex() as unknown as {
         client: {
           acquireConnection(): Promise<PgListenConnection>;
@@ -755,7 +226,7 @@ export default class AgentRunEventService {
         connection.on('notification', handleNotification);
         connection.on('error', handleNotificationError);
         await connection.query(`LISTEN ${RUN_EVENT_NOTIFY_CHANNEL}`);
-        notificationConnection = connection;
+        state.connection = connection;
       } catch (error) {
         await knex.client.releaseConnection(connection);
         throw error;
@@ -767,18 +238,19 @@ export default class AgentRunEventService {
         throw error;
       })
       .finally(() => {
-        notificationListenPromise = null;
+        state.listenPromise = null;
       });
 
-    return notificationListenPromise;
+    return state.listenPromise;
   }
 
   static async waitForRunEventNotification(
     runUuid: string,
     afterSequence: number,
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ): Promise<boolean> {
-    if (timeoutMs <= 0) {
+    if (timeoutMs <= 0 || signal?.aborted) {
       return false;
     }
 
@@ -791,7 +263,7 @@ export default class AgentRunEventService {
 
     return new Promise((resolve) => {
       let timeout: NodeJS.Timeout | null = null;
-      const subscribers = notificationSubscribers.get(runUuid) || new Set<RunEventNotificationSubscriber>();
+      const subscribers = runEventNotifyState().subscribers.get(runUuid) || new Set<RunEventNotificationSubscriber>();
 
       const cleanup = (notified: boolean) => {
         if (timeout) {
@@ -799,13 +271,19 @@ export default class AgentRunEventService {
           timeout = null;
         }
 
+        if (signal) {
+          signal.removeEventListener('abort', onAbort);
+        }
+
         subscribers.delete(subscriber);
         if (subscribers.size === 0) {
-          notificationSubscribers.delete(runUuid);
+          runEventNotifyState().subscribers.delete(runUuid);
         }
 
         resolve(notified);
       };
+
+      const onAbort = () => cleanup(false);
 
       const subscriber: RunEventNotificationSubscriber = (notification) => {
         if (notification.latestSequence > afterSequence) {
@@ -814,8 +292,12 @@ export default class AgentRunEventService {
       };
 
       subscribers.add(subscriber);
-      notificationSubscribers.set(runUuid, subscribers);
+      runEventNotifyState().subscribers.set(runUuid, subscribers);
       timeout = setTimeout(() => cleanup(false), timeoutMs);
+
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
     });
   }
 
@@ -887,15 +369,34 @@ export default class AgentRunEventService {
     const pageLimit = normalizeRunEventPageLimit(options.pageLimit ?? RUN_EVENT_STREAM_PAGE_LIMIT);
     const pollIntervalMs = options.pollIntervalMs ?? RUN_EVENT_STREAM_POLL_INTERVAL_MS;
 
+    // `stopped` exits the loop on disconnect; the controller interrupts the notification wait.
+    let stopped = false;
+    const abortController = new AbortController();
+
     return new ReadableStream<Uint8Array>({
       start: async (controller) => {
         let cursor = normalizeRunEventAfterSequence(afterSequence);
         let sawTerminalEvent = false;
 
+        // enqueue() throws after the consumer cancels; guard every write so a disconnect tears down cleanly.
+        const safeEnqueue = (chunk: Uint8Array): boolean => {
+          if (stopped) {
+            return false;
+          }
+          try {
+            controller.enqueue(chunk);
+            return true;
+          } catch {
+            stopped = true;
+            abortController.abort();
+            return false;
+          }
+        };
+
         const drainAvailableEvents = async (): Promise<boolean> => {
           let hasMoreEvents = true;
 
-          while (hasMoreEvents) {
+          while (hasMoreEvents && !stopped) {
             const page = await this.listRunEventsPage(runUuid, {
               afterSequence: cursor,
               limit: pageLimit,
@@ -908,57 +409,111 @@ export default class AgentRunEventService {
               if (RUN_EVENT_TERMINAL_EVENT_TYPES.has(event.eventType)) {
                 sawTerminalEvent = true;
               }
-              controller.enqueue(encodeCanonicalSseEvent(this.serializeRunEvent(event)));
+              if (!safeEnqueue(encodeCanonicalSseEvent(this.serializeRunEvent(event)))) {
+                return false;
+              }
             }
 
             cursor = page.nextSequence;
             hasMoreEvents = page.hasMore;
           }
 
-          return true;
+          return !stopped;
         };
 
-        let streamOpen = true;
-        while (streamOpen) {
-          if (!(await drainAvailableEvents())) {
-            controller.close();
-            return;
-          }
-
-          const currentRun = await AgentRun.query().findOne({ uuid: runUuid });
-          if (!currentRun) {
-            controller.close();
-            return;
-          }
-
-          if (!isRunEventStreamOpen(currentRun)) {
-            if (sawTerminalEvent) {
-              streamOpen = false;
-              controller.close();
-              return;
-            }
-
+        try {
+          let streamOpen = true;
+          while (streamOpen && !stopped) {
             if (!(await drainAvailableEvents())) {
-              controller.close();
-              return;
+              break;
             }
 
-            if (sawTerminalEvent) {
-              streamOpen = false;
-              controller.close();
-              return;
+            const currentRun = await AgentRun.query().findOne({ uuid: runUuid });
+            if (!currentRun) {
+              break;
             }
 
-            if (!sawTerminalEvent) {
-              await this.waitForRunEventNotification(runUuid, cursor, pollIntervalMs);
-              continue;
+            if (!isRunEventStreamOpen(currentRun)) {
+              // Terminal status: drain anything still pending, then close.
+              if (!sawTerminalEvent) {
+                if (!(await drainAvailableEvents())) {
+                  break;
+                }
+              }
+
+              // Self-heal: terminal status without a terminal event would poll forever; repair it.
+              if (!sawTerminalEvent) {
+                await this.ensureTerminalEventForTerminalRun(runUuid);
+                await drainAvailableEvents();
+              }
+
+              break;
             }
+
+            // Idle keep-alive: with no new events the connection would be idle-killed (~30-60s).
+            if (!safeEnqueue(SSE_KEEPALIVE_FRAME)) {
+              break;
+            }
+
+            await this.waitForRunEventNotification(runUuid, cursor, pollIntervalMs, abortController.signal);
           }
-
-          await this.waitForRunEventNotification(runUuid, cursor, pollIntervalMs);
+        } finally {
+          stopped = true;
+          if (!abortController.signal.aborted) {
+            abortController.abort();
+          }
+          try {
+            controller.close();
+          } catch {
+            // already closed/errored by the consumer
+          }
         }
       },
+      cancel: () => {
+        stopped = true;
+        abortController.abort();
+      },
     });
+  }
+
+  /** Idempotently append the terminal run.* event for a terminal-status run missing it, so stranded streams recover. Returns true if appended. */
+  private static async ensureTerminalEventForTerminalRun(runUuid: string): Promise<boolean> {
+    let appendedSequence: number | null = null;
+    await AgentRun.transaction(async (trx) => {
+      const run = await AgentRun.query(trx).findOne({ uuid: runUuid }).forUpdate();
+      if (!run || isRunEventStreamOpen(run)) {
+        return;
+      }
+
+      const terminalEventType = `run.${run.status}`;
+      if (!RUN_EVENT_TERMINAL_EVENT_TYPES.has(terminalEventType)) {
+        return;
+      }
+
+      const existing = await AgentRunEvent.query(trx).where({ runId: run.id, eventType: terminalEventType }).first();
+      if (existing) {
+        return;
+      }
+
+      const runWithError = run as AgentRun & { error?: unknown; usageSummary?: unknown };
+      appendedSequence = await this.appendStatusEventForRunInTransaction(
+        run,
+        terminalEventType,
+        {
+          status: run.status,
+          error: runWithError.error || null,
+          usageSummary: runWithError.usageSummary || {},
+          repaired: true,
+        },
+        trx
+      );
+    });
+
+    if (appendedSequence) {
+      await this.notifyRunEventsInserted(runUuid, appendedSequence);
+      return true;
+    }
+    return false;
   }
 
   private static requireExecutionOwner(

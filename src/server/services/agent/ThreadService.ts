@@ -15,11 +15,13 @@
  */
 
 import AgentSession from 'server/models/AgentSession';
+import { getOwnedSession } from 'server/services/agent/sessionOwnership';
 import AgentMessage from 'server/models/AgentMessage';
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 import type { Transaction } from 'objection';
+import { NotFoundError, ConflictError } from 'server/lib/appError';
 import { canSessionAcceptMessages, getSessionMessageBlockReason } from './sessionReadiness';
 import { TERMINAL_RUN_STATUSES } from './RunService';
 import WorkspaceRuntimeStateService from './WorkspaceRuntimeStateService';
@@ -90,17 +92,21 @@ export type AgentThreadCreateConflictCode =
   | 'active_run'
   | 'pending_approval';
 
-export class AgentThreadCreateNotFoundError extends Error {
-  constructor(public readonly code: AgentThreadCreateNotFoundCode, message: string) {
-    super(message);
+export class AgentThreadCreateNotFoundError extends NotFoundError {
+  readonly reason: AgentThreadCreateNotFoundCode;
+  constructor(reason: AgentThreadCreateNotFoundCode, message: string) {
+    super(message, 'thread_target_not_found', { reason });
     this.name = 'AgentThreadCreateNotFoundError';
+    this.reason = reason;
   }
 }
 
-export class AgentThreadCreateConflictError extends Error {
-  constructor(public readonly code: AgentThreadCreateConflictCode, message: string) {
-    super(message);
+export class AgentThreadCreateConflictError extends ConflictError {
+  readonly reason: AgentThreadCreateConflictCode;
+  constructor(reason: AgentThreadCreateConflictCode, message: string) {
+    super(message, reason, { reason });
     this.name = 'AgentThreadCreateConflictError';
+    this.reason = reason;
   }
 }
 
@@ -304,14 +310,7 @@ export default class AgentThreadService {
   static getRuntimeControlChoices = getRuntimeControlChoices;
   static buildRuntimeControlChoicesMetadataPatch = buildRuntimeControlChoicesMetadataPatch;
 
-  static async getOwnedSession(sessionUuid: string, userId: string): Promise<AgentSession> {
-    const session = await AgentSession.query().findOne({ uuid: sessionUuid, userId });
-    if (!session) {
-      throw new Error('Agent session not found');
-    }
-
-    return session;
-  }
+  static getOwnedSession = getOwnedSession;
 
   static async getOwnedThread(threadUuid: string, userId: string): Promise<AgentThread> {
     const thread = await AgentThread.query()

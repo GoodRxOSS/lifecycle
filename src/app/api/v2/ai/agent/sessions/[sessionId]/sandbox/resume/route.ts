@@ -17,7 +17,7 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
 import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
@@ -65,10 +65,7 @@ function isSessionNotFoundError(error: unknown): boolean {
  *         description: Workspace action is blocked by an active run or another lifecycle action
  */
 const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   try {
     const githubToken = await resolveRequestGitHubToken(req);

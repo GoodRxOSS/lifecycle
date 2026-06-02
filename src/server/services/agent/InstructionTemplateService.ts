@@ -17,6 +17,7 @@
 import { createHash } from 'crypto';
 import AgentInstructionTemplate from 'server/models/AgentInstructionTemplate';
 import { getLogger } from 'server/lib/logger';
+import { AppError } from 'server/lib/appError';
 import {
   SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS,
   type SystemInstructionTemplateDefinition,
@@ -65,19 +66,31 @@ export type UpdateInstructionTemplateOverrideInput = {
   updatedBy?: string | null;
 };
 
-export class InstructionTemplateServiceError extends Error {
+// Maps each discriminant to {httpStatus, stable contract code} so routes never re-map.
+const INSTRUCTION_TEMPLATE_ERROR_CONTRACT: Record<
+  InstructionTemplateServiceErrorCode,
+  { httpStatus: number; code: string }
+> = {
+  invalid_ref: { httpStatus: 400, code: 'instruction_template_ref_invalid' },
+  unknown_ref: { httpStatus: 404, code: 'instruction_template_not_found' },
+  invalid_content: { httpStatus: 400, code: 'instruction_template_content_invalid' },
+};
+
+export class InstructionTemplateServiceError extends AppError {
   readonly statusCode: number;
-  readonly details?: Record<string, unknown>;
+  readonly templateCode: InstructionTemplateServiceErrorCode;
 
   constructor(
-    public readonly code: InstructionTemplateServiceErrorCode,
+    templateCode: InstructionTemplateServiceErrorCode,
     message: string,
     options: { statusCode?: number; details?: Record<string, unknown> } = {}
   ) {
-    super(message);
+    const contract = INSTRUCTION_TEMPLATE_ERROR_CONTRACT[templateCode];
+    const httpStatus = options.statusCode || contract.httpStatus;
+    super({ httpStatus, code: contract.code, message, details: { templateCode, ...(options.details || {}) } });
     this.name = 'InstructionTemplateServiceError';
-    this.statusCode = options.statusCode || (code === 'unknown_ref' ? 404 : 400);
-    this.details = options.details;
+    this.templateCode = templateCode;
+    this.statusCode = httpStatus;
   }
 }
 
@@ -162,11 +175,43 @@ export default class InstructionTemplateService {
   static async seedSystemTemplates(
     definitions: readonly SystemInstructionTemplateDefinition[] = SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS
   ): Promise<InstructionTemplateView[]> {
-    const rows = await Promise.all(
-      definitions.map((definition) => {
-        assertValidTemplateRef(definition.ref);
-        assertValidContent(definition.defaultContent);
+    const refs = definitions.map((d) => d.ref);
+    const existingRows = await AgentInstructionTemplate.query().whereIn('ref', refs).orderBy('ref', 'asc');
+    const existingMap = new Map(existingRows.map((r) => [r.ref, r]));
 
+    const toUpsert: SystemInstructionTemplateDefinition[] = [];
+    const unchangedRows: AgentInstructionTemplate[] = [];
+
+    for (const definition of definitions) {
+      assertValidTemplateRef(definition.ref);
+      assertValidContent(definition.defaultContent);
+
+      const existing = existingMap.get(definition.ref);
+      if (!existing) {
+        toUpsert.push(definition);
+      } else {
+        const defaultHash = computeInstructionTemplateContentHash(definition.defaultContent);
+        const needsUpdate =
+          existing.name !== definition.name ||
+          existing.description !== definition.description ||
+          existing.defaultContent !== definition.defaultContent ||
+          existing.defaultVersion !== definition.defaultVersion ||
+          existing.defaultHash !== defaultHash;
+
+        if (needsUpdate) {
+          toUpsert.push(definition);
+        } else {
+          unchangedRows.push(existing);
+        }
+      }
+    }
+
+    if (toUpsert.length === 0) {
+      return definitions.map((def) => toView(existingMap.get(def.ref)!));
+    }
+
+    const upsertedRows = await Promise.all(
+      toUpsert.map((definition) => {
         return AgentInstructionTemplate.upsert(
           {
             ref: definition.ref,
@@ -181,8 +226,18 @@ export default class InstructionTemplateService {
       })
     );
 
-    getLogger().info(`AgentExec: instruction templates seeded count=${rows.length}`);
-    return rows.map(toView);
+    const allRowsMap = new Map<string, AgentInstructionTemplate>();
+    for (const row of unchangedRows) {
+      allRowsMap.set(row.ref, row);
+    }
+    for (const row of upsertedRows) {
+      allRowsMap.set(row.ref, row);
+    }
+
+    getLogger().info(
+      `AgentExec: instruction templates seeded count=${definitions.length} (upserted=${toUpsert.length})`
+    );
+    return definitions.map((def) => toView(allRowsMap.get(def.ref)!));
   }
 
   static async listTemplates(): Promise<InstructionTemplateView[]> {

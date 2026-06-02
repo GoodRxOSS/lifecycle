@@ -18,10 +18,8 @@ import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { getRequestUserIdentity } from 'server/lib/get-user';
-import AgentThreadRuntimeControlsService, {
-  AgentThreadRuntimeControlsError,
-} from 'server/services/agent/ThreadRuntimeControlsService';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import AgentThreadRuntimeControlsService from 'server/services/agent/ThreadRuntimeControlsService';
 
 type RuntimeControlsPatchBody = {
   toolChoiceIds?: string[];
@@ -71,21 +69,6 @@ function parsePatchBody(body: unknown): RuntimeControlsPatchBody | Error {
   }
 
   return { toolChoiceIds, mcpChoiceIds };
-}
-
-function mapRuntimeControlsError(error: unknown, req: NextRequest) {
-  if (error instanceof AgentThreadRuntimeControlsError) {
-    const statusByCode: Record<AgentThreadRuntimeControlsError['code'], number> = {
-      invalid_input: 400,
-      unknown_choice: 400,
-      policy_denied: 403,
-      not_found: 404,
-      active_run: 409,
-    };
-    return errorResponse(error, { status: statusByCode[error.code] }, req);
-  }
-
-  throw error;
 }
 
 /**
@@ -185,24 +168,15 @@ function mapRuntimeControlsError(error: unknown, req: NextRequest) {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
-  try {
-    const state = await AgentThreadRuntimeControlsService.getState({ threadId: params.threadId, userIdentity });
-    return successResponse(state, { status: 200 }, req);
-  } catch (error) {
-    return mapRuntimeControlsError(error, req);
-  }
+  // AgentThreadRuntimeControlsError is an AppError; createApiHandler maps its httpStatus/code.
+  const state = await AgentThreadRuntimeControlsService.getState({ threadId: params.threadId, userIdentity });
+  return successResponse(state, { status: 200 }, req);
 };
 
 const patchHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   let body: unknown;
   try {
@@ -216,16 +190,12 @@ const patchHandler = async (req: NextRequest, { params }: { params: { threadId: 
     return errorResponse(parsedBody, { status: 400 }, req);
   }
 
-  try {
-    const state = await AgentThreadRuntimeControlsService.patchChoices({
-      threadId: params.threadId,
-      userIdentity,
-      ...parsedBody,
-    });
-    return successResponse(state, { status: 200 }, req);
-  } catch (error) {
-    return mapRuntimeControlsError(error, req);
-  }
+  const state = await AgentThreadRuntimeControlsService.patchChoices({
+    threadId: params.threadId,
+    userIdentity,
+    ...parsedBody,
+  });
+  return successResponse(state, { status: 200 }, req);
 };
 
 export const GET = createApiHandler(getHandler);

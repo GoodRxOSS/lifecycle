@@ -24,12 +24,18 @@ export class GetFileTool extends BaseTool {
 
   constructor(private githubClient: GitHubClient) {
     super(
-      'Read any file from the repository. Returns raw file content and total line count. Use this to read configuration files (lifecycle.yaml, lifecycle.yml), Dockerfiles, Helm values, source code, or any other file.',
+      "Read any file from one of THIS environment's repositories. Returns raw file content and total line count. Use this to read configuration files (lifecycle.yaml, lifecycle.yml), Dockerfiles, Helm values, source code, or any other file. Default repository_owner/repository_name to this build's primary repository; repositories outside this environment are rejected.",
       {
         type: 'object',
         properties: {
-          repository_owner: { type: 'string', description: 'Repository owner' },
-          repository_name: { type: 'string', description: 'Repository name' },
+          repository_owner: {
+            type: 'string',
+            description: "Repository owner. Defaults to this build's primary repo owner.",
+          },
+          repository_name: {
+            type: 'string',
+            description: "Repository name. Defaults to this build's primary repo name.",
+          },
           branch: { type: 'string', description: 'Branch name' },
           file_path: {
             type: 'string',
@@ -54,6 +60,15 @@ export class GetFileTool extends BaseTool {
       const repo = args.repository_name as string;
       const branch = args.branch as string;
       const filePath = args.file_path as string;
+
+      // SECURITY: lock to the build's repositories; reject out-of-scope repos.
+      if (!this.githubClient.isRepoAllowed(owner, repo)) {
+        return this.createErrorResult(
+          `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be accessed.`,
+          'FILE_ACCESS_DENIED',
+          false
+        );
+      }
 
       if (!this.githubClient.isFilePathAllowed(filePath, 'read')) {
         return this.createErrorResult(

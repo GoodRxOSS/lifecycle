@@ -42,6 +42,39 @@ echo "Starting tilt..."
 tilt up
 """
 
+[tasks.prd]
+description = "Like dev, but run web/worker/gateway from a production-built image (pnpm start, real SSE streaming; no HMR)"
+run = """
+#!/usr/bin/env bash
+set -e
+
+CLUSTER_NAME="lfc"
+REGISTRY_CONFIG_DIR="/tmp/kind-registry-config/10.96.188.230:5000"
+
+echo "Setting up registry config for containerd..."
+mkdir -p "$REGISTRY_CONFIG_DIR"
+cat > "$REGISTRY_CONFIG_DIR/hosts.toml" << 'EOF'
+server = "http://10.96.188.230:5000"
+
+[host."http://10.96.188.230:5000"]
+  capabilities = ["pull", "resolve", "push"]
+  skip_verify = true
+EOF
+
+if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+  echo "Kind cluster '$CLUSTER_NAME' already exists"
+else
+  echo "Creating kind cluster '$CLUSTER_NAME'..."
+  kind create cluster --config sysops/tilt/kind-config.yaml --name "$CLUSTER_NAME"
+fi
+
+echo "Switching kubectl context to kind-$CLUSTER_NAME..."
+kubectl config use-context "kind-$CLUSTER_NAME"
+
+echo "Starting tilt (LIFECYCLE_PROD=1 -- production build, no HMR)..."
+LIFECYCLE_PROD=1 tilt up
+"""
+
 [tasks.down]
 description = "Stop tilt (cluster remains)"
 run = """

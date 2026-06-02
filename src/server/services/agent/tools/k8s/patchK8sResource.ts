@@ -23,11 +23,15 @@ export class PatchK8sResourceTool extends BaseTool {
 
   constructor(private k8sClient: K8sClient) {
     super(
-      'Modify Kubernetes resources. Supports operations: patch (update config), scale (change replicas), restart (rolling restart), delete (delete pod/job). Use this to fix misconfigurations or manage resource lifecycle.',
+      "Modify Kubernetes resources in THIS environment's namespace. Supports operations: patch (update config), scale (change replicas), restart (rolling restart). IMPORTANT: these changes are EPHEMERAL — Lifecycle reverts patch/scale/restart on the next deploy/reconcile. Use them only to validate a hypothesis or temporarily unblock. The DURABLE fix is an approval-gated update_file to lifecycle.yaml or its referenced files. The namespace defaults to this environment's namespace; any other namespace is rejected.",
       {
         type: 'object',
         properties: {
-          namespace: { type: 'string', description: 'The Kubernetes namespace' },
+          namespace: {
+            type: 'string',
+            description:
+              "Optional. Defaults to this environment's namespace. If provided, it MUST equal the environment's namespace; any other value is rejected.",
+          },
           resource_type: {
             type: 'string',
             description: 'Resource type (e.g., "deployment", "pod", "job")',
@@ -35,8 +39,9 @@ export class PatchK8sResourceTool extends BaseTool {
           name: { type: 'string', description: 'The resource name' },
           operation: {
             type: 'string',
-            description: 'Operation to perform: "patch", "scale", "restart", or "delete"',
-            enum: ['patch', 'scale', 'restart', 'delete'],
+            description:
+              'Operation to perform: "patch", "scale", or "restart". All are ephemeral and reverted on the next deploy/reconcile.',
+            enum: ['patch', 'scale', 'restart'],
           },
           patch: {
             type: 'object',
@@ -58,12 +63,13 @@ export class PatchK8sResourceTool extends BaseTool {
   async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
     const resourceType = args.resource_type as string;
     const name = args.name as string;
-    const namespace = args.namespace as string;
     const operation = args.operation as string;
+    // SECURITY: enforce namespace scope before approval; a foreign namespace must never become approvable.
+    const namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
     return {
       title: `${operation} Kubernetes resource`,
       description: `${operation} ${resourceType}/${name} in namespace ${namespace}`,
-      impact: 'This will modify a live Kubernetes resource.',
+      impact: 'This will modify a live Kubernetes resource. The change is ephemeral and reverted on the next deploy.',
       confirmButtonText: `${operation.charAt(0).toUpperCase() + operation.slice(1)}`,
     };
   }
@@ -73,8 +79,15 @@ export class PatchK8sResourceTool extends BaseTool {
       return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
     }
 
+    let namespace: string;
     try {
-      const namespace = args.namespace as string;
+      // SECURITY: lock to the build's namespace; reject any foreign namespace.
+      namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
+    } catch (error: any) {
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+    }
+
+    try {
       const resourceType = args.resource_type as string;
       const name = args.name as string;
       const operation = args.operation as string;
@@ -105,13 +118,9 @@ export class PatchK8sResourceTool extends BaseTool {
           result = await this.handleRestartOperation(normalizedType, name, namespace);
           break;
 
-        case 'delete':
-          result = await this.handleDeleteOperation(normalizedType, name, namespace);
-          break;
-
         default:
           return this.createErrorResult(
-            `Unknown operation: ${operation}. Supported operations: patch, scale, restart, delete`,
+            `Unknown operation: ${operation}. Supported operations: patch, scale, restart`,
             'INVALID_OPERATION'
           );
       }
@@ -147,15 +156,6 @@ export class PatchK8sResourceTool extends BaseTool {
       return this.restartDeployment(name, namespace);
     }
     throw new Error(`Restart operation not supported for resource type: ${resourceType}`);
-  }
-
-  private async handleDeleteOperation(resourceType: string, name: string, namespace: string): Promise<any> {
-    if (resourceType === 'pod') {
-      return this.deletePod(name, namespace);
-    } else if (resourceType === 'job') {
-      return this.deleteJob(name, namespace);
-    }
-    throw new Error(`Delete operation not supported for resource type: ${resourceType}`);
   }
 
   private async patchDeployment(name: string, namespace: string, patch: any): Promise<any> {
@@ -260,32 +260,6 @@ export class PatchK8sResourceTool extends BaseTool {
       success: true,
       message: `Successfully triggered rolling restart of deployment ${name}`,
       restartedAt: now,
-    };
-  }
-
-  private async deletePod(podName: string, namespace: string): Promise<any> {
-    await this.k8sClient.coreApi.deleteNamespacedPod(podName, namespace);
-
-    return {
-      success: true,
-      message: `Successfully deleted pod ${podName}. Kubernetes will create a new pod automatically.`,
-    };
-  }
-
-  private async deleteJob(jobName: string, namespace: string): Promise<any> {
-    await this.k8sClient.batchApi.deleteNamespacedJob(
-      jobName,
-      namespace,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'Background'
-    );
-
-    return {
-      success: true,
-      message: `Successfully deleted job ${jobName}.`,
     };
   }
 }

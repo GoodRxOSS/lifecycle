@@ -17,11 +17,18 @@
 import AgentSession from 'server/models/AgentSession';
 import AgentSessionService from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
-import { AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
+import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import { resolveAgentSessionCleanupConfig } from 'server/lib/agentSession/runtimeConfig';
-import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
+import {
+  WorkspaceActionBlockedError,
+  WorkspaceRuntimeStateService,
+} from 'server/services/agent/WorkspaceRuntimeStateService';
+import { buildWorkspaceRuntimeFailure } from 'server/lib/agentSession/startupFailureState';
 
 const logger = () => getLogger();
+
+const PROVISIONING_TIMEOUT_MESSAGE =
+  'Workspace provisioning timed out. The previous attempt was interrupted before the workspace became ready. Retry to start it again.';
 
 export async function processAgentSessionCleanup(): Promise<void> {
   const cleanupConfig = await resolveAgentSessionCleanupConfig();
@@ -36,6 +43,13 @@ export async function processAgentSessionCleanup(): Promise<void> {
         .whereNot('sessionKind', AgentSessionKind.CHAT)
         .orWhereNot('workspaceStatus', AgentWorkspaceStatus.HIBERNATED);
     });
+  // Chat provisioning is synchronous in the HTTP request; if that process dies the catch never runs and
+  // the session is stranded in PROVISIONING under a live claim. Reap stale ones into a retryable FAILED.
+  const timedOutProvisioningSessions = await AgentSession.query()
+    .where('status', 'active')
+    .where('sessionKind', AgentSessionKind.CHAT)
+    .where('workspaceStatus', AgentWorkspaceStatus.PROVISIONING)
+    .where('updatedAt', '<', startingCutoff);
   const staleSessions = [
     ...idleActiveSessions,
     ...(await AgentSession.query().where('status', 'starting').where('updatedAt', '<', startingCutoff)),
@@ -46,14 +60,41 @@ export async function processAgentSessionCleanup(): Promise<void> {
       .where('updatedAt', '<', suspendedExpiryCutoff)),
   ];
 
+  for (const session of timedOutProvisioningSessions) {
+    const sessionId = session.uuid || String(session.id);
+    try {
+      const failure = buildWorkspaceRuntimeFailure({
+        error: new Error(PROVISIONING_TIMEOUT_MESSAGE),
+        stage: 'connect_runtime',
+        origin: 'chat_runtime',
+        retryable: true,
+        code: 'workspace_provisioning_timeout',
+      });
+      logger().info(`Session: cleanup provisioning timed out sessionId=${sessionId} updatedAt=${session.updatedAt}`);
+      await WorkspaceRuntimeStateService.recordWorkspaceFailure(session.id, {
+        sessionPatch: {
+          status: 'active',
+          chatStatus: AgentChatStatus.READY,
+          workspaceStatus: AgentWorkspaceStatus.FAILED,
+        } as unknown as Partial<AgentSession>,
+        failure,
+        // Release the stranded lifecycle claim so the retry path is unblocked.
+        runtimeLifecycle: null,
+      });
+    } catch (err) {
+      logger().error({ error: err, sessionId }, `Session: cleanup provisioning-timeout failed sessionId=${sessionId}`);
+    }
+  }
+
   for (const session of staleSessions) {
     const sessionId = session.uuid || String(session.id);
     try {
+      // Provisioning chat runtimes are owned by the provisioning-timeout reaper above; never end them here.
       const isProvisioningChatRuntime =
         session.status === 'active' &&
         session.sessionKind === AgentSessionKind.CHAT &&
         session.workspaceStatus === AgentWorkspaceStatus.PROVISIONING;
-      if (isProvisioningChatRuntime && new Date(session.updatedAt).getTime() >= startingCutoff.getTime()) {
+      if (isProvisioningChatRuntime) {
         logger().info(`Session: cleanup skipped sessionId=${sessionId} reason=runtime_provisioning`);
         continue;
       }

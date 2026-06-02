@@ -58,12 +58,12 @@ jest.mock('../AgentDefinitionRegistry', () => {
 
 jest.mock('../CustomAgentDefinitionService', () => {
   class MockCustomAgentDefinitionServiceError extends Error {
-    code: string;
+    reason: string;
 
-    constructor(code: string, message: string) {
+    constructor(reason: string, message: string) {
       super(message);
       this.name = 'CustomAgentDefinitionServiceError';
-      this.code = code;
+      this.reason = reason;
     }
   }
 
@@ -89,13 +89,13 @@ jest.mock('../InstructionTemplateService', () => {
     readonly details?: Record<string, unknown>;
 
     constructor(
-      public readonly code: string,
+      public readonly templateCode: string,
       message: string,
       options: { statusCode?: number; details?: Record<string, unknown> } = {}
     ) {
       super(message);
       this.name = 'InstructionTemplateServiceError';
-      this.statusCode = options.statusCode || (code === 'unknown_ref' ? 404 : 400);
+      this.statusCode = options.statusCode || (templateCode === 'unknown_ref' ? 404 : 400);
       this.details = options.details;
     }
   }
@@ -504,9 +504,11 @@ describe('AgentRunPlanResolver', () => {
 
     await expect(resolve()).rejects.toMatchObject({
       name: AgentRunPlanInstructionTemplateError.name,
-      code: 'unknown_ref',
+      code: 'instruction_template_invalid',
+      httpStatus: 422,
+      templateCode: 'unknown_ref',
       statusCode: 404,
-      details: { ref: 'system:missing' },
+      details: { templateCode: 'unknown_ref', ref: 'system:missing' },
     });
     expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
     expect(mockResolveInstructionRefs).toHaveBeenCalledWith(['system:missing']);
@@ -526,9 +528,11 @@ describe('AgentRunPlanResolver', () => {
 
     await expect(resolve()).rejects.toMatchObject({
       name: AgentRunPlanInstructionTemplateError.name,
-      code: 'invalid_ref',
+      code: 'instruction_template_invalid',
+      httpStatus: 422,
+      templateCode: 'invalid_ref',
       statusCode: 400,
-      details: { ref: 'invalid ref' },
+      details: { templateCode: 'invalid_ref', ref: 'invalid ref' },
     });
     expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
   });
@@ -641,6 +645,8 @@ describe('AgentRunPlanResolver', () => {
       expect.arrayContaining(['diagnostics_codefresh', 'diagnostics_kubernetes', 'github_write'])
     );
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).not.toContain('workspace_shell');
+    // Debug no longer grants external_mcp_write; repairs go through github_write (least privilege).
+    expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).not.toContain('external_mcp_write');
     expect(result.runPlanSnapshot.capabilities.resolvedCapabilityAccess).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -649,13 +655,10 @@ describe('AgentRunPlanResolver', () => {
           availability: 'system_only',
           approvalMode: 'require_approval',
         }),
-        expect.objectContaining({
-          capabilityId: 'external_mcp_write',
-          allowed: true,
-          availability: 'admin_only',
-          approvalMode: 'require_approval',
-        }),
       ])
+    );
+    expect(result.runPlanSnapshot.capabilities.resolvedCapabilityAccess).not.toContainEqual(
+      expect.objectContaining({ capabilityId: 'external_mcp_write', allowed: true })
     );
     expect(result.runPlanSnapshot.runtime.runtimeOptions).toEqual({ maxIterations: 12 });
     expect(result.runPlanSnapshot.runtime.approvalPolicy).toEqual({

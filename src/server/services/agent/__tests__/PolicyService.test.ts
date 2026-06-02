@@ -14,10 +14,25 @@
  * limitations under the License.
  */
 
+const mockGetEffectiveConfig = jest.fn();
+
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getEffectiveConfig: mockGetEffectiveConfig,
+    })),
+  },
+}));
+
 import AgentPolicyService from '../PolicyService';
-import { DEFAULT_AGENT_APPROVAL_POLICY } from '../types';
+import { AGENT_CAPABILITY_KEYS, DEFAULT_AGENT_APPROVAL_POLICY } from '../types';
 
 describe('AgentPolicyService', () => {
+  beforeEach(() => {
+    mockGetEffectiveConfig.mockReset();
+  });
+
   it('keeps read-only sandbox tools in the read capability', () => {
     expect(
       AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.read_file', {
@@ -46,6 +61,43 @@ describe('AgentPolicyService', () => {
     expect(AgentPolicyService.modeForCapability(DEFAULT_AGENT_APPROVAL_POLICY, 'deploy_k8s_mutation')).toBe(
       'require_approval'
     );
+  });
+
+  it('keeps system approval modes when no approval default is configured', async () => {
+    mockGetEffectiveConfig.mockResolvedValue({
+      approvalPolicy: {
+        rules: {
+          shell_exec: 'allow',
+        },
+      },
+    });
+
+    await expect(AgentPolicyService.getEffectivePolicy()).resolves.toEqual({
+      defaultMode: DEFAULT_AGENT_APPROVAL_POLICY.defaultMode,
+      rules: {
+        ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+        shell_exec: 'allow',
+      },
+    });
+  });
+
+  it('uses an explicit approval default as the fallback for known capability families', async () => {
+    mockGetEffectiveConfig.mockResolvedValue({
+      approvalPolicy: {
+        defaultMode: 'deny',
+        rules: {
+          shell_exec: 'allow',
+        },
+      },
+    });
+
+    await expect(AgentPolicyService.getEffectivePolicy()).resolves.toEqual({
+      defaultMode: 'deny',
+      rules: {
+        ...Object.fromEntries(AGENT_CAPABILITY_KEYS.map((capabilityKey) => [capabilityKey, 'deny'])),
+        shell_exec: 'allow',
+      },
+    });
   });
 
   it('allows all user-owned definitions to use all-users capabilities', () => {

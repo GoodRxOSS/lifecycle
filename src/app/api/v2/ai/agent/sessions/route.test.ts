@@ -32,6 +32,12 @@ const mockResolveRequestedAgentSessionServices = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 jest.mock('server/services/agent/ChatSessionService', () => ({
@@ -100,7 +106,10 @@ jest.mock('server/services/agentSessionCandidates', () => ({
 }));
 
 jest.mock('server/services/agent/ProviderRegistry', () => {
-  class MissingAgentProviderApiKeyError extends Error {}
+  class MissingAgentProviderApiKeyError extends Error {
+    readonly httpStatus = 400;
+    readonly code = 'provider_api_key_required';
+  }
   return {
     __esModule: true,
     default: {},
@@ -109,10 +118,19 @@ jest.mock('server/services/agent/ProviderRegistry', () => {
 });
 
 jest.mock('server/services/agent/ThreadRuntimeControlsService', () => {
+  const HTTP_STATUS: Record<string, number> = {
+    invalid_input: 400,
+    unknown_choice: 400,
+    policy_denied: 403,
+    not_found: 404,
+    active_run: 409,
+  };
   class AgentThreadRuntimeControlsError extends Error {
+    readonly httpStatus: number;
     constructor(public readonly code: string, message: string) {
       super(message);
       this.name = 'AgentThreadRuntimeControlsError';
+      this.httpStatus = HTTP_STATUS[code] ?? 400;
     }
   }
 

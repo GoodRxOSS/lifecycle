@@ -22,10 +22,18 @@ const mockSwitchThreadAgent = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockGetRequestUserIdentity(...args),
+  // requireRequestUserIdentity mirrors getRequestUserIdentity; throws 401 when unauthenticated.
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const id = mockGetRequestUserIdentity(...args);
+    if (!id) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return id;
+  },
 }));
 
 jest.mock('server/services/agent/AgentSelectionService', () => {
   class AgentThreadAgentSwitchError extends Error {
+    readonly httpStatus = 409;
+    readonly code = 'agent_switch_blocked';
     constructor(
       public readonly reason: string,
       message: string,
@@ -157,14 +165,14 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
     expect(missingIdResponse.status).toBe(400);
   });
 
-  it('returns 400 for another user or unknown custom agent ids', async () => {
+  it('returns 409 for another user or unknown custom agent ids', async () => {
     mockSwitchThreadAgent.mockRejectedValueOnce(new AgentThreadAgentSwitchError('unknown_agent', 'Unknown agent.'));
 
     const response = await PATCH(makeRequest({ agentId: 'custom.another-user-agent' }), {
       params: { threadId: 'thread-1' },
     });
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(409);
   });
 
   it('returns 409 for active run switch failures', async () => {

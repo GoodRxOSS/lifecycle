@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { AppError } from 'server/lib/appError';
 import {
   WORKSPACE_RUNTIME_FAILURE_STAGES,
   buildAgentSessionStartupFailure,
@@ -80,6 +81,7 @@ describe('startupFailureState', () => {
       recordedAt: failure.recordedAt,
       retryable: false,
       origin: 'agent_session',
+      code: 'workspace_attach_services_failed',
     });
   });
 
@@ -187,5 +189,65 @@ describe('startupFailureState', () => {
         })
       );
     }
+  });
+
+  it('derives a stable code per failure stage when the error is not an AppError', () => {
+    expect(buildWorkspaceRuntimeFailure({ error: new Error('boom'), stage: 'connect_runtime' }).code).toBe(
+      'workspace_connect_runtime_failed'
+    );
+    expect(buildWorkspaceRuntimeFailure({ error: new Error('boom'), stage: 'suspend' }).code).toBe(
+      'workspace_suspend_failed'
+    );
+    // Default stage is connect_runtime when none is supplied.
+    expect(buildWorkspaceRuntimeFailure({ error: new Error('boom') }).code).toBe('workspace_connect_runtime_failed');
+  });
+
+  it('propagates the originating AppError code and nextAction onto the durable failure', () => {
+    const appError = new AppError({
+      httpStatus: 503,
+      code: 'session_workspace_gateway_unavailable',
+      message: 'gateway unavailable',
+      retryable: true,
+      nextAction: { kind: 'reconnect', label: 'Reconnect workspace' },
+    });
+
+    const failure = buildWorkspaceRuntimeFailure({
+      error: appError,
+      stage: 'connect_runtime',
+      origin: 'manual_runtime',
+      retryable: true,
+    });
+
+    expect(failure.code).toBe('session_workspace_gateway_unavailable');
+    expect(failure.nextAction).toEqual({ kind: 'reconnect', label: 'Reconnect workspace' });
+  });
+
+  it('lets an explicit code override the AppError code and stage default', () => {
+    const failure = buildWorkspaceRuntimeFailure({
+      error: new Error('Workspace provisioning timed out'),
+      stage: 'connect_runtime',
+      origin: 'chat_runtime',
+      retryable: true,
+      code: 'workspace_provisioning_timeout',
+    });
+
+    expect(failure.code).toBe('workspace_provisioning_timeout');
+    expect(failure.retryable).toBe(true);
+  });
+
+  it('round-trips the code and nextAction through normalizeWorkspaceRuntimeFailure', () => {
+    const built = buildWorkspaceRuntimeFailure({
+      error: new AppError({
+        httpStatus: 503,
+        code: 'session_workspace_gateway_unavailable',
+        message: 'gateway unavailable',
+        nextAction: { kind: 'reconnect', label: 'Reconnect workspace' },
+      }),
+      stage: 'connect_runtime',
+    });
+
+    const normalized = normalizeWorkspaceRuntimeFailure(built);
+    expect(normalized.code).toBe('session_workspace_gateway_unavailable');
+    expect(normalized.nextAction).toEqual({ kind: 'reconnect', label: 'Reconnect workspace' });
   });
 });

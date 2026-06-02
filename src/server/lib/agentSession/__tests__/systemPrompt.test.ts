@@ -89,6 +89,83 @@ describe('agent session system prompt', () => {
     );
   });
 
+  it('emits the top-level namespace from build context when not set directly', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      build: { uuid: 'sample-build-1', namespace: 'env-sample-123456' },
+      services: [],
+    });
+
+    expect(prompt).toContain('- namespace: env-sample-123456');
+  });
+
+  it('renders lifecycle config presence and declared services', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      lifecycleConfig: {
+        status: 'present',
+        path: 'lifecycle.yaml',
+        declaredServices: ['next-web', 'api'],
+      },
+      services: [],
+    });
+
+    expect(prompt).toContain('- lifecycleConfig: present (lifecycle.yaml)');
+    expect(prompt).toContain('- declaredServices: next-web, api');
+  });
+
+  it('renders a missing or invalid lifecycle config without declared services', () => {
+    const missing = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      lifecycleConfig: { status: 'missing', path: 'lifecycle.yaml' },
+      services: [],
+    });
+    expect(missing).toContain('- lifecycleConfig: missing (lifecycle.yaml)');
+    expect(missing).not.toContain('declaredServices');
+
+    const invalid = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      lifecycleConfig: { status: 'invalid', path: 'lifecycle.yaml' },
+      services: [],
+    });
+    expect(invalid).toContain('- lifecycleConfig: invalid (lifecycle.yaml)');
+  });
+
+  it('reports an invalid lifecycle config when fetch throws', async () => {
+    const buildGraphQuery = {
+      withGraphFetched: jest.fn().mockResolvedValue({
+        uuid: 'sample-build-1',
+        status: 'build_failed',
+        namespace: 'env-sample-123456',
+        pullRequest: {
+          fullName: 'example-org/example-repo',
+          branchName: 'feature/sample',
+          pullRequestNumber: 42,
+          status: 'open',
+          labels: [],
+          deployOnUpdate: false,
+          repository: { htmlUrl: 'https://github.com/example-org/example-repo' },
+        },
+        deploys: [],
+      }),
+    };
+    (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+      findOne: jest.fn().mockReturnValue(buildGraphQuery),
+    });
+    (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+      where: jest.fn().mockReturnValue({ withGraphFetched: jest.fn().mockResolvedValue([]) }),
+    });
+    (fetchLifecycleConfig as jest.Mock).mockRejectedValue(new Error('invalid yaml'));
+
+    const context = await resolveAgentSessionPromptContext({
+      sessionDbId: 123,
+      namespace: null,
+      buildUuid: 'sample-build-1',
+    });
+
+    expect(context.lifecycleConfig).toEqual({ status: 'invalid', path: 'lifecycle.yaml' });
+  });
+
   it('combines the configured and dynamic prompts with spacing', () => {
     expect(
       combineAgentSessionAppendSystemPrompt('Use concise responses.', 'Session context:\n- namespace: env-sample')
@@ -140,6 +217,8 @@ describe('agent session system prompt', () => {
     expect(prompt).not.toContain('Lifecycle debugging profile:');
     expect(prompt).not.toContain('explicitly asks to continue into repair');
     expect(prompt).toContain('Initial Lifecycle snapshot:');
+    // Top-level namespace falls back to build.namespace for build-context chats.
+    expect(prompt).toContain('- namespace: env-sample-123456');
     expect(prompt).toContain(
       '- build=sample-build-1: buildStatusAtStart=deploy_failed, buildStatusMessageAtStart=web deploy failed, namespace=env-sample-123456, sha=abc123'
     );
@@ -147,7 +226,7 @@ describe('agent session system prompt', () => {
     expect(prompt).toContain(
       '- repo=example-org/example-repo, branch=feature/sample, number=42, url=https://github.com/example-org/example-repo/pull/42, statusAtStart=open, labelsAtStart=lifecycle-deploy, deployOnUpdateAtStart=true, deployLabels=lifecycle-deploy!, disabledLabels=lifecycle-disabled!, latestCommit=abc123, repositoryUrl=https://github.com/example-org/example-repo'
     );
-    expect(prompt).toContain('Deploy roster:');
+    expect(prompt).toContain('DEPLOYS — roster:');
     expect(prompt).toContain(
       '- next-web: deployUuid=next-web-deploy-1, activeAtStart=true, statusAtStart=deploy_failed, statusMessageAtStart=CrashLoopBackOff, repo=example-org/example-repo, branch=feature/sample, publicUrl=https://next-web-sample.lifecycle.dev.example.com, dockerImage=registry.example.test/next-web:abc123, buildPipelineId=build-pipeline-1, deployPipelineId=deploy-pipeline-1'
     );
@@ -196,7 +275,7 @@ describe('agent session system prompt', () => {
       },
     });
 
-    expect(prompt).toContain('Selected deploy:');
+    expect(prompt).toContain('DEPLOYS — selected:');
     expect(prompt).toContain(
       '- sample-service: deployUuid=deploy-1, activeAtStart=false, statusAtStart=build_failed, statusMessageAtStart=Dockerfile not found, repo=example-org/service-repo, branch=feature/service-change, serviceSha=service-sha-1, dockerfilePath=services/sample/Dockerfile'
     );
@@ -273,7 +352,7 @@ describe('agent session system prompt', () => {
     expect(prompt).toContain(
       '- sample-service: deployUuid=sample-service-sample-build-1, activeAtStart=false, statusAtStart=pending, statusMessageAtStart=<none>'
     );
-    expect(prompt).toContain('Deploy roster:');
+    expect(prompt).toContain('DEPLOYS — roster:');
     expect(prompt).not.toContain('Fresh repository reads:');
     expect(prompt).not.toContain('Mismatch handling:');
     expect(prompt).not.toContain('lifecycle.yaml');
@@ -360,6 +439,11 @@ describe('agent session system prompt', () => {
         disabledLabels: ['lifecycle-disabled!'],
         latestCommit: 'abc123',
         repositoryUrl: 'https://github.com/example-org/example-repo',
+      },
+      lifecycleConfig: {
+        status: 'present',
+        path: 'lifecycle.yaml',
+        declaredServices: ['next-web'],
       },
       services: [
         {
@@ -491,6 +575,11 @@ describe('agent session system prompt', () => {
         disabledLabels: ['lifecycle-disabled!'],
         latestCommit: 'abc123',
         repositoryUrl: 'https://github.com/example-org/example-repo',
+      },
+      lifecycleConfig: {
+        status: 'present',
+        path: 'lifecycle.yaml',
+        declaredServices: ['next-web'],
       },
       services: [
         {

@@ -17,10 +17,9 @@
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
 import AgentThreadRuntimeControlsService, {
-  AgentThreadRuntimeControlsError,
   type AgentRuntimeControlsEntryDefaultsInput,
   type AgentRuntimeControlsEntrySourceInput,
   type AgentThreadRuntimeControlChoiceInput,
@@ -137,21 +136,6 @@ function parsePreviewBody(body: unknown): RuntimeControlsPreviewBody | Error {
   };
 }
 
-function mapRuntimeControlsError(error: unknown, req: NextRequest) {
-  if (error instanceof AgentThreadRuntimeControlsError) {
-    const statusByCode: Record<AgentThreadRuntimeControlsError['code'], number> = {
-      invalid_input: 400,
-      unknown_choice: 400,
-      policy_denied: 403,
-      not_found: 404,
-      active_run: 409,
-    };
-    return errorResponse(error, { status: statusByCode[error.code] }, req);
-  }
-
-  throw error;
-}
-
 /**
  * @openapi
  * /api/v2/ai/agent/runtime-controls/preview:
@@ -200,25 +184,19 @@ function mapRuntimeControlsError(error: unknown, req: NextRequest) {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const postHandler = async (req: NextRequest) => {
-  const userIdentity = getRequestUserIdentity(req);
-  if (!userIdentity) {
-    return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
-  }
+  const userIdentity = requireRequestUserIdentity(req);
 
   const parsedBody = parsePreviewBody(await req.json().catch(() => ({})));
   if (parsedBody instanceof Error) {
     return errorResponse(parsedBody, { status: 400 }, req);
   }
 
-  try {
-    const state = await AgentThreadRuntimeControlsService.getEntryPreview({
-      userIdentity,
-      ...parsedBody,
-    });
-    return successResponse(state, { status: 200 }, req);
-  } catch (error) {
-    return mapRuntimeControlsError(error, req);
-  }
+  // AgentThreadRuntimeControlsError is an AppError; createApiHandler maps its httpStatus/code.
+  const state = await AgentThreadRuntimeControlsService.getEntryPreview({
+    userIdentity,
+    ...parsedBody,
+  });
+  return successResponse(state, { status: 200 }, req);
 };
 
 export const POST = createApiHandler(postHandler);

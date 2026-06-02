@@ -54,7 +54,6 @@ export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefi
     description: 'Investigate build and environment context.',
     instructionRefs: ['system:debug'],
     capabilityRefs: [
-      'read_context',
       'diagnostics_logs',
       'diagnostics_codefresh',
       'diagnostics_kubernetes',
@@ -62,7 +61,6 @@ export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefi
       'github_read',
       'github_write',
       'external_mcp_read',
-      'external_mcp_write',
     ],
     resourcePolicy: {
       sourceKinds: ['build_context_chat'],

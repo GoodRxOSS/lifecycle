@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PaginationMetadata } from './paginate';
 import { getLogger } from 'server/lib/logger';
+import { isAppError, toErrorResponseError, type AppErrorAction } from './appError';
 
 interface Metadata {
   pagination?: PaginationMetadata;
@@ -26,7 +27,7 @@ interface Metadata {
 
 type SuccessStatusCode = 200 | 201;
 
-type ErrorStatusCode = 400 | 401 | 403 | 404 | 409 | 500 | 502 | 503;
+type ErrorStatusCode = 400 | 401 | 403 | 404 | 409 | 410 | 422 | 429 | 500 | 502 | 503;
 
 interface SuccessResponse<T> {
   request_id: string;
@@ -45,6 +46,10 @@ export interface ErrorResponse {
   data: unknown | null;
   error: {
     message: string;
+    /** Stable, machine-readable discriminant. The UI switches on this, not on the message. */
+    code?: string;
+    details?: Record<string, unknown>;
+    nextAction?: AppErrorAction;
   };
 }
 
@@ -78,16 +83,19 @@ export function errorResponse(error: unknown, options: ErrorResponseOptions, req
     errorStack = error.stack || '';
   }
 
-  getLogger().error({ error, stack: errorStack }, `API: error message=${errorMessage}`);
+  // Honor AppError.httpStatus so a 409/422/etc. isn't shipped as the caller's default 500.
+  const status = isAppError(error) ? (error.httpStatus as ErrorStatusCode) : options.status;
 
-  const { status } = options;
+  const appErrorCode = isAppError(error) ? error.code : undefined;
+  getLogger().error(
+    { error, stack: errorStack, code: appErrorCode, status },
+    `API: error message=${errorMessage}${appErrorCode ? ` code=${appErrorCode}` : ''}`
+  );
 
   const body: ErrorResponse = {
     request_id: req.headers.get('x-request-id') || '',
     data: options.data ?? null,
-    error: {
-      message: error instanceof Error ? error.message : 'An unknown error occurred.',
-    },
+    error: toErrorResponseError(error),
   };
   return NextResponse.json(body, { status });
 }

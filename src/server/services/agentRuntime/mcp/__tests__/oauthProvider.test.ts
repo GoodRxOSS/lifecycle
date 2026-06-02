@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { PersistentOAuthClientProvider } from '../oauthProvider';
+import { OAuthAuthorizationRequiredError, PersistentOAuthClientProvider } from '../oauthProvider';
 
 describe('PersistentOAuthClientProvider', () => {
   it('includes a valid client URI in dynamic registration metadata', () => {
@@ -42,5 +42,28 @@ describe('PersistentOAuthClientProvider', () => {
       client_uri: 'https://app.example.com',
       scope: 'sample.read',
     });
+  });
+
+  it('tells non-interactive callers to reconnect when OAuth authorization is required', async () => {
+    const provider = new PersistentOAuthClientProvider({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      definitionFingerprint: 'sample-definition-fingerprint',
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+      },
+      redirectUrl: 'https://app.example.com/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback',
+      interactive: false,
+    });
+
+    await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(
+      OAuthAuthorizationRequiredError
+    );
+    await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(
+      'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.'
+    );
   });
 });

@@ -167,7 +167,7 @@ export function buildAgentSessionPodName(sessionUuid: string, buildUuid?: string
   return normalizeKubernetesLabelValue(`agent-${identifier}`.toLowerCase()).replace(/[_.]/g, '-');
 }
 
-export function buildChatSessionNamespace(sessionUuid: string): string {
+function buildChatSessionNamespace(sessionUuid: string): string {
   return normalizeKubernetesLabelValue(`chat-${sessionUuid.slice(0, 8)}`.toLowerCase()).replace(/[_.]/g, '-');
 }
 
@@ -838,7 +838,7 @@ export interface CreateChatSessionOptions {
   model?: string;
 }
 
-export interface CreateChatRuntimeOptions {
+interface CreateChatRuntimeOptions {
   sessionId: string;
   userId: string;
   userIdentity?: RequestUserIdentity;
@@ -1196,6 +1196,8 @@ export default class AgentSessionService {
     const workspaceAction = opts.workspaceAction || (failureOrigin === 'resume' ? 'resume' : 'provision');
     const claimSandboxStatus = failureOrigin === 'resume' ? 'resuming' : 'provisioning';
     const failureRetryable = opts.failureRetryable ?? workspaceAction === 'retry';
+    // A resume reuses the persisted PVC; its data must never be deleted on a failed resume.
+    const resumeReusesExistingPvc = failureOrigin === 'resume' || Boolean(session.pvcName);
     let namespace = chatNamespace;
     let podName = fallbackPodName;
     let pvcName = fallbackPvcName;
@@ -1403,11 +1405,14 @@ export default class AgentSessionService {
         redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`).catch(() => {}),
       ];
       if (resourcesStarted) {
-        cleanupTasks.push(
-          deleteAgentRuntimeResources(namespace, podName, apiKeySecretName).catch(() => {}),
-          ownsPvc ? deleteAgentPvc(namespace, pvcName).catch(() => {}) : Promise.resolve(),
-          deleteNamespace(namespace).catch(() => {})
-        );
+        cleanupTasks.push(deleteAgentRuntimeResources(namespace, podName, apiKeySecretName).catch(() => {}));
+        // Never destroy a resume's persisted PVC/namespace on a transient failure (sr-1).
+        if (!resumeReusesExistingPvc) {
+          cleanupTasks.push(
+            ownsPvc ? deleteAgentPvc(namespace, pvcName).catch(() => {}) : Promise.resolve(),
+            deleteNamespace(namespace).catch(() => {})
+          );
+        }
       }
       await Promise.all(cleanupTasks);
 
@@ -1515,18 +1520,20 @@ export default class AgentSessionService {
     const redis = RedisClient.getInstance().getRedis();
     const apiKeySecretName = `agent-secret-${session.uuid.slice(0, 8)}`;
     const suspendClaimedAt = new Date().toISOString();
-    const { session: claimedSession } = await WorkspaceRuntimeStateService.claimWorkspaceAction(session.id, {
+    // sr-3: capture the live pod before the claim nulls podName, so a crash mid-suspend never leaves a dead URL.
+    const namespace = session.namespace;
+    const podName = session.podName;
+    await WorkspaceRuntimeStateService.claimWorkspaceAction(session.id, {
       action: 'suspend',
       claimedAt: suspendClaimedAt,
       sessionPatch: {
         status: 'active',
         chatStatus: AgentChatStatus.READY,
         workspaceStatus: AgentWorkspaceStatus.READY,
+        podName: null,
       } as unknown as Partial<AgentSession>,
       sandboxStatus: 'suspending',
     });
-    const namespace = claimedSession.namespace || session.namespace;
-    const podName = claimedSession.podName || session.podName;
     try {
       await deleteAgentRuntimeResources(namespace, podName, apiKeySecretName);
     } catch (error) {
@@ -1606,6 +1613,8 @@ export default class AgentSessionService {
       ...opts,
       failureOrigin: 'resume',
       failureStage: 'resume',
+      // Resume failures are retryable: the PVC persists (sr-1), so FAILED→retry recovers it.
+      failureRetryable: true,
     });
   }
 
@@ -2502,7 +2511,7 @@ export default class AgentSessionService {
     const [session, effectiveConfig, approvalPolicy] = await Promise.all([
       AgentSession.query()
         .findOne({ uuid: sessionId })
-        .select('id', 'namespace', 'buildUuid', 'skillPlan', 'sessionKind'),
+        .select('id', 'namespace', 'buildUuid', 'skillPlan', 'sessionKind', 'workspaceStatus', 'podName'),
       AgentSessionConfigService.getInstance().getEffectiveConfig(repoFullName),
       AgentPolicyService.getEffectivePolicy(repoFullName),
     ]);
@@ -2523,7 +2532,11 @@ export default class AgentSessionService {
         namespace: session.namespace || null,
         buildUuid: session.buildUuid,
       });
-      const toolLines = session.namespace
+      const hasReadyWorkspace =
+        session.workspaceStatus === AgentWorkspaceStatus.READY &&
+        Boolean(session.namespace) &&
+        Boolean(session.podName);
+      const toolLines = hasReadyWorkspace
         ? buildSessionWorkspacePromptLines({
             approvalPolicy,
             toolRules: effectiveConfig.toolRules,
@@ -2535,12 +2548,18 @@ export default class AgentSessionService {
         resolvedConfiguredPrompt,
         buildAgentSessionDynamicSystemPrompt({
           ...context,
+          // Fall back to build.namespace so build-context chats still emit the namespace line.
+          namespace: context.namespace || context.build?.namespace || null,
           toolLines,
         })
       );
     } catch (error) {
+      // Disclose missing grounding so the model gathers state via tools instead of assuming a clean baseline.
       logger().warn({ error, sessionId }, `Session: prompt context resolution failed sessionId=${sessionId}`);
-      return resolvedConfiguredPrompt;
+      return combineAgentSessionAppendSystemPrompt(
+        resolvedConfiguredPrompt,
+        'Initial Lifecycle snapshot: UNAVAILABLE (context lookup failed) — gather build/deploy/k8s state via tools and note in your answer that baseline context was unavailable.'
+      );
     }
   }
 

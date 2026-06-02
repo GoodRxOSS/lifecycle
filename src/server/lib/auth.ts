@@ -33,6 +33,14 @@ type RequestWithHeaders = {
   headers?: HeadersLike | null;
 };
 
+type JwtVerificationErrorSummary = {
+  name: string;
+  message: string;
+  code?: unknown;
+  claim?: unknown;
+  reason?: unknown;
+};
+
 type RemoteJwksUrl = Parameters<typeof createRemoteJWKSet>[0];
 type UrlConstructor = new (input: string, base?: string) => unknown;
 
@@ -54,6 +62,26 @@ function buildJwksUrl(input: string): RemoteJwksUrl {
   return new urlCtor(input) as RemoteJwksUrl;
 }
 
+function summarizeJwtVerificationError(error: unknown): JwtVerificationErrorSummary {
+  const maybeError = error as Partial<JwtVerificationErrorSummary> | null | undefined;
+  const summary: JwtVerificationErrorSummary = {
+    name: error instanceof Error ? error.name : typeof maybeError?.name === 'string' ? maybeError.name : 'Error',
+    message: error instanceof Error ? error.message : String(error),
+  };
+
+  if (maybeError?.code !== undefined) {
+    summary.code = maybeError.code;
+  }
+  if (maybeError?.claim !== undefined) {
+    summary.claim = maybeError.claim;
+  }
+  if (maybeError?.reason !== undefined) {
+    summary.reason = maybeError.reason;
+  }
+
+  return summary;
+}
+
 export async function verifyBearerToken(token: string | null | undefined): Promise<AuthResult> {
   if (!token) {
     return {
@@ -62,7 +90,6 @@ export async function verifyBearerToken(token: string | null | undefined): Promi
     };
   }
 
-  // 2. Get Keycloak configuration from environment variables.
   const issuer = process.env.KEYCLOAK_ISSUER;
   const audience = process.env.KEYCLOAK_CLIENT_ID;
   const jwksUrl = process.env.KEYCLOAK_JWKS_URL;
@@ -76,22 +103,18 @@ export async function verifyBearerToken(token: string | null | undefined): Promi
   }
 
   try {
-    // 3. Fetch the JSON Web Key Set (JWKS) from your Keycloak server.
     const JWKS = createRemoteJWKSet(buildJwksUrl(jwksUrl));
 
-    // 4. Verify the token. This function checks the signature, expiration, issuer, and audience.
     const { payload } = await jwtVerify(token, JWKS, {
       issuer,
       audience,
     });
 
-    // 5. If verification is successful, return a success result.
     return { success: true, payload };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-    console.error('Auth: JWT verification failed', error);
+    console.warn('Auth: JWT verification failed', summarizeJwtVerificationError(error));
 
-    // 6. If any part of the verification fails, return an error.
     return {
       success: false,
       error: { message: `Authentication failed: ${errorMessage}`, status: 401 },

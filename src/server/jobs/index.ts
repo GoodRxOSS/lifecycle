@@ -30,8 +30,6 @@ import {
   resolveAgentSessionCleanupConfig,
 } from 'server/lib/agentSession/runtimeConfig';
 
-let isBootstrapped = false;
-
 export default function bootstrapJobs(services: IServices) {
   if (defaultDb.services) {
     return;
@@ -205,28 +203,40 @@ export default function bootstrapJobs(services: IServices) {
   defaultDb.services = services;
 
   if (process.env.NEXT_MANUAL_SIG_HANDLE) {
-    if (!isBootstrapped) {
-      isBootstrapped = true;
+    const globalForJobs = global as unknown as {
+      sigintHandler?: () => void;
+      sigtermHandler?: () => void;
+    };
 
-      // This function is used to handle graceful shutdowns add things as needed.
-      const handleExit = async (signal: string) => {
-        getLogger().info(`Jobs: shutting down signal=${signal}`);
-        try {
-          const redisClient = RedisClient.getInstance();
-          const queueManager = QueueManager.getInstance();
-          await queueManager.emptyAndCloseAllQueues();
-          await redisClient.close();
-          process.exit(0);
-        } catch (error) {
-          getLogger().error({ error }, 'Jobs: shutdown failed');
-          process.exit(0);
-        }
-      };
-
-      process.on('SIGINT', () => handleExit('SIGINT'));
-      process.on('SIGTERM', () => handleExit('SIGTERM'));
-      getLogger().info('Jobs: signal handlers registered');
+    // Remove any previously registered handlers to prevent memory leaks during hot reloads
+    if (globalForJobs.sigintHandler) {
+      process.off('SIGINT', globalForJobs.sigintHandler);
     }
+    if (globalForJobs.sigtermHandler) {
+      process.off('SIGTERM', globalForJobs.sigtermHandler);
+    }
+
+    // This function is used to handle graceful shutdowns add things as needed.
+    const handleExit = async (signal: string) => {
+      getLogger().info(`Jobs: shutting down signal=${signal}`);
+      try {
+        const redisClient = RedisClient.getInstance();
+        const queueManager = QueueManager.getInstance();
+        await queueManager.emptyAndCloseAllQueues();
+        await redisClient.close();
+        process.exit(0);
+      } catch (error) {
+        getLogger().error({ error }, 'Jobs: shutdown failed');
+        process.exit(0);
+      }
+    };
+
+    globalForJobs.sigintHandler = () => handleExit('SIGINT');
+    globalForJobs.sigtermHandler = () => handleExit('SIGTERM');
+
+    process.on('SIGINT', globalForJobs.sigintHandler);
+    process.on('SIGTERM', globalForJobs.sigtermHandler);
+    getLogger().info('Jobs: signal handlers registered');
   }
   getLogger().info('Jobs: bootstrap complete');
 }

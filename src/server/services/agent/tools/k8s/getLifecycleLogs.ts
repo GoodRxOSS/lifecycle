@@ -53,13 +53,20 @@ function deduplicateLines(lines: string[]): string[] {
 export class GetLifecycleLogsTool extends BaseTool {
   static readonly Name = 'get_lifecycle_logs';
 
+  // SECURITY: filter logs to this build's UUID so a model can't read another build's logs.
+  private allowedBuildUuid: string | null = null;
+
   constructor(private k8sClient: K8sClient) {
     super(
-      'Fetch logs from the Lifecycle control plane services (lifecycle-worker or lifecycle-web pods in lifecycle-app namespace), filtered by build UUID and correlation ID. First finds logs matching the build UUID, extracts correlationId from matched structured log lines, then expands the search to include all logs sharing that correlationId. This gives a complete picture of the request lifecycle across services. For user service logs, use get_pod_logs instead.',
+      "Fetch logs from the Lifecycle control plane services (lifecycle-worker or lifecycle-web pods in lifecycle-app namespace), filtered by THIS build's UUID and correlation ID. First finds logs matching the build UUID, extracts correlationId from matched structured log lines, then expands the search to include all logs sharing that correlationId. This gives a complete picture of the request lifecycle across services. For user service logs, use get_pod_logs instead. build_uuid defaults to this build; any other build UUID is rejected.",
       {
         type: 'object',
         properties: {
-          build_uuid: { type: 'string', description: 'The build UUID to filter logs for' },
+          build_uuid: {
+            type: 'string',
+            description:
+              "Optional. Defaults to this build's UUID. If provided, it MUST equal this build's UUID; any other value is rejected.",
+          },
           service_type: {
             type: 'string',
             description:
@@ -74,11 +81,39 @@ export class GetLifecycleLogsTool extends BaseTool {
               'Optional: directly filter by correlation ID instead of discovering it from build UUID. Useful for follow-up queries.',
           },
         },
-        required: ['build_uuid'],
+        required: [],
       },
       ToolSafetyLevel.SAFE,
       'k8s'
     );
+  }
+
+  setAllowedBuildUuid(buildUuid: string | null | undefined): void {
+    this.allowedBuildUuid = buildUuid?.trim() || null;
+  }
+
+  private resolveBuildUuid(requested: string | null | undefined): string {
+    const allowed = this.allowedBuildUuid;
+    const requestedTrimmed = requested?.trim() || null;
+
+    if (!allowed) {
+      if (!requestedTrimmed) {
+        throw new Error('build_uuid is required');
+      }
+      return requestedTrimmed;
+    }
+
+    if (!requestedTrimmed) {
+      return allowed;
+    }
+
+    if (requestedTrimmed !== allowed) {
+      throw new Error(
+        `build_uuid "${requestedTrimmed}" is outside this environment's build "${allowed}" and cannot be accessed.`
+      );
+    }
+
+    return allowed;
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
@@ -86,8 +121,15 @@ export class GetLifecycleLogsTool extends BaseTool {
       return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
     }
 
+    let buildUuid: string;
     try {
-      const buildUuid = args.build_uuid as string;
+      // SECURITY: lock to this build's UUID; reject any foreign build UUID.
+      buildUuid = this.resolveBuildUuid(args.build_uuid as string | undefined);
+    } catch (error: any) {
+      return this.createErrorResult(error.message || 'build_uuid not allowed', 'BUILD_NOT_ALLOWED', false);
+    }
+
+    try {
       const serviceType = (args.service_type as string) || 'worker';
       const tailLines = (args.tail_lines as number) || 200;
       const sinceMinutes = (args.since_minutes as number) || 30;

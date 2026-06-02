@@ -26,6 +26,15 @@ if [ -z "$github_client_id" ] || [ "$github_client_id" = "local-github-client-id
   exit 0
 fi
 
+echo "Keycloak: Waiting for lifecycle-keycloak statefulset to be ready..."
+if ! kubectl -n "$namespace" rollout status statefulset/lifecycle-keycloak --timeout=300s; then
+  echo "Keycloak: Timeout waiting for lifecycle-keycloak statefulset to be ready"
+  exit 1
+fi
+
+# Give Tilt a brief moment to establish port-forwarding
+sleep 5
+
 tmp_current="$(mktemp)"
 tmp_updated="$(mktemp)"
 trap 'rm -f "$tmp_current" "$tmp_updated"' EXIT
@@ -39,7 +48,7 @@ get_admin_token() {
     --data-urlencode 'client_id=admin-cli' | jq -r '.access_token'
 }
 
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   token="$(get_admin_token || true)"
   if [ -n "$token" ] && [ "$token" != "null" ]; then
     status="$(curl -sS --max-time 10 -o "$tmp_current" -w '%{http_code}' \

@@ -16,6 +16,8 @@
 
 import { PatchK8sResourceTool } from '../patchK8sResource';
 
+let mockAllowedNamespace: string | null = null;
+
 const mockK8sClient = {
   coreApi: {
     deleteNamespacedPod: jest.fn(),
@@ -26,6 +28,23 @@ const mockK8sClient = {
   },
   batchApi: {
     deleteNamespacedJob: jest.fn(),
+  },
+  setAllowedNamespace: (ns: string | null | undefined) => {
+    mockAllowedNamespace = ns?.trim() || null;
+  },
+  resolveNamespace: (requested?: string | null) => {
+    const requestedTrimmed = requested?.trim() || null;
+    if (!mockAllowedNamespace) {
+      if (!requestedTrimmed) throw new Error('namespace is required');
+      return requestedTrimmed;
+    }
+    if (!requestedTrimmed) return mockAllowedNamespace;
+    if (requestedTrimmed !== mockAllowedNamespace) {
+      throw new Error(
+        `namespace "${requestedTrimmed}" is outside this environment's namespace "${mockAllowedNamespace}" and cannot be accessed.`
+      );
+    }
+    return mockAllowedNamespace;
   },
 } as any;
 
@@ -42,6 +61,7 @@ describe('PatchK8sResourceTool', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAllowedNamespace = null;
     tool = new PatchK8sResourceTool(mockK8sClient);
   });
 
@@ -103,9 +123,7 @@ describe('PatchK8sResourceTool', () => {
     expect(patchArg.spec.template.metadata.annotations['kubectl.kubernetes.io/restartedAt']).toBeDefined();
   });
 
-  it('delete pod', async () => {
-    mockK8sClient.coreApi.deleteNamespacedPod.mockResolvedValue({});
-
+  it('rejects delete: it is removed from the supported operations', async () => {
     const result = await tool.execute({
       namespace: 'test-ns',
       resource_type: 'pod',
@@ -113,30 +131,11 @@ describe('PatchK8sResourceTool', () => {
       operation: 'delete',
     });
 
-    expect(result.success).toBe(true);
-    expect(mockK8sClient.coreApi.deleteNamespacedPod).toHaveBeenCalledWith('my-pod', 'test-ns');
-  });
-
-  it('delete job', async () => {
-    mockK8sClient.batchApi.deleteNamespacedJob.mockResolvedValue({});
-
-    const result = await tool.execute({
-      namespace: 'test-ns',
-      resource_type: 'job',
-      name: 'my-job',
-      operation: 'delete',
-    });
-
-    expect(result.success).toBe(true);
-    expect(mockK8sClient.batchApi.deleteNamespacedJob).toHaveBeenCalledWith(
-      'my-job',
-      'test-ns',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'Background'
-    );
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INVALID_OPERATION');
+    expect(result.agentContent).toContain('Unknown operation');
+    expect(mockK8sClient.coreApi.deleteNamespacedPod).not.toHaveBeenCalled();
+    expect(mockK8sClient.batchApi.deleteNamespacedJob).not.toHaveBeenCalled();
   });
 
   it('returns error for missing patch object on patch operation', async () => {
@@ -182,5 +181,47 @@ describe('PatchK8sResourceTool', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('CANCELLED');
+  });
+
+  it('rejects a namespace outside the build scope during execution', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+
+    const result = await tool.execute({
+      namespace: 'env-other',
+      resource_type: 'deployment',
+      name: 'my-deploy',
+      operation: 'restart',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('NAMESPACE_NOT_ALLOWED');
+    expect(mockK8sClient.appsApi.patchNamespacedDeployment).not.toHaveBeenCalled();
+  });
+
+  it('rejects a foreign namespace BEFORE presenting an approval', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+
+    await expect(
+      tool.shouldConfirmExecution({
+        namespace: 'env-other',
+        resource_type: 'deployment',
+        name: 'my-deploy',
+        operation: 'restart',
+      })
+    ).rejects.toThrow('env-other');
+  });
+
+  it('presents an approval for the matching build namespace', async () => {
+    mockK8sClient.setAllowedNamespace('env-mine');
+
+    const confirmation = await tool.shouldConfirmExecution({
+      namespace: 'env-mine',
+      resource_type: 'deployment',
+      name: 'my-deploy',
+      operation: 'restart',
+    });
+
+    expect(confirmation).not.toBe(false);
+    expect((confirmation as any).description).toContain('env-mine');
   });
 });

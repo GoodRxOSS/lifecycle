@@ -59,6 +59,7 @@ export function createApiHandler(handler: RouteHandler, options?: ApiHandlerOpti
         throw error;
       }
 
+      // errorResponse honors AppError.httpStatus; non-AppErrors fall back to 500.
       return errorResponse(error, { status: 500 }, req);
     }
   };

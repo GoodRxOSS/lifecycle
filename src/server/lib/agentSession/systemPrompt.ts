@@ -67,12 +67,19 @@ export interface AgentSessionPromptPullRequestContext {
   repositoryUrl?: string;
 }
 
+export interface AgentSessionPromptLifecycleConfigContext {
+  status: 'present' | 'missing' | 'invalid';
+  path: string;
+  declaredServices?: string[];
+}
+
 export interface AgentSessionPromptContext {
   namespace?: string | null;
   buildUuid?: string | null;
   gatheredAt?: string;
   build?: AgentSessionPromptBuildContext;
   pullRequest?: AgentSessionPromptPullRequestContext;
+  lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   services: AgentSessionPromptServiceContext[];
   selectedDeploy?: AgentSessionPromptServiceContext;
   diagnosticServices?: AgentSessionPromptServiceContext[];
@@ -140,12 +147,22 @@ function formatOptionalBoolean(value: boolean | undefined): string {
 export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPromptContext): string {
   const lines = ['Initial Lifecycle snapshot:'];
 
-  if (context.namespace) {
-    lines.push(`- namespace: ${context.namespace}`);
+  // Surface namespace (top-level or from build) prominently for get_k8s_resources/get_pod_logs.
+  const namespace = context.namespace || context.build?.namespace;
+  if (namespace) {
+    lines.push(`- namespace: ${namespace}`);
   }
 
   if (context.buildUuid) {
     lines.push(`- buildUuid: ${context.buildUuid}`);
+  }
+
+  if (context.lifecycleConfig) {
+    const { status, path } = context.lifecycleConfig;
+    lines.push(`- lifecycleConfig: ${status} (${path})`);
+    if (context.lifecycleConfig.declaredServices?.length) {
+      lines.push(`- declaredServices: ${context.lifecycleConfig.declaredServices.join(', ')}`);
+    }
   }
 
   if (context.gatheredAt) {
@@ -232,11 +249,11 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
       service.deployPipelineId ? `deployPipelineId=${service.deployPipelineId}` : undefined,
     ]);
 
-    lines.push('Selected deploy:', `- ${service.name}${details ? `: ${details}` : ''}`);
+    lines.push('DEPLOYS — selected:', `- ${service.name}${details ? `: ${details}` : ''}`);
   }
 
   if (context.diagnosticServices?.length) {
-    lines.push('Deploy roster:');
+    lines.push('DEPLOYS — roster:');
 
     const diagnosticServices = [...context.diagnosticServices].sort((left, right) =>
       left.name.localeCompare(right.name)
@@ -286,9 +303,57 @@ type BuildDiagnosticContext = {
   source: { repo?: string; branch?: string };
   build?: AgentSessionPromptBuildContext;
   pullRequest?: AgentSessionPromptPullRequestContext;
+  lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   deploys: Deploy[];
   diagnosticServices: AgentSessionPromptServiceContext[];
 };
+
+// Representative config path in the snapshot; actual file may be a .lifecycle.yaml/.yml variant.
+const LIFECYCLE_CONFIG_PATH = 'lifecycle.yaml';
+
+// Detect missing/invalid lifecycle.yaml (a common root cause) for the snapshot without throwing; seeds the shared cache.
+async function resolveLifecycleConfigPresence(
+  repo: string | undefined,
+  branch: string | undefined,
+  cache: Map<string, Promise<LifecycleConfig | null>>
+): Promise<AgentSessionPromptLifecycleConfigContext | undefined> {
+  if (!repo || !branch) {
+    return undefined;
+  }
+
+  // fetchLifecycleConfig returns null when absent, throws on parse errors: distinguishes missing from invalid.
+  const key = `${repo}::${branch}`;
+  let fetchPromise = cache.get(key);
+  if (!fetchPromise) {
+    fetchPromise = fetchLifecycleConfig(repo, branch).then((config) => config ?? null);
+    // Shared cache stores a non-throwing variant for the workDir path.
+    cache.set(
+      key,
+      fetchPromise.catch(() => null)
+    );
+  }
+
+  try {
+    const config = await fetchPromise;
+    if (!config) {
+      return { status: 'missing', path: LIFECYCLE_CONFIG_PATH };
+    }
+
+    const declaredServices = Array.isArray(config.services)
+      ? config.services
+          .map((service) => normalizeOptionalString(service?.name))
+          .filter((name): name is string => Boolean(name))
+      : [];
+
+    return {
+      status: 'present',
+      path: LIFECYCLE_CONFIG_PATH,
+      ...(declaredServices.length ? { declaredServices } : {}),
+    };
+  } catch {
+    return { status: 'invalid', path: LIFECYCLE_CONFIG_PATH };
+  }
+}
 
 async function fetchCachedLifecycleConfig(
   repositoryName: string,
@@ -342,7 +407,10 @@ function formatDeployDiagnosticService(
   };
 }
 
-async function resolveBuildDiagnosticContext(buildUuid?: string | null): Promise<BuildDiagnosticContext> {
+async function resolveBuildDiagnosticContext(
+  buildUuid: string | null | undefined,
+  lifecycleConfigCache: Map<string, Promise<LifecycleConfig | null>>
+): Promise<BuildDiagnosticContext> {
   const normalizedBuildUuid = normalizeOptionalString(buildUuid);
   if (!normalizedBuildUuid) {
     return { source: {}, deploys: [], diagnosticServices: [] };
@@ -360,9 +428,11 @@ async function resolveBuildDiagnosticContext(buildUuid?: string | null): Promise
     repo: normalizeOptionalString(pullRequest?.fullName),
     branch: normalizeOptionalString(pullRequest?.branchName),
   };
+  const lifecycleConfig = await resolveLifecycleConfigPresence(source.repo, source.branch, lifecycleConfigCache);
 
   return {
     source,
+    lifecycleConfig,
     build: build
       ? {
           uuid: build.uuid,
@@ -397,14 +467,14 @@ async function resolveBuildDiagnosticContext(buildUuid?: string | null): Promise
 export async function resolveAgentSessionPromptContext(
   lookup: SessionPromptLookupContext
 ): Promise<AgentSessionPromptContext> {
+  const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
   const [session, deploys, buildSource] = await Promise.all([
     AgentSession.query().findById(lookup.sessionDbId),
     Deploy.query()
       .where({ devModeSessionId: lookup.sessionDbId })
       .withGraphFetched('[deployable, repository, service]'),
-    resolveBuildDiagnosticContext(lookup.buildUuid),
+    resolveBuildDiagnosticContext(lookup.buildUuid, lifecycleConfigCache),
   ]);
-  const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
   const allDeploys = deploys.length > 0 ? deploys : buildSource.deploys;
   const deployById = new Map(allDeploys.filter((deploy) => deploy.id != null).map((deploy) => [deploy.id, deploy]));
 
@@ -500,6 +570,7 @@ export async function resolveAgentSessionPromptContext(
     gatheredAt: new Date().toISOString(),
     build: buildSource.build,
     pullRequest: buildSource.pullRequest,
+    ...(buildSource.lifecycleConfig ? { lifecycleConfig: buildSource.lifecycleConfig } : {}),
     services,
     ...(services[0]?.deployUuid ? { selectedDeploy: services[0] } : {}),
     diagnosticServices: buildSource.diagnosticServices,

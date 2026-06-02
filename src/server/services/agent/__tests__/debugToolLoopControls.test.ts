@@ -237,8 +237,62 @@ describe('resolveDebugToolLoopControls', () => {
     expect(controls.activeTools).not.toEqual(
       expect.arrayContaining(['mcp__lifecycle__update_file', 'mcp__lifecycle__patch_k8s_resource'])
     );
-    expect(controls.effectiveMaxIterations).toBe(9);
-    expect(mockStepCountIs).toHaveBeenCalledWith(9);
+    expect(controls.effectiveMaxIterations).toBe(14);
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+  });
+
+  it('strips workspace-provisioning tools for non-Debug build-context runs without an intent', () => {
+    const customBuildContextRunPlan = {
+      ...buildRunPlan(),
+      agent: {
+        id: 'custom.repo-helper',
+        label: 'Repo Helper',
+        sourceKind: 'build_context_chat',
+      },
+    } as AgentRunPlanSnapshotV1;
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: customBuildContextRunPlan,
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 14,
+    });
+
+    expect(controls.activeTools).toBeDefined();
+    expect(controls.activeTools).not.toEqual(
+      expect.arrayContaining([
+        'mcp__sandbox__workspace_exec',
+        'mcp__sandbox__workspace_write_file',
+        'mcp__sandbox__workspace_exec_mutation',
+      ])
+    );
+    // Custom agents aren't constrained to read-only; only workspace-provisioning tools are removed.
+    expect(controls.activeTools).toEqual(
+      expect.arrayContaining(['mcp__lifecycle__get_file', 'mcp__lifecycle__update_file'])
+    );
+    expect(controls.prepareStep).toBeUndefined();
+    expect(controls.effectiveMaxIterations).toBe(14);
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+  });
+
+  it('leaves non-build-context runs without an intent unconstrained even if sandbox tools exist', () => {
+    const customWorkspaceRunPlan = {
+      ...buildRunPlan(),
+      agent: {
+        id: 'custom.repo-helper',
+        label: 'Repo Helper',
+        sourceKind: 'workspace_session',
+      },
+    } as AgentRunPlanSnapshotV1;
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: customWorkspaceRunPlan,
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 14,
+    });
+
+    expect(controls.activeTools).toBeUndefined();
+    expect(controls.prepareStep).toBeUndefined();
+    expect(controls.effectiveMaxIterations).toBe(14);
   });
 
   it('limits diagnosis to read tools, then reserves a final no-tool answer step', async () => {
@@ -265,12 +319,12 @@ describe('resolveDebugToolLoopControls', () => {
         'mcp__sample__stale_missing_tool',
       ])
     );
-    expect(controls.effectiveMaxIterations).toBe(9);
-    expect(mockStepCountIs).toHaveBeenCalledWith(9);
+    expect(controls.effectiveMaxIterations).toBe(14);
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
     expect(await controls.prepareStep?.({ stepNumber: 0 } as any)).toEqual({
       activeTools: controls.activeTools,
     });
-    expect(await controls.prepareStep?.({ stepNumber: 8 } as any)).toEqual({
+    expect(await controls.prepareStep?.({ stepNumber: 13 } as any)).toEqual({
       activeTools: [],
       toolChoice: 'none',
     });
@@ -305,9 +359,9 @@ describe('resolveDebugToolLoopControls', () => {
         'mcp__docs__update_docs',
       ])
     );
-    expect(controls.effectiveMaxIterations).toBe(9);
-    expect(mockStepCountIs).toHaveBeenCalledWith(9);
-    expect(await controls.prepareStep?.({ stepNumber: 8 } as any)).toEqual({
+    expect(controls.effectiveMaxIterations).toBe(99);
+    expect(mockStepCountIs).toHaveBeenCalledWith(99);
+    expect(await controls.prepareStep?.({ stepNumber: 98 } as any)).toEqual({
       activeTools: [],
       toolChoice: 'none',
     });
@@ -380,7 +434,7 @@ describe('resolveDebugToolLoopControls', () => {
     );
     expect(controls.activeTools).not.toContain('mcp__sample__unguarded_repair');
     expect(controls.activeTools).not.toContain('mcp__sample__denied_repair');
-    expect(controls.effectiveMaxIterations).toBe(10);
-    expect(mockStepCountIs).toHaveBeenCalledWith(10);
+    expect(controls.effectiveMaxIterations).toBe(14);
+    expect(mockStepCountIs).toHaveBeenCalledWith(14);
   });
 });

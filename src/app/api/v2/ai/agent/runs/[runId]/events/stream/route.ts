@@ -119,6 +119,8 @@ const getHandler = async (req: NextRequest, { params }: { params: { runId: strin
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      // Disable proxy buffering (nginx and friends) so SSE frames flush immediately.
+      'X-Accel-Buffering': 'no',
     },
   });
 };

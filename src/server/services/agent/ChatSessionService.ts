@@ -248,6 +248,7 @@ export default class AgentChatSessionService {
         userId: opts.userId,
         ownerGithubUsername: opts.userIdentity?.githubUsername || null,
         podName: null,
+        // Workspace namespace stays null until runtime provisioning; build namespace comes from build context instead.
         namespace: null,
         pvcName: null,
         model: selection.modelId,

@@ -23,6 +23,7 @@ import UserApiKeyService from 'server/services/userApiKey';
 import { transformProviderModels } from 'server/services/agentRuntime/models/modelTransformation';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
+import { BadRequestError } from 'server/lib/appError';
 import type { AgentModelSummary, AgentResolvedModelSelection } from './types';
 import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from './providerConfig';
 
@@ -36,21 +37,23 @@ function normalizeModelProvider(provider: string): string | null {
   return normalizeStoredAgentProviderName(provider);
 }
 
-export class MissingAgentProviderApiKeyError extends Error {
+export class MissingAgentProviderApiKeyError extends BadRequestError {
   readonly provider: string;
 
   constructor(provider: string) {
     super(
-      `No API key is configured for provider "${provider}". Save your ${provider} API key in Agent Session settings or configure a shared Agent provider key.`
+      `No API key is configured for provider "${provider}". Save your ${provider} API key in Agent Session settings or configure a shared Agent provider key.`,
+      'provider_api_key_required',
+      { provider }
     );
     this.name = 'MissingAgentProviderApiKeyError';
     this.provider = provider;
   }
 }
 
-export class AgentModelSelectionError extends Error {
+export class AgentModelSelectionError extends BadRequestError {
   constructor(message: string) {
-    super(message);
+    super(message, 'model_selection_invalid');
     this.name = 'AgentModelSelectionError';
   }
 }
