@@ -1,54 +1,58 @@
-name: Build & Push Workspace Docker Image on Release
+name: Build & Push Workspace Docker Image
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for the workspace image (e.g., v1.0.0)'
+        required: true
+        type: string
+      push_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   prepare-metadata:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
-      prerelease_type: ${{ steps.meta.outputs.prerelease_type }}
+      major: ${{ steps.meta.outputs.major }}
+      major_minor: ${{ steps.meta.outputs.major_minor }}
       tags_suffix: ${{ steps.tags.outputs.tags_suffix }}
     steps:
-      - name: Extract release metadata
+      - name: Validate version format
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: version must be in format v1.2.3"
+            exit 1
+          fi
+
+      - name: Extract version metadata
         id: meta
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${{ github.event.inputs.version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
-
-            if [[ "$VERSION" =~ -([a-zA-Z]+)\. ]]; then
-              PRERELEASE_TYPE="${BASH_REMATCH[1]}"
-              echo "prerelease_type=$PRERELEASE_TYPE" >> $GITHUB_OUTPUT
-            else
-              echo "prerelease_type=beta" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          if [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="v${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            MAJOR_MINOR="v${BASH_REMATCH[1]}.${MINOR}"
+            echo "major=$MAJOR" >> $GITHUB_OUTPUT
+            echo "major_minor=$MAJOR_MINOR" >> $GITHUB_OUTPUT
           fi
 
       - name: Determine Docker tags
         id: tags
         run: |
           TAGS_SUFFIX="${{ steps.meta.outputs.version }}"
+          TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.major }}"
+          TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.major_minor }}"
 
-          if [[ "${{ steps.meta.outputs.is_prerelease }}" == "true" ]]; then
-            TAGS_SUFFIX="$TAGS_SUFFIX,${{ steps.meta.outputs.prerelease_type }}"
-          else
+          if [[ "${{ github.event.inputs.push_latest }}" == "true" ]]; then
             TAGS_SUFFIX="$TAGS_SUFFIX,latest"
-
-            VERSION="${{ steps.meta.outputs.version }}"
-            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              MAJOR="${BASH_REMATCH[1]}"
-              MINOR="${BASH_REMATCH[2]}"
-              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR"
-              TAGS_SUFFIX="$TAGS_SUFFIX,$MAJOR.$MINOR"
-            fi
           fi
 
           echo "tags_suffix=$TAGS_SUFFIX" >> $GITHUB_OUTPUT
@@ -180,3 +184,23 @@ jobs:
       - name: Inspect final image
         run: |
           docker buildx imagetools inspect lifecycleoss/workspace:${{ needs.prepare-metadata.outputs.version }}
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: workspace-${{ needs.prepare-metadata.outputs.version }}
+          release_name: Workspace Image ${{ needs.prepare-metadata.outputs.version }}
+          body: |
+            Workspace image release for lifecycle agent sessions.
+
+            Docker Hub: `lifecycleoss/workspace:${{ needs.prepare-metadata.outputs.version }}`
+
+            Tags created:
+            - `lifecycleoss/workspace:${{ needs.prepare-metadata.outputs.version }}`
+            - `lifecycleoss/workspace:${{ needs.prepare-metadata.outputs.major }}`
+            - `lifecycleoss/workspace:${{ needs.prepare-metadata.outputs.major_minor }}`
+            ${{ github.event.inputs.push_latest == 'true' && '- `lifecycleoss/workspace:latest`' || '' }}
+          draft: false
+          prerelease: false
