@@ -1588,9 +1588,7 @@ export default class BuildService extends BaseService {
           name: build.namespace,
           buildUUID: build.uuid,
           staticEnv: build.isStatic,
-          repo: build.pullRequest?.fullName,
-          pullRequestNumber: build.pullRequest?.pullRequestNumber,
-          author: build.pullRequest?.githubLogin,
+          pullRequest: build.pullRequest,
         });
         await k8s.createOrUpdateServiceAccount({
           namespace: build.namespace,

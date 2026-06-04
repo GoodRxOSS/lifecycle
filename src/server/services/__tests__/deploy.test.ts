@@ -32,7 +32,7 @@ const mockCodefreshWaitForImage = jest.fn();
 const mockBuildWithNative = jest.fn();
 const mockGlobalConfigGetAllConfigs = jest.fn();
 const mockGlobalConfigGetOrgChartName = jest.fn();
-const mockEnsureNamespaceExists = jest.fn();
+const mockCreateOrUpdateNamespace = jest.fn();
 
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
@@ -69,8 +69,8 @@ jest.mock('server/lib/nativeBuild', () => ({
   buildWithNative: (...args: any[]) => mockBuildWithNative(...args),
 }));
 
-jest.mock('server/lib/nativeBuild/utils', () => ({
-  ensureNamespaceExists: (...args: any[]) => mockEnsureNamespaceExists(...args),
+jest.mock('server/lib/kubernetes', () => ({
+  createOrUpdateNamespace: (...args: any[]) => mockCreateOrUpdateNamespace(...args),
 }));
 
 const mockDetermineChartType = jest.fn();
@@ -124,7 +124,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     mockCodefreshTagExists.mockReset();
     mockCodefreshWaitForImage.mockReset();
     mockBuildWithNative.mockReset();
-    mockEnsureNamespaceExists.mockReset();
+    mockCreateOrUpdateNamespace.mockReset();
     mockGlobalConfigGetOrgChartName.mockResolvedValue('org-chart');
     mockGlobalConfigGetAllConfigs.mockResolvedValue({
       lifecycleDefaults: {
@@ -422,6 +422,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           uuid: 'sample-build',
           namespace: 'env-sample',
           enableFullYaml: true,
+          isStatic: false,
           commentRuntimeEnv: {},
           enabledFeatures: [],
           pullRequest: {
@@ -536,6 +537,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           uuid: 'sample-build',
           namespace: 'env-sample',
           enableFullYaml: true,
+          isStatic: false,
           commentRuntimeEnv: {},
           enabledFeatures: [],
           pullRequest: {
@@ -571,7 +573,15 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
 
         expect(result).toBe(true);
         expect(mockBuildWithNative).not.toHaveBeenCalled();
-        expect(mockEnsureNamespaceExists).toHaveBeenCalledWith('env-sample');
+        expect(mockCreateOrUpdateNamespace).toHaveBeenCalledWith({
+          name: 'env-sample',
+          buildUUID: 'sample-build',
+          staticEnv: false,
+          pullRequest: {
+            githubLogin: 'sample-user',
+          },
+          waitForReady: true,
+        });
         expect(processSecretsSpy).toHaveBeenCalledWith({
           env: {
             API_TOKEN: '{{aws:repo/example-repo/api:API_TOKEN}}',

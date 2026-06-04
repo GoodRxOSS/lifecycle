@@ -20,7 +20,7 @@ import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
 import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
 import { shellPromise } from './shell';
-import { flattenObject, waitUntil } from 'server/lib/utils';
+import { flattenObject, getKeepLabel, waitUntil } from 'server/lib/utils';
 import { ServiceDiskConfig } from 'server/models/yaml';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError, V1Status, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
@@ -82,6 +82,44 @@ type NamespaceMetadata = {
   labels: Record<string, string>;
 };
 
+type NamespacePullRequestMetadata = {
+  fullName?: string | null;
+  pullRequestNumber?: number | null;
+  githubLogin?: string | null;
+  labels?: string[] | string | null;
+};
+
+export type CreateOrUpdateNamespaceOptions = {
+  name: string;
+  buildUUID: string;
+  staticEnv: boolean;
+  ttl?: boolean;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+  pullRequest?: NamespacePullRequestMetadata | null;
+  waitForReady?: boolean;
+};
+
+async function waitForNamespaceReady(namespace: string, timeout: number = 30000): Promise<void> {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const result = await shellPromise(`kubectl get namespace ${namespace} -o jsonpath='{.status.phase}'`);
+      if (result.trim() === 'Active') {
+        return;
+      }
+    } catch (error) {
+      // Namespace not ready yet, will retry
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`Namespace ${namespace} did not become ready within ${timeout}ms`);
+}
+
 function buildNamespacePrMetadata({
   repo,
   pullRequestNumber,
@@ -112,6 +150,35 @@ function buildNamespacePrMetadata({
   }
 
   return { labels };
+}
+
+function parseNamespacePullRequestLabels(labels?: string[] | string | null): string[] {
+  if (!labels) {
+    return [];
+  }
+
+  if (Array.isArray(labels)) {
+    return labels;
+  }
+
+  try {
+    const parsed = JSON.parse(labels);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function shouldEnableNamespaceTTL(
+  staticEnv: boolean,
+  pullRequest?: NamespacePullRequestMetadata | null
+): Promise<boolean> {
+  if (staticEnv) {
+    return false;
+  }
+
+  const keepLabel = await getKeepLabel();
+  return !parseNamespacePullRequestLabels(pullRequest?.labels).includes(keepLabel);
 }
 
 /**
@@ -262,34 +329,32 @@ export async function createOrUpdateNamespace({
   name,
   buildUUID,
   staticEnv,
-  ttl = true,
+  ttl,
   repo,
   pullRequestNumber,
   author,
-}: {
-  name: string;
-  buildUUID: string;
-  staticEnv: boolean;
-  ttl?: boolean;
-  repo?: string | null;
-  pullRequestNumber?: number | null;
-  author?: string | null;
-}) {
+  pullRequest,
+  waitForReady = false,
+}: CreateOrUpdateNamespaceOptions) {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
   const client = kc.makeApiClient(k8s.CoreV1Api);
 
   const uuid = name.replace('env-', '');
+  const ttlEnabled = ttl ?? (pullRequest ? await shouldEnableNamespaceTTL(staticEnv, pullRequest) : !staticEnv);
+  const namespaceRepo = repo ?? pullRequest?.fullName;
+  const namespacePullRequestNumber = pullRequestNumber ?? pullRequest?.pullRequestNumber;
+  const namespaceAuthor = author ?? pullRequest?.githubLogin;
 
   // Generate TTL labels using helper function
   const { labels, logMessage } = await generateTTLLabels({
     uuid,
     staticEnv,
-    ttl,
+    ttl: ttlEnabled,
     buildUUID,
-    repo,
-    pullRequestNumber,
-    author,
+    repo: namespaceRepo,
+    pullRequestNumber: namespacePullRequestNumber,
+    author: namespaceAuthor,
   });
 
   getLogger({ namespace: name }).info(`Deploy: creating namespace ${logMessage}`);
@@ -307,23 +372,29 @@ export async function createOrUpdateNamespace({
     const { patch, logMessage: patchMessage } = await generateTTLPatch({
       uuid,
       staticEnv,
-      ttl: staticEnv ? false : ttl,
+      ttl: staticEnv ? false : ttlEnabled,
       buildUUID,
-      repo,
-      pullRequestNumber,
-      author,
+      repo: namespaceRepo,
+      pullRequestNumber: namespacePullRequestNumber,
+      author: namespaceAuthor,
     });
 
     await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
       headers: { 'Content-Type': 'application/json-patch+json' },
     });
     getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
+    if (waitForReady) {
+      await waitForNamespaceReady(name);
+    }
     return;
   }
 
   try {
     await client.createNamespace(namespace);
     getLogger({ namespace: name }).debug('Namespace created');
+    if (waitForReady) {
+      await waitForNamespaceReady(name);
+    }
   } catch (err) {
     getLogger({ namespace: name, error: err }).error('Namespace: create failed');
     throw err;
