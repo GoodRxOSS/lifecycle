@@ -953,7 +953,7 @@ export async function getEcr(service: Service): Promise<string> {
   if (!ecr) {
     const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
     const registry = lifecycleDefaults?.ecrRegistry;
-    const appShort = this.getAppShort(service);
+    const appShort = getAppShort(service);
     return appShort ? `${registry}/${appShort}/lfc` : `${registry}/lifecycle-deployments`;
   }
   return ecr;
