@@ -47,9 +47,9 @@ describe('DELETE /api/v2/repositories/{owner}/{repo}', () => {
 
   test('soft-removes the repository by owner/repo path', async () => {
     const response = await DELETE(makeRequest(), {
-      params: {
+      params: Promise.resolve({
         fullName: ['example-org', 'api'],
-      },
+      }),
     });
     const body = await response.json();
 
@@ -67,9 +67,9 @@ describe('DELETE /api/v2/repositories/{owner}/{repo}', () => {
     const response = await DELETE(
       makeRequest('http://localhost/api/v2/repositories/example-org/api?installationId=34'),
       {
-        params: {
+        params: Promise.resolve({
           fullName: ['example-org', 'api'],
-        },
+        }),
       }
     );
 
@@ -79,9 +79,9 @@ describe('DELETE /api/v2/repositories/{owner}/{repo}', () => {
 
   test('rejects incomplete repository paths', async () => {
     const response = await DELETE(makeRequest(), {
-      params: {
+      params: Promise.resolve({
         fullName: ['example-org'],
-      },
+      }),
     });
     const body = await response.json();
 

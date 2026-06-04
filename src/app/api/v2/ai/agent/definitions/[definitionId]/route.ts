@@ -296,14 +296,19 @@ function parseUpsertBody(body: Record<string, unknown>): UserAgentDefinitionUpse
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 // CustomAgentDefinitionServiceError is an AppError; createApiHandler maps its httpStatus/code.
-const getHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ definitionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
-  const definition = await customAgentDefinitionService.getUserDefinition(params.definitionId, userIdentity.userId);
+  const definition = await customAgentDefinitionService.getUserDefinition(
+    routeParams.definitionId,
+    userIdentity.userId
+  );
   return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
 };
 
-const patchHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ definitionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   const body = await readRequestBody(req);
@@ -316,14 +321,22 @@ const patchHandler = async (req: NextRequest, { params }: { params: { definition
     return errorResponse(input, { status: 400 }, req);
   }
 
-  const definition = await customAgentDefinitionService.updateUserDefinition(params.definitionId, userIdentity, input);
+  const definition = await customAgentDefinitionService.updateUserDefinition(
+    routeParams.definitionId,
+    userIdentity,
+    input
+  );
   return successResponse({ definition: serializeUserAgentDefinition(definition) }, { status: 200 }, req);
 };
 
-const deleteHandler = async (req: NextRequest, { params }: { params: { definitionId: string } }) => {
+const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ definitionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
-  const definition = await customAgentDefinitionService.archiveUserDefinition(params.definitionId, userIdentity.userId);
+  const definition = await customAgentDefinitionService.archiveUserDefinition(
+    routeParams.definitionId,
+    userIdentity.userId
+  );
   return successResponse(
     { archived: true, definition: serializeUserAgentDefinition(definition) },
     { status: 200 },

@@ -87,7 +87,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events/stream?afterSequence=5'),
       {
-        params: { runId: 'run-1' },
+        params: Promise.resolve({ runId: 'run-1' }),
       }
     );
 
@@ -105,7 +105,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
         ['last-event-id', '8'],
       ]),
       {
-        params: { runId: 'run-1' },
+        params: Promise.resolve({ runId: 'run-1' }),
       }
     );
 
@@ -117,7 +117,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events/stream?afterSequence=-1'),
       {
-        params: { runId: 'run-1' },
+        params: Promise.resolve({ runId: 'run-1' }),
       }
     );
     const body = await response.json();
@@ -133,7 +133,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     mockIsRunNotFoundError.mockReturnValue(true);
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/missing-run/events/stream'), {
-      params: { runId: 'missing-run' },
+      params: Promise.resolve({ runId: 'missing-run' }),
     });
     const body = await response.json();
 
@@ -145,7 +145,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     mockGetRequestUserIdentity.mockReturnValue(null);
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events/stream'), {
-      params: { runId: 'run-1' },
+      params: Promise.resolve({ runId: 'run-1' }),
     });
     const body = await response.json();
 

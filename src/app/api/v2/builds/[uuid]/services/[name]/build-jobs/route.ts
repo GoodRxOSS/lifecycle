@@ -79,8 +79,9 @@ import { getNativeBuildJobs } from 'server/lib/kubernetes/getNativeBuildJobs';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
-  const { uuid, name } = params;
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string; name: string }> }) => {
+  const routeParams = await params;
+  const { uuid, name } = routeParams;
 
   if (!uuid || !name) {
     getLogger().warn(`API: invalid params uuid=${uuid} name=${name}`);

@@ -179,11 +179,12 @@ function mapCreateThreadError(error: unknown, req: NextRequest) {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
-    const threads = await AgentThreadService.listThreadHistoryForSession(params.sessionId, userIdentity.userId);
+    const threads = await AgentThreadService.listThreadHistoryForSession(routeParams.sessionId, userIdentity.userId);
     return successResponse({ threads }, { status: 200 }, req);
   } catch (error) {
     if (error instanceof Error && error.message === 'Agent session not found') {
@@ -194,7 +195,8 @@ const getHandler = async (req: NextRequest, { params }: { params: { sessionId: s
   }
 };
 
-const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   const body = await readCreateThreadBody(req);
@@ -203,9 +205,9 @@ const postHandler = async (req: NextRequest, { params }: { params: { sessionId: 
   }
 
   try {
-    const thread = await AgentThreadService.createThread(params.sessionId, userIdentity.userId, body);
+    const thread = await AgentThreadService.createThread(routeParams.sessionId, userIdentity.userId, body);
 
-    return successResponse(AgentThreadService.serializeThread(thread, params.sessionId), { status: 201 }, req);
+    return successResponse(AgentThreadService.serializeThread(thread, routeParams.sessionId), { status: 201 }, req);
   } catch (error) {
     return mapCreateThreadError(error, req);
   }

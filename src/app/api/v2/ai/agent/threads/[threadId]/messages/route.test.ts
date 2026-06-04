@@ -92,7 +92,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
   it('returns canonical messages with cursor options', async () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=25&beforeMessageId=message-2'),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -113,7 +113,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
 
   it('rejects invalid limits', async () => {
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=0'), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     const body = await response.json();
 
@@ -125,7 +125,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
   it('maps missing threads to 404', async () => {
     mockListCanonicalMessages.mockRejectedValueOnce(new Error('Agent thread not found'));
 
-    const response = await GET(makeRequest(), { params: { threadId: 'missing-thread' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'missing-thread' }) });
     const body = await response.json();
 
     expect(response.status).toBe(404);

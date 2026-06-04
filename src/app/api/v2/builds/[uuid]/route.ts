@@ -123,13 +123,14 @@ function validateBuildConfigPatch(body: unknown): BuildConfigPatchInput | Error 
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+  const routeParams = await params;
   const buildService = new BuildService();
 
-  const build = await buildService.getBuildByUUID(params.uuid);
+  const build = await buildService.getBuildByUUID(routeParams.uuid);
 
   if (!build) {
-    return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
+    return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
 
   return successResponse(
@@ -189,7 +190,8 @@ const getHandler = async (req: NextRequest, { params }: { params: { uuid: string
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const patchHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+  const routeParams = await params;
   const body = (await req.json().catch(() => null)) as UpdateBuildConfigPatchRequest | null;
   const patch = validateBuildConfigPatch(body);
 
@@ -199,10 +201,12 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
 
   const override = new OverrideService();
   const buildService = new BuildService();
-  const build = await override.db.models.Build.query().findOne({ uuid: params.uuid }).withGraphFetched('pullRequest');
+  const build = await override.db.models.Build.query()
+    .findOne({ uuid: routeParams.uuid })
+    .withGraphFetched('pullRequest');
 
   if (!build) {
-    return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
+    return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
 
   try {

@@ -97,7 +97,8 @@ function parseLimit(value: string | null): number {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   let limit;
@@ -108,7 +109,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { threadId: st
   }
 
   try {
-    const result = await AgentMessageStore.listCanonicalMessages(params.threadId, userIdentity.userId, {
+    const result = await AgentMessageStore.listCanonicalMessages(routeParams.threadId, userIdentity.userId, {
       limit,
       beforeMessageId: req.nextUrl.searchParams.get('beforeMessageId'),
     });

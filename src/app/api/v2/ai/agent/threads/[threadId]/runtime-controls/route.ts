@@ -167,15 +167,17 @@ function parsePatchBody(body: unknown): RuntimeControlsPatchBody | Error {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   // AgentThreadRuntimeControlsError is an AppError; createApiHandler maps its httpStatus/code.
-  const state = await AgentThreadRuntimeControlsService.getState({ threadId: params.threadId, userIdentity });
+  const state = await AgentThreadRuntimeControlsService.getState({ threadId: routeParams.threadId, userIdentity });
   return successResponse(state, { status: 200 }, req);
 };
 
-const patchHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   let body: unknown;
@@ -191,7 +193,7 @@ const patchHandler = async (req: NextRequest, { params }: { params: { threadId: 
   }
 
   const state = await AgentThreadRuntimeControlsService.patchChoices({
-    threadId: params.threadId,
+    threadId: routeParams.threadId,
     userIdentity,
     ...parsedBody,
   });

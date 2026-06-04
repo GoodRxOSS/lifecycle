@@ -60,7 +60,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
   it('returns 401 when the requester is not authenticated', async () => {
     mockGetRequestUserIdentity.mockReturnValue(null);
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({
@@ -119,7 +119,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
       riskLabels: ['Workspace write'],
     });
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -173,7 +173,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
     });
     mockListPendingActions.mockRejectedValue(new Error('Agent thread not found'));
 
-    const response = await GET(makeRequest(), { params: { threadId: 'missing-thread' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'missing-thread' }) });
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({

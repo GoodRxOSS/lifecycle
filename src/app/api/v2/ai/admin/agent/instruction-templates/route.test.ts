@@ -181,7 +181,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', {
         content: 'Use the sample admin debug override.',
       }),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -209,7 +209,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
   it('gets one template by decoded ref', async () => {
     const response = await GET_TEMPLATE(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug'),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -231,7 +231,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
 
     const response = await GET_TEMPLATE(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Amissing'),
-      { params: { ref: 'system%3Amissing' } }
+      { params: Promise.resolve({ ref: 'system%3Amissing' }) }
     );
     const body = await response.json();
 
@@ -246,7 +246,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
   ])('rejects malformed override body: %s', async (_label, body) => {
     const response = await PUT_OVERRIDE(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', body),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const responseBody = await response.json();
 
@@ -260,7 +260,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', undefined, {
         rejectJson: true,
       }),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -274,7 +274,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', {
         content: 'Use the sample admin debug override.',
       }),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -301,7 +301,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', {
         content: ' ',
       }),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -313,7 +313,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
   it('resets overrides back to default effective metadata', async () => {
     const response = await POST_RESET(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/reset'),
-      { params: { ref: 'system%3Adebug' } }
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
     );
     const body = await response.json();
 
@@ -335,7 +335,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
 
     const response = await POST_RESET(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Amissing/reset'),
-      { params: { ref: 'system%3Amissing' } }
+      { params: Promise.resolve({ ref: 'system%3Amissing' }) }
     );
     const body = await response.json();
 

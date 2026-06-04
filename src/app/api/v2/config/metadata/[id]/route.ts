@@ -21,9 +21,9 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import BuildMetadataService, { BuildMetadataError } from 'server/services/buildMetadata';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 function mapMetadataError(error: unknown, req: NextRequest) {
@@ -117,11 +117,12 @@ async function readRequestBody(req: NextRequest): Promise<unknown> {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const patchHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   const service = new BuildMetadataService();
 
   try {
     const body = await readRequestBody(req);
-    const metadata = await service.updateLink(params.id, body);
+    const metadata = await service.updateLink(routeParams.id, body);
     return successResponse(metadata, { status: 200 }, req);
   } catch (error) {
     return mapMetadataError(error, req);
@@ -129,10 +130,11 @@ const patchHandler = async (req: NextRequest, { params }: RouteContext) => {
 };
 
 const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   const service = new BuildMetadataService();
 
   try {
-    await service.deleteLink(params.id);
+    await service.deleteLink(routeParams.id);
     return new NextResponse(null, { status: 204 });
   } catch (error) {
     return mapMetadataError(error, req);

@@ -71,7 +71,8 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { slug: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
+  const routeParams = await params;
   requireRequestUserIdentity(req);
 
   const scope = req.nextUrl.searchParams.get('scope');
@@ -80,7 +81,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { slug: string
   }
 
   try {
-    const result = await AgentAdminService.listMcpServerUsers(params.slug, scope);
+    const result = await AgentAdminService.listMcpServerUsers(routeParams.slug, scope);
     return successResponse(result, { status: 200 }, req);
   } catch (error) {
     if (error instanceof Error && error.message === 'MCP server config not found') {

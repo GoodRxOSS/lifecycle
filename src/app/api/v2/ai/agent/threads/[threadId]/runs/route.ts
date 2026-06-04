@@ -272,7 +272,8 @@ function normalizeDebugIntent(value: unknown): { ok: true; value: AgentDebugRunI
  *                 error:
  *                   $ref: '#/components/schemas/ApiError'
  */
-const postHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => ({}));
@@ -320,7 +321,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { threadId: s
 
   let threadWithSession;
   try {
-    threadWithSession = await AgentThreadService.getOwnedThreadWithSession(params.threadId, userIdentity.userId);
+    threadWithSession = await AgentThreadService.getOwnedThreadWithSession(routeParams.threadId, userIdentity.userId);
   } catch (error) {
     if (
       error instanceof Error &&

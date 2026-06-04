@@ -67,11 +67,12 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
-    const pendingActions = await ApprovalService.listPendingActions(params.threadId, userIdentity.userId);
+    const pendingActions = await ApprovalService.listPendingActions(routeParams.threadId, userIdentity.userId);
     return successResponse(
       {
         pendingActions: pendingActions.map((action) => ApprovalService.serializePendingAction(action)),

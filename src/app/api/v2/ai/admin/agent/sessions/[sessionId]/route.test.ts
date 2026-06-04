@@ -90,7 +90,7 @@ describe('GET /api/v2/ai/admin/agent/sessions/[sessionId]', () => {
     });
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions/session-1'), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -101,7 +101,7 @@ describe('GET /api/v2/ai/admin/agent/sessions/[sessionId]', () => {
 
   it('returns the requested session for admin users', async () => {
     const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions/session-1'), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 

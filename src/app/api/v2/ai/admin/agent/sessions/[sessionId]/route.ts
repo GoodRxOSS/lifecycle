@@ -63,11 +63,12 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const routeParams = await params;
   requireRequestUserIdentity(req);
 
   try {
-    const result = await AgentAdminService.getSession(params.sessionId);
+    const result = await AgentAdminService.getSession(routeParams.sessionId);
     return successResponse(result, { status: 200 }, req);
   } catch (error) {
     if (error instanceof Error && error.message === 'Agent session not found') {

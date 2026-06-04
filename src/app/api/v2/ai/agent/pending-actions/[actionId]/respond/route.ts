@@ -83,7 +83,8 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const postHandler = async (req: NextRequest, { params }: { params: { actionId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ actionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => null);
@@ -95,7 +96,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { actionId: s
   const githubToken = await resolveRequestGitHubToken(req);
   try {
     const action = await ApprovalService.resolvePendingAction(
-      params.actionId,
+      routeParams.actionId,
       userIdentity.userId,
       responseBody.approved ? 'approved' : 'denied',
       {

@@ -83,7 +83,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const putHandler = async (req: NextRequest, { params }: { params: { ref: string } }) => {
+const putHandler = async (req: NextRequest, { params }: { params: Promise<{ ref: string }> }) => {
+  const routeParams = await params;
   let body: unknown;
   try {
     body = await req.json();
@@ -97,7 +98,7 @@ const putHandler = async (req: NextRequest, { params }: { params: { ref: string 
 
   try {
     await InstructionTemplateService.seedSystemTemplates();
-    const template = await InstructionTemplateService.updateOverride(decodeURIComponent(params.ref), {
+    const template = await InstructionTemplateService.updateOverride(decodeURIComponent(routeParams.ref), {
       content: body.content,
       updatedBy: getRequestUserIdentity(req)?.userId || null,
     });

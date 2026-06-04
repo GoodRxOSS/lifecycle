@@ -72,10 +72,11 @@ export const dynamic = 'force-dynamic';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { ref: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ ref: string }> }) => {
+  const routeParams = await params;
   try {
     await InstructionTemplateService.seedSystemTemplates();
-    const template = await InstructionTemplateService.getTemplate(decodeURIComponent(params.ref));
+    const template = await InstructionTemplateService.getTemplate(decodeURIComponent(routeParams.ref));
     return successResponse({ template }, { status: 200 }, req);
   } catch (error) {
     if (error instanceof InstructionTemplateServiceError) {

@@ -21,9 +21,9 @@ import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
 
 type RouteContext = {
-  params: {
+  params: Promise<{
     siteId: string;
-  };
+  }>;
 };
 
 /**
@@ -61,9 +61,10 @@ type RouteContext = {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const postHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.extendSite(params.siteId);
+    const site = await service.extendSite(routeParams.siteId);
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);

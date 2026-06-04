@@ -56,11 +56,12 @@ import AgentUsageService from 'server/services/agent/AgentUsageService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
-    const usage = await AgentUsageService.getOwnedThreadUsage(params.threadId, userIdentity.userId);
+    const usage = await AgentUsageService.getOwnedThreadUsage(routeParams.threadId, userIdentity.userId);
     return successResponse(usage, { status: 200 }, req);
   } catch (error) {
     if (
