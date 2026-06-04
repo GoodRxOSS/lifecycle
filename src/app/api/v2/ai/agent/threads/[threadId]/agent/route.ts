@@ -93,18 +93,20 @@ function mapAgentSelectionError(error: unknown, req: NextRequest) {
  *                     data:
  *                       $ref: '#/components/schemas/SwitchAgentSelectionResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
-    const state = await AgentSelectionService.getThreadAgentState({ threadId: params.threadId, userIdentity });
+    const state = await AgentSelectionService.getThreadAgentState({ threadId: routeParams.threadId, userIdentity });
     return successResponse(state, { status: 200 }, req);
   } catch (error) {
     return mapAgentSelectionError(error, req);
   }
 };
 
-const patchHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   const body = await req.json().catch(() => ({}));
@@ -128,7 +130,7 @@ const patchHandler = async (req: NextRequest, { params }: { params: { threadId: 
 
   try {
     const result = await AgentSelectionService.switchThreadAgent({
-      threadId: params.threadId,
+      threadId: routeParams.threadId,
       userIdentity,
       agentId: requestBody.agentId.trim(),
     });

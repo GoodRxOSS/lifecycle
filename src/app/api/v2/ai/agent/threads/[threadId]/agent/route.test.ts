@@ -112,7 +112,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
   });
 
   it('GET returns built_in and my_agents selection state', async () => {
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -125,7 +125,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
 
   it('PATCH accepts only agentId and delegates the switch', async () => {
     const response = await PATCH(makeRequest({ agentId: 'custom.sample-agent' }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
 
     expect(response.status).toBe(200);
@@ -139,7 +139,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
   it('returns 401 without identity', async () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
   });
@@ -147,21 +147,23 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
   it('returns 404 for non-owned thread/session errors', async () => {
     mockGetThreadAgentState.mockRejectedValueOnce(new Error('Agent thread not found'));
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(404);
   });
 
   it('returns 400 for non-string or unsupported agent switch bodies', async () => {
     const response = await PATCH(makeRequest({ agentId: 'custom.sample-agent', another: true }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     const body = await response.json();
 
     expect(response.status).toBe(400);
     expect(body.error.message).toContain('Unsupported switch request fields');
 
-    const missingIdResponse = await PATCH(makeRequest({ agentId: 7 }), { params: { threadId: 'thread-1' } });
+    const missingIdResponse = await PATCH(makeRequest({ agentId: 7 }), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
     expect(missingIdResponse.status).toBe(400);
   });
 
@@ -169,7 +171,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
     mockSwitchThreadAgent.mockRejectedValueOnce(new AgentThreadAgentSwitchError('unknown_agent', 'Unknown agent.'));
 
     const response = await PATCH(makeRequest({ agentId: 'custom.another-user-agent' }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
 
     expect(response.status).toBe(409);
@@ -181,7 +183,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
     );
 
     const response = await PATCH(makeRequest({ agentId: 'custom.sample-agent' }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     const body = await response.json();
 

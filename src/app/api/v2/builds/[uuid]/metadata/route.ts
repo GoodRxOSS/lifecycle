@@ -21,9 +21,9 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import BuildMetadataService, { BuildMetadataError } from 'server/services/buildMetadata';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     uuid: string;
-  };
+  }>;
 }
 
 /**
@@ -69,10 +69,11 @@ interface RouteContext {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   const service = new BuildMetadataService();
 
   try {
-    const metadata = await service.renderMetadataForBuildUUID(params.uuid);
+    const metadata = await service.renderMetadataForBuildUUID(routeParams.uuid);
     return successResponse(metadata, { status: 200 }, req);
   } catch (error) {
     if (error instanceof BuildMetadataError) {

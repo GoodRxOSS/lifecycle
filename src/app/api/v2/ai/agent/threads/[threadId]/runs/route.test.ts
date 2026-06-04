@@ -336,7 +336,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -357,7 +357,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -396,7 +396,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Update the sample file in the workspace' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -431,7 +431,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Summarize the sample thread' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(201);
@@ -449,7 +449,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         runtimeOptions: { maxIterations: 12 },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(201);
@@ -513,7 +513,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         debugIntent: ' investigate ',
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(201);
@@ -535,7 +535,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         debugIntent: 'fix',
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -566,7 +566,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -610,7 +610,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           ],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -633,7 +633,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           ],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -650,7 +650,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Nope' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -667,7 +667,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Nope' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -684,7 +684,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         runtimeOptions: { temperature: 0.7 },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -701,7 +701,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         model: { id: 123 },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -719,7 +719,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         harness: { kind: 'lifecycle_ai_sdk' },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -736,7 +736,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         agent: { id: 'system.freeform' },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -753,7 +753,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         agentId: 'system.freeform',
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -770,7 +770,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         },
         runPlanSnapshot: customAgentRunPlanSnapshot,
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 
@@ -802,7 +802,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(200);
@@ -819,7 +819,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(500);
@@ -850,7 +850,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(500);
@@ -868,7 +868,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'missing-thread' } }
+      { params: Promise.resolve({ threadId: 'missing-thread' }) }
     );
     const body = await response.json();
 
@@ -887,7 +887,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           parts: [{ type: 'text', text: 'Hi' }],
         },
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
     const body = await response.json();
 

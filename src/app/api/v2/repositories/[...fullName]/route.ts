@@ -20,9 +20,9 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import RepositoryService from 'server/services/repository';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     fullName?: string[];
-  };
+  }>;
 }
 
 /**
@@ -70,7 +70,8 @@ interface RouteContext {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
-  const segments = params.fullName || [];
+  const routeParams = await params;
+  const segments = routeParams.fullName || [];
   if (segments.length < 2) {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }

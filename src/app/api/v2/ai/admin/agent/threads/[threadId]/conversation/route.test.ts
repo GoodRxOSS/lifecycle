@@ -79,7 +79,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
     mockGetUser.mockReturnValue(null);
     mockGetRequestUserIdentity.mockReturnValue(null);
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({
@@ -96,7 +96,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
       },
     });
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(403);
@@ -126,7 +126,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
       ],
     });
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -145,7 +145,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
   it.each(['Agent thread not found', 'Agent session not found'])('returns 404 for %s', async (message) => {
     mockGetThreadConversation.mockRejectedValue(new Error(message));
 
-    const response = await GET(makeRequest(), { params: { threadId: 'missing-thread' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'missing-thread' }) });
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({

@@ -63,11 +63,12 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   requireRequestUserIdentity(req);
 
   try {
-    const result = await AgentAdminService.getThreadConversation(params.threadId);
+    const result = await AgentAdminService.getThreadConversation(routeParams.threadId);
     return successResponse(result, { status: 200 }, req);
   } catch (error) {
     if (error instanceof Error && error.message === 'Agent thread not found') {

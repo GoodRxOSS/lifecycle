@@ -87,13 +87,14 @@ function isSessionNotFoundError(error: unknown): boolean {
  *       '409':
  *         description: Workspace action is blocked by an active run or another lifecycle action
  */
-const postHandler = async (req: NextRequest, { params }: { params: { sessionId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ sessionId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
     const githubToken = await resolveRequestGitHubToken(req);
     const session = await AgentSessionService.openChatRuntime({
-      sessionId: params.sessionId,
+      sessionId: routeParams.sessionId,
       userId: userIdentity.userId,
       userIdentity,
       githubToken,
@@ -109,7 +110,7 @@ const postHandler = async (req: NextRequest, { params }: { params: { sessionId: 
     }
 
     const failureData = await buildWorkspaceFailureLinkData({
-      sessionId: params.sessionId,
+      sessionId: routeParams.sessionId,
       userId: userIdentity.userId,
     });
     return errorResponse(error, { status: 400, data: failureData }, req);

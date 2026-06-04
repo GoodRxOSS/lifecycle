@@ -71,8 +71,9 @@ import { getEnvironmentPods } from 'server/lib/kubernetes/getEnvironmentPods';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
-  const { uuid } = params;
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+  const routeParams = await params;
+  const { uuid } = routeParams;
 
   if (!uuid) {
     getLogger().warn(`API: invalid params uuid=${uuid}`);

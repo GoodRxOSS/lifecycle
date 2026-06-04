@@ -49,10 +49,14 @@ import AgentThreadService from 'server/services/agent/ThreadService';
  *                     data:
  *                       $ref: '#/components/schemas/AgentThread'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { threadId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ threadId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
-  const { thread, session } = await AgentThreadService.getOwnedThreadWithSession(params.threadId, userIdentity.userId);
+  const { thread, session } = await AgentThreadService.getOwnedThreadWithSession(
+    routeParams.threadId,
+    userIdentity.userId
+  );
   return successResponse(AgentThreadService.serializeThread(thread, session.uuid), { status: 200 }, req);
 };
 

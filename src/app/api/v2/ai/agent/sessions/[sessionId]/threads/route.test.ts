@@ -195,7 +195,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     ]);
 
     const response = await GET(makeRequest(), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -262,7 +262,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     mockListThreadHistoryForSession.mockRejectedValueOnce(new Error('Agent session not found'));
 
     const response = await GET(makeRequest(), {
-      params: { sessionId: 'missing-session' },
+      params: Promise.resolve({ sessionId: 'missing-session' }),
     });
     const body = await response.json();
 
@@ -279,7 +279,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     });
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -306,7 +306,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     });
 
     const response = await POST(makeRequest({ title: 'New chat', sourceThreadId: 'source-thread-1' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
 
     expect(response.status).toBe(201);
@@ -325,7 +325,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     });
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
 
     expect(response.status).toBe(201);
@@ -342,7 +342,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     [{ title: 'New chat', unexpected: true }, 'Unsupported thread request fields: unexpected.'],
   ])('rejects invalid create-thread bodies %#', async (invalidBody, expectedMessage) => {
     const response = await POST(makeRequest(invalidBody), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -359,7 +359,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
 
   it('rejects invalid JSON bodies', async () => {
     const response = await POST(makeRequest(undefined, { jsonError: new SyntaxError('Unexpected token') }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -374,7 +374,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     );
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -388,7 +388,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     );
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -402,7 +402,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     );
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'missing-session' },
+      params: Promise.resolve({ sessionId: 'missing-session' }),
     });
     const body = await response.json();
 
@@ -416,7 +416,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     );
 
     const response = await POST(makeRequest({ title: 'New chat', sourceThreadId: 'missing-thread' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -431,7 +431,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     mockCreateThread.mockRejectedValueOnce(new AgentThreadCreateConflictError(code, message));
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -448,7 +448,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     );
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -460,7 +460,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
     const response = await POST(makeRequest({ title: 'New chat' }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 

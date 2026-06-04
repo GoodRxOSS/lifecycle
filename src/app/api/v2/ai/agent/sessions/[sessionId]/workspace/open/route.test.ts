@@ -100,7 +100,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
 
   it('opens the chat workspace through the service policy and serializes the session', async () => {
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -127,7 +127,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     );
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -162,7 +162,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     });
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -180,7 +180,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     mockOpenChatRuntime.mockRejectedValueOnce(new Error('Workspace runtime cannot be opened from the current state'));
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -193,7 +193,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     mockOpenChatRuntime.mockRejectedValueOnce(new Error('Session not found'));
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -207,7 +207,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/workspace/open', () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 

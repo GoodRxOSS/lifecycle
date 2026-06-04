@@ -45,7 +45,7 @@ function makeRequest(body?: unknown): NextRequest {
   } as unknown as NextRequest;
 }
 
-const params = { params: { fullName: ['example-org', 'example-repo'] } };
+const params = { params: Promise.resolve({ fullName: ['example-org', 'example-repo'] }) };
 
 describe('/api/v2/ai/config/agent-session/repos/[...fullName] (admin-gated repo-level writes)', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;

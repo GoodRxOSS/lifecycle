@@ -110,7 +110,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events?afterSequence=5&limit=2'),
       {
-        params: { runId: 'run-1' },
+        params: Promise.resolve({ runId: 'run-1' }),
       }
     );
     const body = await response.json();
@@ -168,7 +168,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
     });
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events?limit=999'), {
-      params: { runId: 'run-1' },
+      params: Promise.resolve({ runId: 'run-1' }),
     });
 
     expect(response.status).toBe(200);
@@ -180,7 +180,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
 
   it('returns 400 for an invalid cursor', async () => {
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events?afterSequence=-1'), {
-      params: { runId: 'run-1' },
+      params: Promise.resolve({ runId: 'run-1' }),
     });
     const body = await response.json();
 
@@ -195,7 +195,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
     mockIsRunNotFoundError.mockReturnValue(true);
 
     const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/missing-run/events'), {
-      params: { runId: 'missing-run' },
+      params: Promise.resolve({ runId: 'missing-run' }),
     });
     const body = await response.json();
 

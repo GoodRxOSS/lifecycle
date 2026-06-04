@@ -17,17 +17,15 @@
 require('dotenv').config();
 
 module.exports = {
-  experimental: {
-    serverComponentsExternalPackages: [
-      '@kubernetes/client-node',
-      '@octokit/core',
-      '@octokit/auth-app',
-      'dd-trace',
-      'knex',
-      '@aws-sdk/client-s3',
-      'google-auth-library',
-    ],
-  },
+  serverExternalPackages: [
+    '@kubernetes/client-node',
+    '@octokit/core',
+    '@octokit/auth-app',
+    'dd-trace',
+    'knex',
+    '@aws-sdk/client-s3',
+    'google-auth-library',
+  ],
   env: {
     GITHUB_APP_ID: process.env.GITHUB_APP_ID,
     GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,

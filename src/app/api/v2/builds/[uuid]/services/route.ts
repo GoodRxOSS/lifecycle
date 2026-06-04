@@ -116,7 +116,8 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const patchHandler = async (req: NextRequest, { params }: { params: { uuid: string } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+  const routeParams = await params;
   const body = (await req.json().catch(() => null)) as UpdateServiceOverridesRequest | null;
   const serviceOverridesBody = body?.serviceOverrides;
 
@@ -136,11 +137,11 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
 
   const override = new OverrideService();
   const build = await override.db.models.Build.query()
-    .findOne({ uuid: params.uuid })
+    .findOne({ uuid: routeParams.uuid })
     .withGraphFetched('[pullRequest, environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
 
   if (!build) {
-    return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
+    return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
 
   try {
@@ -152,11 +153,11 @@ const patchHandler = async (req: NextRequest, { params }: { params: { uuid: stri
       runUuid: nanoid(),
     });
     const updatedBuild = await override.db.models.Build.query()
-      .findOne({ uuid: params.uuid })
+      .findOne({ uuid: routeParams.uuid })
       .withGraphFetched('[environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
 
     if (!updatedBuild) {
-      return errorResponse(new Error(`Build with UUID ${params.uuid} not found`), { status: 404 }, req);
+      return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
     }
 
     const updatedServiceOverrides = await override.getServiceOverrideStates(updatedBuild, updatedBuild.deploys || []);

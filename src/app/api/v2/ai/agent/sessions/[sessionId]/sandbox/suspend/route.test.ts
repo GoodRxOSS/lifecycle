@@ -98,7 +98,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/suspend', () => {
     );
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -115,7 +115,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/suspend', () => {
     mockSuspendChatRuntime.mockRejectedValueOnce(new Error('Workspace runtime is not ready'));
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -127,7 +127,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/suspend', () => {
     mockSuspendChatRuntime.mockRejectedValueOnce(new Error('Session not found'));
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 
@@ -140,7 +140,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/suspend', () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
     const response = await POST(makeRequest(), {
-      params: { sessionId: 'sample-session' },
+      params: Promise.resolve({ sessionId: 'sample-session' }),
     });
     const body = await response.json();
 

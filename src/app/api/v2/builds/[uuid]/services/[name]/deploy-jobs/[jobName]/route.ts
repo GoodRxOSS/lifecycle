@@ -88,8 +88,9 @@ interface RouteParams {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: RouteParams }) => {
-  const { uuid, name: serviceName, jobName } = params;
+const getHandler = async (req: NextRequest, { params }: { params: Promise<RouteParams> }) => {
+  const routeParams = await params;
+  const { uuid, name: serviceName, jobName } = routeParams;
 
   if (!uuid || !jobName || !serviceName) {
     getLogger().warn(`API: invalid params uuid=${uuid} serviceName=${serviceName} jobName=${jobName}`);
