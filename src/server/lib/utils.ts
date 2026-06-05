@@ -247,6 +247,18 @@ export const getKeepLabel = async (): Promise<string> => {
   return labelsConfig?.keep?.[0] || FallbackLabels.KEEP;
 };
 
+export const parsePullRequestLabels = (labels?: string[] | string | null): string[] => {
+  if (!labels) return [];
+  if (Array.isArray(labels)) return labels;
+
+  try {
+    const parsed = JSON.parse(labels);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
 export const getStatusCommentLabel = async (): Promise<string> => {
   const labelsConfig = await GlobalConfigService.getInstance().getLabels();
   return labelsConfig?.statusComments?.[0] || FallbackLabels.STATUS_COMMENTS;

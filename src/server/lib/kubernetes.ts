@@ -20,7 +20,7 @@ import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
 import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
 import { shellPromise } from './shell';
-import { flattenObject, getKeepLabel, waitUntil } from 'server/lib/utils';
+import { flattenObject, getKeepLabel, parsePullRequestLabels, waitUntil } from 'server/lib/utils';
 import { ServiceDiskConfig } from 'server/models/yaml';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError, V1Status, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
@@ -152,23 +152,6 @@ function buildNamespacePrMetadata({
   return { labels };
 }
 
-function parseNamespacePullRequestLabels(labels?: string[] | string | null): string[] {
-  if (!labels) {
-    return [];
-  }
-
-  if (Array.isArray(labels)) {
-    return labels;
-  }
-
-  try {
-    const parsed = JSON.parse(labels);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 async function shouldEnableNamespaceTTL(
   staticEnv: boolean,
   pullRequest?: NamespacePullRequestMetadata | null
@@ -178,7 +161,7 @@ async function shouldEnableNamespaceTTL(
   }
 
   const keepLabel = await getKeepLabel();
-  return !parseNamespacePullRequestLabels(pullRequest?.labels).includes(keepLabel);
+  return !parsePullRequestLabels(pullRequest?.labels).includes(keepLabel);
 }
 
 /**

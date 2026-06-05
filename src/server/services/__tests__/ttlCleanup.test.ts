@@ -67,6 +67,17 @@ jest.mock('server/lib/utils', () => ({
   getKeepLabel: jest.fn(() => Promise.resolve('sample-keep')),
   getDisabledLabel: jest.fn(() => Promise.resolve('sample-disabled')),
   getDeployLabel: jest.fn(() => Promise.resolve('sample-deploy')),
+  parsePullRequestLabels: (labels?: string[] | string | null): string[] => {
+    if (!labels) return [];
+    if (Array.isArray(labels)) return labels;
+
+    try {
+      const parsed = JSON.parse(labels);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
 }));
 
 jest.mock('server/lib/metrics', () =>

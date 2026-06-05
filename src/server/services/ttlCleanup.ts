@@ -21,7 +21,7 @@ import { redisClient } from 'server/lib/dependencies';
 import { withLogContext, updateLogContext, getLogger, LogStage, extractContextForQueue } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
-import { getKeepLabel, getDisabledLabel, getDeployLabel } from 'server/lib/utils';
+import { getKeepLabel, getDisabledLabel, getDeployLabel, parsePullRequestLabels } from 'server/lib/utils';
 import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
 import { DEFAULT_TTL_INACTIVITY_DAYS, DEFAULT_TTL_CHECK_INTERVAL_MINUTES, PullRequestStatus } from 'shared/constants';
@@ -113,11 +113,6 @@ export default class TTLCleanupService extends Service {
       }
     });
   };
-
-  private parseLabels(labels: string | string[] | null): string[] {
-    if (!labels) return [];
-    return typeof labels === 'string' ? JSON.parse(labels) : labels;
-  }
 
   private async getTTLConfig() {
     const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
@@ -237,7 +232,7 @@ export default class TTLCleanupService extends Service {
             build,
             pullRequest,
             daysExpired,
-            currentLabels: this.parseLabels(pullRequest.labels),
+            currentLabels: parsePullRequestLabels(pullRequest.labels),
             hadLabelDrift: false,
           });
           continue;
@@ -253,7 +248,7 @@ export default class TTLCleanupService extends Service {
 
           getLogger().debug(`Fetched ${currentLabels.length} labels from GitHub: ${currentLabels.join(', ')}`);
 
-          const dbLabels = this.parseLabels(pullRequest.labels);
+          const dbLabels = parsePullRequestLabels(pullRequest.labels);
           if (JSON.stringify(currentLabels.sort()) !== JSON.stringify(dbLabels.sort())) {
             getLogger().debug('TTL: label drift detected, syncing to DB');
             await pullRequest.$query().patch({
@@ -262,7 +257,7 @@ export default class TTLCleanupService extends Service {
           }
         } catch (error) {
           getLogger().warn({ error }, 'TTL: GitHub labels fetch failed, using DB');
-          currentLabels = this.parseLabels(pullRequest.labels);
+          currentLabels = parsePullRequestLabels(pullRequest.labels);
         }
 
         if (currentLabels.includes(keepLabel)) {
@@ -275,7 +270,7 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
-        const dbLabels = this.parseLabels(pullRequest.labels);
+        const dbLabels = parsePullRequestLabels(pullRequest.labels);
         const hadLabelDrift = JSON.stringify(currentLabels.sort()) !== JSON.stringify(dbLabels.sort());
 
         staleEnvironments.push({
@@ -354,7 +349,7 @@ export default class TTLCleanupService extends Service {
     const deployLabel = await getDeployLabel();
     const disabledLabel = await getDisabledLabel();
 
-    const currentLabels = this.parseLabels(pullRequest.labels);
+    const currentLabels = parsePullRequestLabels(pullRequest.labels);
 
     const updatedLabels = currentLabels.filter((label) => label !== deployLabel).concat(disabledLabel);
 
