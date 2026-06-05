@@ -29,6 +29,7 @@ import {
   getStatusCommentLabel,
   isDefaultStatusCommentsEnabled,
   isControlCommentsEnabled,
+  parsePullRequestLabels,
 } from 'server/lib/utils';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -681,5 +682,26 @@ describe('isControlCommentsEnabled', () => {
     mockService.getLabels.mockRejectedValueOnce(new Error('Database error'));
     const result = await isControlCommentsEnabled();
     expect(result).toBe(true);
+  });
+});
+
+describe('parsePullRequestLabels', () => {
+  test('returns an empty array for missing labels', () => {
+    expect(parsePullRequestLabels()).toEqual([]);
+    expect(parsePullRequestLabels(null)).toEqual([]);
+  });
+
+  test('returns array labels unchanged', () => {
+    const labels = ['deploy-env', 'keep-env'];
+    expect(parsePullRequestLabels(labels)).toBe(labels);
+  });
+
+  test('parses JSON string labels', () => {
+    expect(parsePullRequestLabels('["deploy-env","keep-env"]')).toEqual(['deploy-env', 'keep-env']);
+  });
+
+  test('returns an empty array for malformed or non-array JSON', () => {
+    expect(parsePullRequestLabels('not-json')).toEqual([]);
+    expect(parsePullRequestLabels('{"label":"deploy-env"}')).toEqual([]);
   });
 });

@@ -42,6 +42,7 @@ import { SecretProcessor } from 'server/services/secretProcessor';
 import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 import { isNativeBuilderEngine } from 'server/lib/buildEngines';
 import { SecretProvidersConfig } from 'server/services/types/globalConfig';
+import { createOrUpdateNamespace } from 'server/lib/kubernetes';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -1034,8 +1035,15 @@ export default class DeployService extends BaseService {
       return emptyResult;
     }
 
-    const { ensureNamespaceExists } = await import('server/lib/nativeBuild/utils');
-    await ensureNamespaceExists(deploy.build.namespace);
+    await deploy.$fetchGraph('[build.[pullRequest]]');
+
+    await createOrUpdateNamespace({
+      name: deploy.build.namespace,
+      buildUUID: deploy.build.uuid,
+      staticEnv: deploy.build.isStatic,
+      pullRequest: deploy.build.pullRequest,
+      waitForReady: true,
+    });
 
     const secretProcessor = new SecretProcessor(secretProviders);
 

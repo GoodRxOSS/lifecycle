@@ -15,59 +15,10 @@
  */
 
 import { V1Job } from '@kubernetes/client-node';
-import { shellPromise } from '../shell';
-import { getLogger } from '../logger';
-import * as k8s from '@kubernetes/client-node';
 import GlobalConfigService from '../../services/globalConfig';
 import { createBuildJob } from '../kubernetes/jobFactory';
 import { setupBuildServiceAccountInNamespace as setupServiceAccountWithRBAC } from '../kubernetes/rbac';
 import { JobMonitor } from '../kubernetes/JobMonitor';
-
-export async function ensureNamespaceExists(namespace: string): Promise<void> {
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
-  const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
-
-  try {
-    await coreV1Api.readNamespace(namespace);
-    getLogger().debug('Namespace: exists');
-  } catch (error) {
-    if (error?.response?.statusCode === 404) {
-      getLogger().debug('Namespace: creating');
-      await coreV1Api.createNamespace({
-        metadata: {
-          name: namespace,
-          labels: {
-            'app.kubernetes.io/managed-by': 'lifecycle',
-          },
-        },
-      });
-
-      await waitForNamespaceReady(namespace);
-    } else {
-      throw error;
-    }
-  }
-}
-
-async function waitForNamespaceReady(namespace: string, timeout: number = 30000): Promise<void> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < timeout) {
-    try {
-      const result = await shellPromise(`kubectl get namespace ${namespace} -o jsonpath='{.status.phase}'`);
-      if (result.trim() === 'Active') {
-        return;
-      }
-    } catch (error) {
-      // Namespace not ready yet, will retry
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-
-  throw new Error(`Namespace ${namespace} did not become ready within ${timeout}ms`);
-}
 
 export async function setupBuildServiceAccountInNamespace(
   namespace: string,

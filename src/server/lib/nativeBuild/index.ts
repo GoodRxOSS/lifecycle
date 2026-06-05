@@ -16,10 +16,10 @@
 
 import { Deploy } from '../../models';
 import { getLogger, withSpan, withLogContext } from '../logger';
-import { ensureNamespaceExists } from './utils';
 import { buildWithEngine, NativeBuildOptions } from './engines';
 import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
 import { isNativeBuilderEngine } from '../buildEngines';
+import { createOrUpdateNamespace } from '../kubernetes';
 
 export type { NativeBuildOptions } from './engines';
 
@@ -38,7 +38,19 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
         getLogger().info('Build: starting (native)');
 
         try {
-          await ensureNamespaceExists(options.namespace);
+          await deploy.$fetchGraph('[build.[pullRequest]]');
+
+          if (!deploy.build) {
+            throw new Error('Build: namespace setup requires build metadata');
+          }
+
+          await createOrUpdateNamespace({
+            name: options.namespace,
+            buildUUID: deploy.build.uuid,
+            staticEnv: deploy.build.isStatic,
+            pullRequest: deploy.build.pullRequest,
+            waitForReady: true,
+          });
 
           const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
 

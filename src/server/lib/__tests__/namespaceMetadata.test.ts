@@ -18,6 +18,8 @@ var mockReadNamespace: jest.Mock;
 var mockCreateNamespace: jest.Mock;
 var mockPatchNamespace: jest.Mock;
 var mockGetAllConfigs: jest.Mock;
+var mockGetLabels: jest.Mock;
+var mockShellPromise: jest.Mock;
 
 jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
@@ -49,12 +51,14 @@ jest.mock('@kubernetes/client-node', () => {
 
 jest.mock('server/services/globalConfig', () => {
   mockGetAllConfigs = jest.fn();
+  mockGetLabels = jest.fn();
 
   return {
     __esModule: true,
     default: {
       getInstance: jest.fn(() => ({
         getAllConfigs: mockGetAllConfigs,
+        getLabels: mockGetLabels,
       })),
     },
   };
@@ -69,6 +73,14 @@ jest.mock('server/lib/logger', () => ({
   })),
 }));
 
+jest.mock('server/lib/shell', () => {
+  mockShellPromise = jest.fn();
+
+  return {
+    shellPromise: (...args: unknown[]) => mockShellPromise(...args),
+  };
+});
+
 import { createOrUpdateNamespace } from '../kubernetes';
 
 describe('createOrUpdateNamespace metadata', () => {
@@ -78,12 +90,18 @@ describe('createOrUpdateNamespace metadata', () => {
     mockCreateNamespace.mockReset();
     mockPatchNamespace.mockReset();
     mockGetAllConfigs.mockReset();
+    mockGetLabels.mockReset();
+    mockShellPromise.mockReset();
     jest.useFakeTimers().setSystemTime(new Date('2026-04-16T12:00:00.000Z'));
     mockGetAllConfigs.mockResolvedValue({
       ttl_cleanup: {
         inactivityDays: 7,
       },
     });
+    mockGetLabels.mockResolvedValue({
+      keep: ['keep-env'],
+    });
+    mockShellPromise.mockResolvedValue('Active');
   });
 
   afterEach(() => {
@@ -118,6 +136,88 @@ describe('createOrUpdateNamespace metadata', () => {
         }),
       })
     );
+  });
+
+  it('adds TTL labels immediately for build-backed namespaces', async () => {
+    mockReadNamespace.mockRejectedValueOnce({ response: { statusCode: 404 } });
+    mockCreateNamespace.mockResolvedValue({});
+
+    await createOrUpdateNamespace({
+      name: 'env-build123',
+      buildUUID: 'build123',
+      staticEnv: false,
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        pullRequestNumber: 42,
+        githubLogin: 'example-author',
+        labels: ['deploy-env'],
+      },
+    });
+
+    expect(mockCreateNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          name: 'env-build123',
+          labels: expect.objectContaining({
+            'lfc/uuid': 'build123',
+            'lfc/type': 'ephemeral',
+            'lfc/ttl-enable': 'true',
+            'lfc/ttl-createdAtUnix': '1776340800000',
+            'lfc/ttl-createdAt': '2026-04-16',
+            'lfc/ttl-expireAtUnix': '1776945600000',
+            'lfc/ttl-expireAt': '2026-04-23',
+            'lfc/org': 'example-org',
+            'lfc/repo': 'example-repo',
+            'lfc/pull-request': '42',
+            'lfc/author': 'example-author',
+          }),
+        }),
+      })
+    );
+  });
+
+  it('disables TTL for build-backed namespaces when the pull request has the keep label', async () => {
+    mockReadNamespace.mockRejectedValueOnce({ response: { statusCode: 404 } });
+    mockCreateNamespace.mockResolvedValue({});
+
+    await createOrUpdateNamespace({
+      name: 'env-keep123',
+      buildUUID: 'keep123',
+      staticEnv: false,
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        pullRequestNumber: 99,
+        githubLogin: 'example-author',
+        labels: ['keep-env'],
+      },
+    });
+
+    expect(mockCreateNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          labels: expect.objectContaining({
+            'lfc/uuid': 'keep123',
+            'lfc/type': 'ephemeral',
+            'lfc/ttl-enable': 'false',
+          }),
+        }),
+      })
+    );
+    expect(mockCreateNamespace.mock.calls[0][0].metadata.labels).not.toHaveProperty('lfc/ttl-expireAtUnix');
+  });
+
+  it('waits for the namespace to become active when requested', async () => {
+    mockReadNamespace.mockRejectedValueOnce({ response: { statusCode: 404 } });
+    mockCreateNamespace.mockResolvedValue({});
+
+    await createOrUpdateNamespace({
+      name: 'env-wait123',
+      buildUUID: 'wait123',
+      staticEnv: false,
+      waitForReady: true,
+    });
+
+    expect(mockShellPromise).toHaveBeenCalledWith("kubectl get namespace env-wait123 -o jsonpath='{.status.phase}'");
   });
 
   it('patches PR and repo labels onto an existing namespace', async () => {
