@@ -129,7 +129,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
   });
 
   it('GET returns sanitized runtime-control state', async () => {
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -148,7 +148,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
         toolChoiceIds: ['rtc_optional'],
         mcpChoiceIds: ['rtc_mcp'],
       }),
-      { params: { threadId: 'thread-1' } }
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
 
     expect(response.status).toBe(200);
@@ -162,12 +162,12 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
 
   it('returns 400 for malformed bodies and unknown choices', async () => {
     const malformed = await PATCH(makeRequest({ toolChoiceIds: 'workspace_files' }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(malformed.status).toBe(400);
 
     const invalidJson = await PATCH(makeInvalidJsonRequest(), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(invalidJson.status).toBe(400);
 
@@ -175,7 +175,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
       new AgentThreadRuntimeControlsError('unknown_choice', 'Unknown runtime control choice.')
     );
     const unknown = await PATCH(makeRequest({ toolChoiceIds: ['workspace_files'], mcpChoiceIds: [] }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(unknown.status).toBe(400);
   });
@@ -185,19 +185,19 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
       new AgentThreadRuntimeControlsError('policy_denied', 'Runtime control choice is unavailable.')
     );
     const denied = await PATCH(makeRequest({ toolChoiceIds: ['rtc_optional'], mcpChoiceIds: [] }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(denied.status).toBe(403);
 
     mockGetState.mockRejectedValueOnce(new AgentThreadRuntimeControlsError('not_found', 'Agent thread not found'));
-    const missing = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const missing = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     expect(missing.status).toBe(404);
 
     mockPatchChoices.mockRejectedValueOnce(
       new AgentThreadRuntimeControlsError('active_run', 'Change after this response finishes.')
     );
     const active = await PATCH(makeRequest({ toolChoiceIds: [], mcpChoiceIds: [] }), {
-      params: { threadId: 'thread-1' },
+      params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(active.status).toBe(409);
   });
@@ -205,7 +205,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
   it('returns 401 without identity', async () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
   });

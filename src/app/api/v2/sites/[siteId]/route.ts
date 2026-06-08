@@ -21,9 +21,9 @@ import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
 
 type RouteContext = {
-  params: {
+  params: Promise<{
     siteId: string;
-  };
+  }>;
 };
 
 /**
@@ -79,9 +79,10 @@ type RouteContext = {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.getSite(params.siteId);
+    const site = await service.getSite(routeParams.siteId);
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);
@@ -89,9 +90,10 @@ const getHandler = async (req: NextRequest, { params }: RouteContext) => {
 };
 
 const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.deleteSite(params.siteId);
+    const site = await service.deleteSite(routeParams.siteId);
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);

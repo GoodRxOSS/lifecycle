@@ -74,7 +74,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/services', () => {
 
   it('returns 400 for malformed service objects before session lookup', async () => {
     const response = await POST(makeRequest({ services: [{ repo: 'example-org/example-repo' }] }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -86,7 +86,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/services', () => {
 
   it('returns 400 for malformed JSON before session lookup', async () => {
     const response = await POST(makeMalformedJsonRequest(), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -100,7 +100,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/services', () => {
     mockGetSession.mockResolvedValueOnce(null);
 
     const response = await POST(makeRequest({ services: ['sample-service'] }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 
@@ -116,7 +116,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/services', () => {
     });
 
     const response = await POST(makeRequest({ services: ['sample-service'] }), {
-      params: { sessionId: 'session-1' },
+      params: Promise.resolve({ sessionId: 'session-1' }),
     });
     const body = await response.json();
 

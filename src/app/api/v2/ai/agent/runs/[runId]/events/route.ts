@@ -136,7 +136,8 @@ function parsePositiveInteger(value: string | null, fallback: number): number {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { runId: string } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   let afterSequence: number;
@@ -150,7 +151,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { runId: strin
 
   let run;
   try {
-    run = await AgentRunService.getOwnedRun(params.runId, userIdentity.userId);
+    run = await AgentRunService.getOwnedRun(routeParams.runId, userIdentity.userId);
   } catch (error) {
     if (AgentRunService.isRunNotFoundError(error)) {
       return errorResponse(new Error('Agent run not found'), { status: 404 }, req);

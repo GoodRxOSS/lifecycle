@@ -64,7 +64,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/admin/agent/mcp-servers/sample-connector/users'),
       {
-        params: { slug: 'sample-connector' },
+        params: Promise.resolve({ slug: 'sample-connector' }),
       }
     );
 
@@ -98,7 +98,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
         'http://localhost/api/v2/ai/admin/agent/mcp-servers/sample-connector/users?scope=example-org/example-repo'
       ),
       {
-        params: { slug: 'sample-connector' },
+        params: Promise.resolve({ slug: 'sample-connector' }),
       }
     );
     const body = await response.json();
@@ -129,7 +129,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
     const response = await GET(
       makeRequest('http://localhost/api/v2/ai/admin/agent/mcp-servers/sample-connector/users?scope=global'),
       {
-        params: { slug: 'sample-connector' },
+        params: Promise.resolve({ slug: 'sample-connector' }),
       }
     );
 

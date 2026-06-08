@@ -652,7 +652,7 @@ describe('canonical agent session API acceptance flow', () => {
           parts: [{ type: 'text', text: 'Inspect the workspace and summarize the main entrypoints.' }],
         },
       }),
-      { params: { threadId } }
+      { params: Promise.resolve({ threadId }) }
     );
     const runBody = await runResponse.json();
     const runId = runBody.data.run.id;
@@ -697,7 +697,7 @@ describe('canonical agent session API acceptance flow', () => {
 
     const initialMessagesResponse = await getMessages(
       makeRequest(`http://localhost/api/v2/ai/agent/threads/${threadId}/messages`),
-      { params: { threadId } }
+      { params: Promise.resolve({ threadId }) }
     );
     const initialMessagesBody = await initialMessagesResponse.json();
 
@@ -715,7 +715,7 @@ describe('canonical agent session API acceptance flow', () => {
 
     const eventsResponse = await getRunEvents(
       makeRequest(`http://localhost/api/v2/ai/agent/runs/${runId}/events?afterSequence=0&limit=100`),
-      { params: { runId } }
+      { params: Promise.resolve({ runId }) }
     );
     const eventsBody = await eventsResponse.json();
 
@@ -736,7 +736,7 @@ describe('canonical agent session API acceptance flow', () => {
       makeRequest(`http://localhost/api/v2/ai/agent/runs/${runId}/events/stream?afterSequence=0`, undefined, [
         ['last-event-id', '1'],
       ]),
-      { params: { runId } }
+      { params: Promise.resolve({ runId }) }
     );
     const streamBody = await streamResponse.text();
 
@@ -750,7 +750,7 @@ describe('canonical agent session API acceptance flow', () => {
 
     const pendingActionsResponse = await getPendingActions(
       makeRequest(`http://localhost/api/v2/ai/agent/threads/${threadId}/pending-actions`),
-      { params: { threadId } }
+      { params: Promise.resolve({ threadId }) }
     );
     const pendingActionsBody = await pendingActionsResponse.json();
 
@@ -773,7 +773,7 @@ describe('canonical agent session API acceptance flow', () => {
         approved: true,
         reason: 'approved for acceptance flow',
       }),
-      { params: { actionId: 'action-1' } }
+      { params: Promise.resolve({ actionId: 'action-1' }) }
     );
     const approvalBody = await approvalResponse.json();
 
@@ -798,7 +798,7 @@ describe('canonical agent session API acceptance flow', () => {
 
     const terminalEventsResponse = await getRunEvents(
       makeRequest(`http://localhost/api/v2/ai/agent/runs/${runId}/events?afterSequence=0&limit=100`),
-      { params: { runId } }
+      { params: Promise.resolve({ runId }) }
     );
     const terminalEventsBody = await terminalEventsResponse.json();
 
@@ -817,7 +817,7 @@ describe('canonical agent session API acceptance flow', () => {
 
     const finalMessagesResponse = await getMessages(
       makeRequest(`http://localhost/api/v2/ai/agent/threads/${threadId}/messages`),
-      { params: { threadId } }
+      { params: Promise.resolve({ threadId }) }
     );
     const finalMessagesBody = await finalMessagesResponse.json();
 

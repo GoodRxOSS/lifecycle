@@ -90,7 +90,8 @@ function parseAfterSequence(req: NextRequest): number {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { runId: string } }): Promise<Response> => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runId: string }> }): Promise<Response> => {
+  const routeParams = await params;
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) {
     return errorResponse(new Error('Unauthorized'), { status: 401 }, req);
@@ -105,7 +106,7 @@ const getHandler = async (req: NextRequest, { params }: { params: { runId: strin
 
   let run;
   try {
-    run = await AgentRunService.getOwnedRun(params.runId, userIdentity.userId);
+    run = await AgentRunService.getOwnedRun(routeParams.runId, userIdentity.userId);
   } catch (error) {
     if (AgentRunService.isRunNotFoundError(error)) {
       return errorResponse(new Error('Agent run not found'), { status: 404 }, req);

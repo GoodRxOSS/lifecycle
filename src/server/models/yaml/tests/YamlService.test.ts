@@ -22,6 +22,32 @@ import { YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 import { DeployTypes } from 'shared/constants';
 import * as YamlService from '../index';
 
+const mockGetAllConfigs = jest.fn();
+
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getAllConfigs: mockGetAllConfigs,
+    })),
+  },
+}));
+
+jest.mock('server/lib/github', () => ({
+  getYamlFileContentFromBranch: jest.fn(),
+  getYamlFileContentFromPullRequest: jest.fn(),
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({
+    error: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    fatal: jest.fn(),
+  })),
+}));
+
 describe('Yaml Service', () => {
   const lifecycleConfigContent: string = `---
   version: '1.0.0'
@@ -523,6 +549,39 @@ services:
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'dockerApp');
 
       expect(YamlService.hasLifecycleManagedDockerBuild(service)).toEqual(false);
+    });
+  });
+
+  describe('getEcr', () => {
+    beforeEach(() => {
+      mockGetAllConfigs.mockResolvedValue({
+        lifecycleDefaults: {
+          ecrRegistry: 'account-id.dkr.ecr.us-west-2.amazonaws.com',
+        },
+      });
+    });
+
+    test('falls back to appShort when helm docker ecr is not configured', async () => {
+      const parser = new YamlConfigParser();
+      const config = parser.parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'service-with-app-short'
+    appShort: 'svc'
+    helm:
+      repository: 'org/example'
+      branchName: 'main'
+      chart:
+        name: './helm/app'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'service/Dockerfile'
+`);
+
+      const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'service-with-app-short');
+
+      await expect(YamlService.getEcr(service)).resolves.toEqual('account-id.dkr.ecr.us-west-2.amazonaws.com/svc/lfc');
     });
   });
 

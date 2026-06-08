@@ -51,11 +51,12 @@ import AgentRunService from 'server/services/agent/RunService';
  *       '404':
  *         description: Agent run not found
  */
-const postHandler = async (req: NextRequest, { params }: { params: { runId: string } }) => {
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ runId: string }> }) => {
+  const routeParams = await params;
   const userIdentity = requireRequestUserIdentity(req);
 
   try {
-    const run = await AgentRunService.cancelRun(params.runId, userIdentity.userId);
+    const run = await AgentRunService.cancelRun(routeParams.runId, userIdentity.userId);
     return successResponse(AgentRunService.serializeRun(run), { status: 200 }, req);
   } catch (error) {
     if (AgentRunService.isRunNotFoundError(error)) {

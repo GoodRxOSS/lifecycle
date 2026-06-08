@@ -72,7 +72,7 @@ describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
     });
 
     const response = await POST(makeRequest(), {
-      params: { runId: 'run-1' },
+      params: Promise.resolve({ runId: 'run-1' }),
     });
     const body = await response.json();
 
@@ -90,7 +90,7 @@ describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
     mockIsRunNotFoundError.mockReturnValueOnce(true);
 
     const response = await POST(makeRequest(), {
-      params: { runId: 'missing-run' },
+      params: Promise.resolve({ runId: 'missing-run' }),
     });
     const body = await response.json();
 
@@ -102,7 +102,7 @@ describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
     const response = await POST(makeRequest(), {
-      params: { runId: 'run-1' },
+      params: Promise.resolve({ runId: 'run-1' }),
     });
     const body = await response.json();
 

@@ -97,10 +97,11 @@ function parseRepoFullName(segments: string[]): string {
  *       '204':
  *         description: Override deleted
  */
-const getHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let repoFullName: string;
   try {
-    repoFullName = parseRepoFullName(params.fullName);
+    repoFullName = parseRepoFullName(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }
@@ -109,10 +110,11 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
   return successResponse({ repoFullName, config }, { status: 200 }, req);
 };
 
-const putHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const putHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let repoFullName: string;
   try {
-    repoFullName = parseRepoFullName(params.fullName);
+    repoFullName = parseRepoFullName(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }
@@ -142,10 +144,11 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
   }
 };
 
-const deleteHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let repoFullName: string;
   try {
-    repoFullName = parseRepoFullName(params.fullName);
+    repoFullName = parseRepoFullName(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }

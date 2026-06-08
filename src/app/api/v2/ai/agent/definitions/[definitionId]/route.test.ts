@@ -120,7 +120,7 @@ function makeRequest(body?: unknown): NextRequest {
   } as unknown as NextRequest;
 }
 
-const params = { params: { definitionId: 'custom.sample-agent' } };
+const params = { params: Promise.resolve({ definitionId: 'custom.sample-agent' }) };
 
 describe('/api/v2/ai/agent/definitions/[definitionId]', () => {
   beforeEach(() => {

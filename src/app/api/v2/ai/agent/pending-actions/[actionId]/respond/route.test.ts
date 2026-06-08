@@ -102,7 +102,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
   it('returns 401 when the requester is not authenticated', async () => {
     mockGetRequestUserIdentity.mockReturnValue(null);
 
-    const response = await POST(makeRequest({ approved: true }), { params: { actionId: 'action-1' } });
+    const response = await POST(makeRequest({ approved: true }), { params: Promise.resolve({ actionId: 'action-1' }) });
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({
@@ -113,7 +113,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
 
   it('resolves the pending action through the canonical response API', async () => {
     const response = await POST(makeRequest({ approved: false, reason: 'not needed' }), {
-      params: { actionId: 'action-1' },
+      params: Promise.resolve({ actionId: 'action-1' }),
     });
     const body = await response.json();
 
@@ -165,7 +165,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
         githubUsername: 'sample-user',
       });
 
-      const response = await POST(makeRequest(testCase.body), { params: { actionId: 'action-1' } });
+      const response = await POST(makeRequest(testCase.body), { params: Promise.resolve({ actionId: 'action-1' }) });
 
       expect(response.status).toBe(400);
       await expect(response.json()).resolves.toMatchObject({
@@ -177,7 +177,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
   });
 
   it('rejects invalid JSON instead of denying the action', async () => {
-    const response = await POST(makeInvalidJsonRequest(), { params: { actionId: 'action-1' } });
+    const response = await POST(makeInvalidJsonRequest(), { params: Promise.resolve({ actionId: 'action-1' }) });
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
@@ -190,7 +190,9 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
   it('returns 404 when the pending action cannot be resolved for the requester', async () => {
     mockResolvePendingAction.mockRejectedValue(new Error('Pending action not found'));
 
-    const response = await POST(makeRequest({ approved: true }), { params: { actionId: 'missing-action' } });
+    const response = await POST(makeRequest({ approved: true }), {
+      params: Promise.resolve({ actionId: 'missing-action' }),
+    });
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toMatchObject({

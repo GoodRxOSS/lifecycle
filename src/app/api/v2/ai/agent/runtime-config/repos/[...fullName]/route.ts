@@ -146,10 +146,11 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const getHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let parsed: { fullName: string; isEffective: boolean };
   try {
-    parsed = parseFullNameParams(params.fullName);
+    parsed = parseFullNameParams(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }
@@ -302,10 +303,11 @@ const getHandler = async (req: NextRequest, { params }: { params: { fullName: st
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const putHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const putHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let parsed: { fullName: string; isEffective: boolean };
   try {
-    parsed = parseFullNameParams(params.fullName);
+    parsed = parseFullNameParams(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }
@@ -349,10 +351,11 @@ const putHandler = async (req: NextRequest, { params }: { params: { fullName: st
   return successResponse({ repoFullName: parsed.fullName, config: updated }, { status: 200 }, req);
 };
 
-const patchHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let parsed: { fullName: string; isEffective: boolean };
   try {
-    parsed = parseFullNameParams(params.fullName);
+    parsed = parseFullNameParams(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }
@@ -456,10 +459,11 @@ const patchHandler = async (req: NextRequest, { params }: { params: { fullName: 
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const deleteHandler = async (req: NextRequest, { params }: { params: { fullName: string[] } }) => {
+const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
+  const routeParams = await params;
   let parsed: { fullName: string; isEffective: boolean };
   try {
-    parsed = parseFullNameParams(params.fullName);
+    parsed = parseFullNameParams(routeParams.fullName);
   } catch {
     return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
   }

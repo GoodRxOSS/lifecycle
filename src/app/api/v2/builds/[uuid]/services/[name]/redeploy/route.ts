@@ -68,8 +68,9 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: { uuid: string; name: string } }) => {
-  const { uuid: buildUuid, name: serviceName } = params;
+const PutHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string; name: string }> }) => {
+  const routeParams = await params;
+  const { uuid: buildUuid, name: serviceName } = routeParams;
 
   const buildService = new BuildService();
 

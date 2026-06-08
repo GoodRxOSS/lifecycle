@@ -87,7 +87,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/usage', () => {
   });
 
   it('returns thread usage for the authenticated owner', async () => {
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -108,7 +108,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/usage', () => {
   it('returns 401 without a request identity', async () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 
-    const response = await GET(makeRequest(), { params: { threadId: 'thread-1' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
     expect(mockGetOwnedThreadUsage).not.toHaveBeenCalled();
@@ -117,7 +117,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/usage', () => {
   it('maps missing thread or session ownership to 404', async () => {
     mockGetOwnedThreadUsage.mockRejectedValueOnce(new Error('Agent thread not found'));
 
-    const response = await GET(makeRequest(), { params: { threadId: 'missing-thread' } });
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'missing-thread' }) });
     const body = await response.json();
 
     expect(response.status).toBe(404);

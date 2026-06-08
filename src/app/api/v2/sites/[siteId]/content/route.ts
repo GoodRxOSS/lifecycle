@@ -24,9 +24,9 @@ import SitesService from 'server/services/sites';
 export const runtime = 'nodejs';
 
 type RouteContext = {
-  params: {
+  params: Promise<{
     siteId: string;
-  };
+  }>;
 };
 
 /**
@@ -71,10 +71,11 @@ type RouteContext = {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const putHandler = async (req: NextRequest, { params }: RouteContext) => {
+  const routeParams = await params;
   try {
     const upload = await readUploadFile(req);
     const service = new SitesService();
-    const site = await service.replaceSiteContent(params.siteId, {
+    const site = await service.replaceSiteContent(routeParams.siteId, {
       ...upload,
       user: getRequestUserIdentity(req),
     });
