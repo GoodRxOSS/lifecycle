@@ -30,11 +30,9 @@ function deriveAdapter(session: AgentSession): string {
   return session.buildKind === 'sandbox' ? 'lifecycle_fork' : 'lifecycle_environment';
 }
 
+// The source is the session's input spec, not infrastructure: archiving reclaims the workspace
+// but must keep the source ready so the chat stays readable and a send can revive it.
 function deriveStatus(session: AgentSession): AgentSource['status'] {
-  if (session.status === 'ended') {
-    return 'cleaned_up';
-  }
-
   if (session.status === 'error') {
     return 'failed';
   }
@@ -131,11 +129,8 @@ export default class AgentSourceService {
         previewPorts: true,
       },
       error: status === 'failed' ? { message: 'Source failed' } : null,
-      preparedAt: status === 'cleaned_up' ? null : toTimestampString(session.updatedAt) || new Date().toISOString(),
-      cleanedUpAt:
-        status === 'cleaned_up'
-          ? toTimestampString(session.endedAt) || toTimestampString(session.updatedAt) || new Date().toISOString()
-          : null,
+      preparedAt: toTimestampString(session.updatedAt) || new Date().toISOString(),
+      cleanedUpAt: null,
     } as Partial<AgentSource>);
   }
 
@@ -187,9 +182,9 @@ export default class AgentSourceService {
       patch.error = { message: 'Source failed' };
     }
 
-    if (status === 'cleaned_up' && !existing.cleanedUpAt) {
-      patch.cleanedUpAt =
-        toTimestampString(session.endedAt) || toTimestampString(session.updatedAt) || new Date().toISOString();
+    // Legacy rows may still carry a cleanup stamp; sources are never cleaned up anymore.
+    if (existing.cleanedUpAt) {
+      patch.cleanedUpAt = null;
     }
 
     if (Object.keys(patch).length === 0) {

@@ -32,11 +32,15 @@ jest.mock('server/services/globalConfig', () => ({
     })),
   },
 }));
+jest.mock('../triageDossier', () => ({
+  buildTriageDossier: jest.fn(),
+}));
 
 import AgentSession from 'server/models/AgentSession';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
+import { buildTriageDossier } from '../triageDossier';
 import {
   buildAgentSessionDynamicSystemPrompt,
   combineAgentSessionAppendSystemPrompt,
@@ -50,6 +54,7 @@ describe('agent session system prompt', () => {
     (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue({
       findById: jest.fn().mockResolvedValue(null),
     });
+    (buildTriageDossier as jest.Mock).mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -63,8 +68,8 @@ describe('agent session system prompt', () => {
         buildUuid: 'sample-123456',
         skillsAvailable: true,
         toolLines: [
-          '- inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_exec',
-          '- run mutating or networked shell commands that are not direct file edits: mcp__sandbox__workspace_exec_mutation',
+          '- inspect files, services, and git state: mcp__workspace_core__read_file, mcp__workspace_core__exec',
+          '- run mutating or networked shell commands that are not direct file edits: mcp__workspace_core__exec',
         ],
         services: [
           {
@@ -83,8 +88,8 @@ describe('agent session system prompt', () => {
         '- next-web: publicUrl=https://next-web-sample.lifecycle.dev.example.com, workDir=/workspace/apps/next-web',
         '- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it',
         '- equipped tools:',
-        '  - inspect files, services, and git state: mcp__sandbox__workspace_read_file, mcp__sandbox__workspace_exec',
-        '  - run mutating or networked shell commands that are not direct file edits: mcp__sandbox__workspace_exec_mutation',
+        '  - inspect files, services, and git state: mcp__workspace_core__read_file, mcp__workspace_core__exec',
+        '  - run mutating or networked shell commands that are not direct file edits: mcp__workspace_core__exec',
       ].join('\n')
     );
   });
@@ -164,6 +169,87 @@ describe('agent session system prompt', () => {
     });
 
     expect(context.lifecycleConfig).toEqual({ status: 'invalid', path: 'lifecycle.yaml' });
+  });
+
+  it('renders triage evidence under its header after the DEPLOYS roster', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      services: [],
+      diagnosticServices: [{ name: 'next-web', status: 'build_failed' }],
+      triage: '## next-web — phase=build status=build_failed\n```log\nERROR: no Dockerfile\n```',
+      skillsAvailable: true,
+    });
+
+    const rosterIndex = prompt.indexOf('DEPLOYS — roster:');
+    const triageIndex = prompt.indexOf('Triage evidence (collected automatically):');
+    const skillsIndex = prompt.indexOf('- equipped skills:');
+    expect(rosterIndex).toBeGreaterThanOrEqual(0);
+    expect(triageIndex).toBeGreaterThan(rosterIndex);
+    expect(skillsIndex).toBeGreaterThan(triageIndex);
+    expect(prompt).toContain(
+      'Triage evidence (collected automatically):\n## next-web — phase=build status=build_failed\n```log\nERROR: no Dockerfile\n```'
+    );
+  });
+
+  it('omits the triage section when no dossier is present', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      services: [],
+    });
+
+    expect(prompt).not.toContain('Triage evidence (collected automatically):');
+  });
+
+  it('attaches the triage dossier to the resolved context for failing builds', async () => {
+    const buildRow = {
+      uuid: 'sample-build-1',
+      status: 'build_failed',
+      statusMessage: 'web build failed',
+      namespace: 'env-sample-123456',
+      pullRequest: null,
+      deploys: [],
+    };
+    (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+      findOne: jest.fn().mockReturnValue({ withGraphFetched: jest.fn().mockResolvedValue(buildRow) }),
+    });
+    (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+      where: jest.fn().mockReturnValue({ withGraphFetched: jest.fn().mockResolvedValue([]) }),
+    });
+    (buildTriageDossier as jest.Mock).mockResolvedValue('## web — phase=build status=build_failed\n- evidence');
+
+    const context = await resolveAgentSessionPromptContext({
+      sessionDbId: 123,
+      namespace: null,
+      buildUuid: 'sample-build-1',
+    });
+
+    expect(buildTriageDossier).toHaveBeenCalledWith(buildRow, []);
+    expect(context.triage).toBe('## web — phase=build status=build_failed\n- evidence');
+  });
+
+  it('degrades to a one-line triage note when the dossier build throws', async () => {
+    (Build.query as jest.Mock) = jest.fn().mockReturnValue({
+      findOne: jest.fn().mockReturnValue({
+        withGraphFetched: jest.fn().mockResolvedValue({
+          uuid: 'sample-build-1',
+          status: 'build_failed',
+          pullRequest: null,
+          deploys: [],
+        }),
+      }),
+    });
+    (Deploy.query as jest.Mock) = jest.fn().mockReturnValue({
+      where: jest.fn().mockReturnValue({ withGraphFetched: jest.fn().mockResolvedValue([]) }),
+    });
+    (buildTriageDossier as jest.Mock).mockRejectedValue(new Error('k8s exploded'));
+
+    const context = await resolveAgentSessionPromptContext({
+      sessionDbId: 123,
+      namespace: null,
+      buildUuid: 'sample-build-1',
+    });
+
+    expect(context.triage).toBe('- triage: unavailable (k8s exploded)');
   });
 
   it('combines the configured and dynamic prompts with spacing', () => {
@@ -283,6 +369,66 @@ describe('agent session system prompt', () => {
     expect(prompt).not.toContain('Selected services:');
     expect(prompt).not.toContain('Fresh repository reads:');
     expect(prompt).not.toContain('Mismatch handling:');
+  });
+
+  it('preserves build-context debug grounding for selected deploys and log evidence', () => {
+    const prompt = buildAgentSessionDynamicSystemPrompt({
+      buildUuid: 'sample-build-1',
+      gatheredAt: '2026-04-30T12:00:00.000Z',
+      build: {
+        uuid: 'sample-build-1',
+        status: 'build_failed',
+        statusMessage: 'Dockerfile not found',
+        namespace: 'env-sample-123456',
+        sha: 'base-build-sha-1',
+      },
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        branchName: 'feature/sample',
+        pullRequestNumber: 42,
+        latestCommit: '0123456789abcdef0123456789abcdef01234567',
+      },
+      services: [
+        {
+          name: 'sample-service',
+          deployUuid: 'sample-service-sample-build-1',
+          status: 'build_failed',
+          statusMessage: 'Dockerfile not found',
+          repo: 'example-org/service-repo',
+          branch: 'feature/service-change',
+          serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+          dockerImage: 'registry.example.test/sample-service:abcdef01',
+          buildPipelineId: 'build-pipeline-1',
+          deployPipelineId: 'deploy-pipeline-1',
+        },
+      ],
+      selectedDeploy: {
+        name: 'sample-service',
+        deployUuid: 'sample-service-sample-build-1',
+        status: 'build_failed',
+        statusMessage: 'Dockerfile not found',
+        repo: 'example-org/service-repo',
+        branch: 'feature/service-change',
+        serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+        dockerImage: 'registry.example.test/sample-service:abcdef01',
+        buildPipelineId: 'build-pipeline-1',
+        deployPipelineId: 'deploy-pipeline-1',
+      },
+      triage:
+        '## sample-service — phase=build status=build_failed\n- logs: get_build_logs service_name=sample-service phase=build',
+    });
+
+    expect(prompt).toContain('- namespace: env-sample-123456');
+    expect(prompt).toContain(
+      '- build=sample-build-1: buildStatusAtStart=build_failed, buildStatusMessageAtStart=Dockerfile not found, namespace=env-sample-123456, sha=base-build-sha-1'
+    );
+    expect(prompt).toContain('latestCommit=0123456789abcdef0123456789abcdef01234567');
+    expect(prompt).toContain('serviceSha=abcdef0123456789abcdef0123456789abcdef01');
+    expect(prompt).toContain('dockerImage=registry.example.test/sample-service:abcdef01');
+    expect(prompt).toContain('buildPipelineId=build-pipeline-1');
+    expect(prompt).toContain('deployPipelineId=deploy-pipeline-1');
+    expect(prompt).toContain('Triage evidence (collected automatically):');
+    expect(prompt).toContain('get_build_logs service_name=sample-service phase=build');
   });
 
   it('renders deploy-gated pending builds as an explicit initial snapshot', () => {
@@ -461,6 +607,7 @@ describe('agent session system prompt', () => {
           workDir: '/workspace/apps/next-web',
         },
       ],
+      userSelectedServices: true,
       selectedDeploy: {
         name: 'next-web',
         active: true,
@@ -597,20 +744,7 @@ describe('agent session system prompt', () => {
           workDir: '/workspace/apps/next-web',
         },
       ],
-      selectedDeploy: {
-        name: 'next-web',
-        active: false,
-        deployUuid: 'next-web-deploy-1',
-        status: 'pending',
-        statusMessage: undefined,
-        publicUrl: 'https://next-web-sample.lifecycle.dev.example.com',
-        repo: 'example-org/example-repo',
-        branch: 'feature/sample',
-        dockerImage: 'registry.example.test/next-web:abc123',
-        buildPipelineId: 'build-pipeline-1',
-        deployPipelineId: 'deploy-pipeline-1',
-        workDir: '/workspace/apps/next-web',
-      },
+      userSelectedServices: false,
       diagnosticServices: [
         {
           name: 'next-web',

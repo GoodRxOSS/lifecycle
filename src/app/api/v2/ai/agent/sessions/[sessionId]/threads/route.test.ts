@@ -79,6 +79,14 @@ jest.mock('server/services/agent/ThreadService', () => {
   };
 });
 
+jest.mock('server/services/agentSession', () => ({
+  __esModule: true,
+  default: {
+    getSession: jest.fn(),
+    ensureSessionActive: jest.fn(),
+  },
+}));
+
 jest.mock('server/services/agent/WorkspaceRuntimeStateService', () => {
   class WorkspaceActionBlockedError extends Error {
     readonly httpStatus = 409;
@@ -105,11 +113,14 @@ import AgentThreadService, {
   AgentThreadCreateNotFoundError,
 } from 'server/services/agent/ThreadService';
 import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
+import AgentSessionService from 'server/services/agentSession';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
 const mockCreateThread = AgentThreadService.createThread as jest.Mock;
 const mockListThreadHistoryForSession = AgentThreadService.listThreadHistoryForSession as jest.Mock;
 const mockSerializeThread = AgentThreadService.serializeThread as jest.Mock;
+const mockGetSession = AgentSessionService.getSession as jest.Mock;
+const mockEnsureSessionActive = AgentSessionService.ensureSessionActive as jest.Mock;
 
 function makeRequest(body?: unknown, options: { jsonError?: Error; hasBody?: boolean } = {}): NextRequest {
   const hasBody = options.hasBody ?? (body !== undefined || options.jsonError !== undefined);
@@ -135,6 +146,13 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
+    mockGetSession.mockResolvedValue({
+      id: 17,
+      uuid: 'session-1',
+      userId: 'sample-user',
+      status: 'active',
+    });
+    mockEnsureSessionActive.mockImplementation(async (session) => session);
   });
 
   it('lists owned session threads', async () => {

@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';
+import type { MCPClient, MCPTransport } from '@ai-sdk/mcp';
 import { getLogger } from 'server/lib/logger';
-import type { McpDiscoveredTool, McpResolvedTransportConfig, McpToolAnnotations } from './types';
+import { importEsm } from 'server/lib/esmImport';
+import type { McpCallToolResult, McpDiscoveredTool, McpResolvedTransportConfig, McpToolAnnotations } from './types';
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000;
 const DEFAULT_CALL_TIMEOUT_MS = 30000;
@@ -24,11 +25,26 @@ const REDACTED_MCP_SECRET = '******';
 const MIN_SECRET_REDACTION_LENGTH = 4;
 
 type ListToolsDefinitions = Awaited<ReturnType<MCPClient['listTools']>>;
-type ExperimentalStdioMCPModule = typeof import('@ai-sdk/mcp/dist/mcp-stdio');
+type McpSdkModule = typeof import('@ai-sdk/mcp');
+type ExperimentalStdioMCPTransportConstructor = new (config: {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}) => MCPTransport;
+type ExperimentalStdioMCPModule = {
+  Experimental_StdioMCPTransport: ExperimentalStdioMCPTransportConstructor;
+};
 
-function getExperimentalStdioMCPTransport(): ExperimentalStdioMCPModule['Experimental_StdioMCPTransport'] {
-  return require('@ai-sdk/mcp/mcp-stdio')
-    .Experimental_StdioMCPTransport as ExperimentalStdioMCPModule['Experimental_StdioMCPTransport'];
+let mcpSdkPromise: Promise<McpSdkModule> | null = null;
+
+function loadMcpSdk(): Promise<McpSdkModule> {
+  mcpSdkPromise ||= importEsm<McpSdkModule>('@ai-sdk/mcp');
+  return mcpSdkPromise;
+}
+
+async function getExperimentalStdioMCPTransport(): Promise<ExperimentalStdioMCPTransportConstructor> {
+  const { Experimental_StdioMCPTransport } = await importEsm<ExperimentalStdioMCPModule>('@ai-sdk/mcp/mcp-stdio');
+  return Experimental_StdioMCPTransport;
 }
 
 function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -71,13 +87,14 @@ function toMcpDiscoveredTools(definitions: ListToolsDefinitions): McpDiscoveredT
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema as Record<string, unknown>,
+    ...(tool.outputSchema ? { outputSchema: tool.outputSchema as Record<string, unknown> } : {}),
     annotations: mapToolAnnotations(tool.annotations as Record<string, unknown> | undefined),
   }));
 }
 
-function createTransport(transport: McpResolvedTransportConfig) {
+async function createTransport(transport: McpResolvedTransportConfig) {
   if (transport.type === 'stdio') {
-    const ExperimentalStdioMCPTransport = getExperimentalStdioMCPTransport();
+    const ExperimentalStdioMCPTransport = await getExperimentalStdioMCPTransport();
 
     return new ExperimentalStdioMCPTransport({
       command: transport.command,
@@ -86,7 +103,7 @@ function createTransport(transport: McpResolvedTransportConfig) {
     });
   }
 
-  return transport;
+  return transport.redirect === undefined ? { ...transport, redirect: 'follow' as const } : transport;
 }
 
 function addSecretValue(secrets: Set<string>, value: unknown): void {
@@ -164,14 +181,17 @@ export class McpClientManager {
     handshakeTimeoutMs: number = DEFAULT_HANDSHAKE_TIMEOUT_MS
   ): Promise<void> {
     this.client = await withTimeout(
-      createMCPClient({
-        transport: createTransport(transport),
-        name: 'lifecycle',
-        version: '1.0.0',
-        onUncaughtError: (error) => {
-          getLogger().warn(`MCP client uncaught error: ${sanitizeTransportErrorMessage(error, transport)}`);
-        },
-      }),
+      (async () => {
+        const [{ createMCPClient }, resolvedTransport] = await Promise.all([loadMcpSdk(), createTransport(transport)]);
+        return createMCPClient({
+          transport: resolvedTransport,
+          clientName: 'lifecycle',
+          version: '1.0.0',
+          onUncaughtError: (error) => {
+            getLogger().warn(`MCP client uncaught error: ${sanitizeTransportErrorMessage(error, transport)}`);
+          },
+        });
+      })(),
       handshakeTimeoutMs,
       'MCP client connect'
     );
@@ -198,7 +218,7 @@ export class McpClientManager {
     args: Record<string, unknown>,
     timeoutMs: number = DEFAULT_CALL_TIMEOUT_MS,
     signal?: AbortSignal
-  ): Promise<{ content: unknown; isError: boolean }> {
+  ): Promise<McpCallToolResult> {
     if (!this.client) {
       throw new Error('MCP client not connected. Call connect() first.');
     }
@@ -212,11 +232,7 @@ export class McpClientManager {
       }));
     this.toolDefinitions = definitions;
 
-    const tools = this.client.toolsFromDefinitions(definitions);
-    const tool = tools[toolName] as unknown as {
-      execute?: (input: unknown, options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
-    };
-    if (!tool?.execute) {
+    if (!definitions.tools.some((tool) => tool.name === toolName)) {
       throw new Error(`MCP tool '${toolName}' not found`);
     }
 
@@ -226,8 +242,19 @@ export class McpClientManager {
     signal?.addEventListener('abort', onAbort);
 
     try {
-      const result = await tool.execute(args, { abortSignal: controller.signal });
-      return result as { content: unknown; isError: boolean };
+      const result = await withTimeout(
+        this.client.callTool({
+          name: toolName,
+          arguments: args,
+          options: {
+            signal: controller.signal,
+            timeout: timeoutMs,
+          },
+        }),
+        timeoutMs,
+        `MCP tool call '${toolName}'`
+      );
+      return result as McpCallToolResult;
     } catch (error) {
       if (error instanceof Error && error.message.includes('Request was aborted')) {
         throw new Error(`MCP tool call '${toolName}' timed out after ${timeoutMs}ms`);

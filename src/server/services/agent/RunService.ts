@@ -20,7 +20,7 @@ import { getLogger } from 'server/lib/logger';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 import AgentSession from 'server/models/AgentSession';
-import type { AgentApprovalPolicy, AgentRunStatus, AgentRunUsageSummary } from './types';
+import type { AgentApprovalPolicy, AgentRunStatus, AgentRunTransition, AgentRunUsageSummary } from './types';
 import type { AgentUiMessageChunk } from './streamChunks';
 import AgentRunEventService from './RunEventService';
 import { isAgentRunPlanSnapshotV1, type AgentDebugRunIntent, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
@@ -33,7 +33,7 @@ import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/run
 
 const activeRunControllers = new Map<string, AbortController>();
 const RUN_NOT_FOUND_ERROR = 'Agent run not found';
-export const TERMINAL_RUN_STATUSES: AgentRunStatus[] = ['completed', 'failed', 'cancelled'];
+export const TERMINAL_RUN_STATUSES: AgentRunStatus[] = ['transitioned', 'completed', 'failed', 'cancelled'];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // Best-effort fast cross-process abort; the ownership fence still stops a missed worker.
@@ -230,6 +230,8 @@ function statusEventType(status: AgentRunStatus): string {
     ? 'run.queued'
     : status === 'completed'
     ? 'run.completed'
+    : status === 'transitioned'
+    ? 'run.transitioned'
     : status === 'failed'
     ? 'run.failed'
     : status === 'cancelled'
@@ -263,6 +265,20 @@ type OwnerStatusEventContext = {
   dispatchAttemptId?: string;
 };
 
+type QueuedRunRecordInput = {
+  thread: AgentThread;
+  session: AgentSession;
+  policy: AgentApprovalPolicy;
+  requestedHarness?: string | null;
+  requestedProvider?: string | null;
+  requestedModel?: string | null;
+  resolvedHarness: string;
+  resolvedProvider: string;
+  resolvedModel: string;
+  sandboxRequirement?: Record<string, unknown>;
+  runPlanSnapshot: AgentRunPlanSnapshotV1;
+};
+
 type RecoveryPauseOptions = {
   now?: Date;
   expectedExecutionOwner?: string | null;
@@ -275,31 +291,12 @@ type RecoveryPauseOptions = {
 };
 
 export default class AgentRunService {
-  static async createQueuedRun({
-    thread,
-    session,
-    policy,
-    requestedHarness,
-    requestedProvider,
-    requestedModel,
+  private static validateQueuedRunRecordInput({
     resolvedHarness,
     resolvedProvider,
     resolvedModel,
-    sandboxRequirement,
     runPlanSnapshot,
-  }: {
-    thread: AgentThread;
-    session: AgentSession;
-    policy: AgentApprovalPolicy;
-    requestedHarness?: string | null;
-    requestedProvider?: string | null;
-    requestedModel?: string | null;
-    resolvedHarness: string;
-    resolvedProvider: string;
-    resolvedModel: string;
-    sandboxRequirement?: Record<string, unknown>;
-    runPlanSnapshot: AgentRunPlanSnapshotV1;
-  }): Promise<AgentRun> {
+  }: QueuedRunRecordInput): void {
     if (!resolvedHarness?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run harness is required.');
     }
@@ -312,9 +309,25 @@ export default class AgentRunService {
     if (!isAgentRunPlanSnapshotV1(runPlanSnapshot)) {
       throw new InvalidAgentRunDefaultsError('Agent run plan snapshot is required.');
     }
+  }
 
-    const now = new Date().toISOString();
-    const record: PartialModelObject<AgentRun> = {
+  private static buildQueuedRunRecord(
+    {
+      thread,
+      session,
+      policy,
+      requestedHarness,
+      requestedProvider,
+      requestedModel,
+      resolvedHarness,
+      resolvedProvider,
+      resolvedModel,
+      sandboxRequirement,
+      runPlanSnapshot,
+    }: QueuedRunRecordInput,
+    now: string
+  ): PartialModelObject<AgentRun> {
+    return {
       threadId: thread.id,
       sessionId: session.id,
       status: 'queued',
@@ -333,8 +346,17 @@ export default class AgentRunService {
       usageSummary: {},
       policySnapshot: policy as unknown as Record<string, unknown>,
       runPlanSnapshot: runPlanSnapshot as unknown as Record<string, unknown>,
+      transition: null,
       error: null,
     };
+  }
+
+  static async createQueuedRun(input: QueuedRunRecordInput): Promise<AgentRun> {
+    this.validateQueuedRunRecordInput(input);
+
+    const { thread, session } = input;
+    const now = new Date().toISOString();
+    const record = this.buildQueuedRunRecord(input, now);
 
     const run = await AgentRun.transaction(async (trx) => {
       await AgentSession.query(trx).findById(session.id).forUpdate();
@@ -367,6 +389,51 @@ export default class AgentRunService {
     });
 
     return run;
+  }
+
+  static async createQueuedContinuationRunInTransaction(
+    input: QueuedRunRecordInput & {
+      sourceRun: Pick<AgentRun, 'id'>;
+      trx: Transaction;
+    }
+  ): Promise<{ run: AgentRun; queuedEventSequence: number | null }> {
+    this.validateQueuedRunRecordInput(input);
+
+    const { thread, session, sourceRun, trx } = input;
+    const now = new Date().toISOString();
+    await AgentSession.query(trx).findById(session.id).forUpdate();
+
+    const activeRun = await AgentRun.query(trx)
+      .where({ sessionId: session.id })
+      .whereNot('id', sourceRun.id)
+      .whereNotIn('status', TERMINAL_RUN_STATUSES)
+      .orderBy('createdAt', 'desc')
+      .orderBy('id', 'desc')
+      .first();
+    if (activeRun) {
+      throw new ActiveAgentRunError();
+    }
+
+    const queuedRun = await AgentRun.query(trx).insertAndFetch(this.buildQueuedRunRecord(input, now));
+    await AgentThread.query(trx).patchAndFetchById(thread.id, {
+      lastRunAt: now,
+      metadata: {
+        ...(thread.metadata || {}),
+        latestRunId: queuedRun.uuid,
+      },
+    } as Partial<AgentThread>);
+
+    const queuedEventSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+      queuedRun,
+      'run.queued',
+      {
+        threadId: thread.uuid,
+        sessionId: session.uuid,
+      },
+      trx
+    );
+
+    return { run: queuedRun, queuedEventSequence };
   }
 
   static registerAbortController(runUuid: string, controller: AbortController): void {
@@ -444,19 +511,32 @@ export default class AgentRunService {
   static async hasPriorCompletedDebugIntentRun({
     threadId,
     intents,
+    buildUuid,
+    selectedDeployUuid,
   }: {
     threadId: number;
     intents: AgentDebugRunIntent[];
+    buildUuid?: string | null;
+    selectedDeployUuid?: string | null;
   }): Promise<boolean> {
     if (!Number.isInteger(threadId) || threadId <= 0 || intents.length === 0) {
       return false;
     }
 
-    const run = await AgentRun.query()
+    const query = AgentRun.query()
       .where({ threadId, status: 'completed' })
-      .whereRaw(`"runPlanSnapshot"->'agent'->>'id' = ?`, ['system.debug'])
-      .whereIn(raw(`"runPlanSnapshot"->'debug'->>'resolvedIntent'`), intents)
-      .first();
+      .whereRaw(`"runPlanSnapshot"->'agent'->>'sourceKind' = ?`, ['build_context_chat'])
+      .whereIn(raw(`"runPlanSnapshot"->'debug'->>'resolvedIntent'`), intents);
+
+    if (buildUuid) {
+      query.whereRaw(`"runPlanSnapshot"->'source'->>'buildUuid' = ?`, [buildUuid]);
+    }
+
+    if (selectedDeployUuid) {
+      query.whereRaw(`"runPlanSnapshot"->'source'->'selectedDeploy'->>'selectedDeployUuid' = ?`, [selectedDeployUuid]);
+    }
+
+    const run = await query.first();
 
     return Boolean(run);
   }
@@ -767,6 +847,7 @@ export default class AgentRunService {
         startedAt: now,
         completedAt: null,
         cancelledAt: null,
+        transition: null,
         error: null,
         resolvedHarness: resolved.resolvedHarness,
         resolvedProvider: resolved.provider,
@@ -955,6 +1036,7 @@ export default class AgentRunService {
       status,
       error: updatedRun.error || null,
       usageSummary: updatedRun.usageSummary || {},
+      transition: updatedRun.transition || null,
       ...(executionOwner ? { executionOwner } : {}),
       ...(eventContext.dispatchAttemptId ? { dispatchAttemptId: eventContext.dispatchAttemptId } : {}),
     };
@@ -1146,6 +1228,7 @@ export default class AgentRunService {
       usageSummary: run.usageSummary || {},
       policySnapshot: run.policySnapshot || {},
       runPlan: serializeRunPlanSummary(run.runPlanSnapshot),
+      transition: (run.transition || null) as unknown as AgentRunTransition | null,
       recovery: readRunRecovery(run.error),
       error: run.error,
       createdAt: run.createdAt || null,

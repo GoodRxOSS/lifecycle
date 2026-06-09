@@ -19,6 +19,7 @@ import type AgentSession from 'server/models/AgentSession';
 import type AgentSource from 'server/models/AgentSource';
 import { AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import type { AgentDefinitionContract } from './agentDefinitionTypes';
+import type { AgentCapabilitySourceKind } from './capabilityCatalog';
 import {
   isSystemAgentDefinitionId,
   SYSTEM_AGENT_DEFINITIONS,
@@ -147,23 +148,29 @@ export function assertAgentDefinitionMutable(definition: AgentDefinitionContract
   }
 }
 
+export function inferDefaultAgentSourceKind(session: AgentSession, source: AgentSource): AgentCapabilitySourceKind {
+  if (session.sessionKind === AgentSessionKind.CHAT) {
+    if (readString(source.input?.buildUuid)) {
+      return 'build_context_chat';
+    }
+
+    if (session.workspaceStatus === AgentWorkspaceStatus.READY) {
+      return 'workspace_session';
+    }
+
+    return 'freeform_chat';
+  }
+
+  return 'workspace_session';
+}
+
 export function inferDefaultSystemAgentDefinitionId(
   session: AgentSession,
   source: AgentSource
 ): SystemAgentDefinitionId {
-  if (session.sessionKind === AgentSessionKind.CHAT) {
-    if (readString(source.input?.buildUuid)) {
-      return 'system.debug';
-    }
-
-    if (session.workspaceStatus === AgentWorkspaceStatus.READY) {
-      return 'system.develop';
-    }
-
-    return 'system.freeform';
-  }
-
-  return 'system.develop';
+  void session;
+  void source;
+  return 'system.agent';
 }
 
 export function normalizeSystemAgentDefinitionId(value: unknown): SystemAgentDefinitionId | null {

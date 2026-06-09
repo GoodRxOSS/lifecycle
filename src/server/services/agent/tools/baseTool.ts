@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Tool, ToolResult, ToolSafetyLevel, ToolCategory, JSONSchema, ConfirmationDetails } from './types';
+import { Tool, ToolResult, JSONSchema, ToolExecutionContext } from './types';
 
 export abstract class BaseTool implements Tool {
   static readonly Name: string;
@@ -29,22 +29,17 @@ export abstract class BaseTool implements Tool {
 
   public readonly description: string;
   public readonly parameters: JSONSchema;
-  public readonly safetyLevel: ToolSafetyLevel;
-  public readonly category: ToolCategory;
-  public readonly executionTimeout?: number;
 
-  constructor(description: string, parameters: JSONSchema, safetyLevel: ToolSafetyLevel, category: ToolCategory) {
+  constructor(description: string, parameters: JSONSchema) {
     this.description = description;
     this.parameters = parameters;
-    this.safetyLevel = safetyLevel;
-    this.category = category;
   }
 
-  abstract execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
-
-  async shouldConfirmExecution?(_args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
-    return false;
-  }
+  abstract execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult>;
 
   protected createSuccessResult(agentContent: string, displayContent?: string): ToolResult {
     return {
@@ -59,14 +54,13 @@ export abstract class BaseTool implements Tool {
     };
   }
 
-  protected createErrorResult(message: string, code: string, recoverable: boolean = true): ToolResult {
+  protected createErrorResult(message: string, code: string): ToolResult {
     return {
       success: false,
       agentContent: `Error: ${message}`,
       error: {
         message,
         code,
-        recoverable,
       },
     };
   }

@@ -35,6 +35,13 @@ describe('isReadOnlyWorkspaceCommand', () => {
     expect(isReadOnlyWorkspaceCommand('node sample-service/app.js')).toBe(false);
   });
 
+  it('allows runtime version probes as read-only inspection', () => {
+    expect(isReadOnlyWorkspaceCommand('node -v')).toBe(true);
+    expect(isReadOnlyWorkspaceCommand('node --version')).toBe(true);
+    expect(isReadOnlyWorkspaceCommand('pnpm --version')).toBe(true);
+    expect(isReadOnlyWorkspaceCommand('python3 --version')).toBe(true);
+  });
+
   it('rejects mutating git and package manager commands', () => {
     expect(isReadOnlyWorkspaceCommand('git push -u origin feature-branch')).toBe(false);
     expect(isReadOnlyWorkspaceCommand('pnpm install')).toBe(false);

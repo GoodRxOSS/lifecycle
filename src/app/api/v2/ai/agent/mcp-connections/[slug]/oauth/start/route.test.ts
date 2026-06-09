@@ -18,7 +18,9 @@ import { NextRequest } from 'next/server';
 
 const mockAuth = jest.fn();
 const mockGetBySlugAndScope = jest.fn();
+const mockDiscoverTools = jest.fn();
 const mockGetDecryptedConnection = jest.fn();
+const mockUpsertConnection = jest.fn();
 const mockGetRequestUserIdentity = jest.fn();
 const mockCreateFlow = jest.fn();
 const mockInvalidateFlow = jest.fn();
@@ -34,6 +36,7 @@ jest.mock('server/services/agentRuntime/mcp/config', () => {
     ...actual,
     McpConfigService: jest.fn().mockImplementation(() => ({
       getBySlugAndScope: (...args: unknown[]) => mockGetBySlugAndScope(...args),
+      discoverTools: (...args: unknown[]) => mockDiscoverTools(...args),
     })),
   };
 });
@@ -42,7 +45,7 @@ jest.mock('server/services/userMcpConnection', () => ({
   __esModule: true,
   default: {
     getDecryptedConnection: (...args: unknown[]) => mockGetDecryptedConnection(...args),
-    upsertConnection: jest.fn(),
+    upsertConnection: (...args: unknown[]) => mockUpsertConnection(...args),
   },
 }));
 
@@ -105,6 +108,7 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
         scope: 'sample.read',
       },
     } as const);
+    mockDiscoverTools.mockResolvedValue([{ name: 'sampleTool', inputSchema: {} }]);
     mockGetDecryptedConnection.mockResolvedValue(null);
     mockCreateFlow.mockResolvedValue({
       flowId: 'flow-123',
@@ -175,6 +179,98 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
       authorizationUrl: null,
     });
     expect(mockInvalidateFlow).toHaveBeenCalledWith('flow-123');
+  });
+
+  it('re-discovers tools when a silent AUTHORIZED reconnect finds an empty tool set', async () => {
+    mockAuth.mockResolvedValueOnce('AUTHORIZED');
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        tokens: { access_token: 'sample-access-token', token_type: 'bearer' },
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: 'MCP validation failed for sample-oauth: server returned 0 tools',
+      validatedAt: null,
+      updatedAt: null,
+    });
+    mockDiscoverTools.mockResolvedValueOnce([{ name: 'searchDocs', inputSchema: {} }]);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({ status: 'AUTHORIZED', authorizationUrl: null });
+    expect(mockDiscoverTools).toHaveBeenCalledWith(
+      expect.objectContaining({ url: 'https://mcp.example.com/v1/mcp' }),
+      30000
+    );
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        slug: 'sample-oauth',
+        scope: 'global',
+        discoveredTools: [{ name: 'searchDocs', inputSchema: {} }],
+        validationError: null,
+      })
+    );
+  });
+
+  it('keeps the connection marked broken when re-discovery still returns 0 tools', async () => {
+    mockAuth.mockResolvedValueOnce('AUTHORIZED');
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        tokens: { access_token: 'sample-access-token', token_type: 'bearer' },
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+    mockDiscoverTools.mockResolvedValueOnce([]);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error.message).toContain('server returned 0 tools');
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        discoveredTools: [],
+        validationError: expect.stringContaining('server returned 0 tools'),
+      })
+    );
+  });
+
+  it('skips re-discovery when the stored connection already has tools', async () => {
+    mockAuth.mockResolvedValueOnce('AUTHORIZED');
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        tokens: { access_token: 'sample-access-token', token_type: 'bearer' },
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [{ name: 'searchDocs', inputSchema: {} }],
+      validationError: null,
+      validatedAt: '2026-04-08T00:00:00.000Z',
+      updatedAt: null,
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
   });
 
   it('redacts MCP secrets when OAuth authorization setup fails', async () => {

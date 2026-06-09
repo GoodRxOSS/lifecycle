@@ -57,6 +57,8 @@ const CAPABILITY_UNAVAILABLE_MESSAGE =
   'Some selected capabilities are no longer available. Review the list and save again.';
 const MODEL_UNAVAILABLE_MESSAGE = 'Selected model is no longer available. Choose another model and save again.';
 const CREATION_UNAVAILABLE_MESSAGE = 'Custom agent creation is not available. Ask an admin for access.';
+export const CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE =
+  'This custom agent needs conversion before it can run in the one-agent harness.';
 const CAPABILITY_DENIAL_REASONS = new Set<AgentCapabilityAccessReason>([
   'unknown_capability',
   'admin_only',
@@ -289,6 +291,19 @@ export function serializeUserAgentDefinition(definition: AgentDefinitionContract
     resourceBehavior: resourceBehaviorForPolicy(definition.resourcePolicy),
     status: definition.status === 'archived' ? 'archived' : 'active',
   };
+}
+
+export function customAgentDefinitionNeedsOneAgentConversion(definition: AgentDefinitionContract): boolean {
+  if (definition.owner.kind !== 'user') {
+    return false;
+  }
+
+  const sourceKinds = definition.resourcePolicy.sourceKinds;
+  return Boolean(
+    definition.resourcePolicy.workspaceRequired ||
+      definition.resourcePolicy.sandboxRequired ||
+      (sourceKinds.includes('workspace_session') && !sourceKinds.includes('freeform_chat'))
+  );
 }
 
 export class CustomAgentDefinitionService {

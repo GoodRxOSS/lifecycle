@@ -16,7 +16,7 @@
 
 const mockListTools = jest.fn();
 const mockClose = jest.fn();
-const mockExecute = jest.fn();
+const mockCallTool = jest.fn();
 const mockCreateMCPClient = jest.fn();
 const mockExperimentalStdioTransport = jest.fn();
 const mockLoggerWarn = jest.fn();
@@ -45,10 +45,8 @@ describe('McpClientManager', () => {
 
     mockCreateMCPClient.mockResolvedValue({
       listTools: mockListTools,
+      callTool: mockCallTool,
       close: mockClose,
-      toolsFromDefinitions: jest.fn(() => ({
-        inspectItem: { execute: mockExecute },
-      })),
     });
 
     mockExperimentalStdioTransport.mockReturnValue({ transport: 'stdio' });
@@ -73,8 +71,9 @@ describe('McpClientManager', () => {
           type: 'http',
           url: 'https://mcp.example.com/v1/mcp',
           headers: { Authorization: 'Bearer sample-token' },
+          redirect: 'follow',
         },
-        name: 'lifecycle',
+        clientName: 'lifecycle',
         version: '1.0.0',
       })
     );
@@ -89,10 +88,8 @@ describe('McpClientManager', () => {
       );
       return {
         listTools: mockListTools,
+        callTool: mockCallTool,
         close: mockClose,
-        toolsFromDefinitions: jest.fn(() => ({
-          inspectItem: { execute: mockExecute },
-        })),
       };
     });
 
@@ -129,7 +126,14 @@ describe('McpClientManager', () => {
 
   it('returns discovered tools from AI SDK definitions', async () => {
     mockListTools.mockResolvedValue({
-      tools: [{ name: 'inspectItem', description: 'Inspect item', inputSchema: {} }],
+      tools: [
+        {
+          name: 'inspectItem',
+          description: 'Inspect item',
+          inputSchema: {},
+          outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+        },
+      ],
     });
 
     await manager.connect({ type: 'http', url: 'https://mcp.example.com/v1/mcp' });
@@ -140,29 +144,36 @@ describe('McpClientManager', () => {
         name: 'inspectItem',
         description: 'Inspect item',
         inputSchema: {},
+        outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
         annotations: undefined,
       },
     ]);
   });
 
-  it('executes tool calls via toolsFromDefinitions', async () => {
+  it('executes tool calls through the MCP v2 direct client API', async () => {
     mockListTools.mockResolvedValue({
       tools: [{ name: 'inspectItem', description: 'Inspect item', inputSchema: {} }],
     });
-    mockExecute.mockResolvedValue({
+    mockCallTool.mockResolvedValue({
       content: [{ type: 'text', text: 'ok' }],
+      structuredContent: { ok: true },
       isError: false,
     });
 
     await manager.connect({ type: 'http', url: 'https://mcp.example.com/v1/mcp' });
     const result = await manager.callTool('inspectItem', { id: 'item-123' });
 
-    expect(mockExecute).toHaveBeenCalledWith(
-      { id: 'item-123' },
-      expect.objectContaining({ abortSignal: expect.any(Object) })
-    );
+    expect(mockCallTool).toHaveBeenCalledWith({
+      name: 'inspectItem',
+      arguments: { id: 'item-123' },
+      options: expect.objectContaining({
+        signal: expect.any(Object),
+        timeout: 30000,
+      }),
+    });
     expect(result).toEqual({
       content: [{ type: 'text', text: 'ok' }],
+      structuredContent: { ok: true },
       isError: false,
     });
   });

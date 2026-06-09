@@ -51,7 +51,7 @@ describe('agent capability catalog', () => {
     expect(getAgentCapabilityCatalogEntry('github_write').runtimeCapabilityKey).toBe('git_write');
     expect(getAgentCapabilityCatalogEntry('workspace_files').runtimeCapabilityKey).toBe('workspace_write');
     expect(getAgentCapabilityCatalogEntry('workspace_shell').runtimeCapabilityKey).toBe('shell_exec');
-    expect(getAgentCapabilityCatalogEntry('workspace_git').runtimeCapabilityKey).toBe('git_write');
+    expect(getAgentCapabilityCatalogEntry('workspace_git').runtimeCapabilityKey).toBe('read');
     expect(getAgentCapabilityCatalogEntry('external_mcp_read').runtimeCapabilityKey).toBe('external_mcp_read');
     expect(getAgentCapabilityCatalogEntry('external_mcp_write').runtimeCapabilityKey).toBe('external_mcp_write');
     expect(getAgentCapabilityCatalogEntry('preview_publish').category).toBe('preview');

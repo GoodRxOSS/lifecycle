@@ -37,6 +37,7 @@ type UsageRecord = Partial<Record<OptionalUsageField | 'totalTokens', unknown>>;
 const MISSING_USAGE_STATUSES: AgentRunStatus[] = [
   'waiting_for_approval',
   'waiting_for_input',
+  'transitioned',
   'completed',
   'failed',
   'cancelled',

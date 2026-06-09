@@ -23,7 +23,11 @@ import type { AgentMcpConnection } from 'server/services/agentRuntime/mcp/types'
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import AgentCapabilityService from './CapabilityService';
 import * as AgentDefinitionRegistry from './AgentDefinitionRegistry';
-import { customAgentDefinitionService } from './CustomAgentDefinitionService';
+import {
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE,
+  customAgentDefinitionNeedsOneAgentConversion,
+  customAgentDefinitionService,
+} from './CustomAgentDefinitionService';
 import AgentPolicyService from './PolicyService';
 import AgentRunService from './RunService';
 import AgentSourceService from './SourceService';
@@ -35,6 +39,7 @@ import {
   type AgentCapabilitySourceKind,
 } from './capabilityCatalog';
 import {
+  SYSTEM_AGENT_DEFINITIONS,
   isSystemAgentDefinitionId,
   sourceKindForSystemAgentDefinitionId,
   type SystemAgentDefinitionId,
@@ -154,13 +159,8 @@ function opaqueChoiceId(kind: 'mcp' | 'tool', rawId: string): string {
 }
 
 function inferEntryDefaultAgentDefinitionId(source?: AgentRuntimeControlsEntrySourceInput): SystemAgentDefinitionId {
-  if (source?.adapter === 'blank_workspace') {
-    return typeof source.input?.buildUuid === 'string' && source.input.buildUuid.trim()
-      ? 'system.debug'
-      : 'system.freeform';
-  }
-
-  return 'system.develop';
+  void source;
+  return 'system.agent';
 }
 
 function sourceKindForEntrySelection({
@@ -172,15 +172,21 @@ function sourceKindForEntrySelection({
   selectedAgentId: string;
   source?: AgentRuntimeControlsEntrySourceInput;
 }): AgentCapabilitySourceKind {
-  const isBlankChat =
-    source?.adapter === 'blank_workspace' &&
-    !(typeof source.input?.buildUuid === 'string' && source.input.buildUuid.trim());
+  const buildUuid = typeof source?.input?.buildUuid === 'string' && source.input.buildUuid.trim();
+  const defaultSourceKind: AgentCapabilitySourceKind =
+    source?.adapter === 'blank_workspace' ? (buildUuid ? 'build_context_chat' : 'freeform_chat') : 'workspace_session';
+  const isBlankChat = source?.adapter === 'blank_workspace' && !buildUuid;
 
   if (isBlankChat && selectedAgentId === 'system.develop') {
     return 'workspace_session';
   }
 
-  return sourceKindForSystemAgentDefinitionId(defaultAgentDefinitionId);
+  if (selectedAgentId !== 'system.agent' && isSystemAgentDefinitionId(selectedAgentId)) {
+    return sourceKindForSystemAgentDefinitionId(selectedAgentId);
+  }
+
+  void defaultAgentDefinitionId;
+  return defaultSourceKind;
 }
 
 function readOptionalStringArray(value: unknown, fieldName: string): string[] | undefined {
@@ -301,11 +307,33 @@ function assertDefinitionUsable(definition: AgentDefinitionContract, sourceKind:
     throw new AgentThreadRuntimeControlsError('policy_denied', `${definition.name} is unavailable.`);
   }
 
+  if (customAgentDefinitionNeedsOneAgentConversion(definition)) {
+    throw new AgentThreadRuntimeControlsError('policy_denied', CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE);
+  }
+
   if (!definition.resourcePolicy.sourceKinds.includes(sourceKind)) {
     throw new AgentThreadRuntimeControlsError(
       'policy_denied',
       `${definition.name} is unavailable for this conversation.`
     );
+  }
+}
+
+function effectiveDefinitionForRuntimeChoices(
+  definition: AgentDefinitionContract,
+  sourceKind: AgentCapabilitySourceKind
+): AgentDefinitionContract {
+  if (definition.id !== 'system.agent') {
+    return definition;
+  }
+
+  switch (sourceKind) {
+    case 'build_context_chat':
+      return SYSTEM_AGENT_DEFINITIONS['system.debug'];
+    case 'workspace_session':
+      return SYSTEM_AGENT_DEFINITIONS['system.develop'];
+    case 'freeform_chat':
+      return SYSTEM_AGENT_DEFINITIONS['system.freeform'];
   }
 }
 
@@ -651,9 +679,10 @@ export default class AgentThreadRuntimeControlsService {
 
     const defaultAgentDefinitionId = AgentDefinitionRegistry.inferDefaultSystemAgentDefinitionId(session, source);
     const selectedAgentId = AgentThreadService.getSelectedAgentDefinitionId(thread) || defaultAgentDefinitionId;
-    const sourceKind = sourceKindForSystemAgentDefinitionId(defaultAgentDefinitionId);
+    const sourceKind = AgentDefinitionRegistry.inferDefaultAgentSourceKind(session, source);
     const definition = await resolveDefinition(selectedAgentId, userIdentity);
     assertDefinitionUsable(definition, sourceKind);
+    const effectiveDefinition = effectiveDefinitionForRuntimeChoices(definition, sourceKind);
     const { repoFullName, approvalPolicy, capabilityPolicy, customAgentCreationPolicy } =
       await AgentCapabilityService.resolveSessionContext(session.uuid, userIdentity);
     const [activeRun, mcpConnections] = await Promise.all([
@@ -664,7 +693,7 @@ export default class AgentThreadRuntimeControlsService {
     return {
       threadRecordId: thread.id,
       selectedAgentId,
-      definition,
+      definition: effectiveDefinition,
       sourceKind,
       capabilityPolicy,
       customAgentCreationPolicy,
@@ -690,6 +719,7 @@ export default class AgentThreadRuntimeControlsService {
     const sourceKind = sourceKindForEntrySelection({ defaultAgentDefinitionId, selectedAgentId, source });
     const definition = await resolveDefinition(selectedAgentId, userIdentity);
     assertDefinitionUsable(definition, sourceKind);
+    const effectiveDefinition = effectiveDefinitionForRuntimeChoices(definition, sourceKind);
     const repoFullName = repoFullNameFromEntrySource(source);
     const [approvalPolicy, effectiveConfig, mcpConnections] = await Promise.all([
       AgentPolicyService.getEffectivePolicy(repoFullName),
@@ -699,7 +729,7 @@ export default class AgentThreadRuntimeControlsService {
 
     return {
       selectedAgentId,
-      definition,
+      definition: effectiveDefinition,
       sourceKind,
       capabilityPolicy: effectiveConfig.capabilityPolicy,
       customAgentCreationPolicy: effectiveConfig.customAgentCreationPolicy,

@@ -16,6 +16,7 @@
 
 import type { OAuthClientProvider } from '@ai-sdk/mcp';
 import objectHash from 'object-hash';
+import { APP_HOST } from 'shared/config';
 import type {
   McpAuthConfig,
   McpCompiledConnectionConfig,
@@ -425,6 +426,14 @@ export function applyCompiledConnectionConfigToTransport(
       ...(config?.env || {}),
     },
   };
+}
+
+// Single source of truth: OAuth clients register this exact redirect URI, so every
+// flow (interactive start, callback, runtime refresh) must build the identical URL.
+export function buildMcpOAuthCallbackUrl(slug: string): string {
+  const url = new URL(APP_HOST);
+  url.pathname = `/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`;
+  return url.toString();
 }
 
 export function buildMcpDefinitionFingerprint({

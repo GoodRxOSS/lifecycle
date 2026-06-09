@@ -19,7 +19,7 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { requireRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import ApprovalService from 'server/services/agent/ApprovalService';
 
 /**
@@ -51,6 +51,9 @@ import ApprovalService from 'server/services/agent/ApprovalService';
  *               reason:
  *                 type: string
  *                 nullable: true
+ *               alwaysAllow:
+ *                 type: boolean
+ *                 description: Also auto-approve future calls of this tool in this conversation.
  *     responses:
  *       '200':
  *         description: Pending action resolved
@@ -93,7 +96,7 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ act
     return errorResponse(responseBody, { status: 400 }, req);
   }
 
-  const githubToken = await resolveRequestGitHubToken(req);
+  const githubAuth = await resolveRequestGitHubAuth(req);
   try {
     const action = await ApprovalService.resolvePendingAction(
       routeParams.actionId,
@@ -103,8 +106,9 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ act
         approved: responseBody.approved,
         reason: responseBody.reason,
         source: 'endpoint',
+        ...(responseBody.alwaysAllow ? { alwaysAllow: true } : {}),
       },
-      { githubToken }
+      { githubAuth, alwaysAllow: responseBody.alwaysAllow }
     );
 
     return successResponse(ApprovalService.serializePendingAction(action), { status: 200 }, req);

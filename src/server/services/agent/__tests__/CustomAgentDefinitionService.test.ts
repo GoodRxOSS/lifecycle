@@ -325,7 +325,7 @@ describe('CustomAgentDefinitionService', () => {
     ['admin_only', 'external_mcp_write', undefined],
     ['system_only', 'approval_controls', undefined],
     ['disabled', 'read_context', { availability: { read_context: 'disabled' } }],
-    ['source_incompatible', 'workspace_shell', undefined],
+    ['source_incompatible', 'github_read', undefined],
   ])(
     'rejects update payloads with %s capabilities without persistence',
     async (reason, capabilityId, capabilityPolicy) => {
@@ -388,7 +388,7 @@ describe('CustomAgentDefinitionService', () => {
       service.createUserDefinition(userIdentity, {
         name: 'Sample agent',
         instructionAddendum: 'Answer briefly.',
-        capabilityRefs: ['workspace_shell'],
+        capabilityRefs: ['github_read'],
         resourceBehavior: 'chat_only',
       })
     ).rejects.toMatchObject({
@@ -603,10 +603,18 @@ describe('CustomAgentDefinitionService', () => {
       resourceBehavior: 'chat_only',
     });
 
-    expect(capabilities.map((capability) => capability.capabilityId)).toEqual(['read_context', 'external_mcp_read']);
+    expect(capabilities.map((capability) => capability.capabilityId)).toEqual([
+      'read_context',
+      'workspace_files',
+      'workspace_shell',
+      'workspace_git',
+      'network_access',
+      'preview_publish',
+      'external_mcp_read',
+    ]);
     expect(capabilities.find((capability) => capability.capabilityId === 'external_mcp_write')).toBeUndefined();
     expect(capabilities.find((capability) => capability.capabilityId === 'approval_controls')).toBeUndefined();
-    expect(capabilities.find((capability) => capability.capabilityId === 'workspace_shell')).toBeUndefined();
+    expect(capabilities.find((capability) => capability.capabilityId === 'github_read')).toBeUndefined();
     expect(JSON.stringify(capabilities)).not.toContain('workspace.exec');
     expect(JSON.stringify(capabilities)).not.toContain('toolKey');
     expect(JSON.stringify(capabilities)).not.toContain('serverSlug');
@@ -631,9 +639,14 @@ describe('CustomAgentDefinitionService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           capabilityId: 'workspace_shell',
-          requiresWorkspace: true,
-          toolCount: 1,
+          // Workspace tools are chat-selectable now that chats can request a workspace on demand.
+          requiresWorkspace: false,
+          toolCount: 6,
           resourceCount: 1,
+        }),
+        expect.objectContaining({
+          capabilityId: 'github_read',
+          requiresWorkspace: true,
         }),
       ])
     );

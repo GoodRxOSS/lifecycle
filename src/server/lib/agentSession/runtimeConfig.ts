@@ -15,23 +15,35 @@
  */
 
 import GlobalConfigService from 'server/services/globalConfig';
+import { decryptConfigSecret, isEncryptedConfigSecret } from 'server/lib/encryption';
+import { getLogger } from 'server/lib/logger';
+import { DEFAULT_E2B_TIMEOUT_SECONDS } from './runtimeDefaults';
 import type {
   AgentSessionControlPlaneConfig,
   AgentSessionCleanupConfig,
+  AgentSessionDaytonaBackendConfig,
   AgentSessionDefaults,
   AgentSessionDurabilityConfig,
+  AgentSessionE2bBackendConfig,
+  AgentSessionModalBackendConfig,
   AgentSessionReadinessConfig,
   AgentSessionResourcesConfig,
   AgentSessionSchedulingConfig,
+  AgentSessionOpenSandboxBackendConfig,
+  AgentSessionWorkspaceBackendConfig,
+  AgentSessionWorkspaceBackendProvider,
   AgentSessionWorkspaceStorageAccessMode,
   AgentSessionWorkspaceStorageConfig,
   ResourceRequirements,
 } from 'server/services/types/globalConfig';
 
+export { DEFAULT_E2B_TIMEOUT_SECONDS } from './runtimeDefaults';
+
 export interface AgentSessionRuntimeConfig {
   workspaceImage: string;
   workspaceEditorImage: string;
   workspaceGatewayImage: string;
+  workspaceBackend: ResolvedAgentSessionWorkspaceBackendConfig;
   nodeSelector?: Record<string, string>;
   keepAttachedServicesOnSessionNode: boolean;
   readiness: ResolvedAgentSessionReadinessConfig;
@@ -74,6 +86,7 @@ export interface ResolvedAgentSessionCleanupConfig {
   activeIdleSuspendMs: number;
   startingTimeoutMs: number;
   hibernatedRetentionMs: number;
+  idleArchiveMs: number;
   intervalMs: number;
   redisTtlSeconds: number;
 }
@@ -87,6 +100,67 @@ export interface ResolvedAgentSessionDurabilityConfig {
   fileChangePreviewChars: number;
 }
 
+export type { AgentSessionWorkspaceBackendProvider } from 'server/services/types/globalConfig';
+
+export interface ResolvedAgentSessionOpenSandboxBackendConfig {
+  domain: string;
+  protocol: 'http' | 'https';
+  apiKey?: string;
+  image?: string;
+  poolRef?: string;
+  timeoutSeconds: number | null;
+  useServerProxy: boolean;
+  secureAccess: boolean;
+  resourceLimits: Record<string, string>;
+  execdPort: number;
+  gatewayPort: number;
+  editorPort: number;
+}
+
+export interface ResolvedAgentSessionE2bBackendConfig {
+  domain: string;
+  apiKey?: string;
+  templateId?: string;
+  timeoutSeconds: number | null;
+  autoPause: boolean;
+  gatewayPort: number;
+  editorPort: number;
+}
+
+export interface ResolvedAgentSessionDaytonaBackendConfig {
+  apiUrl: string;
+  apiKey?: string;
+  snapshot?: string;
+  target?: string;
+  /** Minutes continuously stopped before auto-archive; 0 = platform maximum (30 days). */
+  autoArchiveInterval: number;
+  gatewayPort: number;
+  editorPort: number;
+}
+
+export interface ResolvedAgentSessionModalBackendConfig {
+  tokenId?: string;
+  tokenSecret?: string;
+  environment?: string;
+  appName: string;
+  image: string;
+  imageRegistrySecret?: string;
+  /** Sandbox lifetime; Modal hard-caps at 24h with no extension API. */
+  timeoutSeconds: number;
+  cpu?: number;
+  memoryMiB?: number;
+  inboundCidrAllowlist?: string[];
+  gatewayPort: number;
+}
+
+export interface ResolvedAgentSessionWorkspaceBackendConfig {
+  provider: AgentSessionWorkspaceBackendProvider;
+  opensandbox: ResolvedAgentSessionOpenSandboxBackendConfig;
+  e2b: ResolvedAgentSessionE2bBackendConfig;
+  daytona: ResolvedAgentSessionDaytonaBackendConfig;
+  modal: ResolvedAgentSessionModalBackendConfig;
+}
+
 export interface ResolvedAgentSessionControlPlaneConfig {
   systemPrompt?: string;
   appendSystemPrompt?: string;
@@ -96,12 +170,12 @@ export interface ResolvedAgentSessionControlPlaneConfig {
 }
 
 export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_SYSTEM_PROMPT = [
-  'You are Lifecycle Agent Session, a coding agent operating on a real workspace through tool calls.',
-  'Use the available tools directly when you need to inspect files, search the workspace, run commands, or modify code.',
+  'You are a Lifecycle agent operating through tool calls. Your identity, surface, and capabilities are defined by the agent instructions that follow — only the tools actually registered in this conversation exist.',
   'Do not emit pseudo-tool markup or pretend execution happened. Never write things like <read_file>, <write_file>, <attempt_completion>, <result>, or shell commands as if they were already executed.',
   'Do not claim that a file was read, a command was run, or a change was made unless that happened through an actual tool call in this conversation.',
   'A local git commit is not a remote branch update. Only say a PR branch, GitHub commit URL, webhook rebuild, or Lifecycle build changed after a successful push, GitHub API call, or observed Lifecycle state confirms it.',
   'If a tool call fails or a capability is unavailable, say that plainly and explain what failed.',
+  'Never offer to perform an action you have no registered tool for; point to the visible UI action instead.',
 ].join('\n');
 
 export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT = [
@@ -109,8 +183,12 @@ export const DEFAULT_AGENT_SESSION_CONTROL_PLANE_APPEND_SYSTEM_PROMPT = [
   'When showing multi-line exact text such as file contents, command output, diffs, or JSON, use a fenced code block instead of inline code.',
 ].join('\n');
 export const DEFAULT_AGENT_SESSION_MAX_ITERATIONS = 20;
+// Cumulative input-token budget per run; the tool loop forces a tools-off answer step once exceeded.
+export const DEFAULT_AGENT_SESSION_MAX_RUN_INPUT_TOKENS = 400_000;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_DISCOVERY_TIMEOUT_MS = 3000;
 export const DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS = 15000;
+// Model-initiated workspace requests auto-provision by default; admins can require per-tool approval by disabling it.
+export const DEFAULT_AGENT_SESSION_AUTO_PROVISION_WORKSPACE = true;
 export const DEFAULT_AGENT_SESSION_KEEP_ATTACHED_SERVICES_ON_SESSION_NODE = true;
 
 const DEFAULT_AGENT_READY_TIMEOUT_MS = 60000;
@@ -121,6 +199,7 @@ export const DEFAULT_AGENT_SESSION_WORKSPACE_STORAGE_ACCESS_MODE: AgentSessionWo
 export const DEFAULT_AGENT_SESSION_ACTIVE_IDLE_SUSPEND_MS = 30 * 60 * 1000;
 export const DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS = 15 * 60 * 1000;
 export const DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_AGENT_SESSION_IDLE_ARCHIVE_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 export const DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS = 7200;
 export const DEFAULT_AGENT_SESSION_RUN_EXECUTION_LEASE_MS = 30 * 60 * 1000;
@@ -129,6 +208,20 @@ export const DEFAULT_AGENT_SESSION_DISPATCH_RECOVERY_LIMIT = 50;
 export const DEFAULT_AGENT_SESSION_MAX_DURABLE_PAYLOAD_BYTES = 64 * 1024;
 export const DEFAULT_AGENT_SESSION_PAYLOAD_PREVIEW_BYTES = 16 * 1024;
 export const DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS = 4000;
+export const DEFAULT_AGENT_SESSION_WORKSPACE_BACKEND_PROVIDER: AgentSessionWorkspaceBackendProvider =
+  'lifecycle_kubernetes';
+export const DEFAULT_OPEN_SANDBOX_DOMAIN = 'localhost:8080';
+export const DEFAULT_OPEN_SANDBOX_PROTOCOL: 'http' | 'https' = 'http';
+export const DEFAULT_OPEN_SANDBOX_EXECD_PORT = 44772;
+export const DEFAULT_OPEN_SANDBOX_TIMEOUT_SECONDS = 60 * 60;
+export const DEFAULT_E2B_DOMAIN = 'e2b.app';
+export const DEFAULT_DAYTONA_API_URL = 'https://app.daytona.io/api';
+export const DEFAULT_DAYTONA_AUTO_ARCHIVE_INTERVAL = 0;
+export const DEFAULT_MODAL_APP_NAME = 'lifecycle-workspaces';
+// Published workspace image; operators should pin a tag for reproducible sandboxes.
+export const DEFAULT_MODAL_IMAGE = 'lifecycleoss/workspace:latest';
+export const DEFAULT_MODAL_TIMEOUT_SECONDS = 4 * 60 * 60;
+export const MAX_MODAL_TIMEOUT_SECONDS = 24 * 60 * 60;
 const DEFAULT_WORKSPACE_RESOURCES: ResolvedAgentSessionResourceRequirements = {
   requests: {
     cpu: '500m',
@@ -162,6 +255,20 @@ const DEFAULT_WORKSPACE_GATEWAY_RESOURCES: ResolvedAgentSessionResourceRequireme
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export interface ResolveWorkspaceBackendOptions {
+  /** false = presence-only resolution (catalog/redaction paths); ciphertext passes through untouched. */
+  decryptSecrets?: boolean;
+}
+
+// Legacy plaintext secrets pass through as-is and migrate to ciphertext on the next config save.
+function resolveStoredSecret(value: unknown, decryptSecrets: boolean): string | undefined {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized || !isEncryptedConfigSecret(normalized)) {
+    return normalized;
+  }
+  return decryptSecrets ? decryptConfigSecret(normalized) : normalized;
 }
 
 function normalizeNonNegativeInteger(value: unknown): number | undefined {
@@ -219,6 +326,20 @@ function normalizeStringArray(value: unknown): string[] {
 
 function normalizeAccessMode(value: unknown): AgentSessionWorkspaceStorageAccessMode | undefined {
   return value === 'ReadWriteMany' || value === 'ReadWriteOnce' ? value : undefined;
+}
+
+function normalizeWorkspaceBackendProvider(value: unknown): AgentSessionWorkspaceBackendProvider | undefined {
+  return value === 'opensandbox' ||
+    value === 'lifecycle_kubernetes' ||
+    value === 'e2b' ||
+    value === 'daytona' ||
+    value === 'modal'
+    ? value
+    : undefined;
+}
+
+function normalizeProtocol(value: unknown): 'http' | 'https' | undefined {
+  return value === 'http' || value === 'https' ? value : undefined;
 }
 
 function normalizeResourceQuantityMap(values: unknown): Record<string, string> {
@@ -355,6 +476,231 @@ export function resolveAgentSessionWorkspaceStorageFromDefaults(
   };
 }
 
+function normalizeOpenSandboxConfig(
+  defaults: AgentSessionOpenSandboxBackendConfig | null | undefined,
+  workspaceImage: string | null | undefined,
+  decryptSecrets: boolean
+): ResolvedAgentSessionOpenSandboxBackendConfig {
+  const envUseServerProxy = normalizeBoolean(process.env.OPEN_SANDBOX_USE_SERVER_PROXY);
+  const envSecureAccess = normalizeBoolean(process.env.OPEN_SANDBOX_SECURE_ACCESS);
+  const apiKey =
+    resolveStoredSecret(defaults?.apiKey, decryptSecrets) || normalizeOptionalString(process.env.OPEN_SANDBOX_API_KEY);
+  const image =
+    normalizeOptionalString(defaults?.image) ||
+    normalizeOptionalString(process.env.OPEN_SANDBOX_IMAGE) ||
+    workspaceImage ||
+    undefined;
+  const poolRef =
+    normalizeOptionalString(defaults?.poolRef) || normalizeOptionalString(process.env.OPEN_SANDBOX_POOL_REF);
+  const configuredResourceLimits = normalizeResourceQuantityMap(defaults?.resourceLimits);
+  const resourceLimits =
+    Object.keys(configuredResourceLimits).length > 0
+      ? configuredResourceLimits
+      : {
+          cpu: DEFAULT_WORKSPACE_RESOURCES.limits.cpu,
+          memory: DEFAULT_WORKSPACE_RESOURCES.limits.memory,
+        };
+  const timeoutSeconds =
+    defaults?.timeoutSeconds === null || process.env.OPEN_SANDBOX_TIMEOUT_SECONDS === 'null'
+      ? null
+      : normalizePositiveInteger(defaults?.timeoutSeconds) ??
+        normalizePositiveInteger(process.env.OPEN_SANDBOX_TIMEOUT_SECONDS) ??
+        DEFAULT_OPEN_SANDBOX_TIMEOUT_SECONDS;
+
+  return {
+    domain:
+      normalizeOptionalString(defaults?.domain) ||
+      normalizeOptionalString(process.env.OPEN_SANDBOX_DOMAIN) ||
+      DEFAULT_OPEN_SANDBOX_DOMAIN,
+    protocol:
+      normalizeProtocol(defaults?.protocol) ||
+      normalizeProtocol(process.env.OPEN_SANDBOX_PROTOCOL) ||
+      DEFAULT_OPEN_SANDBOX_PROTOCOL,
+    ...(apiKey ? { apiKey } : {}),
+    ...(image ? { image } : {}),
+    ...(poolRef ? { poolRef } : {}),
+    timeoutSeconds,
+    useServerProxy: normalizeBoolean(defaults?.useServerProxy) ?? envUseServerProxy ?? true,
+    // Fail-safe default: the execd data plane is an arbitrary-exec surface.
+    secureAccess: normalizeBoolean(defaults?.secureAccess) ?? envSecureAccess ?? true,
+    resourceLimits,
+    execdPort:
+      normalizePositiveInteger(defaults?.execdPort) ??
+      normalizePositiveInteger(process.env.OPEN_SANDBOX_EXECD_PORT) ??
+      DEFAULT_OPEN_SANDBOX_EXECD_PORT,
+    gatewayPort:
+      normalizePositiveInteger(defaults?.gatewayPort) ??
+      normalizePositiveInteger(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT) ??
+      13338,
+    editorPort:
+      normalizePositiveInteger(defaults?.editorPort) ??
+      normalizePositiveInteger(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT) ??
+      13337,
+  };
+}
+
+function resolveWorkspaceGatewayPort(): number {
+  return normalizePositiveInteger(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT) ?? 13338;
+}
+
+function resolveWorkspaceEditorPort(): number {
+  return normalizePositiveInteger(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT) ?? 13337;
+}
+
+function normalizeE2bConfig(
+  defaults: AgentSessionE2bBackendConfig | null | undefined,
+  decryptSecrets: boolean
+): ResolvedAgentSessionE2bBackendConfig {
+  const apiKey =
+    resolveStoredSecret(defaults?.apiKey, decryptSecrets) || normalizeOptionalString(process.env.E2B_API_KEY);
+  const templateId = normalizeOptionalString(defaults?.templateId);
+  const timeoutSeconds =
+    defaults?.timeoutSeconds === null
+      ? null
+      : normalizePositiveInteger(defaults?.timeoutSeconds) ?? DEFAULT_E2B_TIMEOUT_SECONDS;
+  // E2B has no infinite TTL (null = "create with default TTL, never renew"), so a null timeout MUST
+  // pair with autoPause to avoid a hard kill mid-session at the 1h wall with no dead-man fallback.
+  const autoPause = timeoutSeconds === null ? true : normalizeBoolean(defaults?.autoPause) ?? true;
+
+  return {
+    domain: normalizeOptionalString(defaults?.domain) || DEFAULT_E2B_DOMAIN,
+    ...(apiKey ? { apiKey } : {}),
+    ...(templateId ? { templateId } : {}),
+    timeoutSeconds,
+    autoPause,
+    gatewayPort: resolveWorkspaceGatewayPort(),
+    editorPort: resolveWorkspaceEditorPort(),
+  };
+}
+
+function normalizeDaytonaConfig(
+  defaults: AgentSessionDaytonaBackendConfig | null | undefined,
+  decryptSecrets: boolean
+): ResolvedAgentSessionDaytonaBackendConfig {
+  const apiKey =
+    resolveStoredSecret(defaults?.apiKey, decryptSecrets) || normalizeOptionalString(process.env.DAYTONA_API_KEY);
+  const snapshot = normalizeOptionalString(defaults?.snapshot);
+  const target = normalizeOptionalString(defaults?.target);
+
+  return {
+    apiUrl: normalizeOptionalString(defaults?.apiUrl) || DEFAULT_DAYTONA_API_URL,
+    ...(apiKey ? { apiKey } : {}),
+    ...(snapshot ? { snapshot } : {}),
+    ...(target ? { target } : {}),
+    autoArchiveInterval:
+      normalizeNonNegativeInteger(defaults?.autoArchiveInterval) ?? DEFAULT_DAYTONA_AUTO_ARCHIVE_INTERVAL,
+    gatewayPort: resolveWorkspaceGatewayPort(),
+    editorPort: resolveWorkspaceEditorPort(),
+  };
+}
+
+function normalizePositiveNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseFloat(value.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeModalConfig(
+  defaults: AgentSessionModalBackendConfig | null | undefined,
+  decryptSecrets: boolean
+): ResolvedAgentSessionModalBackendConfig {
+  // Modal credentials are valid only as a pair, so resolve both halves from the SAME source: a DB
+  // tokenId paired with an env tokenSecret (or vice versa) fails auth confusingly. Use the DB pair
+  // only when both are stored; otherwise fall back to env for both, warning on a partial DB pair.
+  const dbTokenId = resolveStoredSecret(defaults?.tokenId, decryptSecrets);
+  const dbTokenSecret = resolveStoredSecret(defaults?.tokenSecret, decryptSecrets);
+  let tokenId: string | undefined;
+  let tokenSecret: string | undefined;
+  if (dbTokenId && dbTokenSecret) {
+    tokenId = dbTokenId;
+    tokenSecret = dbTokenSecret;
+  } else {
+    if (dbTokenId || dbTokenSecret) {
+      getLogger().warn(
+        'Modal credentials are incomplete in config (only one of tokenId/tokenSecret stored); falling back to MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env for both.'
+      );
+    }
+    tokenId = normalizeOptionalString(process.env.MODAL_TOKEN_ID);
+    tokenSecret = normalizeOptionalString(process.env.MODAL_TOKEN_SECRET);
+  }
+  const environment = normalizeOptionalString(defaults?.environment);
+  const imageRegistrySecret = normalizeOptionalString(defaults?.imageRegistrySecret);
+  const cpu = normalizePositiveNumber(defaults?.cpu);
+  const memoryMiB = normalizePositiveInteger(defaults?.memoryMiB);
+  const inboundCidrAllowlist = normalizeStringArray(defaults?.inboundCidrAllowlist);
+
+  return {
+    ...(tokenId ? { tokenId } : {}),
+    ...(tokenSecret ? { tokenSecret } : {}),
+    ...(environment ? { environment } : {}),
+    appName: normalizeOptionalString(defaults?.appName) || DEFAULT_MODAL_APP_NAME,
+    image: normalizeOptionalString(defaults?.image) || DEFAULT_MODAL_IMAGE,
+    ...(imageRegistrySecret ? { imageRegistrySecret } : {}),
+    timeoutSeconds: Math.min(
+      normalizePositiveInteger(defaults?.timeoutSeconds) ?? DEFAULT_MODAL_TIMEOUT_SECONDS,
+      MAX_MODAL_TIMEOUT_SECONDS
+    ),
+    ...(cpu !== undefined ? { cpu } : {}),
+    ...(memoryMiB !== undefined ? { memoryMiB } : {}),
+    ...(inboundCidrAllowlist.length > 0 ? { inboundCidrAllowlist } : {}),
+    gatewayPort: resolveWorkspaceGatewayPort(),
+  };
+}
+
+export function resolveAgentSessionWorkspaceBackendFromDefaults(
+  backendDefaults?: AgentSessionWorkspaceBackendConfig | null,
+  workspaceImage?: string | null,
+  opts: ResolveWorkspaceBackendOptions = {}
+): ResolvedAgentSessionWorkspaceBackendConfig {
+  const decryptSecrets = opts.decryptSecrets ?? true;
+  const storedProvider = normalizeWorkspaceBackendProvider(backendDefaults?.provider);
+  const envProvider = normalizeWorkspaceBackendProvider(process.env.AGENT_SESSION_WORKSPACE_BACKEND);
+  // Surface a bad stored/env provider instead of silently defaulting to K8s (no-silent-fallback posture).
+  if (!storedProvider && backendDefaults?.provider) {
+    getLogger().warn(
+      `Unknown workspace backend provider '${backendDefaults.provider}' in config; using the default backend.`
+    );
+  } else if (!storedProvider && !envProvider && process.env.AGENT_SESSION_WORKSPACE_BACKEND) {
+    getLogger().warn(
+      `Unknown AGENT_SESSION_WORKSPACE_BACKEND '${process.env.AGENT_SESSION_WORKSPACE_BACKEND}'; using the default backend.`
+    );
+  }
+  const provider = storedProvider || envProvider || DEFAULT_AGENT_SESSION_WORKSPACE_BACKEND_PROVIDER;
+
+  return {
+    provider,
+    opensandbox: normalizeOpenSandboxConfig(backendDefaults?.opensandbox, workspaceImage, decryptSecrets),
+    e2b: normalizeE2bConfig(backendDefaults?.e2b, decryptSecrets),
+    daytona: normalizeDaytonaConfig(backendDefaults?.daytona, decryptSecrets),
+    modal: normalizeModalConfig(backendDefaults?.modal, decryptSecrets),
+  };
+}
+
+/**
+ * Resolves every backend's config block from global config + env fallback WITHOUT requiring the
+ * workspace images: existing-row operations (suspend/resume/destroy/leases) must stay possible
+ * even when session provisioning config is incomplete or the selected provider changed.
+ */
+export async function resolveAgentSessionWorkspaceBackendConfig(
+  opts: ResolveWorkspaceBackendOptions = {}
+): Promise<ResolvedAgentSessionWorkspaceBackendConfig> {
+  const { agentSessionDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  return resolveAgentSessionWorkspaceBackendFromDefaults(
+    agentSessionDefaults?.workspaceBackend,
+    agentSessionDefaults?.workspaceImage?.trim() || null,
+    opts
+  );
+}
+
 export class AgentSessionWorkspaceStorageConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -406,6 +752,7 @@ export function resolveAgentSessionCleanupFromDefaults(
       normalizePositiveInteger(cleanupDefaults?.startingTimeoutMs) ?? DEFAULT_AGENT_SESSION_STARTING_TIMEOUT_MS,
     hibernatedRetentionMs:
       normalizePositiveInteger(cleanupDefaults?.hibernatedRetentionMs) ?? DEFAULT_AGENT_SESSION_HIBERNATED_RETENTION_MS,
+    idleArchiveMs: normalizePositiveInteger(cleanupDefaults?.idleArchiveMs) ?? DEFAULT_AGENT_SESSION_IDLE_ARCHIVE_MS,
     intervalMs: normalizePositiveInteger(cleanupDefaults?.intervalMs) ?? DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
     redisTtlSeconds:
       normalizePositiveInteger(cleanupDefaults?.redisTtlSeconds) ?? DEFAULT_AGENT_SESSION_REDIS_TTL_SECONDS,
@@ -510,6 +857,10 @@ export async function resolveAgentSessionRuntimeConfig(): Promise<AgentSessionRu
     workspaceImage,
     workspaceEditorImage,
     workspaceGatewayImage,
+    workspaceBackend: resolveAgentSessionWorkspaceBackendFromDefaults(
+      agentSessionDefaults?.workspaceBackend,
+      workspaceImage
+    ),
     nodeSelector: normalizeNodeSelector(agentSessionDefaults?.scheduling),
     keepAttachedServicesOnSessionNode: resolveKeepAttachedServicesOnSessionNode(agentSessionDefaults?.scheduling),
     readiness: resolveAgentSessionReadinessFromDefaults(agentSessionDefaults?.readiness),

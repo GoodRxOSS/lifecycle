@@ -116,12 +116,79 @@ describe('AgentRunQueueService', () => {
         reason: 'submit',
         dispatchAttemptId: result.dispatchAttemptId,
         encryptedGithubToken: 'encrypted:token-1',
+        githubTokenSource: 'user',
+        githubUsername: null,
+        githubTokenWriteAuthorized: false,
         correlationId: 'correlation-1',
         sender: 'sample-user',
       }),
       expect.objectContaining({
         jobId: `agent-run:run-1:${result.dispatchAttemptId}`,
       })
+    );
+  });
+
+  it('serializes auth-aware user GitHub metadata', async () => {
+    mockQueueAdd.mockResolvedValue(undefined);
+
+    await AgentRunQueueService.enqueueRun('run-1', 'approval_resolved', {
+      githubAuth: {
+        githubToken: ' user-token ',
+        source: 'user',
+        githubUsername: 'octocat',
+        writeAuthorized: true,
+      },
+    });
+
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      'execute-run',
+      expect.objectContaining({
+        encryptedGithubToken: 'encrypted:user-token',
+        githubTokenSource: 'user',
+        githubUsername: 'octocat',
+        githubTokenWriteAuthorized: true,
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it('serializes app and empty GitHub auth without write authorization', async () => {
+    mockQueueAdd.mockResolvedValue(undefined);
+
+    await AgentRunQueueService.enqueueRun('run-app', 'submit', {
+      githubAuth: {
+        githubToken: 'app-token',
+        source: 'app',
+        writeAuthorized: true,
+      },
+    });
+    await AgentRunQueueService.enqueueRun('run-none', 'submit', {
+      githubAuth: {
+        githubToken: null,
+        source: 'none',
+        writeAuthorized: true,
+      },
+    });
+
+    expect(mockQueueAdd).toHaveBeenNthCalledWith(
+      1,
+      'execute-run',
+      expect.objectContaining({
+        encryptedGithubToken: 'encrypted:app-token',
+        githubTokenSource: 'app',
+        githubTokenWriteAuthorized: false,
+      }),
+      expect.any(Object)
+    );
+    expect(mockQueueAdd).toHaveBeenNthCalledWith(
+      2,
+      'execute-run',
+      expect.objectContaining({
+        encryptedGithubToken: null,
+        githubTokenSource: 'none',
+        githubTokenWriteAuthorized: false,
+      }),
+      expect.any(Object)
     );
   });
 
@@ -142,5 +209,20 @@ describe('AgentRunQueueService', () => {
     expect(secondOptions.jobId).not.toContain(':resume');
     expect(mockQueueAdd.mock.calls[0][1]).toEqual(expect.objectContaining({ reason: 'resume' }));
     expect(mockQueueAdd.mock.calls[1][1]).toEqual(expect.objectContaining({ reason: 'resume' }));
+  });
+
+  it('records workspace continuation as a distinct queue reason', async () => {
+    mockQueueAdd.mockResolvedValue(undefined);
+
+    await AgentRunQueueService.enqueueRun('run-continuation-1', 'workspace_continuation');
+
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      'execute-run',
+      expect.objectContaining({
+        runId: 'run-continuation-1',
+        reason: 'workspace_continuation',
+      }),
+      expect.any(Object)
+    );
   });
 });

@@ -15,14 +15,12 @@
  */
 
 import type { LanguageModel } from 'ai';
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createOpenAI } from '@ai-sdk/openai';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import UserApiKeyService from 'server/services/userApiKey';
 import { transformProviderModels } from 'server/services/agentRuntime/models/modelTransformation';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
+import { importEsm } from 'server/lib/esmImport';
 import { BadRequestError } from 'server/lib/appError';
 import type { AgentModelSummary, AgentResolvedModelSelection } from './types';
 import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from './providerConfig';
@@ -32,6 +30,7 @@ type ProviderConfig = {
   apiKeyEnvVar?: string;
   enabled?: boolean;
 };
+type LanguageModelProvider = (modelId: string) => LanguageModel;
 
 function normalizeModelProvider(provider: string): string | null {
   return normalizeStoredAgentProviderName(provider);
@@ -58,15 +57,24 @@ export class AgentModelSelectionError extends BadRequestError {
   }
 }
 
-function getProviderInstance(provider: AgentResolvedModelSelection['provider'], apiKey: string) {
+async function getProviderInstance(
+  provider: AgentResolvedModelSelection['provider'],
+  apiKey: string
+): Promise<LanguageModelProvider> {
   switch (provider) {
-    case 'anthropic':
-      return createAnthropic({ apiKey });
-    case 'openai':
-      return createOpenAI({ apiKey });
+    case 'anthropic': {
+      const { createAnthropic } = await importEsm<typeof import('@ai-sdk/anthropic')>('@ai-sdk/anthropic');
+      return createAnthropic({ apiKey }) as LanguageModelProvider;
+    }
+    case 'openai': {
+      const { createOpenAI } = await importEsm<typeof import('@ai-sdk/openai')>('@ai-sdk/openai');
+      return createOpenAI({ apiKey }) as LanguageModelProvider;
+    }
     case 'gemini':
-    case 'google':
-      return createGoogleGenerativeAI({ apiKey });
+    case 'google': {
+      const { createGoogle } = await importEsm<typeof import('@ai-sdk/google')>('@ai-sdk/google');
+      return createGoogle({ apiKey }) as LanguageModelProvider;
+    }
     default:
       throw new Error(`Unsupported agent provider: ${provider}`);
   }
@@ -364,7 +372,7 @@ export default class AgentProviderRegistry {
       userIdentity,
       repoFullName,
     });
-    const provider = getProviderInstance(selection.provider, apiKey);
+    const provider = await getProviderInstance(selection.provider, apiKey);
 
     return provider(selection.modelId);
   }

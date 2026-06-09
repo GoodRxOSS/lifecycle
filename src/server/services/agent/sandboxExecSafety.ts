@@ -45,6 +45,7 @@ const READ_ONLY_SEGMENT_PATTERNS: RegExp[] = [
   /^git\s+rev-parse(?:\s|$)/,
   /^git\s+ls-files(?:\s|$)/,
   /^git\s+blame(?:\s|$)/,
+  /^(?:node|npm|pnpm|yarn|python|python3|ruby|go|rustc|cargo|java|javac)\s+(?:--version|-v)(?:\s|$)/,
   /^node\s+(?:--check|-c)(?:\s|$)/,
 ];
 

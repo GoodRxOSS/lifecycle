@@ -35,12 +35,13 @@ export default class AgentSession extends Model {
   namespace!: string | null;
   pvcName!: string | null;
   model!: string;
-  status!: 'starting' | 'active' | 'ended' | 'error';
+  status!: 'starting' | 'active' | 'archived' | 'error';
   chatStatus!: AgentChatStatus;
   workspaceStatus!: AgentWorkspaceStatus;
   keepAttachedServicesOnSessionNode!: boolean | null;
+  keepWorkspace!: boolean;
   lastActivity!: string;
-  endedAt!: string | null;
+  archivedAt!: string | null;
   devModeSnapshots!: Record<string, DevModeResourceSnapshot>;
   forwardedAgentSecretProviders!: string[];
   workspaceRepos!: AgentSessionWorkspaceRepo[];
@@ -76,7 +77,7 @@ export default class AgentSession extends Model {
       namespace: { type: ['string', 'null'] },
       pvcName: { type: ['string', 'null'] },
       model: { type: 'string' },
-      status: { type: 'string', enum: ['starting', 'active', 'ended', 'error'], default: 'starting' },
+      status: { type: 'string', enum: ['starting', 'active', 'archived', 'error'], default: 'starting' },
       chatStatus: { type: 'string', enum: Object.values(AgentChatStatus), default: AgentChatStatus.READY },
       workspaceStatus: {
         type: 'string',
@@ -84,8 +85,9 @@ export default class AgentSession extends Model {
         default: AgentWorkspaceStatus.READY,
       },
       keepAttachedServicesOnSessionNode: { type: ['boolean', 'null'] },
+      keepWorkspace: { type: 'boolean', default: false },
       lastActivity: { type: 'string' },
-      endedAt: { type: ['string', 'null'] },
+      archivedAt: { type: ['string', 'null'] },
       devModeSnapshots: { type: 'object', default: {} },
       forwardedAgentSecretProviders: { type: 'array', items: { type: 'string' }, default: [] },
       workspaceRepos: { type: 'array', items: { type: 'object' }, default: [] },
