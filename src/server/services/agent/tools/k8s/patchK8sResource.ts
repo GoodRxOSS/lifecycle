@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../types';
+import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 
 export class PatchK8sResourceTool extends BaseTool {
@@ -54,29 +54,13 @@ export class PatchK8sResourceTool extends BaseTool {
           },
         },
         required: ['namespace', 'resource_type', 'name', 'operation'],
-      },
-      ToolSafetyLevel.DANGEROUS,
-      'k8s'
+      }
     );
-  }
-
-  async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
-    const resourceType = args.resource_type as string;
-    const name = args.name as string;
-    const operation = args.operation as string;
-    // SECURITY: enforce namespace scope before approval; a foreign namespace must never become approvable.
-    const namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
-    return {
-      title: `${operation} Kubernetes resource`,
-      description: `${operation} ${resourceType}/${name} in namespace ${namespace}`,
-      impact: 'This will modify a live Kubernetes resource. The change is ephemeral and reverted on the next deploy.',
-      confirmButtonText: `${operation.charAt(0).toUpperCase() + operation.slice(1)}`,
-    };
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     let namespace: string;
@@ -84,7 +68,7 @@ export class PatchK8sResourceTool extends BaseTool {
       // SECURITY: lock to the build's namespace; reject any foreign namespace.
       namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED');
     }
 
     try {

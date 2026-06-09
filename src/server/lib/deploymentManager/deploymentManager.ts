@@ -32,6 +32,9 @@ const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
 export class DeploymentManager {
   private deploys: Map<string, Deploy> = new Map();
   private deploymentLevels: Map<number, Deploy[]> = new Map();
+  // Deploys never placed in a level: members of a dependency cycle, or dependents of one.
+  private unresolvedDeploys: Deploy[] = [];
+  private dependencyCycleDescription = '';
 
   constructor(deploys: Deploy[]) {
     deploys.forEach((deploy) => {
@@ -80,6 +83,17 @@ export class DeploymentManager {
       level++;
     }
 
+    const placed = new Set<string>();
+    this.deploymentLevels.forEach((levelDeploys) => levelDeploys.forEach((d) => placed.add(d.deployable.name)));
+    this.unresolvedDeploys = Array.from(this.deploys.values()).filter((d) => !placed.has(d.deployable.name));
+    if (this.unresolvedDeploys.length > 0) {
+      this.dependencyCycleDescription = this.describeDependencyCycle();
+      const unresolvedNames = this.unresolvedDeploys.map((d) => d.deployable.name).join(',');
+      getLogger().warn(
+        `Deploy: dependency cycle ${this.dependencyCycleDescription} leaves [${unresolvedNames}] unschedulable`
+      );
+    }
+
     const orderSummary = Array.from({ length: this.deploymentLevels.size }, (_, i) => {
       const services =
         this.deploymentLevels
@@ -90,6 +104,25 @@ export class DeploymentManager {
     }).join(' ');
 
     getLogger().info(`Deploy: ${this.deploymentLevels.size} levels ${orderSummary}`);
+  }
+
+  // After leveling, unresolved deploys only retain deps on other unresolved deploys; walking them finds the cycle.
+  private describeDependencyCycle(): string {
+    const unresolved = new Map(this.unresolvedDeploys.map((d) => [d.deployable.name, d]));
+    const start = Array.from(unresolved.keys()).sort()[0];
+    const path: string[] = [];
+    let current: string | undefined = start;
+
+    while (current && !path.includes(current)) {
+      path.push(current);
+      current = unresolved.get(current)?.deployable.deploymentDependsOn.find((dep) => unresolved.has(dep));
+    }
+
+    if (!current) {
+      return path.join(' -> ');
+    }
+
+    return [...path.slice(path.indexOf(current)), current].join(' -> ');
   }
 
   private removeInvalidDependencies(): void {
@@ -103,8 +136,19 @@ export class DeploymentManager {
   }
 
   public async deploy(): Promise<void> {
+    const unresolved = new Set(this.unresolvedDeploys);
     for (const value of this.deploys.values()) {
-      await value.$query().patch({ status: DeployStatus.QUEUED });
+      if (!unresolved.has(value)) {
+        await value.$query().patch({ status: DeployStatus.QUEUED });
+      }
+    }
+
+    if (this.unresolvedDeploys.length > 0) {
+      const statusMessage = `Dependency cycle detected: ${this.dependencyCycleDescription}; deploy order cannot be resolved`;
+      for (const deploy of this.unresolvedDeploys) {
+        getLogger().error(`Deploy: ${deploy.deployable.name} failed — ${statusMessage}`);
+        await deploy.$query().patch({ status: DeployStatus.DEPLOY_FAILED, statusMessage });
+      }
     }
 
     for (let level = 0; level < this.deploymentLevels.size; level++) {
@@ -228,9 +272,9 @@ export class DeploymentManager {
         );
 
         const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
-        const isReady = cliDeploy ? true : await waitForDeployPodReady(deploy);
+        const readiness = cliDeploy ? { ready: true } : await waitForDeployPodReady(deploy);
 
-        if (isReady) {
+        if (readiness.ready) {
           await deployService.patchAndUpdateActivityFeed(
             deploy,
             {
@@ -240,7 +284,8 @@ export class DeploymentManager {
             runUUID
           );
         } else {
-          throw new Error('Pods failed to become ready within timeout');
+          const cause = readiness.causeSummary ? `: ${readiness.causeSummary.slice(0, 350)}` : '';
+          throw new Error(`Pods failed to become ready within timeout${cause}`);
         }
       } catch (error) {
         await deployService.recordDeployFailure(deploy, runUUID, {

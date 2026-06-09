@@ -18,7 +18,9 @@ import { NextRequest } from 'next/server';
 import {
   fetchGitHubAuthenticatedUser,
   fetchGitHubBrokerToken,
+  fetchGitHubRepositoryWritePermission,
   getGitHubUsernameFromKeycloakAccessToken,
+  resolveRequestGitHubAuth,
   resolveRequestGitHubToken,
   resolveRequestGitHubUserToken,
 } from '../githubToken';
@@ -79,6 +81,18 @@ describe('githubToken', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('labels the auth-disabled fallback token as app auth', async () => {
+    process.env.ENABLE_AUTH = 'false';
+    mockGetGithubClientToken.mockResolvedValue('ghs_cached_app_token');
+
+    await expect(resolveRequestGitHubAuth(new NextRequest('http://localhost/api'))).resolves.toEqual({
+      githubToken: 'ghs_cached_app_token',
+      source: 'app',
+      githubUsername: null,
+      writeAuthorized: false,
+    });
+  });
+
   it('returns null when auth is disabled and cached GitHub app token lookup fails', async () => {
     process.env.ENABLE_AUTH = 'false';
     mockGetGithubClientToken.mockRejectedValue(new Error('cache unavailable'));
@@ -112,6 +126,33 @@ describe('githubToken', () => {
       },
     });
     expect(token).toBe('gho_broker_token');
+  });
+
+  it('labels broker tokens as user auth with the GitHub username claim', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue(JSON.stringify({ access_token: 'gho_broker_token' })),
+    });
+    const keycloakAccessToken = makeJwt({
+      sub: 'user-123',
+      github_username: 'sample-user',
+    });
+
+    await expect(
+      resolveRequestGitHubAuth(
+        new NextRequest('http://localhost/api', {
+          headers: {
+            authorization: `Bearer ${keycloakAccessToken}`,
+          },
+        })
+      )
+    ).resolves.toEqual({
+      githubToken: 'gho_broker_token',
+      source: 'user',
+      githubUsername: 'sample-user',
+      writeAuthorized: false,
+    });
   });
 
   it('extracts the GitHub username from a Keycloak access token', () => {
@@ -217,10 +258,88 @@ describe('githubToken', () => {
     });
   });
 
+  it('probes repository write permission without relying on OAuth scopes', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers([
+        ['x-oauth-scopes', ''],
+        ['x-ratelimit-remaining', '41'],
+      ]),
+      json: jest.fn().mockResolvedValue({
+        full_name: 'GoodRxOSS/lifecycle',
+        permissions: {
+          admin: false,
+          maintain: false,
+          push: true,
+        },
+      }),
+    });
+
+    await expect(fetchGitHubRepositoryWritePermission('ghu_user_token', 'GoodRxOSS', 'lifecycle')).resolves.toEqual({
+      ok: true,
+      repository: 'GoodRxOSS/lifecycle',
+      status: 200,
+      permission: 'granted',
+      permissions: {
+        admin: false,
+        maintain: false,
+        push: true,
+      },
+      scopes: [],
+      rateLimitRemaining: '41',
+    });
+    expect(globalThis.fetch).toHaveBeenCalledWith('https://api.github.com/repos/GoodRxOSS/lifecycle', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: 'Bearer ghu_user_token',
+        'User-Agent': 'lifecycle-github-repository-permission-check',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+  });
+
+  it('reports denied repository write permission when GitHub says the user cannot push', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: jest.fn().mockResolvedValue({
+        full_name: 'GoodRxOSS/lifecycle',
+        permissions: {
+          admin: false,
+          maintain: false,
+          push: false,
+        },
+      }),
+    });
+
+    await expect(fetchGitHubRepositoryWritePermission('ghu_user_token', 'GoodRxOSS', 'lifecycle')).resolves.toEqual(
+      expect.objectContaining({
+        ok: true,
+        repository: 'GoodRxOSS/lifecycle',
+        status: 200,
+        permission: 'denied',
+        permissions: {
+          admin: false,
+          maintain: false,
+          push: false,
+        },
+      })
+    );
+  });
+
   it('returns null when auth is enabled but no bearer token is present', async () => {
     process.env.ENABLE_AUTH = 'true';
 
     await expect(resolveRequestGitHubToken(new NextRequest('http://localhost/api'))).resolves.toBeNull();
+    await expect(resolveRequestGitHubAuth(new NextRequest('http://localhost/api'))).resolves.toEqual({
+      githubToken: null,
+      source: 'none',
+      githubUsername: null,
+      writeAuthorized: false,
+    });
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

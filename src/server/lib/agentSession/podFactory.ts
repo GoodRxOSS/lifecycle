@@ -32,6 +32,7 @@ import {
   SESSION_POD_MCP_CONFIG_ENV,
   SESSION_POD_MCP_CONFIG_SECRET_KEY,
 } from 'server/services/agentRuntime/mcp/sessionPod';
+import { LIFECYCLE_GATEWAY_TOKEN_ENV } from 'server/services/workspaceRuntime/gatewayToken';
 import {
   SESSION_WORKSPACE_EDITOR_PROJECT_FILE,
   SESSION_WORKSPACE_SUBPATH,
@@ -50,11 +51,17 @@ export const SESSION_WORKSPACE_GATEWAY_PORT = parseInt(process.env.AGENT_SESSION
 const SESSION_WORKSPACE_VOLUME_ROOT = '/workspace-volume';
 const SESSION_WORKSPACE_EDITOR_SHARED_SESSION_HOME_DIR = '/home/coder/.lifecycle-session';
 const SESSION_WORKSPACE_EDITOR_GIT_CONFIG_PATH = `${SESSION_WORKSPACE_EDITOR_SHARED_SESSION_HOME_DIR}/.gitconfig`;
+const SESSION_WORKSPACE_POD_DELETE_TIMEOUT_MS = 30000;
+const SESSION_WORKSPACE_POD_DELETE_POLL_MS = 500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isKubernetesNotFound(error: unknown): boolean {
+  return error instanceof k8s.HttpError && error.response?.statusCode === 404;
 }
 
 function normalizeNonNegativeInteger(value: unknown): number | undefined {
@@ -432,6 +439,17 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
       },
     },
   };
+  // optional: pods from older control planes (key absent) must still start (rollback safety).
+  const gatewayTokenEnv: k8s.V1EnvVar = {
+    name: LIFECYCLE_GATEWAY_TOKEN_ENV,
+    valueFrom: {
+      secretKeyRef: {
+        name: apiKeySecretName,
+        key: LIFECYCLE_GATEWAY_TOKEN_ENV,
+        optional: true,
+      },
+    },
+  };
 
   const securityContext: k8s.V1SecurityContext = {
     runAsUser: 1000,
@@ -663,6 +681,7 @@ export function buildSessionWorkspacePodSpec(opts: SessionWorkspacePodOptions): 
               value: process.env.AGENT_SESSION_WORKSPACE_GATEWAY_NODE_OPTIONS || '--max-old-space-size=2048',
             },
             sessionPodMcpConfigEnv,
+            gatewayTokenEnv,
             ...forwardedAgentSecretEnv,
             ...githubTokenEnv,
             ...userEnv,
@@ -934,15 +953,48 @@ export async function createSessionWorkspacePod(opts: SessionWorkspacePodOptions
   return result;
 }
 
-export async function deleteSessionWorkspacePod(namespace: string, podName: string): Promise<void> {
+async function waitForSessionWorkspacePodDeleted(
+  coreApi: k8s.CoreV1Api,
+  namespace: string,
+  podName: string,
+  opts: { timeoutMs?: number; pollMs?: number } = {}
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? SESSION_WORKSPACE_POD_DELETE_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? SESSION_WORKSPACE_POD_DELETE_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+  let lastObservedState = 'deleting';
+
+  while (Date.now() < deadline) {
+    try {
+      const { body: pod } = await coreApi.readNamespacedPod(podName, namespace);
+      lastObservedState = summarizePodState(pod);
+    } catch (error) {
+      if (isKubernetesNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    await sleep(pollMs);
+  }
+
+  throw new Error(`Session workspace pod was not deleted within ${timeoutMs}ms: ${lastObservedState}`);
+}
+
+export async function deleteSessionWorkspacePod(
+  namespace: string,
+  podName: string,
+  wait?: { timeoutMs?: number; pollMs?: number }
+): Promise<void> {
   const logger = getLogger();
   const coreApi = getCoreApi();
 
   try {
     await coreApi.deleteNamespacedPod(podName, namespace);
+    await waitForSessionWorkspacePodDeleted(coreApi, namespace, podName, wait);
     logger.info(`Session: workspace pod cleaned podName=${podName} namespace=${namespace}`);
   } catch (error: any) {
-    if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
+    if (isKubernetesNotFound(error)) {
       logger.info(`Session: workspace pod cleanup skipped reason=not_found podName=${podName} namespace=${namespace}`);
       return;
     }

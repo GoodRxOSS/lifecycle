@@ -16,3 +16,13 @@
 
 process.env.PINO_LOGGER = 'false';
 process.env.IS_TESTING = 'true';
+
+const bufferModule = require('buffer') as typeof import('buffer') & {
+  SlowBuffer?: typeof Buffer;
+};
+
+// Older JWT transitive dependencies still read `require('buffer').SlowBuffer.prototype`.
+// Some Jest/Node combinations omit that legacy export, so mirror Buffer for test imports.
+if (!bufferModule.SlowBuffer) {
+  bufferModule.SlowBuffer = bufferModule.Buffer;
+}

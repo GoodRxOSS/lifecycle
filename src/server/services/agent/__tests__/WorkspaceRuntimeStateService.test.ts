@@ -69,7 +69,7 @@ function buildSession(overrides: Record<string, unknown> = {}) {
     buildKind: null,
     selectedServices: [],
     updatedAt: '2026-05-09T00:00:00.000Z',
-    endedAt: null,
+    archivedAt: null,
     ...overrides,
   } as any;
 }
@@ -192,11 +192,11 @@ describe('WorkspaceRuntimeStateService', () => {
     expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
   });
 
-  it('blocks workspace claims when the locked session row is already ended', async () => {
+  it('blocks workspace claims when the locked session row is already archived', async () => {
     mockSessionLock(
       buildSession({
-        status: 'ended',
-        workspaceStatus: AgentWorkspaceStatus.ENDED,
+        status: 'archived',
+        workspaceStatus: AgentWorkspaceStatus.NONE,
       })
     );
     mockActiveRun();
@@ -213,7 +213,7 @@ describe('WorkspaceRuntimeStateService', () => {
     ).rejects.toMatchObject({
       reason: 'action_in_progress',
       details: {
-        currentAction: 'ended',
+        currentAction: 'archived',
       },
     });
 

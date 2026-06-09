@@ -33,9 +33,8 @@ describe('GetCodefreshLogsTool', () => {
     mockGetLogsResult.mockResolvedValue({ ok: true, output: 'line1\nline2\nline3' });
     const result = await tool.execute({ pipeline_id: 'abc123' });
     expect(result.success).toBe(true);
-    const data = JSON.parse(result.agentContent as string);
-    expect(data.logs).toContain('line1');
-    expect(data.totalLines).toBe(3);
+    expect(result.agentContent).toContain('Codefresh logs for pipeline abc123: showing last 3 of 3 lines');
+    expect(result.agentContent).toContain('```\nline1\nline2\nline3\n```');
   });
 
   it('reports LOGS_UNAVAILABLE (retryable) when fetch fails', async () => {
@@ -43,7 +42,6 @@ describe('GetCodefreshLogsTool', () => {
     const result = await tool.execute({ pipeline_id: 'badid' });
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('LOGS_UNAVAILABLE');
-    expect(result.error?.recoverable).toBe(true);
     expect(result.error?.message).toContain('badid');
     expect(result.error?.message).toContain('do NOT assume the build is clean');
   });
@@ -53,7 +51,6 @@ describe('GetCodefreshLogsTool', () => {
     const result = await tool.execute({ pipeline_id: 'emptybuild' });
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('LOGS_UNAVAILABLE');
-    expect(result.error?.recoverable).toBe(true);
   });
 
   it('requires a pipeline_id', async () => {

@@ -44,6 +44,7 @@ jest.mock('server/models/AgentDefinition', () => ({
 import {
   assertAgentDefinitionMutable,
   ensureSystemAgentDefinitionsSeeded,
+  inferDefaultAgentSourceKind,
   getSystemAgentDefinition,
   inferDefaultSystemAgentDefinitionId,
   listSystemAgentDefinitions,
@@ -79,15 +80,21 @@ describe('AgentDefinitionRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockUpsert.mockImplementation(async (row) => row);
-    mockFindOne.mockResolvedValue(buildRow('system.freeform'));
-    mockOrderBy.mockResolvedValue([buildRow('system.debug'), buildRow('system.develop'), buildRow('system.freeform')]);
+    mockFindOne.mockResolvedValue(buildRow('system.agent'));
+    mockOrderBy.mockResolvedValue([
+      buildRow('system.agent'),
+      buildRow('system.debug'),
+      buildRow('system.develop'),
+      buildRow('system.freeform'),
+    ]);
   });
 
   it('seeds exactly the first-party system agent definition definitions as code-owned read-only rows', async () => {
     const rows = await ensureSystemAgentDefinitionsSeeded();
 
-    expect(mockUpsert).toHaveBeenCalledTimes(3);
+    expect(mockUpsert).toHaveBeenCalledTimes(4);
     expect(mockUpsert.mock.calls.map(([row]) => (row as { definitionId: string }).definitionId).sort()).toEqual([
+      'system.agent',
       'system.debug',
       'system.develop',
       'system.freeform',
@@ -108,24 +115,29 @@ describe('AgentDefinitionRegistry', () => {
   });
 
   it('loads persisted system agent definitions by public id and lists summaries', async () => {
-    const definition = await getSystemAgentDefinition('system.freeform');
+    const definition = await getSystemAgentDefinition('system.agent');
     const summary = serializeAgentDefinitionSummary(definition);
 
     expect(mockFindOne).toHaveBeenCalledWith({
-      definitionId: 'system.freeform',
+      definitionId: 'system.agent',
       ownerKind: 'system',
     });
     expect(summary).toEqual(
       expect.objectContaining({
-        id: 'system.freeform',
+        id: 'system.agent',
         ownerKind: 'system',
         codeOwned: true,
         readOnly: true,
       })
     );
 
-    await expect(listSystemAgentDefinitions()).resolves.toHaveLength(3);
-    expect(mockWhereIn).toHaveBeenCalledWith('definitionId', ['system.debug', 'system.develop', 'system.freeform']);
+    await expect(listSystemAgentDefinitions()).resolves.toHaveLength(4);
+    expect(mockWhereIn).toHaveBeenCalledWith('definitionId', [
+      'system.agent',
+      'system.debug',
+      'system.develop',
+      'system.freeform',
+    ]);
   });
 
   it('rejects mutations for code-owned system definitions', () => {
@@ -134,24 +146,43 @@ describe('AgentDefinitionRegistry', () => {
     );
   });
 
-  it('infers default system agent definition ids from launch source', () => {
+  it('infers the one-agent default system id and source kind from launch source', () => {
     expect(
       inferDefaultSystemAgentDefinitionId(
         { sessionKind: AgentSessionKind.CHAT } as any,
         { input: { buildUuid: 'build-1' } } as any
       )
-    ).toBe('system.debug');
+    ).toBe('system.agent');
     expect(
       inferDefaultSystemAgentDefinitionId({ sessionKind: AgentSessionKind.CHAT } as any, { input: {} } as any)
-    ).toBe('system.freeform');
+    ).toBe('system.agent');
     expect(
       inferDefaultSystemAgentDefinitionId(
         { sessionKind: AgentSessionKind.CHAT, workspaceStatus: AgentWorkspaceStatus.READY } as any,
         { input: {} } as any
       )
-    ).toBe('system.develop');
+    ).toBe('system.agent');
     expect(
       inferDefaultSystemAgentDefinitionId({ sessionKind: AgentSessionKind.SANDBOX } as any, { input: {} } as any)
-    ).toBe('system.develop');
+    ).toBe('system.agent');
+
+    expect(
+      inferDefaultAgentSourceKind(
+        { sessionKind: AgentSessionKind.CHAT } as any,
+        { input: { buildUuid: 'build-1' } } as any
+      )
+    ).toBe('build_context_chat');
+    expect(inferDefaultAgentSourceKind({ sessionKind: AgentSessionKind.CHAT } as any, { input: {} } as any)).toBe(
+      'freeform_chat'
+    );
+    expect(
+      inferDefaultAgentSourceKind(
+        { sessionKind: AgentSessionKind.CHAT, workspaceStatus: AgentWorkspaceStatus.READY } as any,
+        { input: {} } as any
+      )
+    ).toBe('workspace_session');
+    expect(inferDefaultAgentSourceKind({ sessionKind: AgentSessionKind.SANDBOX } as any, { input: {} } as any)).toBe(
+      'workspace_session'
+    );
   });
 });

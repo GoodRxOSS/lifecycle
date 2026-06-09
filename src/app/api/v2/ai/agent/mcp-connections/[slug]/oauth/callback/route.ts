@@ -17,10 +17,10 @@
 import { auth } from '@ai-sdk/mcp';
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { APP_HOST } from 'shared/config';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
+  buildMcpOAuthCallbackUrl,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
 } from 'server/services/agentRuntime/mcp/connectionConfig';
@@ -42,12 +42,6 @@ type OAuthCallbackMessage = {
   success: boolean;
   error?: string;
 };
-
-function buildCallbackUrl(slug: string): string {
-  const api = new URL(APP_HOST);
-  api.pathname = `/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`;
-  return api.toString();
-}
 
 function escapeHtml(value: string): string {
   return value
@@ -389,10 +383,11 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     slug: flow.slug,
     definitionFingerprint,
     authConfig,
-    redirectUrl: buildCallbackUrl(flow.slug),
+    redirectUrl: buildMcpOAuthCallbackUrl(flow.slug),
     initialState: existing?.state?.type === 'oauth' ? existing.state : null,
     discoveredTools: existing?.discoveredTools,
     validatedAt: existing?.validatedAt,
+    validationError: existing?.validationError,
     interactive: false,
   });
   const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
@@ -432,6 +427,10 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
 
     const validatedAt = new Date().toISOString();
     const discoveredTools = await configService.discoverTools(transport, config.timeout);
+    if (discoveredTools.length === 0) {
+      throw new Error(`MCP validation failed for ${flow.slug}: server returned 0 tools`);
+    }
+
     await persistOAuthConnectionState({
       flow,
       state: provider.currentState,

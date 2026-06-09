@@ -1,5 +1,5 @@
 [tools]
-node = "20"
+node = "22"
 pnpm = "9.15.0"
 kubectl = "latest"
 helm = "latest"

@@ -14,67 +14,32 @@
  * limitations under the License.
  */
 
-export enum ToolSafetyLevel {
-  SAFE = 'safe',
-  CAUTIOUS = 'cautious',
-  DANGEROUS = 'dangerous',
-}
-
-export type ToolCategory = 'k8s' | 'github' | 'codefresh' | 'database' | 'mcp';
-
-export interface ToolCall {
-  name: string;
-  arguments: Record<string, unknown>;
-  id?: string;
-  metadata?: Record<string, unknown>;
-}
-
 export interface TextDisplay {
   type: 'text';
   content: string;
 }
 
-export interface TableDisplay {
-  type: 'table';
-  headers: string[];
-  rows: string[][];
-}
-
-export interface DiffDisplay {
-  type: 'diff';
-  before: string;
-  after: string;
-}
-
-export interface TerminalDisplay {
-  type: 'terminal';
-  output: string;
-}
-
-export type DisplayContent = TextDisplay | TableDisplay | DiffDisplay | TerminalDisplay;
+export type DisplayContent = TextDisplay;
 
 export interface ToolError {
   message: string;
   code: string;
   details?: unknown;
-  recoverable: boolean;
-  suggestedAction?: string;
+}
+
+export interface ToolAuthProvenance {
+  provider: string;
+  source: string;
+  required: boolean;
+  githubUsername?: string | null;
 }
 
 export interface ToolResult {
   success: boolean;
-  agentContent?: string;
+  agentContent: string;
   displayContent?: DisplayContent;
   error?: ToolError;
-}
-
-export interface ConfirmationDetails {
-  title: string;
-  description: string;
-  impact: string;
-  confirmButtonText: string;
-  toolName?: string;
-  onConfirm?(): Promise<void>;
+  auth?: ToolAuthProvenance;
 }
 
 export interface JSONSchema {
@@ -91,11 +56,10 @@ export interface Tool {
   name: string;
   description: string;
   parameters: JSONSchema;
-  safetyLevel: ToolSafetyLevel;
-  category: ToolCategory;
-  executionTimeout?: number;
 
-  execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
+  execute(args: Record<string, unknown>, signal?: AbortSignal, context?: ToolExecutionContext): Promise<ToolResult>;
+}
 
-  shouldConfirmExecution?(args: Record<string, unknown>): Promise<ConfirmationDetails | false>;
+export interface ToolExecutionContext {
+  toolCallId?: string | null;
 }

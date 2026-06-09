@@ -17,6 +17,7 @@
 import { NextRequest } from 'next/server';
 
 const mockGetUser = jest.fn();
+const mockGetGlobalRuntimeConfig = jest.fn();
 const mockSetGlobalRuntimeConfig = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
@@ -27,13 +28,13 @@ jest.mock('server/services/agentSessionConfig', () => ({
   __esModule: true,
   default: {
     getInstance: jest.fn(() => ({
-      getGlobalRuntimeConfig: jest.fn().mockResolvedValue({}),
+      getGlobalRuntimeConfig: (...args: unknown[]) => mockGetGlobalRuntimeConfig(...args),
       setGlobalRuntimeConfig: (...args: unknown[]) => mockSetGlobalRuntimeConfig(...args),
     })),
   },
 }));
 
-import { PUT } from './route';
+import { GET, PUT } from './route';
 
 function makeRequest(body?: unknown): NextRequest {
   return {
@@ -50,6 +51,7 @@ describe('PUT /api/v2/ai/config/agent-session/runtime (admin-gated org-wide writ
     jest.clearAllMocks();
     process.env.ENABLE_AUTH = 'true';
     mockGetUser.mockReturnValue({ sub: 'sample-admin', realm_access: { roles: ['admin'] } });
+    mockGetGlobalRuntimeConfig.mockResolvedValue({});
     mockSetGlobalRuntimeConfig.mockResolvedValue({});
   });
 
@@ -70,10 +72,86 @@ describe('PUT /api/v2/ai/config/agent-session/runtime (admin-gated org-wide writ
     expect(mockSetGlobalRuntimeConfig).not.toHaveBeenCalled();
   });
 
+  it('rejects an invalid workspace backend payload', async () => {
+    const response = await PUT(
+      makeRequest({
+        workspaceBackend: {
+          provider: 'bogus_backend',
+        },
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockSetGlobalRuntimeConfig).not.toHaveBeenCalled();
+  });
+
   it('writes the global runtime config for an admin', async () => {
-    const response = await PUT(makeRequest({}));
+    const runtimeConfig = {
+      workspaceBackend: {
+        provider: 'opensandbox',
+        opensandbox: {
+          poolRef: 'lifecycle-workspace-pool',
+        },
+      },
+    };
+    mockSetGlobalRuntimeConfig.mockResolvedValue(runtimeConfig);
+
+    const response = await PUT(makeRequest(runtimeConfig));
+    const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mockSetGlobalRuntimeConfig).toHaveBeenCalled();
+    expect(mockSetGlobalRuntimeConfig).toHaveBeenCalledWith(runtimeConfig);
+    expect(body.data).toEqual(runtimeConfig);
+  });
+
+  it('accepts a null backend block as the explicit removal sentinel', async () => {
+    const response = await PUT(
+      makeRequest({
+        workspaceBackend: {
+          provider: 'lifecycle_kubernetes',
+          e2b: null,
+        },
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockSetGlobalRuntimeConfig).toHaveBeenCalledWith({
+      workspaceBackend: { provider: 'lifecycle_kubernetes', e2b: null },
+    });
+  });
+
+  it('maps a backend-in-use removal refusal to 409', async () => {
+    const { ConflictError } = jest.requireActual('server/lib/appError');
+    mockSetGlobalRuntimeConfig.mockRejectedValue(
+      new ConflictError('Cannot remove the E2B workspace backend configuration.', 'workspace_backend_in_use')
+    );
+
+    const response = await PUT(makeRequest({ workspaceBackend: { e2b: null } }));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.code).toBe('workspace_backend_in_use');
+  });
+
+  it('returns persisted workspace backend settings', async () => {
+    mockGetGlobalRuntimeConfig.mockResolvedValue({
+      workspaceBackend: {
+        provider: 'opensandbox',
+        opensandbox: {
+          poolRef: 'lifecycle-workspace-pool',
+        },
+      },
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data.workspaceBackend).toEqual({
+      provider: 'opensandbox',
+      opensandbox: {
+        poolRef: 'lifecycle-workspace-pool',
+      },
+    });
   });
 });

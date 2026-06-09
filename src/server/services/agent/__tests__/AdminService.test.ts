@@ -645,7 +645,7 @@ describe('AgentAdminService.getThreadConversation', () => {
           title: 'Approve workspace edit',
           description: 'A workspace edit requires approval.',
           payload: {
-            toolName: 'mcp__sandbox__workspace_edit_file',
+            toolName: 'mcp__workspace_core__edit_file',
             input: {
               path: 'sample-file.txt',
             },
@@ -668,8 +668,8 @@ describe('AgentAdminService.getThreadConversation', () => {
         {
           uuid: 'tool-1',
           source: 'mcp',
-          serverSlug: 'sandbox',
-          toolName: 'workspace.edit_file',
+          serverSlug: 'workspace_core',
+          toolName: 'edit_file',
           toolCallId: 'tool-call-1',
           args: { path: 'sample-file.txt' },
           result: null,
@@ -751,7 +751,7 @@ describe('AgentAdminService.getThreadConversation', () => {
         threadId: 'thread-1',
         runId: 'run-1',
         requestedAt: '2026-04-11T00:00:00.000Z',
-        toolName: 'mcp__sandbox__workspace_edit_file',
+        toolName: 'mcp__workspace_core__edit_file',
       }),
     ]);
     expect(result.events).toEqual([

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { encrypt, decrypt, maskApiKey } from 'server/lib/encryption';
+import { encrypt, decrypt, isEncryptionKeyConfigured, maskApiKey } from 'server/lib/encryption';
 
 beforeAll(() => {
   process.env.ENCRYPTION_KEY = 'a01b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b';
@@ -58,6 +58,18 @@ describe('encryption', () => {
       const originalKey = process.env.ENCRYPTION_KEY;
       delete process.env.ENCRYPTION_KEY;
       expect(() => encrypt('test')).toThrow();
+      process.env.ENCRYPTION_KEY = originalKey;
+    });
+  });
+
+  describe('isEncryptionKeyConfigured', () => {
+    test('is true for a 64-char hex key and false when unset or malformed', () => {
+      const originalKey = process.env.ENCRYPTION_KEY;
+      expect(isEncryptionKeyConfigured()).toBe(true);
+      delete process.env.ENCRYPTION_KEY;
+      expect(isEncryptionKeyConfigured()).toBe(false);
+      process.env.ENCRYPTION_KEY = 'too-short';
+      expect(isEncryptionKeyConfigured()).toBe(false);
       process.env.ENCRYPTION_KEY = originalKey;
     });
   });

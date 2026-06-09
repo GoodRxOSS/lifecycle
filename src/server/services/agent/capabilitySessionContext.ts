@@ -96,6 +96,7 @@ type LifecycleDiagnosticBuildScope = {
   allowedRepos: string[];
   buildUuid: string | null;
   pullRequestId: number | null;
+  allowedPullRequestNumber: number | null;
   databaseScope: DatabaseBuildScope | null;
 };
 
@@ -124,6 +125,7 @@ async function resolveLifecycleDiagnosticBuildScope(session: AgentSession): Prom
     allowedRepos: [...repos],
     buildUuid: session.buildUuid || null,
     pullRequestId: null,
+    allowedPullRequestNumber: null,
     databaseScope: null,
   };
 
@@ -160,6 +162,8 @@ async function resolveLifecycleDiagnosticBuildScope(session: AgentSession): Prom
     scope.allowedNamespace = build.namespace || null;
     scope.allowedRepos = [...repos];
     scope.pullRequestId = pullRequestId;
+    scope.allowedPullRequestNumber =
+      typeof build.pullRequest?.pullRequestNumber === 'number' ? build.pullRequest.pullRequestNumber : null;
     scope.databaseScope = {
       buildId: build.id,
       buildUuid: build.uuid,
@@ -194,6 +198,7 @@ export async function resolveLifecycleDiagnosticGithubSafety({
   const buildScope = await resolveLifecycleDiagnosticBuildScope(session);
   const safety: LifecycleDiagnosticGithubSafety = {
     allowedBranch,
+    primaryRepoFullName: repoFullName || resolvePrimaryRepo(session) || null,
     allowedWritePatterns,
     excludedFilePatterns: config?.excludedFilePatterns || [],
     referencedFiles: selectedDeployReferencedFiles,
@@ -201,6 +206,7 @@ export async function resolveLifecycleDiagnosticGithubSafety({
     allowedRepos: buildScope.allowedRepos,
     buildUuid: buildScope.buildUuid,
     pullRequestId: buildScope.pullRequestId,
+    allowedPullRequestNumber: buildScope.allowedPullRequestNumber,
     databaseScope: buildScope.databaseScope,
   };
 

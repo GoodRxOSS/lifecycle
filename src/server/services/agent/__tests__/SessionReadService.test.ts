@@ -42,10 +42,12 @@ jest.mock('server/models/AgentSandboxExposure', () => ({
   },
 }));
 
+const mockThreadKnexRaw = jest.fn();
 jest.mock('server/models/AgentThread', () => ({
   __esModule: true,
   default: {
     query: jest.fn(),
+    knex: jest.fn(() => ({ raw: (...args: unknown[]) => mockThreadKnexRaw(...args) })),
   },
 }));
 
@@ -93,6 +95,22 @@ jest.mock('server/services/agent/AgentUsageService', () => ({
 
 jest.mock('server/lib/dependencies', () => ({}));
 
+jest.mock('server/lib/agentSession/runtimeConfig', () => {
+  const actual = jest.requireActual('server/lib/agentSession/runtimeConfig');
+  return {
+    __esModule: true,
+    ...actual,
+    resolveAgentSessionCleanupConfig: jest.fn().mockResolvedValue({
+      activeIdleSuspendMs: 30 * 60 * 1000,
+      startingTimeoutMs: 15 * 60 * 1000,
+      hibernatedRetentionMs: 24 * 60 * 60 * 1000,
+      idleArchiveMs: 30 * 24 * 60 * 60 * 1000,
+      intervalMs: 5 * 60 * 1000,
+      redisTtlSeconds: 7200,
+    }),
+  };
+});
+
 import AgentSession from 'server/models/AgentSession';
 import AgentSource from 'server/models/AgentSource';
 import AgentSandbox from 'server/models/AgentSandbox';
@@ -133,7 +151,7 @@ function buildSession(overrides: Record<string, unknown> = {}) {
     sessionKind: 'environment',
     workspaceStatus: 'ready',
     lastActivity: '2026-04-24T12:00:00.000Z',
-    endedAt: null,
+    archivedAt: null,
     createdAt: '2026-04-24T12:00:00.000Z',
     updatedAt: '2026-04-24T12:05:00.000Z',
     workspaceRepos: [{ repo: 'example-org/example-repo', branch: 'main', mountPath: '/workspace/example-repo' }],
@@ -259,6 +277,7 @@ function mockSingleSessionRelations(
 describe('AgentSessionReadService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockThreadKnexRaw.mockResolvedValue({ rows: [] });
     mockAggregateSessionsUsage.mockResolvedValue(
       new Map([
         [
@@ -398,6 +417,9 @@ describe('AgentSessionReadService', () => {
     expect(result.records).toHaveLength(1);
     expect(result.records[0].session.defaults.provider).toBe('sample-provider');
     expect(result.records[0].session.defaultThreadId).toBe('thread-1');
+    expect(result.records[0].session.title).toBe('Investigate sample-service');
+    expect(result.records[0].session.archivedAt).toBeNull();
+    expect(result.records[0].session).not.toHaveProperty('endedAt');
     expect(result.records[0].conversationSummary).toEqual({
       activeTitle: 'Investigate sample-service',
       conversationCount: 1,
@@ -575,6 +597,57 @@ describe('AgentSessionReadService', () => {
     });
   });
 
+  it('serializes archived sessions with the archived status and archive timestamp', async () => {
+    const session = buildSession({
+      status: 'archived',
+      workspaceStatus: 'none',
+      archivedAt: '2026-04-24T13:00:00.000Z',
+    });
+    const source = buildSource({ status: 'cleaned_up', error: null, cleanedUpAt: '2026-04-24T13:00:00.000Z' });
+    mockSingleSessionRelations(source, []);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.status).toBe('archived');
+    expect(record.session.archivedAt).toBe('2026-04-24T13:00:00.000Z');
+    expect(record.session).not.toHaveProperty('endedAt');
+  });
+
+  it('derives the session title from the first user message when no thread is titled', async () => {
+    const session = buildSession();
+    const source = buildSource({ status: 'ready', error: null });
+    mockThreadKnexRaw.mockResolvedValue({
+      rows: [
+        {
+          sessionId: 17,
+          parts: [
+            { type: 'reasoning', text: 'ignored' },
+            { type: 'text', text: '  Fix the login bug\nin the auth service  ' },
+          ],
+        },
+      ],
+    });
+    mockSingleSessionRelations(source, []);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.title).toBe('Fix the login bug in the auth service');
+  });
+
+  it('truncates long first-user-message titles to 80 characters with an ellipsis', async () => {
+    const session = buildSession();
+    const source = buildSource({ status: 'ready', error: null });
+    mockThreadKnexRaw.mockResolvedValue({
+      rows: [{ sessionId: 17, parts: [{ type: 'text', text: 'a'.repeat(200) }] }],
+    });
+    mockSingleSessionRelations(source, []);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.title).toHaveLength(80);
+    expect(record.session.title!.endsWith('…')).toBe(true);
+  });
+
   it('falls back to session activity when no conversations exist', async () => {
     const session = buildSession({
       defaultThreadId: null,
@@ -733,7 +806,6 @@ describe('AgentSessionReadService', () => {
       chatStatus: AgentChatStatus.ERROR,
       sessionKind: AgentSessionKind.ENVIRONMENT,
       workspaceStatus: AgentWorkspaceStatus.FAILED,
-      endedAt: '2026-04-24T12:04:00.000Z',
     });
     const source = buildSource();
     const sandbox = buildSandbox({ error: failure });
@@ -749,7 +821,7 @@ describe('AgentSessionReadService', () => {
     const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
 
     expect(record.session.status).toBe('error');
-    expect(record.session.endedAt).toBe('2026-04-24T12:04:00.000Z');
+    expect(record.session.archivedAt).toBeNull();
     expect(record.source.status).toBe('failed');
     expect(record.sandbox.status).toBe('failed');
     expect(record.sandbox.providerState).toEqual({
@@ -771,7 +843,6 @@ describe('AgentSessionReadService', () => {
       sessionKind: AgentSessionKind.SANDBOX,
       buildKind: 'sandbox',
       workspaceStatus: AgentWorkspaceStatus.FAILED,
-      endedAt: '2026-04-24T12:04:00.000Z',
     });
     const source = buildSource({
       adapter: 'lifecycle_fork',
@@ -782,7 +853,7 @@ describe('AgentSessionReadService', () => {
     const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
 
     expect(record.session.status).toBe('error');
-    expect(record.session.endedAt).toBe('2026-04-24T12:04:00.000Z');
+    expect(record.session.archivedAt).toBeNull();
     expect(record.source.adapter).toBe('lifecycle_fork');
     expect(record.source.status).toBe('failed');
     expect(record.sandbox.status).toBe('failed');
@@ -812,7 +883,6 @@ describe('AgentSessionReadService', () => {
       chatStatus: AgentChatStatus.ERROR,
       sessionKind: AgentSessionKind.ENVIRONMENT,
       workspaceStatus: AgentWorkspaceStatus.FAILED,
-      endedAt: '2026-04-24T12:04:00.000Z',
     });
     const source = buildSource();
     const sandbox = buildSandbox({

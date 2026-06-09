@@ -26,6 +26,7 @@ interface GitHubTokenCheck {
   keycloakGithubUsername: string | null;
   tokenFetched: boolean;
   tokenUsable: boolean;
+  canApproveRepairs: boolean;
   githubUserId: number | null;
   githubLogin: string | null;
   matchesKeycloakUsername: boolean | null;
@@ -56,6 +57,7 @@ const getHandler = async (req: NextRequest) => {
     keycloakGithubUsername: githubUsername,
     tokenFetched: Boolean(githubToken),
     tokenUsable: false,
+    canApproveRepairs: false,
     githubUserId: null,
     githubLogin: null,
     matchesKeycloakUsername: null,
@@ -77,6 +79,7 @@ const getHandler = async (req: NextRequest) => {
     {
       ...baseResult,
       tokenUsable: probe.ok,
+      canApproveRepairs: probe.ok,
       githubUserId: probe.id,
       githubLogin,
       matchesKeycloakUsername,

@@ -98,6 +98,8 @@ export default class AgentPolicyService {
       lowerName.includes('read') ||
       lowerName.includes('list') ||
       lowerName.includes('status') ||
+      lowerName.includes('logs') ||
+      lowerName.includes('operation_wait') ||
       lowerName.includes('grep') ||
       lowerName.includes('diff')
     ) {
@@ -108,7 +110,14 @@ export default class AgentPolicyService {
       return 'workspace_write';
     }
 
-    if (lowerName.includes('exec') || lowerName.includes('bash') || lowerName.includes('command')) {
+    if (
+      lowerName.includes('exec') ||
+      lowerName.includes('bash') ||
+      lowerName.includes('command') ||
+      lowerName.includes('cancel') ||
+      lowerName.includes('service_start') ||
+      lowerName.includes('service_stop')
+    ) {
       return 'shell_exec';
     }
 
