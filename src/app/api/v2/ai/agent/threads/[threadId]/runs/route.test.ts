@@ -31,6 +31,7 @@ jest.mock('server/lib/get-user', () => {
 
 jest.mock('server/lib/agentSession/githubToken', () => ({
   resolveRequestGitHubToken: jest.fn(),
+  resolveRequestGitHubAuth: jest.fn(),
 }));
 
 jest.mock('server/services/agent/RunAdmissionService', () => ({
@@ -118,12 +119,13 @@ jest.mock('server/services/agentSession', () => ({
     canAcceptMessages: jest.fn(),
     getMessageBlockReason: jest.fn(),
     touchActivity: jest.fn(),
+    ensureSessionActive: jest.fn(),
   },
 }));
 
 import { POST } from './route';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunPlanResolver, { AgentRunPlanAgentUnavailableError } from 'server/services/agent/RunPlanResolver';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
@@ -134,7 +136,7 @@ import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import AgentSessionService from 'server/services/agentSession';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
-const mockResolveRequestGitHubToken = resolveRequestGitHubToken as jest.Mock;
+const mockResolveRequestGitHubAuth = resolveRequestGitHubAuth as jest.Mock;
 const mockCreateQueuedRunWithMessage = AgentRunAdmissionService.createQueuedRunWithMessage as jest.Mock;
 const mockResolveForRunAdmission = AgentRunPlanResolver.resolveForRunAdmission as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
@@ -144,6 +146,7 @@ const mockGetSessionSource = AgentSourceService.getSessionSource as jest.Mock;
 const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
 const mockGetOwnedSessionRecord = AgentSessionReadService.getOwnedSessionRecord as jest.Mock;
 const mockCanAcceptMessages = AgentSessionService.canAcceptMessages as jest.Mock;
+const mockEnsureSessionActive = AgentSessionService.ensureSessionActive as jest.Mock;
 const mockTouchActivity = AgentSessionService.touchActivity as jest.Mock;
 
 const customAgentRunPlanSnapshot = {
@@ -222,7 +225,11 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
-    mockResolveRequestGitHubToken.mockResolvedValue('sample-gh-token');
+    mockResolveRequestGitHubAuth.mockResolvedValue({
+      githubToken: 'sample-gh-token',
+      source: 'user',
+      githubUsername: 'sample-user',
+    });
     mockGetOwnedThreadWithSession.mockResolvedValue({
       thread: { id: 7, uuid: 'thread-1' },
       session: {
@@ -232,6 +239,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         defaultModel: 'gpt-5.4',
       },
     });
+    mockEnsureSessionActive.mockImplementation(async (session) => session);
     mockCanAcceptMessages.mockReturnValue(true);
     mockGetSessionSource.mockResolvedValue({
       uuid: 'source-1',
@@ -253,8 +261,8 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         version: 1,
         capturedAt: '2026-05-01T00:00:00.000Z',
         agent: {
-          id: 'system.freeform',
-          label: 'Free-form',
+          id: 'system.agent',
+          label: 'Lifecycle Agent',
           ownerKind: 'system',
           version: 1,
           sourceKind: 'freeform_chat',
@@ -437,8 +445,39 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     expect(response.status).toBe(201);
     expect(mockResolveForRunAdmission).toHaveBeenCalled();
     expect(mockCreateQueuedRunWithMessage).toHaveBeenCalled();
-    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        githubUsername: 'sample-user',
+        writeAuthorized: false,
+      }),
+    });
   });
+
+  it('queues submit runs with no GitHub auth when broker token resolution times out', async () => {
+    mockResolveRequestGitHubAuth.mockImplementationOnce(() => new Promise(() => {}));
+
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: 'client-message-1',
+          parts: [{ type: 'text', text: 'Summarize the sample thread' }],
+        },
+      }),
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: {
+        githubToken: null,
+        source: 'none',
+        githubUsername: null,
+        writeAuthorized: false,
+      },
+    });
+  }, 10_000);
 
   it('resolves explicit-or-default values before queueing', async () => {
     const response = await POST(
@@ -482,14 +521,21 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         runtimeOptions: { maxIterations: 12 },
         runPlanSnapshot: expect.objectContaining({
           version: 1,
-          agent: expect.objectContaining({ id: 'system.freeform' }),
+          agent: expect.objectContaining({ id: 'system.agent' }),
         }),
       })
     );
     expect(mockResolveForRunAdmission.mock.invocationCallOrder[0]).toBeLessThan(
       mockCreateQueuedRunWithMessage.mock.invocationCallOrder[0]
     );
-    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        githubUsername: 'sample-user',
+        writeAuthorized: false,
+      }),
+    });
     const body = await response.json();
     expect(body.data).toEqual(
       expect.objectContaining({
@@ -500,6 +546,25 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
           eventStream: '/api/v2/ai/agent/runs/run-1/events/stream',
           pendingActions: '/api/v2/ai/agent/threads/thread-1/pending-actions',
         },
+      })
+    );
+  });
+
+  it('accepts high configured per-run max iterations', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          parts: [{ type: 'text', text: 'Hi' }],
+        },
+        runtimeOptions: { maxIterations: 250 },
+      }),
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeOptions: { maxIterations: 250 },
       })
     );
   });
@@ -582,7 +647,14 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         runPlanSnapshot: customAgentRunPlanSnapshot,
       })
     );
-    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        githubUsername: 'sample-user',
+        writeAuthorized: false,
+      }),
+    });
     expect(body.data).toEqual(
       expect.objectContaining({
         run: expect.objectContaining({ id: 'run-1', threadId: 'thread-1', sessionId: 'session-1' }),
@@ -734,7 +806,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         message: {
           parts: [{ type: 'text', text: 'Hi' }],
         },
-        agent: { id: 'system.freeform' },
+        agent: { id: 'system.agent' },
       }),
       { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
@@ -751,7 +823,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         message: {
           parts: [{ type: 'text', text: 'Hi' }],
         },
-        agentId: 'system.freeform',
+        agentId: 'system.agent',
       }),
       { params: Promise.resolve({ threadId: 'thread-1' }) }
     );
@@ -806,7 +878,14 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        githubUsername: 'sample-user',
+        writeAuthorized: false,
+      }),
+    });
   });
 
   it('marks a newly admitted queued run failed when activity touch fails before dispatch', async () => {

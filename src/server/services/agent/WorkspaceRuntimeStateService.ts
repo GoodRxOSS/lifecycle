@@ -46,6 +46,9 @@ interface WorkspaceRuntimeStateWrite {
   runtimeLifecycle?: AgentSandboxRuntimeLifecycleMetadata | null;
   workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
   runtimePlanMetadata?: WorkspaceRuntimePlanMetadata;
+  runtimeProvider?: string;
+  providerState?: Record<string, unknown>;
+  capabilitySnapshot?: Record<string, unknown>;
 }
 
 interface WorkspaceRuntimeFailureWrite extends WorkspaceRuntimeStateWrite {
@@ -136,9 +139,9 @@ export class WorkspaceRuntimeStateService {
       if (!session) {
         throw new Error('Agent session not found');
       }
-      if (session.status === 'ended' || session.workspaceStatus === 'ended') {
+      if (session.status === 'archived') {
         throw new WorkspaceActionBlockedError('action_in_progress', 'The workspace action was superseded by cleanup.', {
-          currentAction: 'ended',
+          currentAction: 'archived',
         });
       }
 
@@ -258,9 +261,9 @@ export class WorkspaceRuntimeStateService {
     if (!session) {
       throw new Error('Agent session not found');
     }
-    if (session.status === 'ended') {
+    if (session.status === 'archived') {
       throw new WorkspaceActionBlockedError('action_in_progress', 'The workspace action was superseded by cleanup.', {
-        currentAction: 'ended',
+        currentAction: 'archived',
       });
     }
 
@@ -295,6 +298,9 @@ export class WorkspaceRuntimeStateService {
       ...(state.runtimePlanMetadata ? { runtimePlanMetadata: state.runtimePlanMetadata } : {}),
       ...(state.sandboxStatus ? { sandboxStatus: state.sandboxStatus } : {}),
       ...(state.runtimeLifecycle !== undefined ? { runtimeLifecycle: state.runtimeLifecycle } : {}),
+      ...(state.runtimeProvider ? { runtimeProvider: state.runtimeProvider } : {}),
+      ...(state.providerState ? { providerState: state.providerState } : {}),
+      ...(state.capabilitySnapshot ? { capabilitySnapshot: state.capabilitySnapshot } : {}),
     });
 
     return { session, sandbox };

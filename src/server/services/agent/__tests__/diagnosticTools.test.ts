@@ -18,21 +18,26 @@ import { buildUpdateFilePreview, shouldRequestUpdateFileApproval } from '../diag
 import type { GitHubClient } from '../tools/shared/githubClient';
 
 function buildGithubClient(currentContent: string | null): GitHubClient {
+  const octokit = {
+    request: jest.fn(async () => {
+      if (currentContent === null) {
+        throw new Error('not found');
+      }
+
+      return {
+        data: {
+          content: Buffer.from(currentContent).toString('base64'),
+        },
+      };
+    }),
+  };
   return {
     isFilePathAllowed: jest.fn(() => true),
     validateBranch: jest.fn(() => ({ valid: true })),
-    getOctokit: jest.fn(async () => ({
-      request: jest.fn(async () => {
-        if (currentContent === null) {
-          throw new Error('not found');
-        }
-
-        return {
-          data: {
-            content: Buffer.from(currentContent).toString('base64'),
-          },
-        };
-      }),
+    getOctokit: jest.fn(async () => octokit),
+    getOctokitWithAuth: jest.fn(async () => ({
+      octokit,
+      auth: { provider: 'github', source: 'app', required: false },
     })),
   } as unknown as GitHubClient;
 }
@@ -74,5 +79,27 @@ describe('diagnostic update_file previews', () => {
     );
     expect(preview.unifiedDiff).toContain('-  - name: old-service');
     expect(preview.unifiedDiff).toContain('+  - name: sample-service');
+  });
+
+  it('stamps the schema verdict on lifecycle.yaml previews so the approver sees it', async () => {
+    const githubClient = buildGithubClient('services:\n  - name: old-service\n');
+
+    const [invalidPreview] = await buildUpdateFilePreview(
+      githubClient,
+      { ...updateFileInput, new_content: 'services:\n  - name: sample-service\n    bogusField: nope\n' },
+      'tool-call-1',
+      'update_file'
+    );
+    expect(invalidPreview.schemaValidation).toEqual(
+      expect.objectContaining({ valid: false, error: expect.stringContaining('bogusField') })
+    );
+
+    const [nonConfigPreview] = await buildUpdateFilePreview(
+      githubClient,
+      { ...updateFileInput, file_path: 'Dockerfile', new_content: 'FROM node:20\n' },
+      'tool-call-2',
+      'update_file'
+    );
+    expect(nonConfigPreview.schemaValidation).toBeUndefined();
   });
 });

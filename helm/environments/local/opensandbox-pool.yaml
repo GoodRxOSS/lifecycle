@@ -1,0 +1,79 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: lifecycle-workspace-pool
+  namespace: opensandbox
+  labels:
+    app.kubernetes.io/name: lifecycle-workspace-pool
+    app.kubernetes.io/part-of: lifecycle
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lifecycle-workspace-pool
+        app.kubernetes.io/part-of: lifecycle
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: sandbox-storage
+          emptyDir: {}
+        - name: opensandbox-bin
+          emptyDir: {}
+      initContainers:
+        - name: task-executor-installer
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:v0.1.0
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              cp /workspace/server /opt/opensandbox/bin/task-executor && chmod +x /opt/opensandbox/bin/task-executor
+          volumeMounts:
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox/bin
+        - name: execd-installer
+          image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.18
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              cp ./execd /opt/opensandbox/bin/execd && cp ./bootstrap.sh /opt/opensandbox/bin/bootstrap.sh && chmod +x /opt/opensandbox/bin/execd && chmod +x /opt/opensandbox/bin/bootstrap.sh
+          volumeMounts:
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox/bin
+      containers:
+        - name: sandbox
+          image: lifecycle-workspace:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              exec /opt/opensandbox/bin/task-executor -listen-addr=0.0.0.0:5758 >/tmp/task-executor.log 2>&1
+          env:
+            - name: SANDBOX_MAIN_CONTAINER
+              value: main
+            - name: EXECD_ENVS
+              value: /opt/opensandbox/.env
+            - name: EXECD
+              value: /opt/opensandbox/bin/execd
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: '2'
+              memory: 4Gi
+          volumeMounts:
+            - name: sandbox-storage
+              mountPath: /var/lib/sandbox
+            - name: opensandbox-bin
+              mountPath: /opt/opensandbox/bin
+  capacitySpec:
+    bufferMax: 1
+    bufferMin: 1
+    poolMax: 3
+    poolMin: 1

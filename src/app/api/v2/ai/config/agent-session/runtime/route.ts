@@ -73,6 +73,12 @@ import AgentSessionConfigService from 'server/services/agentSessionConfig';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '409':
+ *         description: Removing a backend block that non-ended workspace sandboxes still reference
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (req: NextRequest) => {
   const config = await AgentSessionConfigService.getInstance().getGlobalRuntimeConfig();
@@ -105,6 +111,6 @@ const putHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-// Org-wide control-plane mutation — admin only.
+// Admin only: carries org-wide runtime settings, including workspace-backend connection details.
+export const GET = createApiHandler(getHandler, { roles: ['admin'] });
 export const PUT = createApiHandler(putHandler, { roles: ['admin'] });

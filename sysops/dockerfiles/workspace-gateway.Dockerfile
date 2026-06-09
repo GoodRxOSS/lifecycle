@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM node:20-slim
+FROM node:22-slim
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV NODE_ENV=production
@@ -28,6 +28,8 @@ COPY sysops/workspace-gateway/package.json /opt/lifecycle-workspace-gateway/pack
 RUN npm install --omit=dev
 
 COPY sysops/workspace-gateway/index.mjs /opt/lifecycle-workspace-gateway/index.mjs
+COPY sysops/workspace-gateway/auth.mjs /opt/lifecycle-workspace-gateway/auth.mjs
+COPY sysops/workspace-gateway/agentEnv.mjs /opt/lifecycle-workspace-gateway/agentEnv.mjs
 COPY sysops/workspace-gateway/schema.mjs /opt/lifecycle-workspace-gateway/schema.mjs
 COPY sysops/workspace-gateway/skills-lib.mjs /opt/lifecycle-workspace-gateway/skills-lib.mjs
 COPY sysops/workspace-gateway/skills-bootstrap.mjs /opt/lifecycle-workspace-gateway/skills-bootstrap.mjs

@@ -15,31 +15,72 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../types';
-import { GitHubClient } from '../shared/githubClient';
+import { ToolExecutionContext, ToolResult } from '../types';
+import { GitHubClient, GitHubUserAuthRequiredError, isGitHubUserAuthorizationError } from '../shared/githubClient';
+import { GITHUB_USER_AUTH_REQUIRED_CODE } from 'server/services/agent/githubAuth';
+import { YamlConfigParser } from 'server/lib/yamlConfigParser';
+import { YamlConfigValidator } from 'server/lib/yamlConfigValidator';
+import { renderLifecycleSchemaSlices } from 'server/lib/yamlSchemas/schemaSlice';
 
 // TODO: Make this configurable in db
 export const MAX_LINES_REMOVED = 10;
 export const MAX_LINES_CHANGED = 150;
+const MAX_EXACT_DIFF_MATRIX_CELLS = 1_000_000;
 
 function normalizeRepoPath(filePath: string): string {
   return filePath.trim().replace(/^\/+/, '').replace(/^\.\//, '');
+}
+
+export function isLifecycleConfigPath(filePath: string): boolean {
+  const base = filePath.split('/').pop() || filePath;
+  return base === 'lifecycle.yaml' || base === 'lifecycle.yml';
+}
+
+/** Validates proposed lifecycle.yaml content so an invalid config never reaches the PR branch. */
+export function validateLifecycleConfigContent(content: string): { valid: boolean; error?: string } {
+  try {
+    const config = new YamlConfigParser().parseYamlConfigFromString(content);
+    new YamlConfigValidator().validate(config?.version, config);
+    return { valid: true };
+  } catch (error: any) {
+    return { valid: false, error: error?.message || String(error) };
+  }
+}
+
+function countDiffLines(oldContent: string, newContent: string): { additions: number; deletions: number } {
+  if (oldContent === newContent) {
+    return { additions: 0, deletions: 0 };
+  }
+
+  const oldLines = oldContent.split('\n');
+  const newLines = newContent.split('\n');
+
+  // Guard the O(n*m) LCS matrix; oversized inputs fall back to a conservative full-rewrite count.
+  if (oldLines.length * newLines.length > MAX_EXACT_DIFF_MATRIX_CELLS) {
+    return { additions: newLines.length, deletions: oldLines.length };
+  }
+
+  const dp = Array.from({ length: oldLines.length + 1 }, () => Array(newLines.length + 1).fill(0));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      dp[oldIndex][newIndex] =
+        oldLines[oldIndex] === newLines[newIndex]
+          ? dp[oldIndex + 1][newIndex + 1] + 1
+          : Math.max(dp[oldIndex + 1][newIndex], dp[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const lcsLength = dp[0][0];
+  return { additions: newLines.length - lcsLength, deletions: oldLines.length - lcsLength };
 }
 
 export function validateDiff(
   oldContent: string,
   newContent: string
 ): { valid: boolean; error?: string; linesRemoved: number; linesChanged: number } {
-  const oldLines = oldContent.split('\n');
-  const newLines = newContent.split('\n');
-  const linesRemoved = Math.max(0, oldLines.length - newLines.length);
-
-  let linesChanged = 0;
-  const minLen = Math.min(oldLines.length, newLines.length);
-  for (let i = 0; i < minLen; i++) {
-    if (oldLines[i] !== newLines[i]) linesChanged++;
-  }
-  linesChanged += Math.abs(oldLines.length - newLines.length);
+  const { additions, deletions } = countDiffLines(oldContent, newContent);
+  const linesRemoved = deletions;
+  const linesChanged = additions + deletions;
 
   if (linesRemoved > MAX_LINES_REMOVED) {
     return {
@@ -83,30 +124,20 @@ export class UpdateFileTool extends BaseTool {
           commit_message: { type: 'string', description: 'Commit message describing the change' },
         },
         required: ['repository_owner', 'repository_name', 'branch', 'file_path', 'new_content', 'commit_message'],
-      },
-      ToolSafetyLevel.DANGEROUS,
-      'github'
+      }
     );
   }
 
-  async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
-    const filePath = args.file_path as string;
-    const commitMessage = args.commit_message as string;
-    const repo = args.repository_name as string;
-    const branch = args.branch as string;
-    return {
-      title: 'Commit file change',
-      description: `Commit to ${repo}/${branch}: ${filePath}\n${commitMessage}`,
-      impact: 'This will commit changes to the repository.',
-      confirmButtonText: 'Commit',
-    };
-  }
-
-  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
+    let auth: ToolResult['auth'];
     try {
       const owner = args.repository_owner as string;
       const repo = args.repository_name as string;
@@ -115,23 +146,34 @@ export class UpdateFileTool extends BaseTool {
       const newContent = args.new_content as string;
       const commitMessage = args.commit_message as string;
 
+      if (!this.githubClient.isRepoAllowed(owner, repo)) {
+        return this.createErrorResult(
+          `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be modified.`,
+          'REPO_NOT_ALLOWED'
+        );
+      }
+
       if (!this.githubClient.isFilePathAllowed(filePath, 'write')) {
         return this.createErrorResult(
           `SAFETY ERROR: File path "${filePath}" is not allowed for modification. Allowed files include:
         1) Configuration files (lifecycle.yaml, lifecycle.yml)
         2) Files explicitly referenced in lifecycle configuration
         3) Additional paths configured via allowedWritePatterns in the agent runtime config`,
-          'FILE_PATH_NOT_ALLOWED',
-          false
+          'FILE_PATH_NOT_ALLOWED'
         );
       }
 
       const branchValidation = this.githubClient.validateBranch(branch);
       if (!branchValidation.valid) {
-        return this.createErrorResult(branchValidation.error!, 'BRANCH_VALIDATION_FAILED', false);
+        return this.createErrorResult(branchValidation.error!, 'BRANCH_VALIDATION_FAILED');
       }
 
-      const octokit = await this.githubClient.getOctokit('agent-runtime-update-file');
+      const octokitWithAuth = await this.githubClient.getOctokitWithAuth('agent-runtime-update-file', {
+        requireUserAuth: true,
+        toolCallId: context?.toolCallId,
+      });
+      const octokit = octokitWithAuth.octokit;
+      auth = octokitWithAuth.auth;
 
       let currentFileSha: string | undefined;
       let currentFileContent: string | undefined;
@@ -151,24 +193,43 @@ export class UpdateFileTool extends BaseTool {
 
       const contentToCommit = newContent.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
 
-      if (currentFileContent !== undefined) {
-        if (currentFileContent === contentToCommit) {
-          const result = {
-            success: true,
-            changed: false,
-            commit_created: false,
-            message: `No changes to ${filePath}; content already matches ${branch}.`,
-            repository: `${owner}/${repo}`,
-            branch,
-            file_path: filePath,
+      if (currentFileContent !== undefined && currentFileContent === contentToCommit) {
+        const result = {
+          success: true,
+          changed: false,
+          commit_created: false,
+          message: `No changes to ${filePath}; content already matches ${branch}.`,
+          repository: `${owner}/${repo}`,
+          branch,
+          file_path: filePath,
+        };
+
+        return {
+          ...this.createSuccessResult(JSON.stringify(result), `No changes to ${filePath}\nNo commit created.`),
+          auth,
+        };
+      }
+
+      if (isLifecycleConfigPath(filePath)) {
+        const validation = validateLifecycleConfigContent(contentToCommit);
+        if (!validation.valid) {
+          const slices = renderLifecycleSchemaSlices(validation.error || '');
+          return {
+            ...this.createErrorResult(
+              `The proposed ${filePath} is not a valid Lifecycle config and was NOT committed. Fix the content, verify it with validate_lifecycle_config, and resubmit. Validation error:\n${
+                validation.error
+              }${slices ? `\nRelevant schema for the failing paths:\n${slices}` : ''}`,
+              'LIFECYCLE_CONFIG_INVALID'
+            ),
+            auth,
           };
-
-          return this.createSuccessResult(JSON.stringify(result), `No changes to ${filePath}\nNo commit created.`);
         }
+      }
 
+      if (currentFileContent !== undefined) {
         const diffResult = validateDiff(currentFileContent, contentToCommit);
         if (!diffResult.valid) {
-          return this.createErrorResult(diffResult.error!, 'DIFF_VALIDATION_FAILED', false);
+          return { ...this.createErrorResult(diffResult.error!, 'DIFF_VALIDATION_FAILED'), auth };
         }
       }
 
@@ -193,9 +254,21 @@ export class UpdateFileTool extends BaseTool {
       };
 
       const displayContent = `${currentFileSha ? 'Updated' : 'Created'} ${filePath}\nCommit: ${commitUrl}`;
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return { ...this.createSuccessResult(JSON.stringify(result), displayContent), auth };
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Failed to commit changes', 'EXECUTION_ERROR');
+      if (error instanceof GitHubUserAuthRequiredError) {
+        return { ...this.createErrorResult(error.message, GITHUB_USER_AUTH_REQUIRED_CODE), auth: error.auth };
+      }
+      if (isGitHubUserAuthorizationError(error)) {
+        return {
+          ...this.createErrorResult(
+            'GitHub authorization is required to apply this repair. Reconnect GitHub and approve again.',
+            GITHUB_USER_AUTH_REQUIRED_CODE
+          ),
+          auth,
+        };
+      }
+      return { ...this.createErrorResult(error.message || 'Failed to commit changes', 'EXECUTION_ERROR'), auth };
     }
   }
 }

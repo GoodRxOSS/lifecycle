@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { ToolLoopAgent, convertToModelMessages, generateText } from 'ai';
+import type { ToolLoopAgentSettings, ToolSet } from 'ai';
 import { randomBytes } from 'crypto';
 import os from 'os';
+import type { Transaction } from 'objection';
 import type AgentRun from 'server/models/AgentRun';
 import type AgentSession from 'server/models/AgentSession';
 import type AgentThread from 'server/models/AgentThread';
@@ -31,32 +32,39 @@ import AgentCapabilityService from './CapabilityService';
 import AgentMessageStore from './MessageStore';
 import { AgentRunObservabilityTracker, buildMessageObservabilityMetadataPatch } from './observability';
 import AgentProviderRegistry from './ProviderRegistry';
-import AgentRunQueueService from './RunQueueService';
+import AgentRunQueueService, { type AgentRunExecuteJob } from './RunQueueService';
+import ApprovalGitHubAuthHandoffService from './ApprovalGitHubAuthHandoffService';
+import type { AgentRequestGitHubAuth } from './githubAuth';
+import { buildAgentRequestGitHubAuthFromToken, normalizeAgentRequestGitHubAuth } from './githubAuth';
 import AgentRunService from './RunService';
 import AgentRunPlanResolver from './RunPlanResolver';
 import AgentSourceService from './SourceService';
 import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
+import { getToolApprovalAllowlist } from './ThreadService';
+import { repairAgentToolName } from './toolCallRepair';
 import type { ResolvedAgentCapabilityAccess } from './PolicyService';
-import type { AgentFileChangeData, AgentUIMessage } from './types';
+import type { AgentFileChangeData, AgentRunUsageSummary, AgentUIMessage } from './types';
 import { applyApprovalResponsesToFileChangeParts, buildResultFileChanges } from './fileChanges';
 import { AgentRunTerminalFailure, SessionWorkspaceGatewayUnavailableError } from './errors';
 import { limitDurablePayloadValue } from './payloadLimits';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
-import { isReadOnlyDebugIntent, resolveDebugIntent, resolveDebugToolLoopControls } from './debugToolLoopControls';
-import { buildDebugRepairObservationText } from './debugRepairObservation';
-import { assistantRunHasText, sanitizeDebugRepairAssistantMessages } from './debugResponseSanitizer';
-import { resolveThinkingProviderOptions } from './thinkingProviderOptions';
-
-const DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT = [
-  'You are completing a read-only Debug diagnosis after the evidence-gathering tool loop reached its tool-step budget.',
-  'Do not call tools, propose edits, or claim a fix was applied.',
-  'Use only the evidence already present in the transcript.',
-  'Answer with: likely cause, evidence, confidence, missing evidence if any, and concise next choices.',
-].join(' ');
-
-const DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT =
-  'Write the final diagnostic answer now. Do not continue investigating or call tools.';
+import { resolveDebugIntent, resolveDebugToolLoopControls } from './debugToolLoopControls';
+import { buildWorkspaceCorePromptLines } from 'server/services/workspaceCoreMcp/prompt';
+import {
+  extractDebugRepairCommitFromToolExecutions,
+  extractDebugRepairCommitObservation,
+} from './debugRepairObservation';
+import EnvironmentWatchService from './EnvironmentWatchService';
+import { sanitizeDebugRepairAssistantMessages } from './debugResponseSanitizer';
+import {
+  applyAnthropicMessageCacheBreakpoint,
+  resolveAgentInstructions,
+  resolveThinkingProviderOptions,
+} from './thinkingProviderOptions';
+import { loadAiSdk } from './aiSdkRuntime';
+import { buildAiToolApprovalConfig } from './capabilityToolHelpers';
+import { buildAgentRuntimeContext, type AgentRuntimeContext } from './runtimeContext';
 
 const DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT = [
   'You are closing out a Debug repair run after the tool loop reached its step budget without a confirmed fix.',
@@ -166,6 +174,47 @@ function appendAssistantTextForRun(messages: AgentUIMessage[], runId: string, te
   return nextMessages;
 }
 
+type AgentLoopOutcome = 'paused_for_approval' | 'budget_exhausted' | 'finished';
+
+function findPendingApprovalAction({ threadId, runId, trx }: { threadId: number; runId: number; trx?: Transaction }) {
+  return AgentPendingAction.query(trx)
+    .where({
+      threadId,
+      runId,
+      kind: 'tool_approval',
+      status: 'pending',
+    })
+    .first()
+    .then((action) => (action?.status === 'pending' ? action : null));
+}
+
+function runHasPendingApprovalRequest(messages: AgentUIMessage[], runId: string): boolean {
+  return messages.some(
+    (message) =>
+      message.role === 'assistant' &&
+      message.metadata?.runId === runId &&
+      message.parts.some((part) => (part as { state?: unknown }).state === 'approval-requested')
+  );
+}
+
+// The SDK reports finishReason 'tool-calls' both for an approval pause and for budget exhaustion, so the
+// outcome must be derived structurally from the final messages.
+function classifyLoopOutcome({
+  finishReason,
+  messages,
+  runId,
+}: {
+  finishReason?: string;
+  messages: AgentUIMessage[];
+  runId: string;
+}): AgentLoopOutcome {
+  if (finishReason !== 'tool-calls') {
+    return 'finished';
+  }
+
+  return runHasPendingApprovalRequest(messages, runId) ? 'paused_for_approval' : 'budget_exhausted';
+}
+
 function calculateDurationMs(startedAt?: string | null, completedAt?: string | null): number | null {
   if (!startedAt || !completedAt) {
     return null;
@@ -180,26 +229,60 @@ function calculateDurationMs(startedAt?: string | null, completedAt?: string | n
   return Math.max(0, completedAtMs - startedAtMs);
 }
 
+function stripToolResultAuth(result: unknown): unknown {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || !('auth' in result)) {
+    return result;
+  }
+
+  const { auth: _auth, ...rest } = result as Record<string, unknown>;
+  return rest;
+}
+
 function classifyTerminalRunFailure({
   finishReason,
   maxIterations,
+  maxRunInputTokens,
+  usageSummary,
 }: {
   finishReason?: string;
   maxIterations: number;
+  maxRunInputTokens: number;
+  usageSummary?: Pick<AgentRunUsageSummary, 'steps' | 'inputTokens'> | null;
 }): AgentRunTerminalFailure | null {
   switch (finishReason) {
     case undefined:
     case 'stop':
       return null;
-    case 'tool-calls':
+    case 'tool-calls': {
+      // Two loop budgets end with finishReason 'tool-calls': the step count and the per-run input token
+      // budget. Blaming the iteration limit when the token budget fired reads as "your setting was ignored".
+      const steps = usageSummary?.steps;
+      const inputTokens = usageSummary?.inputTokens;
+      const hitIterationLimit = typeof steps === 'number' && steps >= maxIterations;
+      if (!hitIterationLimit && typeof inputTokens === 'number' && inputTokens >= maxRunInputTokens) {
+        return new AgentRunTerminalFailure({
+          code: 'run_token_budget_exceeded',
+          message: `Agent stopped after using its ${maxRunInputTokens.toLocaleString(
+            'en-US'
+          )}-token input budget for a single response.`,
+          details: {
+            finishReason,
+            maxRunInputTokens,
+            inputTokens,
+            steps: steps ?? null,
+          },
+        });
+      }
       return new AgentRunTerminalFailure({
         code: 'max_iterations_exceeded',
         message: `Agent stopped after reaching the configured iteration limit of ${maxIterations}.`,
         details: {
           finishReason,
           maxIterations,
+          steps: steps ?? null,
         },
       });
+    }
     case 'length':
       return new AgentRunTerminalFailure({
         code: 'token_limit_reached',
@@ -265,19 +348,22 @@ export default class AgentRunExecutor {
     requestedProvider,
     requestedModelId,
     requestGitHubToken,
+    requestGitHubAuth,
     existingRun,
     dispatchAttemptId,
+    dispatchReason,
     onFileChange,
   }: {
     session: AgentSession;
     thread: AgentThread;
     userIdentity: RequestUserIdentity;
-    messages: AgentUIMessage[];
     requestedProvider?: string;
     requestedModelId?: string;
     requestGitHubToken?: string | null;
+    requestGitHubAuth?: AgentRequestGitHubAuth | null;
     existingRun?: AgentRun;
     dispatchAttemptId?: string;
+    dispatchReason?: AgentRunExecuteJob['reason'];
     onFileChange?: (change: AgentFileChangeData) => Promise<void> | void;
   }) {
     const { repoFullName, approvalPolicy: contextApprovalPolicy } = await AgentCapabilityService.resolveSessionContext(
@@ -317,6 +403,7 @@ export default class AgentRunExecutor {
       selection,
       userIdentity,
     });
+    const { ToolLoopAgent, convertToModelMessages, generateText } = await loadAiSdk();
     // Reasoning is for the streaming ToolLoopAgent path only; synthesis fallbacks discard it.
     const thinkingProviderOptions = resolveThinkingProviderOptions(selection.provider, selection.modelId);
     const observabilityTracker = new AgentRunObservabilityTracker(selection);
@@ -331,16 +418,14 @@ export default class AgentRunExecutor {
       }
     };
     const effectiveSessionConfig = await AgentSessionConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const effectiveRequestGitHubAuth = normalizeAgentRequestGitHubAuth(
+      requestGitHubAuth || buildAgentRequestGitHubAuthFromToken(requestGitHubToken, 'user')
+    );
     const runMaxIterations = readRunMaxIterations(existingRun);
     const runControlPlaneConfig = {
       ...effectiveSessionConfig,
       ...(runMaxIterations ? { maxIterations: runMaxIterations } : {}),
     };
-    const sessionPrompt = await AgentSessionService.getSessionAppendSystemPrompt(
-      session.uuid,
-      repoFullName,
-      runControlPlaneConfig.appendSystemPrompt
-    );
     let run: AgentRun | null = null;
     let heartbeatTimer: NodeJS.Timeout | null = null;
 
@@ -363,7 +448,15 @@ export default class AgentRunExecutor {
         throw new Error('Agent run plan snapshot is required for execution.');
       }
 
-      const { tools, metadata: toolMetadata } = await AgentCapabilityService.buildToolSetWithMetadata({
+      const sessionAllowedToolKeys = new Set(getToolApprovalAllowlist(thread));
+
+      const {
+        tools,
+        metadata: toolMetadata,
+        toolApproval,
+        toolsContext,
+        workspaceRuntimeReady,
+      } = await AgentCapabilityService.buildToolSetWithMetadata({
         session,
         repoFullName,
         userIdentity,
@@ -373,7 +466,16 @@ export default class AgentRunExecutor {
         selectedRuntimeMcpConnectionRefs: executionRunPlan?.capabilities.selectedRuntimeMcpConnectionRefs,
         workspaceToolDiscoveryTimeoutMs: runControlPlaneConfig.workspaceToolDiscoveryTimeoutMs,
         workspaceToolExecutionTimeoutMs: runControlPlaneConfig.workspaceToolExecutionTimeoutMs,
-        requestGitHubToken,
+        // An approval resume re-enters moments after the pausing run discovered live; crash/lease
+        // recovery and fresh submits stay on live discovery.
+        workspaceToolDiscoveryMode: dispatchReason === 'approval_resolved' ? 'prefer_cached' : 'live',
+        autoProvisionWorkspace: runControlPlaneConfig.autoProvisionWorkspace,
+        agentDefinitionId: executionRunPlan?.agent.id,
+        agentSourceKind: executionRunPlan?.agent.sourceKind,
+        requestGitHubToken: effectiveRequestGitHubAuth.githubToken,
+        requestGitHubAuth: effectiveRequestGitHubAuth,
+        resolveApprovalGitHubAuth: async ({ runUuid, toolCallId }) =>
+          runUuid ? ApprovalGitHubAuthHandoffService.getByToolCallId(runUuid, toolCallId) : null,
         toolRules: runControlPlaneConfig.toolRules,
         hooks: {
           onToolStarted: async (audit) => {
@@ -397,7 +499,14 @@ export default class AgentRunExecutor {
               args: audit.args,
               status: 'running',
               safetyLevel: audit.capabilityKey,
-              approved: pendingAction?.status === 'approved' ? true : pendingAction?.status === 'denied' ? false : null,
+              approved:
+                pendingAction?.status === 'approved'
+                  ? true
+                  : pendingAction?.status === 'denied'
+                  ? false
+                  : sessionAllowedToolKeys.has(audit.toolName)
+                  ? true
+                  : null,
               startedAt: new Date().toISOString(),
             } as Partial<AgentToolExecution>);
           },
@@ -432,7 +541,8 @@ export default class AgentRunExecutor {
             await AgentToolExecution.query().patchAndFetchById(execution.id, {
               status: audit.status,
               result: {
-                value: limitDurablePayloadValue(audit.result, durability),
+                value: limitDurablePayloadValue(stripToolResultAuth(audit.result), durability),
+                ...(audit.auth ? { auth: audit.auth } : {}),
                 ...(fileChanges.length > 0 ? { fileChanges } : {}),
               },
               completedAt,
@@ -442,9 +552,17 @@ export default class AgentRunExecutor {
           onFileChange: async (change) => {
             await onFileChange?.(change);
           },
-          getActiveRunUuid: () => requireRun().uuid,
+          // Tool build runs before `run` is assigned; queue-dispatched entries know their identity via
+          // existingRun. Without it a workspace-loss reconcile claim is blocked by our own active run.
+          getActiveRunUuid: () => (run ?? existingRun)?.uuid ?? requireRun().uuid,
         },
       });
+      const sessionPrompt = await AgentSessionService.getSessionAppendSystemPrompt(
+        session.uuid,
+        repoFullName,
+        runControlPlaneConfig.appendSystemPrompt,
+        toolMetadata
+      );
 
       const activeExistingRun = existingRun;
       if (activeExistingRun) {
@@ -529,21 +647,53 @@ export default class AgentRunExecutor {
         }, resolveHeartbeatIntervalMs(runExecutionLeaseMs));
         heartbeatTimer.unref?.();
       }
+      // The tool build already probed (and possibly reconciled) the runtime; reuse its verdict instead of
+      // re-reading a session row that may predate the reconcile.
+      const workspaceReadyAtBuild = workspaceRuntimeReady;
+      // Only a freeform run that provisions mid-loop needs its frozen prompt refreshed to name the workspace
+      // tools; ready or non-freeform runs already name them at bootstrap (or never gain them).
+      const workspaceCorePromptLines =
+        executionRunPlan?.agent.sourceKind === 'freeform_chat' && !workspaceReadyAtBuild
+          ? buildWorkspaceCorePromptLines({
+              approvalPolicy,
+              toolRules: runControlPlaneConfig.toolRules,
+              runtimeToolMetadata: toolMetadata,
+            })
+          : [];
+      const workspaceReadyInstructions = workspaceCorePromptLines.length
+        ? [
+            'The Lifecycle workspace is now ready. Equipped tools:',
+            ...workspaceCorePromptLines.map((line) => `  ${line}`),
+          ].join('\n')
+        : undefined;
       const loopControls = resolveDebugToolLoopControls({
         runPlanSnapshot: executionRunPlan,
         tools,
         toolMetadata,
         maxIterations: runControlPlaneConfig.maxIterations,
+        maxRunInputTokens: runControlPlaneConfig.maxRunInputTokens,
+        // Resume-after-provision carries a stale freeform snapshot; the live session is the ground truth.
+        workspaceReady: workspaceReadyAtBuild,
+        workspaceReadyInstructions,
+      });
+      const runtimeContext = buildAgentRuntimeContext({
+        session,
+        thread,
+        run: activeRun,
+        userIdentity,
+        repoFullName,
+        provider: selection.provider,
+        modelId: selection.modelId,
+        approvalPolicy,
+        runPlanSnapshot: executionRunPlan,
       });
       const resolvedInstructionTexts = readResolvedInstructionTexts(executionRunPlan);
-      // Tools-off synthesis of the final answer after the loop hits its step budget.
-      const synthesizeDebugFinalAnswer = async (
+      // Tools-off synthesis of a final summary after a repair loop burns its budget without pausing or committing.
+      const synthesizeRepairSummaryAnswer = async (
         messages: AgentUIMessage[],
-        synthesisSystemPrompt: string,
-        synthesisUserPrompt: string,
         abortSignal?: AbortSignal
       ): Promise<string | null> => {
-        if (abortSignal?.aborted) {
+        if (abortSignal?.aborted || resolveDebugIntent(executionRunPlan) !== 'repair') {
           return null;
         }
 
@@ -557,24 +707,27 @@ export default class AgentRunExecutor {
           );
           const result = await generateText({
             model,
-            system: buildSystemPrompt([
+            instructions: buildSystemPrompt([
               runControlPlaneConfig.systemPrompt,
               ...resolvedInstructionTexts,
               executionRunPlan?.prompt.instructionAddendum || undefined,
               sessionPrompt,
-              synthesisSystemPrompt,
+              DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT,
             ]),
-            messages: [...modelMessages, { role: 'user', content: synthesisUserPrompt }],
+            messages: [...modelMessages, { role: 'user', content: DEBUG_REPAIR_SYNTHESIS_USER_PROMPT }],
             toolChoice: 'none',
             abortSignal,
           });
+          const finalStep = (result as { finalStep?: { providerMetadata?: unknown; response?: unknown } }).finalStep;
           observabilityTracker.addGeneration({
-            usage: result.totalUsage,
-            providerMetadata: result.providerMetadata,
+            usage: result.usage,
+            providerMetadata: (finalStep?.providerMetadata ?? result.providerMetadata) as
+              | Parameters<AgentRunObservabilityTracker['addGeneration']>[0]['providerMetadata']
+              | undefined,
             finishReason: result.finishReason,
             rawFinishReason: result.rawFinishReason,
             warnings: result.warnings,
-            response: result.response,
+            response: finalStep?.response ?? result.response,
           });
 
           return result.text.trim() || null;
@@ -587,52 +740,62 @@ export default class AgentRunExecutor {
           return null;
         }
       };
-      const synthesizeReadOnlyDebugAnswer = async (
-        messages: AgentUIMessage[],
-        abortSignal?: AbortSignal
-      ): Promise<string | null> => {
-        const debugIntent = resolveDebugIntent(executionRunPlan);
-        if (!debugIntent || !isReadOnlyDebugIntent(debugIntent)) {
-          return null;
-        }
-
-        return synthesizeDebugFinalAnswer(
-          messages,
-          DEBUG_READ_ONLY_SYNTHESIS_SYSTEM_PROMPT,
-          DEBUG_READ_ONLY_SYNTHESIS_USER_PROMPT,
-          abortSignal
-        );
-      };
-      const synthesizeRepairSummaryAnswer = async (
-        messages: AgentUIMessage[],
-        abortSignal?: AbortSignal
-      ): Promise<string | null> => {
-        const debugIntent = resolveDebugIntent(executionRunPlan);
-        if (debugIntent !== 'repair') {
-          return null;
-        }
-
-        return synthesizeDebugFinalAnswer(
-          messages,
-          DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT,
-          DEBUG_REPAIR_SYNTHESIS_USER_PROMPT,
-          abortSignal
-        );
-      };
-      const agent = new ToolLoopAgent({
+      // Rolling last-message cache breakpoint (Anthropic only): each step re-reads the growing
+      // transcript at cache price instead of re-billing it as fresh input.
+      const basePrepareStep = loopControls.prepareStep;
+      const prepareStep: typeof basePrepareStep =
+        selection.provider === 'anthropic'
+          ? async (options) => {
+              const result = (await basePrepareStep?.(options)) ?? {};
+              const stepMessages = result.messages ?? options.messages;
+              return stepMessages
+                ? { ...result, messages: applyAnthropicMessageCacheBreakpoint(stepMessages) }
+                : result;
+            }
+          : basePrepareStep;
+      const agentSettings: ToolLoopAgentSettings<never, ToolSet, AgentRuntimeContext> = {
         model,
-        providerOptions: thinkingProviderOptions,
-        instructions: buildSystemPrompt([
-          runControlPlaneConfig.systemPrompt,
-          ...resolvedInstructionTexts,
-          executionRunPlan?.prompt.instructionAddendum || undefined,
-          sessionPrompt,
-        ]),
+        providerOptions: thinkingProviderOptions as ToolLoopAgentSettings<
+          never,
+          ToolSet,
+          AgentRuntimeContext
+        >['providerOptions'],
+        instructions: resolveAgentInstructions(
+          selection.provider,
+          buildSystemPrompt([
+            runControlPlaneConfig.systemPrompt,
+            ...resolvedInstructionTexts,
+            executionRunPlan?.prompt.instructionAddendum || undefined,
+            sessionPrompt,
+          ])
+        ),
         tools,
+        runtimeContext,
+        toolsContext: toolsContext as never,
+        toolApproval: buildAiToolApprovalConfig(toolApproval, {
+          autoApprovedToolKeys: sessionAllowedToolKeys,
+        }),
         activeTools: loopControls.activeTools,
         stopWhen: loopControls.stopWhen,
-        prepareStep: loopControls.prepareStep,
-        onStepFinish: async (step) => {
+        prepareStep,
+        // Gemini often invents tool namespaces (e.g. default_api:mcp__workspace_core__exec); remap the
+        // mangled name back to the real key so the call runs instead of spiralling on NoSuchToolError.
+        // Repairs resolve against the step's ACTIVE set (the callback argument), never the full registry —
+        // a repair into a stripped tool would just fail re-parse, and must not look like a gating bypass.
+        experimental_repairToolCall: async ({ toolCall, tools: stepActiveTools, error }) => {
+          if ((error as { name?: string })?.name !== 'AI_NoSuchToolError') {
+            return null;
+          }
+          const repairedName = repairAgentToolName(toolCall.toolName, Object.keys(stepActiveTools ?? {}));
+          if (!repairedName) {
+            return null;
+          }
+          getLogger().info(
+            `AgentExec: repaired tool name ${toolCall.toolName} -> ${repairedName} runId=${requireRun().uuid}`
+          );
+          return { ...toolCall, toolName: repairedName };
+        },
+        onStepEnd: async (step) => {
           try {
             const usageSummary = observabilityTracker.updateFromStep({
               usage: (step as { usage?: unknown }).usage as
@@ -666,12 +829,14 @@ export default class AgentRunExecutor {
             );
           }
         },
-        onFinish: (event) => {
+        onEnd: (event) => {
+          const finalStep = (event as { finalStep?: { providerMetadata?: unknown; response?: unknown } }).finalStep;
           observabilityTracker.finalize({
-            usage: (event as { totalUsage?: unknown }).totalUsage as
+            usage: (event as { usage?: unknown }).usage as
               | Parameters<AgentRunObservabilityTracker['finalize']>[0]['usage']
               | undefined,
-            providerMetadata: (event as { providerMetadata?: unknown }).providerMetadata as
+            providerMetadata: (finalStep?.providerMetadata ??
+              (event as { providerMetadata?: unknown }).providerMetadata) as
               | Parameters<AgentRunObservabilityTracker['finalize']>[0]['providerMetadata']
               | undefined,
             steps: Array.isArray((event as { steps?: unknown[] }).steps)
@@ -688,12 +853,13 @@ export default class AgentRunExecutor {
             warnings: Array.isArray((event as { warnings?: unknown[] }).warnings)
               ? (event as { warnings: unknown[] }).warnings
               : undefined,
-            response: (event as { response?: unknown }).response as
+            response: (finalStep?.response ?? (event as { response?: unknown }).response) as
               | Parameters<AgentRunObservabilityTracker['finalize']>[0]['response']
               | undefined,
           });
         },
-      });
+      };
+      const agent = new ToolLoopAgent(agentSettings);
 
       return {
         run: activeRun,
@@ -702,6 +868,7 @@ export default class AgentRunExecutor {
         selection,
         approvalPolicy,
         toolRules: runControlPlaneConfig.toolRules,
+        toolMetadata,
         onStreamFinish: async ({
           messages: updatedMessages,
           finishReason,
@@ -721,48 +888,54 @@ export default class AgentRunExecutor {
 
             let effectiveMessages = updatedMessages;
             let effectiveFinishReason = finishReason;
-            if (finishReason === 'tool-calls' && synthesisAllowed) {
-              const synthesizedAnswer = await synthesizeReadOnlyDebugAnswer(updatedMessages, controller.signal);
-              if (synthesizedAnswer) {
-                effectiveMessages = appendAssistantTextForRun(updatedMessages, activeRun.uuid, synthesizedAnswer);
-                effectiveFinishReason = 'stop';
-              }
-            }
-            if (executionRunPlan?.agent.id === 'system.debug' && executionRunPlan.debug?.resolvedIntent === 'repair') {
+            const structuralLoopOutcome = classifyLoopOutcome({
+              finishReason,
+              messages: updatedMessages,
+              runId: activeRun.uuid,
+            });
+            const streamPersistedApprovalPending =
+              structuralLoopOutcome === 'budget_exhausted'
+                ? await findPendingApprovalAction({
+                    threadId: thread.id,
+                    runId: activeRun.id,
+                  })
+                : null;
+            const loopOutcome = streamPersistedApprovalPending ? 'paused_for_approval' : structuralLoopOutcome;
+            if (resolveDebugIntent(executionRunPlan) === 'repair') {
               effectiveMessages = sanitizeDebugRepairAssistantMessages(effectiveMessages, activeRun.uuid);
             }
-            let hasDebugRepairObservation = false;
-            try {
-              const repairObservationText = await buildDebugRepairObservationText({
-                session,
-                messages: effectiveMessages,
-                runPlanSnapshot: executionRunPlan,
-              });
-              if (repairObservationText) {
-                hasDebugRepairObservation = true;
-                if (!assistantRunHasText(effectiveMessages, activeRun.uuid, repairObservationText)) {
-                  effectiveMessages = appendAssistantTextForRun(
-                    effectiveMessages,
-                    activeRun.uuid,
-                    repairObservationText
+            // A paused run resumes later: no watch and no synthesis while the approval card is pending.
+            if (loopOutcome !== 'paused_for_approval') {
+              if (resolveDebugIntent(executionRunPlan) === 'repair' && session.buildUuid) {
+                try {
+                  const repairCommit =
+                    extractDebugRepairCommitObservation(effectiveMessages) ||
+                    (await extractDebugRepairCommitFromToolExecutions(activeRun.id));
+                  // A created commit means a webhook rebuild is expected; the watch posts environment-state
+                  // events as it progresses. changed:false means no commit and nothing to watch.
+                  if (repairCommit && repairCommit.changed !== false && repairCommit.commitCreated !== false) {
+                    void EnvironmentWatchService.scheduleEnvironmentWatch({
+                      buildUuid: session.buildUuid,
+                      threadUuid: thread.uuid,
+                      sessionUuid: session.uuid,
+                      reason: 'repair_commit',
+                      commitUrl: repairCommit.commitUrl || null,
+                    });
+                  }
+                } catch (error) {
+                  getLogger().warn(
+                    { error, runId: activeRun.uuid },
+                    `AgentExec: repair watch scheduling failed runId=${activeRun.uuid}`
                   );
                 }
               }
-            } catch (error) {
-              getLogger().warn(
-                { error, runId: activeRun.uuid },
-                `AgentExec: debug repair observation failed runId=${activeRun.uuid}`
-              );
-            }
-            if (hasDebugRepairObservation && effectiveFinishReason === 'tool-calls') {
-              effectiveFinishReason = 'stop';
-            }
-            // Repair run hit its budget with no commit observation: synthesize a summary instead of failing blank.
-            if (!hasDebugRepairObservation && effectiveFinishReason === 'tool-calls' && synthesisAllowed) {
-              const repairSummary = await synthesizeRepairSummaryAnswer(effectiveMessages, controller.signal);
-              if (repairSummary) {
-                effectiveMessages = appendAssistantTextForRun(effectiveMessages, activeRun.uuid, repairSummary);
-                effectiveFinishReason = 'stop';
+              // Repair run hit its budget: synthesize a summary instead of failing blank.
+              if (loopOutcome === 'budget_exhausted' && synthesisAllowed) {
+                const repairSummary = await synthesizeRepairSummaryAnswer(effectiveMessages, controller.signal);
+                if (repairSummary) {
+                  effectiveMessages = appendAssistantTextForRun(effectiveMessages, activeRun.uuid, repairSummary);
+                  effectiveFinishReason = 'stop';
+                }
               }
             }
 
@@ -782,8 +955,9 @@ export default class AgentRunExecutor {
             const terminalFailure = classifyTerminalRunFailure({
               finishReason: effectiveFinishReason,
               maxIterations: loopControls.effectiveMaxIterations,
+              maxRunInputTokens: runControlPlaneConfig.maxRunInputTokens,
+              usageSummary: observabilitySummary,
             });
-
             const finalizedRun = await AgentRunService.finalizeRunForExecutionOwner(
               activeRun.uuid,
               activeExecutionOwner,
@@ -798,10 +972,19 @@ export default class AgentRunExecutor {
                   messages: messagesWithObservability,
                   approvalPolicy,
                   toolRules: runControlPlaneConfig.toolRules,
+                  toolMetadata,
                   trx,
                 });
+                const pendingApprovalAction =
+                  approvalSync.pendingActions.length > 0
+                    ? approvalSync.pendingActions[0]
+                    : await findPendingApprovalAction({
+                        threadId: thread.id,
+                        runId: run.id,
+                        trx,
+                      });
 
-                if (approvalSync.pendingActions.length > 0) {
+                if (pendingApprovalAction) {
                   return {
                     status: 'waiting_for_approval',
                     patch: {
@@ -842,8 +1025,11 @@ export default class AgentRunExecutor {
               { dispatchAttemptId }
             );
             if (finalizedRun.status === 'queued') {
+              const approvalAuth =
+                (await ApprovalGitHubAuthHandoffService.getFirstForRun(finalizedRun.uuid).catch(() => null)) ||
+                effectiveRequestGitHubAuth;
               await AgentRunQueueService.enqueueRun(finalizedRun.uuid, 'approval_resolved', {
-                githubToken: requestGitHubToken,
+                githubAuth: approvalAuth,
               }).catch((error) => {
                 getLogger().warn(
                   { error, runId: finalizedRun.uuid },

@@ -1,6 +1,9 @@
 {
   "name": "lifecycle",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=22"
+  },
   "cacheDirectories": [
     "node_modules",
     "vendor"
@@ -13,7 +16,7 @@
     "start": "NEXT_MANUAL_SIG_HANDLE=true NODE_ENV=production node -r ./dd-trace.js .next/ws-server.js",
     "run-prod": "port=5001 pnpm run start",
     "knex": "pnpm run knex",
-    "test": "NODE_ENV=test jest --maxWorkers=75%",
+    "test": "NODE_ENV=test jest --maxWorkers=75% && node --test sysops/workspace-gateway/*.test.mjs",
     "lint": "eslint --ext .ts src",
     "lint:fix": "pnpm run lint --fix",
     "ts-check": "tsc --project tsconfig.json",
@@ -28,10 +31,10 @@
     "eval:compare": "ts-node eval/compare.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.66",
-    "@ai-sdk/google": "^3.0.58",
-    "@ai-sdk/mcp": "^1.0.33",
-    "@ai-sdk/openai": "^3.0.50",
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/google": "^4.0.0",
+    "@ai-sdk/mcp": "^2.0.0",
+    "@ai-sdk/openai": "^4.0.0",
     "@aws-sdk/client-s3": "^3.1000.0",
     "@heroui/react": "^2.8.5",
     "@kubernetes/client-node": "^0.22.3",
@@ -39,7 +42,7 @@
     "@octokit/auth-app": "^6.0.2",
     "@octokit/core": "^5.0.2",
     "@octokit/webhooks": "^12.0.1",
-    "ai": "^6.0.146",
+    "ai": "^7.0.0",
     "aws-sdk": "^2.1004.0",
     "bullmq": "5.56.8",
     "cockatiel": "^3.2.1",
@@ -48,6 +51,7 @@
     "dagre": "^0.8.5",
     "dd-trace": "^5.10.0",
     "dotenv": "^8.0.0",
+    "e2b": "^2.31.0",
     "fastly": "^7.0.1",
     "flatted": "^3.0.4",
     "framer-motion": "^12.23.24",
@@ -62,6 +66,7 @@
     "jsonwebtoken": "^8.5.1",
     "knex": "^2.4.2",
     "lodash": "^4.17.21",
+    "modal": "0.7.6",
     "module-alias": "^2.2.3",
     "moment": "^2.24.0",
     "mustache": "^4.1.0",
@@ -105,7 +110,7 @@
     "@types/jsonwebtoken": "^8.3.5",
     "@types/lodash": "^4.14.135",
     "@types/mustache": "^4.1.1",
-    "@types/node": "^12.0.12",
+    "@types/node": "^22.20.0",
     "@types/object-hash": "^1.3.1",
     "@types/picomatch": "^4.0.2",
     "@types/psl": "^1.1.0",
@@ -155,6 +160,9 @@
     "transform": {
       "^.+\\.(js|ts)$": "@swc/jest"
     },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!\\.pnpm/|ai/|@ai-sdk/|@workflow/)"
+    ],
     "setupFilesAfterEnv": [
       "<rootDir>/jestSetup.ts"
     ],

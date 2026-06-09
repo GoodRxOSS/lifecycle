@@ -15,6 +15,7 @@
  */
 
 import type { UIMessageChunk } from 'ai';
+import { scrubSecretsFromText } from 'server/lib/secretScrub';
 import type { AgentUIDataParts, AgentUIMessageMetadata } from './types';
 
 export type AgentUiMessageChunk = UIMessageChunk<AgentUIMessageMetadata, AgentUIDataParts>;
@@ -104,6 +105,36 @@ function getCanonicalFileChangeToolCallIds(chunks: AgentUiMessageChunk[]): Set<s
   }
 
   return toolCallIds;
+}
+
+function scrubSecretsFromReasoningChunk(chunk: AgentUiMessageChunk): AgentUiMessageChunk {
+  if (!isRecord(chunk) || (chunk.type !== 'reasoning-delta' && chunk.type !== 'reasoning-start')) {
+    return chunk;
+  }
+
+  let changed = false;
+  const next: Record<string, unknown> = { ...chunk };
+
+  for (const key of ['delta', 'text'] as const) {
+    if (typeof next[key] === 'string') {
+      const scrubbed = scrubSecretsFromText(next[key] as string);
+      if (scrubbed !== next[key]) {
+        next[key] = scrubbed;
+        changed = true;
+      }
+    }
+  }
+
+  return changed ? (next as AgentUiMessageChunk) : chunk;
+}
+
+// SECURITY: best-effort credential scrub for the events table + live stream. A secret split
+// exactly across two reasoning-delta chunks can slip a per-delta scrub, but the canonical
+// message copy (canonicalMessages.ts) scrubs the fully-assembled text and catches it at rest.
+// NOTE: tool output (e.g. an `env` dump or file read) is the larger secret surface and is out
+// of scope here — scrub it as a follow-up.
+export function scrubSecretsFromAgentRunStreamChunks(chunks: AgentUiMessageChunk[]): AgentUiMessageChunk[] {
+  return chunks.length ? chunks.map(scrubSecretsFromReasoningChunk) : chunks;
 }
 
 export function sanitizeAgentRunStreamChunks(chunks: AgentUiMessageChunk[]): AgentUiMessageChunk[] {

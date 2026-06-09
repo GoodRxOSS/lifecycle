@@ -24,6 +24,7 @@ import type {
 } from './agentDefinitionTypes';
 
 export type AgentRunPlanSourceKind = 'build_context_chat' | 'workspace_session' | 'freeform_chat';
+// 'investigate' is accepted on the wire and in stored snapshots for compat, but always resolves to 'diagnose'.
 export type AgentDebugRunIntent = 'diagnose' | 'investigate' | 'repair';
 
 export function isAgentDebugRunIntent(value: unknown): value is AgentDebugRunIntent {
@@ -34,6 +35,16 @@ export interface AgentRunPlanWarning {
   code: string;
   message: string;
   detail?: Record<string, unknown>;
+}
+
+export type AgentRunPlanProfileKind = 'answer' | 'debug' | 'change' | 'legacy';
+export type AgentRunPlanProfileIntent = 'chat' | 'diagnose' | 'repair' | 'workspace' | 'legacy';
+export type AgentRunPlanWorkspaceCoreState = 'absent' | 'requested';
+
+export interface AgentRunPlanProfileSnapshot {
+  kind: AgentRunPlanProfileKind;
+  intent: AgentRunPlanProfileIntent;
+  workspaceCore: AgentRunPlanWorkspaceCoreState;
 }
 
 export interface AgentRunPlanAgentSnapshot {
@@ -145,6 +156,7 @@ export interface AgentRunPlanSnapshotV1 {
   runtime: AgentRunPlanRuntimeSnapshot;
   prompt: AgentRunPlanPromptSnapshot;
   capabilities: AgentRunPlanCapabilitiesSnapshot;
+  profile?: AgentRunPlanProfileSnapshot;
   debug?: {
     requestedIntent: AgentDebugRunIntent | null;
     resolvedIntent: AgentDebugRunIntent;
@@ -195,6 +207,7 @@ export interface AgentRunPlanPublicSummary {
   debug?: {
     intent: AgentDebugRunIntent;
   };
+  profile: AgentRunPlanProfileSnapshot;
   warnings: Array<{
     code: string;
     message: string;

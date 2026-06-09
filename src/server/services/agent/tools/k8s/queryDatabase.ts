@@ -15,15 +15,20 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolResult } from '../types';
 import { DatabaseClient } from '../shared/databaseClient';
+import { OutputLimiter } from '../outputLimiter';
+
+// Omitted from results unless explicitly selected — full manifests/logs/env maps overwhelm the model context.
+const HEAVY_COLUMNS = new Set(['manifest', 'buildOutput', 'config', 'env', 'webhooksYaml', 'capacityType']);
+const HEAVY_COLUMN_VALUE_MAX_CHARS = 15000;
 
 export class QueryDatabaseTool extends BaseTool {
   static readonly Name = 'query_database';
 
   constructor(private databaseClient: DatabaseClient) {
     super(
-      "Read-only database query to fetch fresh Lifecycle data for THIS build only. Every query is automatically scoped to this build's own records (builds.uuid = this build, deploys/deployables of this build, this build's pull request / environment / repositories); you cannot read other tenants' rows. Use this to get current build/deploy status, check deployables, or verify configuration. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like \"deploys.repository\".",
+      "Read-only database query to fetch fresh Lifecycle data for THIS build only. Every query is automatically scoped to this build's own records (builds.uuid = this build, deploys/deployables of this build, this build's pull request / environment / repositories); you cannot read other tenants' rows. The latest environment-state event already has current statuses — use this only to fetch fields the state event lacks. Large columns (manifest, buildOutput, config, env) are omitted unless explicitly listed in select; deploys.buildOutput holds persisted build/deploy logs for failed deploys — select it when job pods are gone. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like \"deploys.repository\". deployables.deploymentDependsOn holds the declared service dependency edges when the full graph is needed beyond the state event's Dependency chains.",
       {
         type: 'object',
         properties: {
@@ -64,15 +69,13 @@ export class QueryDatabaseTool extends BaseTool {
           },
         },
         required: ['table'],
-      },
-      ToolSafetyLevel.SAFE,
-      'database'
+      }
     );
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     try {
@@ -94,18 +97,44 @@ export class QueryDatabaseTool extends BaseTool {
         offset,
       });
 
+      const explicitlySelected = new Set((select || []).map((column) => String(column)));
+      const compactRecords = records.map((record) => {
+        if (!record || typeof record !== 'object') {
+          return record;
+        }
+
+        const compacted: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
+          if (HEAVY_COLUMNS.has(key) && value !== null && value !== undefined && !explicitlySelected.has(key)) {
+            const size = typeof value === 'string' ? value.length : JSON.stringify(value).length;
+            compacted[key] = `[omitted ${size} chars — pass select:["${key}"] to fetch]`;
+            continue;
+          }
+
+          if (HEAVY_COLUMNS.has(key) && typeof value === 'string' && value.length > HEAVY_COLUMN_VALUE_MAX_CHARS) {
+            compacted[key] = `${value.slice(
+              -HEAVY_COLUMN_VALUE_MAX_CHARS
+            )}\n[showing last ${HEAVY_COLUMN_VALUE_MAX_CHARS} of ${value.length} chars]`;
+            continue;
+          }
+
+          compacted[key] = value;
+        }
+        return compacted;
+      });
+
       const agentContent = {
         success: true,
         table,
         count: records.length,
         totalCount,
-        records,
+        records: compactRecords,
         ...(warnings && warnings.length > 0 ? { warnings } : {}),
       };
 
       const displayContent = `Found ${records.length} ${table} (${totalCount} total)`;
 
-      return this.createSuccessResult(JSON.stringify(agentContent), displayContent);
+      return this.createSuccessResult(OutputLimiter.truncateJsonSafely(JSON.stringify(agentContent)), displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Database query failed', 'EXECUTION_ERROR');
     }

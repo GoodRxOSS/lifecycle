@@ -15,13 +15,48 @@
  */
 
 import { v4 as uuid } from 'uuid';
+import { getLogger } from 'server/lib/logger';
+import { scrubSecretsFromText } from 'server/lib/secretScrub';
+import { collapseExactSelfRepeat } from './repeatedTextCollapse';
 import type { AgentUIMessage } from './types';
 
 export type CanonicalAgentMessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'file_ref'; path?: string | null; url?: string | null; mediaType?: string | null; title?: string | null }
-  | { type: 'source_ref'; url?: string | null; title?: string | null; sourceType?: string | null };
+  | { type: 'source_ref'; url?: string | null; title?: string | null; sourceType?: string | null }
+  | {
+      type: 'tool_call';
+      toolName: string;
+      toolCallId: string;
+      state: 'completed' | 'error' | 'denied';
+      // Bounded, secret-scrubbed previews: enough for the transcript and for the next run's model
+      // input to remember what was already fetched, without persisting megabyte tool payloads.
+      input?: string | null;
+      output?: string | null;
+      approval?: { id?: string | null; approved?: boolean | null; reason?: string | null } | null;
+    };
+
+const TOOL_CALL_INPUT_MAX_CHARS = 2_000;
+const TOOL_CALL_OUTPUT_MAX_CHARS = 4_000;
+
+function boundToolText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}\n… [truncated]` : value;
+}
+
+function toolValueToText(value: unknown): string | null {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 export type CanonicalAgentInputMessage = {
   id?: string;
@@ -67,7 +102,8 @@ export function normalizeCanonicalAgentMessagePart(value: unknown): CanonicalAge
     }
     case 'reasoning': {
       const text = normalizeText(part.text);
-      return text ? { type: 'reasoning', text } : null;
+      // SECURITY: scrub credentials from chain-of-thought before it persists at rest.
+      return text ? { type: 'reasoning', text: scrubSecretsFromText(text) } : null;
     }
     case 'file_ref': {
       const path = normalizeText(part.path);
@@ -98,13 +134,37 @@ export function normalizeCanonicalAgentMessagePart(value: unknown): CanonicalAge
         sourceType: normalizeText(part.sourceType),
       };
     }
+    case 'tool_call': {
+      const toolName = normalizeText(part.toolName);
+      const toolCallId = normalizeText(part.toolCallId);
+      const state = part.state === 'completed' || part.state === 'error' || part.state === 'denied' ? part.state : null;
+      if (!toolName || !toolCallId || !state) {
+        return null;
+      }
+
+      const input = normalizeText(part.input);
+      const output = normalizeText(part.output);
+      const approval =
+        part.approval && typeof part.approval === 'object' ? (part.approval as Record<string, unknown>) : null;
+      return {
+        type: 'tool_call',
+        toolName,
+        toolCallId,
+        state,
+        input: input ? boundToolText(scrubSecretsFromText(input), TOOL_CALL_INPUT_MAX_CHARS) : null,
+        output: output ? boundToolText(scrubSecretsFromText(output), TOOL_CALL_OUTPUT_MAX_CHARS) : null,
+        approval: approval
+          ? {
+              id: normalizeText(approval.id),
+              approved: typeof approval.approved === 'boolean' ? approval.approved : null,
+              reason: normalizeText(approval.reason),
+            }
+          : null,
+      };
+    }
     default:
       return null;
   }
-}
-
-export function isCanonicalAgentMessagePart(value: unknown): value is CanonicalAgentMessagePart {
-  return normalizeCanonicalAgentMessagePart(value) !== null;
 }
 
 export function normalizeCanonicalAgentMessageParts(value: unknown): CanonicalAgentMessagePart[] {
@@ -142,7 +202,19 @@ export function getCanonicalPartsFromUiMessage(message: AgentUIMessage): Canonic
         parts,
         (() => {
           const text = normalizeText(part.text);
-          return text ? { type: 'text', text } : null;
+          if (!text) {
+            return null;
+          }
+
+          const collapsed = message.role === 'assistant' ? collapseExactSelfRepeat(text) : text;
+          if (collapsed !== text) {
+            getLogger().warn(
+              { messageId: message.id, originalLength: text.length },
+              `AgentMessages: collapsed self-repeated assistant text messageId=${message.id}`
+            );
+          }
+
+          return { type: 'text', text: collapsed };
         })()
       );
       continue;
@@ -153,7 +225,8 @@ export function getCanonicalPartsFromUiMessage(message: AgentUIMessage): Canonic
         parts,
         (() => {
           const text = normalizeText(part.text);
-          return text ? { type: 'reasoning', text } : null;
+          // SECURITY: scrub credentials from the assembled reasoning copy before persistence.
+          return text ? { type: 'reasoning', text: scrubSecretsFromText(text) } : null;
         })()
       );
       continue;
@@ -183,6 +256,48 @@ export function getCanonicalPartsFromUiMessage(message: AgentUIMessage): Canonic
           sourceType: partType === 'source-document' ? 'document' : 'url',
         })
       );
+      continue;
+    }
+
+    // Settled tool activity persists as bounded tool_call parts: the transcript keeps its chips
+    // across reloads and the next run's model input remembers what was already fetched (the old
+    // strip-everything behavior caused cross-run re-fetch spirals and repeat approvals).
+    if (partType === 'dynamic-tool' || partType.startsWith('tool-')) {
+      const state = typeof part.state === 'string' ? part.state : '';
+      const settledState =
+        state === 'output-available'
+          ? ('completed' as const)
+          : state === 'output-error'
+          ? ('error' as const)
+          : state === 'output-denied'
+          ? ('denied' as const)
+          : null;
+      if (!settledState) {
+        continue;
+      }
+
+      const toolName =
+        normalizeText(part.toolName) || (partType.startsWith('tool-') ? partType.slice('tool-'.length) : null);
+      const toolCallId = normalizeText(part.toolCallId);
+      if (!toolName || !toolCallId) {
+        continue;
+      }
+
+      pushPart(
+        parts,
+        normalizeCanonicalAgentMessagePart({
+          type: 'tool_call',
+          toolName,
+          toolCallId,
+          state: settledState,
+          input: toolValueToText(part.input),
+          output:
+            settledState === 'error'
+              ? toolValueToText((part as { errorText?: unknown }).errorText ?? part.output)
+              : toolValueToText(part.output),
+          approval: part.approval ?? null,
+        })
+      );
     }
   }
 
@@ -202,7 +317,8 @@ export function toUiMessageFromCanonicalInput(
     }
 
     if (part.type === 'reasoning') {
-      parts.push({ type: 'reasoning', text: part.text } as AgentUIMessage['parts'][number]);
+      // SECURITY: scrub on the way out too so legacy unscrubbed rows never surface a secret.
+      parts.push({ type: 'reasoning', text: scrubSecretsFromText(part.text) } as AgentUIMessage['parts'][number]);
       continue;
     }
 
@@ -212,6 +328,42 @@ export function toUiMessageFromCanonicalInput(
         ...(part.path ? { path: part.path, filename: part.title || part.path } : {}),
         ...(part.url ? { url: part.url } : {}),
         ...(part.mediaType ? { mediaType: part.mediaType } : {}),
+      } as AgentUIMessage['parts'][number]);
+      continue;
+    }
+
+    if (part.type === 'tool_call') {
+      const input = (() => {
+        if (!part.input) {
+          return {};
+        }
+        try {
+          return JSON.parse(part.input) as unknown;
+        } catch {
+          return { preview: part.input };
+        }
+      })();
+      parts.push({
+        type: 'dynamic-tool',
+        toolName: part.toolName,
+        toolCallId: part.toolCallId,
+        ...(part.state === 'completed'
+          ? { state: 'output-available', input, output: part.output ?? '' }
+          : part.state === 'error'
+          ? { state: 'output-error', input, errorText: part.output || 'Tool call failed.' }
+          : {
+              state: 'output-denied',
+              input,
+              ...(part.approval?.id
+                ? {
+                    approval: {
+                      id: part.approval.id,
+                      approved: false,
+                      ...(part.approval.reason ? { reason: part.approval.reason } : {}),
+                    },
+                  }
+                : {}),
+            }),
       } as AgentUIMessage['parts'][number]);
       continue;
     }
