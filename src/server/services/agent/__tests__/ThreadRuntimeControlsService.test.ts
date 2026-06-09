@@ -25,6 +25,7 @@ const mockHasActiveRun = jest.fn();
 const mockEnsureSeeded = jest.fn();
 const mockGetSystemAgentDefinition = jest.fn();
 const mockInferDefaultAgentDefinitionId = jest.fn();
+const mockInferDefaultAgentSourceKind = jest.fn();
 const mockListUserDefinitions = jest.fn();
 const mockGetUserDefinition = jest.fn();
 const mockListEnabledConnectionsForUser = jest.fn();
@@ -71,11 +72,20 @@ jest.mock('../AgentDefinitionRegistry', () => {
     ensureSystemAgentDefinitionsSeeded: (...args: unknown[]) => mockEnsureSeeded(...args),
     getSystemAgentDefinition: (...args: unknown[]) => mockGetSystemAgentDefinition(...args),
     inferDefaultSystemAgentDefinitionId: (...args: unknown[]) => mockInferDefaultAgentDefinitionId(...args),
+    inferDefaultAgentSourceKind: (...args: unknown[]) => mockInferDefaultAgentSourceKind(...args),
   };
 });
 
 jest.mock('../CustomAgentDefinitionService', () => ({
   __esModule: true,
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE:
+    'This custom agent needs conversion before it can run in the one-agent harness.',
+  customAgentDefinitionNeedsOneAgentConversion: (definition: any) =>
+    definition.owner.kind === 'user' &&
+    (definition.resourcePolicy.workspaceRequired ||
+      definition.resourcePolicy.sandboxRequired ||
+      (definition.resourcePolicy.sourceKinds.includes('workspace_session') &&
+        !definition.resourcePolicy.sourceKinds.includes('freeform_chat'))),
   customAgentDefinitionService: {
     listUserDefinitions: (...args: unknown[]) => mockListUserDefinitions(...args),
     getUserDefinition: (...args: unknown[]) => mockGetUserDefinition(...args),
@@ -167,7 +177,8 @@ function mockBaseContext() {
   });
   mockHasActiveRun.mockResolvedValue(false);
   mockEnsureSeeded.mockResolvedValue([]);
-  mockInferDefaultAgentDefinitionId.mockReturnValue('system.develop');
+  mockInferDefaultAgentDefinitionId.mockReturnValue('system.agent');
+  mockInferDefaultAgentSourceKind.mockReturnValue('workspace_session');
   mockGetEffectiveConfig.mockResolvedValue({
     approvalPolicy: { defaultMode: 'allow', rules: {} },
     capabilityPolicy: undefined,

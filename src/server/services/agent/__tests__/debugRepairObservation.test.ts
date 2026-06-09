@@ -15,7 +15,9 @@
  */
 
 jest.mock('server/models/Build');
+jest.mock('server/models/AgentToolExecution');
 
+import AgentToolExecution from 'server/models/AgentToolExecution';
 import Build from 'server/models/Build';
 import { BuildStatus, DeployStatus } from 'shared/constants';
 import { buildDebugRepairObservationText, extractDebugRepairCommitObservation } from '../debugRepairObservation';
@@ -116,6 +118,38 @@ describe('debugRepairObservation', () => {
     });
   });
 
+  it('extracts commit metadata from an AI SDK static tool part (typed tool-<name>, no toolName property)', () => {
+    const observation = extractDebugRepairCommitObservation([
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        metadata: { runId: 'run-1' },
+        parts: [
+          {
+            type: 'tool-mcp__lifecycle__update_file',
+            toolCallId: 'tool-1',
+            state: 'output-available',
+            output: {
+              success: true,
+              agentContent: JSON.stringify({
+                success: true,
+                commit_sha: commitSha,
+                commit_url: commitUrl,
+              }),
+            },
+          },
+        ],
+      },
+    ] as any);
+
+    expect(observation).toEqual({
+      commitSha,
+      commitUrl,
+      changed: null,
+      commitCreated: null,
+    });
+  });
+
   it('extracts a plain commit URL from markdown-wrapped commit text', () => {
     const observation = extractDebugRepairCommitObservation(
       repairMessages({
@@ -130,6 +164,81 @@ describe('debugRepairObservation', () => {
       changed: null,
       commitCreated: null,
     });
+  });
+
+  it('falls back to recorded tool executions when messages carry no tool parts', async () => {
+    (AgentToolExecution.query as jest.Mock).mockReturnValue({
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          toolName: 'update_file',
+          status: 'completed',
+          result: {
+            value: {
+              success: true,
+              agentContent: JSON.stringify({
+                success: true,
+                commit_sha: commitSha,
+                commit_url: commitUrl,
+              }),
+            },
+          },
+        },
+      ]),
+    });
+    (Build.query as jest.Mock).mockReturnValue({
+      findOne: jest.fn().mockReturnValue({
+        withGraphFetched: jest.fn().mockResolvedValue({
+          uuid: 'sample-build-1',
+          status: BuildStatus.DEPLOYED,
+          statusMessage: '',
+          sha: commitSha,
+          pullRequest: {
+            latestCommit: commitSha,
+          },
+          deploys: [],
+        }),
+      }),
+    });
+
+    const text = await buildDebugRepairObservationText({
+      session: {
+        buildUuid: 'sample-build-1',
+        selectedServices: [],
+      } as any,
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          metadata: { runId: 'run-1' },
+          parts: [{ type: 'text', text: 'I have updated grpc-echo/Dockerfile.' }],
+        },
+      ] as any,
+      runPlanSnapshot: repairRunPlan(),
+      runId: 307,
+    });
+
+    expect(text).toContain(`Commit: ${commitUrl}`);
+    expect(text).toContain('the environment is deployed');
+  });
+
+  it('returns null without a runId when messages carry no tool parts', async () => {
+    const text = await buildDebugRepairObservationText({
+      session: { buildUuid: 'sample-build-1', selectedServices: [] } as any,
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          metadata: { runId: 'run-1' },
+          parts: [{ type: 'text', text: 'I have updated grpc-echo/Dockerfile.' }],
+        },
+      ] as any,
+      runPlanSnapshot: repairRunPlan(),
+    });
+
+    expect(text).toBeNull();
+    expect(AgentToolExecution.query).not.toHaveBeenCalled();
   });
 
   it('summarizes fresh terminal environment state after a repair commit', async () => {

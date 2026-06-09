@@ -210,6 +210,27 @@ describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
     expect(html).not.toContain('sample-code-verifier');
   });
 
+  it('treats OAuth discovery that returns 0 tools as a failed connection', async () => {
+    mockDiscoverTools.mockResolvedValueOnce([]);
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+    const persisted = mockUpsertConnection.mock.calls[mockUpsertConnection.mock.calls.length - 1]?.[0];
+
+    expect(response.status).toBe(422);
+    expect(persisted).toEqual(
+      expect.objectContaining({
+        slug: 'sample-oauth',
+        scope: 'global',
+        discoveredTools: [],
+        validationError: 'MCP validation failed for sample-oauth: server returned 0 tools',
+      })
+    );
+    expect(html).toContain('Connection failed');
+  });
+
   it('rejects expired or reused flows before completing OAuth', async () => {
     mockConsumeFlow.mockResolvedValueOnce(null);
 

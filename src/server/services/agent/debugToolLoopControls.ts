@@ -14,39 +14,100 @@
  * limitations under the License.
  */
 
-import { stepCountIs, type PrepareStepFunction, type StopCondition, type ToolSet } from 'ai';
+import { type PrepareStepFunction, type StopCondition, type ToolSet } from 'ai';
+import { DEFAULT_AGENT_SESSION_MAX_RUN_INPUT_TOKENS } from 'server/lib/agentSession/runtimeConfig';
 import type { AgentRuntimeToolMetadata } from './CapabilityService';
+import type { AgentRuntimeContext } from './runtimeContext';
 import type { AgentDebugRunIntent, AgentRunPlanSnapshotV1 } from './runPlanTypes';
-import { isApprovalGatedWriteRuntimeTool, isReadOnlyRuntimeTool } from './toolMetadata';
+import { buildAgentToolKey, CHAT_REQUEST_WORKSPACE_TOOL_NAME, LIFECYCLE_BUILTIN_SERVER_SLUG } from './toolKeys';
+import { isReadOnlyRuntimeTool, isRepairRuntimeTool } from './toolMetadata';
+
+type AgentPrepareStepFunction = PrepareStepFunction<ToolSet, AgentRuntimeContext>;
+type AgentStopCondition = StopCondition<ToolSet, AgentRuntimeContext>;
 
 type DebugToolLoopControls = {
   activeTools?: string[];
-  stopWhen: StopCondition<ToolSet>;
+  stopWhen: Array<AgentStopCondition>;
   effectiveMaxIterations: number;
-  prepareStep?: PrepareStepFunction<ToolSet>;
+  prepareStep?: AgentPrepareStepFunction;
 };
 
-export function isReadOnlyDebugIntent(intent: AgentDebugRunIntent): boolean {
-  return intent === 'diagnose' || intent === 'investigate';
+const FINAL_ANSWER_STEP = { activeTools: [] as string[], toolChoice: 'none' as const };
+
+type UsageSteps = ReadonlyArray<{ usage?: { inputTokens?: number } }>;
+
+function isStepCount(stepCount: number): AgentStopCondition {
+  return ({ steps }) => steps.length === stepCount;
+}
+
+function cumulativeInputTokens(steps: UsageSteps): number {
+  let total = 0;
+  for (const step of steps) {
+    const inputTokens = step.usage?.inputTokens;
+    if (typeof inputTokens === 'number' && Number.isFinite(inputTokens)) {
+      total += inputTokens;
+    }
+  }
+  return total;
+}
+
+function exceedsRunInputTokenBudget(steps: UsageSteps): boolean {
+  return cumulativeInputTokens(steps) >= DEFAULT_AGENT_SESSION_MAX_RUN_INPUT_TOKENS;
+}
+
+const REQUEST_WORKSPACE_TOOL_KEY = buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_REQUEST_WORKSPACE_TOOL_NAME);
+
+type ToolResultSteps = ReadonlyArray<{
+  toolResults?: ReadonlyArray<{ toolName: string; output?: unknown }>;
+}>;
+
+function workspaceBecameReady(steps: ToolResultSteps): boolean {
+  return steps.some((step) =>
+    (step.toolResults || []).some(
+      (result) =>
+        result.toolName === REQUEST_WORKSPACE_TOOL_KEY &&
+        (result.output as { status?: unknown } | null | undefined)?.status === 'ready'
+    )
+  );
+}
+
+// The token budget degrades in-loop: prepareStep grants one tools-off answer step after the budget trips, so this
+// backstop only ends the loop when that granted step (the budget was already exceeded before it) still made tool calls.
+const stopWhenInputTokenBudgetExhausted: AgentStopCondition = ({ steps }) =>
+  exceedsRunInputTokenBudget(steps.slice(0, -1));
+
+function withInputTokenBudget(prepareStep?: AgentPrepareStepFunction): AgentPrepareStepFunction {
+  return (options) => {
+    const inner = prepareStep?.(options);
+    if (!exceedsRunInputTokenBudget(options.steps)) {
+      return inner;
+    }
+    // Budget exhausted: steer the model to finish with toolChoice 'none', but keep the tools that were
+    // already active. Emptying activeTools here made Gemini's disobedient tool calls fail as a wall of
+    // NoSuchToolError ("couldn't use tool"); keeping them active lets such a call execute cleanly
+    // instead. stopWhenInputTokenBudgetExhausted still ends the loop after this single granted step.
+    const innerActiveTools = (inner as { activeTools?: string[] } | undefined)?.activeTools;
+    return innerActiveTools ? { toolChoice: 'none', activeTools: innerActiveTools } : { toolChoice: 'none' };
+  };
 }
 
 function isBuildContextWorkspaceTool(metadata: AgentRuntimeToolMetadata): boolean {
   return (
+    metadata.workspaceNeed === 'required' ||
     metadata.resourceDomain === 'workspace' ||
     metadata.resourceDomain === 'git' ||
-    metadata.toolKey.startsWith('mcp__sandbox__')
+    metadata.resourceDomain === 'preview' ||
+    metadata.catalogCapabilityId === 'workspace_files' ||
+    metadata.catalogCapabilityId === 'workspace_shell' ||
+    metadata.catalogCapabilityId === 'workspace_git' ||
+    metadata.catalogCapabilityId === 'preview_publish'
   );
 }
 
-// Build-context chats have no workspace, so any workspace/sandbox/git tool would provision one on first call. Strip them by source kind, independent of agent id or debug intent.
+// Build-context chats have no workspace, so any workspace or git tool would provision one on first call. Strip them by source kind, independent of agent id or debug intent.
 function buildContextWorkspaceToolKeys(tools: ToolSet, toolMetadata: AgentRuntimeToolMetadata[]): Set<string> {
   const registered = new Set(Object.keys(tools));
   const excluded = new Set<string>();
-  for (const toolKey of registered) {
-    if (toolKey.startsWith('mcp__sandbox__')) {
-      excluded.add(toolKey);
-    }
-  }
   for (const metadata of toolMetadata) {
     if (registered.has(metadata.toolKey) && isBuildContextWorkspaceTool(metadata)) {
       excluded.add(metadata.toolKey);
@@ -64,11 +125,11 @@ function isToolActiveForIntent(
     return false;
   }
 
-  if (isReadOnlyDebugIntent(intent)) {
+  if (intent === 'diagnose') {
     return isReadOnlyRuntimeTool(metadata);
   }
 
-  return isReadOnlyRuntimeTool(metadata) || isApprovalGatedWriteRuntimeTool(metadata);
+  return isReadOnlyRuntimeTool(metadata) || isRepairRuntimeTool(metadata);
 }
 
 export function resolveDebugIntent(runPlanSnapshot?: AgentRunPlanSnapshotV1 | null): AgentDebugRunIntent | null {
@@ -77,7 +138,9 @@ export function resolveDebugIntent(runPlanSnapshot?: AgentRunPlanSnapshotV1 | nu
   }
 
   if (runPlanSnapshot.debug?.resolvedIntent) {
-    return runPlanSnapshot.debug.resolvedIntent;
+    const resolvedIntent = runPlanSnapshot.debug.resolvedIntent;
+    // Old snapshots may carry 'investigate'; it always ran identically to diagnose.
+    return resolvedIntent === 'investigate' ? 'diagnose' : resolvedIntent;
   }
 
   return runPlanSnapshot.agent.id === 'system.debug' && runPlanSnapshot.agent.sourceKind === 'build_context_chat'
@@ -96,22 +159,42 @@ export function resolveDebugToolLoopControls({
   toolMetadata: AgentRuntimeToolMetadata[];
   maxIterations: number;
 }): DebugToolLoopControls {
-  // maxIterations is the only budget knob; Debug adds intent-based tool scoping + a tools-off final step so the agent always writes a diagnosis.
+  // Step count and cumulative input tokens are the budget knobs; Debug adds intent-based tool scoping + a tools-off final step so the agent always writes a diagnosis.
   const intent = resolveDebugIntent(runPlanSnapshot);
   const effectiveMaxIterations = maxIterations;
-  const stopWhen = stepCountIs(effectiveMaxIterations);
+  const stopWhen = [isStepCount(effectiveMaxIterations), stopWhenInputTokenBudgetExhausted];
 
   if (!intent) {
-    // No debug intent (e.g. a custom agent), but build-context chats must still never be offered workspace-provisioning tools.
-    if (runPlanSnapshot?.agent.sourceKind !== 'build_context_chat') {
-      return { stopWhen, effectiveMaxIterations };
+    // No debug intent. Build-context AND freeform chats must never be offered workspace-provisioning tools until a real signal.
+    const sourceKind = runPlanSnapshot?.agent.sourceKind;
+    const isFreeform = sourceKind === 'freeform_chat';
+    if (sourceKind !== 'build_context_chat' && !isFreeform) {
+      return { stopWhen, effectiveMaxIterations, prepareStep: withInputTokenBudget() };
     }
     const excluded = buildContextWorkspaceToolKeys(tools, toolMetadata);
     if (excluded.size === 0) {
-      return { stopWhen, effectiveMaxIterations };
+      return { stopWhen, effectiveMaxIterations, prepareStep: withInputTokenBudget() };
     }
-    const activeTools = Object.keys(tools).filter((toolKey) => !excluded.has(toolKey));
-    return { activeTools, stopWhen, effectiveMaxIterations };
+    const strippedActiveTools = Object.keys(tools).filter((toolKey) => !excluded.has(toolKey));
+    if (!isFreeform) {
+      return {
+        activeTools: strippedActiveTools,
+        stopWhen,
+        effectiveMaxIterations,
+        prepareStep: withInputTokenBudget(),
+      };
+    }
+    // Freeform starts without workspace tools; once request_workspace reports ready in this run,
+    // later steps widen to the full registered tool set (provisioning still requires that explicit call).
+    const allToolKeys = Object.keys(tools);
+    return {
+      activeTools: strippedActiveTools,
+      stopWhen,
+      effectiveMaxIterations,
+      prepareStep: withInputTokenBudget(({ steps }) => ({
+        activeTools: workspaceBecameReady(steps) ? allToolKeys : strippedActiveTools,
+      })),
+    };
   }
 
   const registeredToolKeys = new Set(Object.keys(tools));
@@ -130,7 +213,8 @@ export function resolveDebugToolLoopControls({
     activeTools,
     stopWhen,
     effectiveMaxIterations,
-    prepareStep: ({ stepNumber }) =>
-      stepNumber >= toolStepLimit ? { activeTools: [], toolChoice: 'none' } : { activeTools },
+    prepareStep: withInputTokenBudget(({ stepNumber }) =>
+      stepNumber >= toolStepLimit ? FINAL_ANSWER_STEP : { activeTools }
+    ),
   };
 }

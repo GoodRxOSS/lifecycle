@@ -17,11 +17,11 @@
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import McpServerConfig from 'server/models/McpServerConfig';
-import { APP_HOST } from 'shared/config';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
+  buildMcpOAuthCallbackUrl,
   compileFieldConnectionConfig,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
@@ -89,12 +89,6 @@ function buildDefinitionFingerprintMap(
       }),
     ])
   );
-}
-
-function buildOAuthCallbackUrl(slug: string, scope: string): string {
-  const url = new URL(`${APP_HOST}/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`);
-  url.searchParams.set('scope', scope);
-  return url.toString();
 }
 
 export class McpConfigService {
@@ -342,10 +336,11 @@ export class McpConfigService {
               slug: config.slug,
               definitionFingerprint: definitionFingerprints.get(buildConnectionKey(config.scope, config.slug)) || '',
               authConfig,
-              redirectUrl: buildOAuthCallbackUrl(config.slug, config.scope),
+              redirectUrl: buildMcpOAuthCallbackUrl(config.slug),
               initialState: connectionState.state,
               discoveredTools: connectionState.discoveredTools,
               validatedAt: connectionState.validatedAt,
+              validationError: connectionState.validationError,
               interactive: false,
             }),
           }

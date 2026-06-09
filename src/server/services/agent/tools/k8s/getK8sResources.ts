@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 import { OutputLimiter } from '../outputLimiter';
 
@@ -66,15 +66,13 @@ export class GetK8sResourcesTool extends BaseTool {
           },
         },
         required: ['resource_type'],
-      },
-      ToolSafetyLevel.SAFE,
-      'k8s'
+      }
     );
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     let namespace: string;
@@ -82,7 +80,7 @@ export class GetK8sResourcesTool extends BaseTool {
       // SECURITY: lock to the build's namespace; reject any foreign namespace.
       namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED');
     }
 
     try {
@@ -290,6 +288,13 @@ export class GetK8sResourcesTool extends BaseTool {
         containers: deployment.spec?.template.spec?.containers.map((c) => ({
           name: c.name,
           image: c.image,
+          envNames: c.env?.map((entry) => entry.name),
+          resources: c.resources,
+          readinessProbe: c.readinessProbe,
+          livenessProbe: c.livenessProbe,
+          command: c.command,
+          args: c.args,
+          ports: c.ports?.map((port) => port.containerPort),
         })),
       },
     };

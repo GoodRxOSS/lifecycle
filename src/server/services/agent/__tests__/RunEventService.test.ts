@@ -418,7 +418,7 @@ describe('AgentRunEventService', () => {
         eventType: 'tool.call.started',
         payload: {
           toolCallId: 'tool-call-1',
-          toolName: 'workspace_read_file',
+          toolName: 'read_file',
           inputStatus: 'available',
           input: { path: '/workspace/README.md' },
         },
@@ -446,7 +446,7 @@ describe('AgentRunEventService', () => {
           data: {
             id: 'change-1',
             toolCallId: 'tool-call-2',
-            sourceTool: 'workspace_edit_file',
+            sourceTool: 'edit_file',
             path: 'README.md',
             displayPath: 'README.md',
             kind: 'edited',
@@ -474,7 +474,7 @@ describe('AgentRunEventService', () => {
       {
         type: 'tool-input-available',
         toolCallId: 'tool-call-1',
-        toolName: 'workspace_read_file',
+        toolName: 'read_file',
         input: { path: '/workspace/README.md' },
       },
       {
@@ -494,7 +494,7 @@ describe('AgentRunEventService', () => {
         data: {
           id: 'change-1',
           toolCallId: 'tool-call-2',
-          sourceTool: 'workspace_edit_file',
+          sourceTool: 'edit_file',
           path: 'README.md',
           displayPath: 'README.md',
           kind: 'edited',
@@ -779,6 +779,64 @@ describe('AgentRunEventService', () => {
     expect(waitForRunEventNotification).not.toHaveBeenCalled();
     expect(listRunEventsPage).toHaveBeenCalledTimes(1);
     expect(text).toContain('id: 2\nevent: run.completed');
+  });
+
+  it('closes the canonical stream on run.transitioned', async () => {
+    const terminalEvent = {
+      uuid: 'event-2',
+      runUuid: 'run-1',
+      threadUuid: 'thread-1',
+      sessionUuid: 'session-1',
+      runId: 17,
+      sequence: 2,
+      eventType: 'run.transitioned',
+      payload: {
+        status: 'transitioned',
+        transition: {
+          kind: 'workspace_escalation',
+          reason: 'create a React app',
+          toolCallId: 'tool-provision',
+          workspaceStatus: 'provisioning',
+          targetAgentDefinitionId: 'system.develop',
+          createdAt: '2026-05-01T00:00:05.000Z',
+          continuation: {
+            status: 'ui_auto_continue_fallback',
+            targetAgentDefinitionId: 'system.develop',
+            runId: null,
+          },
+        },
+      },
+      createdAt: null,
+      updatedAt: null,
+    } as any;
+    const listRunEventsPage = jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue({
+      events: [terminalEvent],
+      nextSequence: 2,
+      hasMore: false,
+      run: {
+        id: 'run-1',
+        status: 'transitioned',
+      },
+      limit: 100,
+      maxLimit: 500,
+    });
+    const waitForRunEventNotification = jest
+      .spyOn(AgentRunEventService, 'waitForRunEventNotification')
+      .mockResolvedValue(false);
+    mockRunQuery.mockReturnValue({
+      findOne: jest.fn().mockResolvedValue({
+        uuid: 'run-1',
+        status: 'transitioned',
+      }),
+    });
+
+    const text = await new Response(
+      AgentRunEventService.createCanonicalRunEventStream('run-1', 1, { pollIntervalMs: 10 })
+    ).text();
+
+    expect(waitForRunEventNotification).not.toHaveBeenCalled();
+    expect(listRunEventsPage).toHaveBeenCalledTimes(1);
+    expect(text).toContain('id: 2\nevent: run.transitioned');
   });
 
   it('self-heals a terminal run that is missing its terminal event, then closes', async () => {

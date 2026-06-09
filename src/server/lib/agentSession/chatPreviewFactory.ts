@@ -14,213 +14,149 @@
  * limitations under the License.
  */
 
-import * as k8s from '@kubernetes/client-node';
-import { APP_HOST } from 'shared/config';
-import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
-import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
-import GlobalConfigService from 'server/services/globalConfig';
+import { createHmac } from 'crypto';
+import { APP_HOST, CHAT_PREVIEW_DOMAIN, LIFECYCLE_UI_URL } from 'shared/config';
 
 export interface ChatPreviewPublication {
   url: string;
   host: string | null;
   path: string;
-  serviceName: string;
-  ingressName: string;
   port: number;
 }
 
-function getClients() {
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
-
-  return {
-    coreApi: kc.makeApiClient(k8s.CoreV1Api),
-    networkingApi: kc.makeApiClient(k8s.NetworkingV1Api),
-  };
-}
-
-function buildResourceName(prefix: string, sessionUuid: string, port: number): string {
-  return normalizeKubernetesLabelValue(`${prefix}-${sessionUuid.slice(0, 8)}-${port}`).replace(/[_.]/g, '-');
-}
-
-function buildPreviewPath(sessionUuid: string, port: number): string {
-  return `/_chat/${sessionUuid}/${port}`;
-}
-
-function resolvePreviewUrl({
-  sessionUuid,
-  port,
-  httpDomain,
-}: {
-  sessionUuid: string;
+export interface ChatPreviewHostMatch {
   port: number;
-  httpDomain?: string | null;
-}): Pick<ChatPreviewPublication, 'url' | 'host' | 'path'> {
-  const previewPath = buildPreviewPath(sessionUuid, port);
+  previewSlug: string;
+  host: string;
+}
+
+function normalizeDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function buildChatPreviewResolverPath(sessionUuid: string, port: number): string {
+  return `/preview/${sessionUuid}/${port}`;
+}
+
+export function resolveChatPreviewHostDomain(): string | null {
+  const configured = normalizeDomain(CHAT_PREVIEW_DOMAIN);
+  if (configured) {
+    return configured;
+  }
+
   const appUrl = new URL(APP_HOST);
+  if (appUrl.hostname === 'localhost') {
+    return appUrl.port ? `${appUrl.hostname}:${appUrl.port}` : appUrl.hostname;
+  }
 
-  if (httpDomain?.trim()) {
-    const host = `${buildResourceName('chat', sessionUuid, port)}.${httpDomain.trim()}`;
-    return {
-      url: `${appUrl.protocol}//${host}`,
-      host,
-      path: '/',
-    };
+  return null;
+}
+
+export function resolveChatPreviewHostProtocol(): string {
+  return new URL(APP_HOST).protocol;
+}
+
+function readPreviewHostSecret(): string {
+  const secret =
+    process.env.CHAT_PREVIEW_HOST_SECRET ||
+    process.env.CHAT_PREVIEW_GRANT_SECRET ||
+    process.env.ENCRYPTION_KEY ||
+    process.env.NEXTAUTH_SECRET ||
+    process.env.GITHUB_WEBHOOK_SECRET ||
+    '';
+  const normalized = secret.trim();
+  if (normalized && normalized !== 'changeme' && normalized !== 'not_setup') {
+    return normalized;
+  }
+  if (process.env.ENABLE_AUTH !== 'true') {
+    return 'local-dev-chat-preview-host-secret';
+  }
+  throw new Error('CHAT_PREVIEW_HOST_SECRET or ENCRYPTION_KEY must be configured for host-based preview URLs.');
+}
+
+export function buildChatPreviewHostSlug({ sessionUuid, port }: { sessionUuid: string; port: number }): string {
+  return createHmac('sha256', readPreviewHostSecret()).update(`${sessionUuid}:${port}`).digest('hex').slice(0, 32);
+}
+
+export function buildChatPreviewHost({ port, previewSlug }: { port: number; previewSlug: string }): string | null {
+  const domain = resolveChatPreviewHostDomain();
+  if (!domain) {
+    return null;
+  }
+  return `${port}--${previewSlug}.${domain}`;
+}
+
+export function parseChatPreviewHost(hostHeader: string | null | undefined): ChatPreviewHostMatch | null {
+  const domain = resolveChatPreviewHostDomain();
+  if (!domain || !hostHeader) {
+    return null;
+  }
+
+  const normalizedHost = normalizeDomain(hostHeader);
+  const pattern = new RegExp(`^(\\d{1,5})--([a-z0-9][a-z0-9-]{5,63})\\.${escapeRegExp(domain)}$`, 'i');
+  const match = normalizedHost.match(pattern);
+  if (!match) {
+    return null;
+  }
+
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
   }
 
   return {
-    url: new URL(previewPath, APP_HOST).toString(),
-    host: appUrl.hostname,
-    path: previewPath,
+    port,
+    previewSlug: match[2].toLowerCase(),
+    host: normalizedHost,
   };
 }
 
-async function upsertService(coreApi: k8s.CoreV1Api, namespace: string, service: k8s.V1Service): Promise<void> {
-  try {
-    const existing = await coreApi.readNamespacedService(service.metadata!.name!, namespace);
-    service.metadata = {
-      ...(service.metadata || {}),
-      resourceVersion: existing.body.metadata?.resourceVersion,
-    };
-    await coreApi.replaceNamespacedService(service.metadata!.name!, namespace, service);
-  } catch (error) {
-    if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      await coreApi.createNamespacedService(namespace, service);
-      return;
-    }
-
-    throw error;
+function resolveChatPreviewResolverBaseUrl(): string {
+  const configured = LIFECYCLE_UI_URL.trim();
+  if (configured) {
+    return configured;
   }
+
+  const appUrl = new URL(APP_HOST);
+  if (appUrl.hostname === 'localhost' && appUrl.port === '5001') {
+    appUrl.port = '3000';
+    return appUrl.toString();
+  }
+
+  if (normalizeDomain(CHAT_PREVIEW_DOMAIN)) {
+    throw new Error('LIFECYCLE_UI_URL must be configured when CHAT_PREVIEW_DOMAIN is enabled.');
+  }
+
+  return APP_HOST;
 }
 
-async function upsertIngress(
-  networkingApi: k8s.NetworkingV1Api,
-  namespace: string,
-  ingress: k8s.V1Ingress
-): Promise<void> {
-  try {
-    const existing = await networkingApi.readNamespacedIngress(ingress.metadata!.name!, namespace);
-    ingress.metadata = {
-      ...(ingress.metadata || {}),
-      resourceVersion: existing.body.metadata?.resourceVersion,
-    };
-    await networkingApi.replaceNamespacedIngress(ingress.metadata!.name!, namespace, ingress);
-  } catch (error) {
-    if (error instanceof k8s.HttpError && error.response?.statusCode === 404) {
-      await networkingApi.createNamespacedIngress(namespace, ingress);
-      return;
-    }
-
-    throw error;
-  }
+export function buildChatPreviewResolverUrl({ sessionUuid, port }: { sessionUuid: string; port: number }): string {
+  return new URL(buildChatPreviewResolverPath(sessionUuid, port), resolveChatPreviewResolverBaseUrl()).toString();
 }
 
-export async function createOrUpdateChatPreview({
-  sessionUuid,
-  namespace,
-  podName,
+export function resolveChatPreviewPublicPublication({
   port,
+  previewSlug,
 }: {
-  sessionUuid: string;
-  namespace: string;
-  podName: string;
   port: number;
-}): Promise<ChatPreviewPublication> {
-  const { coreApi, networkingApi } = getClients();
-  const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  const publication = resolvePreviewUrl({
-    sessionUuid,
-    port,
-    httpDomain: domainDefaults?.http,
-  });
-  const serviceName = buildResourceName('agent-preview', sessionUuid, port);
-  const ingressName = buildResourceName('agent-preview-ingress', sessionUuid, port);
-  const labels = {
-    ...buildLifecycleLabels(),
-    'app.kubernetes.io/component': 'agent-session-preview',
-    'lfc/agent-session': sessionUuid,
-  };
-
-  const service: k8s.V1Service = {
-    apiVersion: 'v1',
-    kind: 'Service',
-    metadata: {
-      name: serviceName,
-      namespace,
-      labels,
-    },
-    spec: {
-      selector: {
-        'app.kubernetes.io/name': podName,
-      },
-      ports: [
-        {
-          name: 'http',
-          port: 80,
-          targetPort: port,
-        },
-      ],
-    },
-  };
-
-  const ingressAnnotations: Record<string, string> = {};
-  const pathRule =
-    publication.path === '/'
-      ? {
-          path: '/',
-          pathType: 'Prefix' as const,
-        }
-      : {
-          path: `${publication.path}(/|$)(.*)`,
-          pathType: 'ImplementationSpecific' as const,
-        };
-
-  if (publication.path !== '/') {
-    ingressAnnotations['nginx.ingress.kubernetes.io/use-regex'] = 'true';
-    ingressAnnotations['nginx.ingress.kubernetes.io/rewrite-target'] = '/$2';
+  previewSlug: string;
+}): Pick<ChatPreviewPublication, 'url' | 'host' | 'path'> {
+  const host = buildChatPreviewHost({ port, previewSlug });
+  if (!host) {
+    throw new Error('CHAT_PREVIEW_DOMAIN must be configured to publish remote sandbox previews.');
   }
 
-  const ingress: k8s.V1Ingress = {
-    apiVersion: 'networking.k8s.io/v1',
-    kind: 'Ingress',
-    metadata: {
-      name: ingressName,
-      namespace,
-      labels,
-      ...(Object.keys(ingressAnnotations).length > 0 ? { annotations: ingressAnnotations } : {}),
-    },
-    spec: {
-      ingressClassName: lifecycleDefaults?.ingressClassName || 'nginx',
-      rules: [
-        {
-          ...(publication.host ? { host: publication.host } : {}),
-          http: {
-            paths: [
-              {
-                ...pathRule,
-                backend: {
-                  service: {
-                    name: serviceName,
-                    port: {
-                      number: 80,
-                    },
-                  },
-                },
-              },
-            ],
-          },
-        },
-      ],
-    },
-  };
-
-  await upsertService(coreApi, namespace, service);
-  await upsertIngress(networkingApi, namespace, ingress);
-
   return {
-    ...publication,
-    serviceName,
-    ingressName,
-    port,
+    url: `${resolveChatPreviewHostProtocol()}//${host}/`,
+    host,
+    path: '/',
   };
 }

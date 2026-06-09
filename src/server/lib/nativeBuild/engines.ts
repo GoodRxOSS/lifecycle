@@ -409,7 +409,12 @@ export async function buildWithEngine(
 
   if (engineName === 'buildkit') {
     const buildkitConfig = buildDefaults.buildkit || {};
-    const buildkitEndpoint = buildkitConfig.endpoint || 'tcp://buildkit.lifecycle-app.svc.cluster.local:1234';
+    // Prefer the DB override, then BUILDKIT_HOST from the chart (release-name aware). The final
+    // fallback matches the default chart install (release "lifecycle" -> service lifecycle-buildkit).
+    const buildkitEndpoint =
+      buildkitConfig.endpoint ||
+      process.env.BUILDKIT_HOST ||
+      'tcp://lifecycle-buildkit.lifecycle-app.svc.cluster.local:1234';
     envVars = {
       ...envVars,
       BUILDKIT_HOST: buildkitEndpoint,

@@ -14,12 +14,6 @@
  * limitations under the License.
  */
 
-jest.mock('ai', () => ({
-  __esModule: true,
-  getToolName: jest.fn(() => 'tool'),
-  isToolUIPart: jest.fn((part) => !!part && typeof part === 'object' && 'state' in part),
-}));
-
 jest.mock('server/models/AgentPendingAction', () => ({
   __esModule: true,
   default: {
@@ -75,17 +69,44 @@ jest.mock('../RunQueueService', () => ({
   },
 }));
 
+const mockStoreApprovalGitHubAuthHandoff = jest.fn();
+const mockGetApprovalGitHubAuthHandoffByAction = jest.fn();
+const mockClearApprovalGitHubAuthHandoff = jest.fn();
+
+jest.mock('../ApprovalGitHubAuthHandoffService', () => ({
+  __esModule: true,
+  default: {
+    store: (...args: unknown[]) => mockStoreApprovalGitHubAuthHandoff(...args),
+    getByAction: (...args: unknown[]) => mockGetApprovalGitHubAuthHandoffByAction(...args),
+    clearAction: (...args: unknown[]) => mockClearApprovalGitHubAuthHandoff(...args),
+  },
+}));
+
+const mockFetchGitHubAuthenticatedUser = jest.fn();
+const mockFetchGitHubRepositoryWritePermission = jest.fn();
+
+jest.mock('server/lib/agentSession/githubToken', () => ({
+  fetchGitHubAuthenticatedUser: (...args: unknown[]) => mockFetchGitHubAuthenticatedUser(...args),
+  fetchGitHubRepositoryWritePermission: (...args: unknown[]) => mockFetchGitHubRepositoryWritePermission(...args),
+}));
+
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRun from 'server/models/AgentRun';
 import ApprovalService from '../ApprovalService';
 import AgentThreadService from '../ThreadService';
-import { getToolName } from 'ai';
 
 const mockPendingActionQuery = AgentPendingAction.query as jest.Mock;
 const mockPendingActionTransaction = AgentPendingAction.transaction as jest.Mock;
 const mockRunQuery = AgentRun.query as jest.Mock;
 const mockGetOwnedThread = AgentThreadService.getOwnedThread as jest.Mock;
-const mockGetToolName = getToolName as jest.Mock;
+
+function toolPart(toolName: string, part: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: 'dynamic-tool',
+    toolName,
+    ...part,
+  };
+}
 
 function makeTransactionalPendingActionQuery(...firstResults: unknown[]) {
   const query: any = {};
@@ -98,9 +119,14 @@ function makeTransactionalPendingActionQuery(...firstResults: unknown[]) {
   for (const result of firstResults) {
     query.first.mockResolvedValueOnce(result);
   }
-  query.patchAndFetchById = jest
-    .fn()
-    .mockImplementation((_id, patch) => Promise.resolve({ ...firstResults[0], ...patch }));
+  query.patchAndFetchById = jest.fn().mockImplementation((_id, patch) => {
+    const firstResult = firstResults[0];
+    const base =
+      firstResult && typeof firstResult === 'object' && !Array.isArray(firstResult)
+        ? (firstResult as Record<string, unknown>)
+        : {};
+    return Promise.resolve({ ...base, ...patch });
+  });
   return query;
 }
 
@@ -118,6 +144,26 @@ describe('ApprovalService', () => {
     jest.clearAllMocks();
     mockPendingActionTransaction.mockImplementation((callback) => callback({ trx: true }));
     mockAppendStatusEventForRunInTransaction.mockResolvedValue(7);
+    mockEnqueueRun.mockResolvedValue(undefined);
+    mockGetApprovalGitHubAuthHandoffByAction.mockResolvedValue(null);
+    mockClearApprovalGitHubAuthHandoff.mockResolvedValue(undefined);
+    mockFetchGitHubAuthenticatedUser.mockResolvedValue({
+      ok: true,
+      id: 12_345,
+      login: 'octocat',
+      status: 200,
+      scopes: [],
+      rateLimitRemaining: '42',
+    });
+    mockFetchGitHubRepositoryWritePermission.mockResolvedValue({
+      ok: true,
+      repository: 'example-org/example-repo',
+      status: 200,
+      permission: 'granted',
+      permissions: { admin: false, maintain: false, push: true },
+      scopes: [],
+      rateLimitRemaining: '42',
+    });
   });
 
   it('normalizes canonical pending action response bodies', () => {
@@ -129,12 +175,22 @@ describe('ApprovalService', () => {
     ).toEqual({
       approved: true,
       reason: 'looks fine',
+      alwaysAllow: false,
     });
 
     expect(ApprovalService.normalizePendingActionResponseBody({ approved: false })).toEqual({
       approved: false,
       reason: null,
+      alwaysAllow: false,
     });
+    expect(ApprovalService.normalizePendingActionResponseBody({ approved: true, alwaysAllow: true })).toEqual({
+      approved: true,
+      reason: null,
+      alwaysAllow: true,
+    });
+    expect(ApprovalService.normalizePendingActionResponseBody({ approved: true, alwaysAllow: 'yes' })).toEqual(
+      new Error('alwaysAllow must be a boolean when provided')
+    );
     expect(ApprovalService.normalizePendingActionResponseBody({})).toEqual(new Error('approved must be a boolean'));
     expect(ApprovalService.normalizePendingActionResponseBody(null)).toEqual(
       new Error('Request body must be a JSON object')
@@ -142,6 +198,25 @@ describe('ApprovalService', () => {
     expect(ApprovalService.normalizePendingActionResponseBody({ approved: true, rawApproval: true })).toEqual(
       new Error('Unsupported pending action response fields: rawApproval')
     );
+  });
+
+  it('gates always-allow eligibility on kind, tool name, and capability', () => {
+    const baseAction = {
+      kind: 'tool_approval',
+      capabilityKey: 'deploy_k8s_mutation',
+      payload: { toolName: 'mcp__lifecycle__trigger_redeploy' },
+    } as Parameters<typeof ApprovalService.isAlwaysAllowEligible>[0];
+
+    expect(ApprovalService.isAlwaysAllowEligible(baseAction)).toBe(true);
+    expect(
+      ApprovalService.isAlwaysAllowEligible({
+        ...baseAction,
+        capabilityKey: 'git_write',
+        payload: { toolName: 'mcp__lifecycle__update_file' },
+      })
+    ).toBe(false);
+    expect(ApprovalService.isAlwaysAllowEligible({ ...baseAction, kind: 'user_input' })).toBe(false);
+    expect(ApprovalService.isAlwaysAllowEligible({ ...baseAction, payload: {} })).toBe(false);
   });
 
   it('serializes display-ready pending action fields without exposing raw payload state', () => {
@@ -157,17 +232,17 @@ describe('ApprovalService', () => {
       payload: {
         approvalId: 'approval-1',
         toolCallId: 'tool-call-1',
-        toolName: 'mcp__sandbox__workspace_edit_file',
+        toolName: 'mcp__workspace_core__edit_file',
         input: {
           path: 'sample-file.txt',
-          oldText: 'before',
-          newText: 'after',
+          old_text: 'before',
+          new_text: 'after',
         },
         fileChanges: [
           {
             id: 'tool-call-1:/workspace/sample-file.txt',
             toolCallId: 'tool-call-1',
-            sourceTool: 'workspace_edit_file',
+            sourceTool: 'edit_file',
             path: '/workspace/sample-file.txt',
             displayPath: 'sample-file.txt',
             kind: 'edited',
@@ -204,7 +279,7 @@ describe('ApprovalService', () => {
       description: 'Tool requires approval',
       requestedAt: '2026-04-11T00:00:00.000Z',
       expiresAt: '2026-04-12T00:00:00.000Z',
-      toolName: 'mcp__sandbox__workspace_edit_file',
+      toolName: 'mcp__workspace_core__edit_file',
       argumentsSummary: [
         {
           name: 'path',
@@ -216,7 +291,7 @@ describe('ApprovalService', () => {
         {
           id: 'tool-call-1:/workspace/sample-file.txt',
           toolCallId: 'tool-call-1',
-          sourceTool: 'workspace_edit_file',
+          sourceTool: 'edit_file',
           path: '/workspace/sample-file.txt',
           displayPath: 'sample-file.txt',
           kind: 'edited',
@@ -236,6 +311,7 @@ describe('ApprovalService', () => {
         },
       ],
       riskLabels: ['Workspace write'],
+      alwaysAllowEligible: true,
     });
   });
 
@@ -388,8 +464,6 @@ describe('ApprovalService', () => {
   });
 
   it('classifies session workspace approval requests by their workspace capability', async () => {
-    mockGetToolName.mockReturnValue('mcp__sandbox__workspace_edit_file');
-
     const existingLookupQuery: any = {};
     existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
     existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
@@ -405,16 +479,16 @@ describe('ApprovalService', () => {
       thread: { id: 7 } as any,
       run: { id: 11 } as any,
       message: { parts: [] } as any,
-      toolPart: {
+      toolPart: toolPart('mcp__workspace_core__edit_file', {
         approval: { id: 'approval-1' },
         input: {
           path: 'approval-check.txt',
-          oldText: 'original',
-          newText: 'updated',
+          old_text: 'original',
+          new_text: 'updated',
         },
         state: 'approval-requested',
         toolCallId: 'tool-call-1',
-      } as any,
+      }) as any,
       capabilityKey: 'external_mcp_write',
     });
 
@@ -422,49 +496,13 @@ describe('ApprovalService', () => {
       expect.objectContaining({
         capabilityKey: 'workspace_write',
         payload: expect.objectContaining({
-          toolName: 'mcp__sandbox__workspace_edit_file',
+          toolName: 'mcp__workspace_core__edit_file',
         }),
       })
     );
   });
 
-  it('does not persist approval requests when the current policy allows the tool', async () => {
-    mockGetToolName.mockReturnValue('mcp__sandbox__workspace_write_file');
-
-    await ApprovalService.syncApprovalRequestsFromMessages({
-      thread: { id: 7 } as any,
-      run: { id: 11 } as any,
-      messages: [
-        {
-          role: 'assistant',
-          parts: [
-            {
-              approval: { id: 'approval-1' },
-              input: {
-                path: 'approval-check.txt',
-                content: 'hello',
-              },
-              state: 'approval-requested',
-              toolCallId: 'tool-call-1',
-            },
-          ],
-        } as any,
-      ],
-      approvalPolicy: {
-        defaultMode: 'allow',
-        rules: {
-          workspace_write: 'allow',
-        },
-      } as any,
-      toolRules: [],
-    });
-
-    expect(mockPendingActionQuery).not.toHaveBeenCalled();
-  });
-
-  it('persists forced Lifecycle fix approval requests even when the policy allows the capability', async () => {
-    mockGetToolName.mockReturnValue('mcp__lifecycle__update_file');
-
+  it('persists runtime-requested approvals even when the current policy allows the tool', async () => {
     const existingLookupQuery: any = {};
     existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
     existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
@@ -483,7 +521,91 @@ describe('ApprovalService', () => {
         {
           role: 'assistant',
           parts: [
-            {
+            toolPart('mcp__workspace_core__write_file', {
+              approval: { id: 'approval-1' },
+              input: {
+                path: 'approval-check.txt',
+                content: 'hello',
+              },
+              state: 'approval-requested',
+              toolCallId: 'tool-call-1',
+            }),
+          ],
+        } as any,
+      ],
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          workspace_write: 'allow',
+        },
+      } as any,
+      toolRules: [],
+    });
+
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityKey: 'workspace_write',
+        payload: expect.objectContaining({
+          approvalId: 'approval-1',
+          toolCallId: 'tool-call-1',
+          toolName: 'mcp__workspace_core__write_file',
+        }),
+      })
+    );
+  });
+
+  it('does not persist approval requests when the current policy denies the tool', async () => {
+    await ApprovalService.syncApprovalRequestsFromMessages({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      messages: [
+        {
+          role: 'assistant',
+          parts: [
+            toolPart('mcp__workspace_core__write_file', {
+              approval: { id: 'approval-1' },
+              input: {
+                path: 'approval-check.txt',
+                content: 'hello',
+              },
+              state: 'approval-requested',
+              toolCallId: 'tool-call-1',
+            }),
+          ],
+        } as any,
+      ],
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          workspace_write: 'deny',
+        },
+      } as any,
+      toolRules: [],
+    });
+
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('persists forced Lifecycle fix approval requests even when the policy allows the capability', async () => {
+    const existingLookupQuery: any = {};
+    existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.first = jest.fn().mockResolvedValue(null);
+
+    const insertQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue({ id: 1 }),
+    };
+
+    mockPendingActionQuery.mockImplementationOnce(() => existingLookupQuery).mockImplementationOnce(() => insertQuery);
+
+    await ApprovalService.syncApprovalRequestsFromMessages({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      messages: [
+        {
+          role: 'assistant',
+          parts: [
+            toolPart('mcp__lifecycle__update_file', {
               approval: { id: 'approval-1' },
               input: {
                 repository_owner: 'example-org',
@@ -494,7 +616,7 @@ describe('ApprovalService', () => {
               },
               state: 'approval-requested',
               toolCallId: 'tool-call-1',
-            },
+            }),
           ],
         } as any,
       ],
@@ -520,9 +642,50 @@ describe('ApprovalService', () => {
     );
   });
 
-  it('persists approval requests when a tool rule requires approval', async () => {
-    mockGetToolName.mockReturnValue('mcp__sandbox__workspace_write_file');
+  it('persists Lifecycle trigger-redeploy approvals as deployment mutations', async () => {
+    const existingLookupQuery: any = {};
+    existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.first = jest.fn().mockResolvedValue(null);
 
+    const insertQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue({ id: 1 }),
+    };
+
+    mockPendingActionQuery.mockImplementationOnce(() => existingLookupQuery).mockImplementationOnce(() => insertQuery);
+
+    await ApprovalService.upsertApprovalRequestFromStream({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      approvalId: 'approval-redeploy',
+      toolCallId: 'tool-call-redeploy',
+      toolName: 'mcp__lifecycle__trigger_redeploy',
+      input: {
+        reason: 'Retry the failed deployment.',
+      },
+      approvalPolicy: {
+        defaultMode: 'allow',
+        rules: {
+          deploy_k8s_mutation: 'allow',
+          external_mcp_write: 'allow',
+        },
+      } as any,
+      toolRules: [],
+    });
+
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityKey: 'deploy_k8s_mutation',
+        payload: expect.objectContaining({
+          approvalId: 'approval-redeploy',
+          toolCallId: 'tool-call-redeploy',
+          toolName: 'mcp__lifecycle__trigger_redeploy',
+        }),
+      })
+    );
+  });
+
+  it('persists approval requests when a tool rule requires approval', async () => {
     const existingLookupQuery: any = {};
     existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
     existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
@@ -541,7 +704,7 @@ describe('ApprovalService', () => {
         {
           role: 'assistant',
           parts: [
-            {
+            toolPart('mcp__workspace_core__write_file', {
               approval: { id: 'approval-1' },
               input: {
                 path: 'approval-check.txt',
@@ -549,7 +712,7 @@ describe('ApprovalService', () => {
               },
               state: 'approval-requested',
               toolCallId: 'tool-call-1',
-            },
+            }),
           ],
         } as any,
       ],
@@ -561,7 +724,7 @@ describe('ApprovalService', () => {
       } as any,
       toolRules: [
         {
-          toolKey: 'mcp__sandbox__workspace_write_file',
+          toolKey: 'mcp__workspace_core__write_file',
           mode: 'require_approval',
         },
       ],
@@ -571,7 +734,7 @@ describe('ApprovalService', () => {
       expect.objectContaining({
         capabilityKey: 'workspace_write',
         payload: expect.objectContaining({
-          toolName: 'mcp__sandbox__workspace_write_file',
+          toolName: 'mcp__workspace_core__write_file',
         }),
       })
     );
@@ -594,7 +757,7 @@ describe('ApprovalService', () => {
       run: { id: 11 } as any,
       approvalId: 'approval-1',
       toolCallId: 'tool-call-1',
-      toolName: 'mcp__sandbox__workspace_write_file',
+      toolName: 'mcp__workspace_core__write_file',
       input: {
         path: 'sample-file.txt',
         content: 'hello',
@@ -603,7 +766,7 @@ describe('ApprovalService', () => {
         {
           id: 'change-1',
           toolCallId: 'tool-call-1',
-          sourceTool: 'workspace.write_file',
+          sourceTool: 'write_file',
           path: 'sample-file.txt',
           displayPath: 'sample-file.txt',
           kind: 'write',
@@ -625,7 +788,7 @@ describe('ApprovalService', () => {
         payload: expect.objectContaining({
           approvalId: 'approval-1',
           toolCallId: 'tool-call-1',
-          toolName: 'mcp__sandbox__workspace_write_file',
+          toolName: 'mcp__workspace_core__write_file',
           fileChanges: expect.arrayContaining([
             expect.objectContaining({
               id: 'change-1',
@@ -637,13 +800,24 @@ describe('ApprovalService', () => {
     );
   });
 
-  it('does not persist stream approval requests when the current policy allows the tool', async () => {
+  it('persists stream approval requests even when the current policy allows the tool', async () => {
+    const existingLookupQuery: any = {};
+    existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
+    existingLookupQuery.first = jest.fn().mockResolvedValue(null);
+
+    const insertQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue({ id: 1 }),
+    };
+
+    mockPendingActionQuery.mockImplementationOnce(() => existingLookupQuery).mockImplementationOnce(() => insertQuery);
+
     await ApprovalService.upsertApprovalRequestFromStream({
       thread: { id: 7 } as any,
       run: { id: 11 } as any,
       approvalId: 'approval-1',
       toolCallId: 'tool-call-1',
-      toolName: 'mcp__sandbox__workspace_write_file',
+      toolName: 'mcp__workspace_core__write_file',
       input: {
         path: 'sample-file.txt',
         content: 'hello',
@@ -657,12 +831,19 @@ describe('ApprovalService', () => {
       toolRules: [],
     });
 
-    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityKey: 'workspace_write',
+        payload: expect.objectContaining({
+          approvalId: 'approval-1',
+          toolCallId: 'tool-call-1',
+          toolName: 'mcp__workspace_core__write_file',
+        }),
+      })
+    );
   });
 
   it('does not reset resolved approval requests during final message sync', async () => {
-    mockGetToolName.mockReturnValue('mcp__sandbox__workspace_write_file');
-
     const existingLookupQuery: any = {};
     existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
     existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
@@ -684,7 +865,7 @@ describe('ApprovalService', () => {
           {
             role: 'assistant',
             parts: [
-              {
+              toolPart('mcp__workspace_core__write_file', {
                 approval: { id: 'approval-1' },
                 input: {
                   path: 'approval-check.txt',
@@ -692,7 +873,7 @@ describe('ApprovalService', () => {
                 },
                 state: 'approval-requested',
                 toolCallId: 'tool-call-1',
-              },
+              }),
             ],
           } as any,
         ],
@@ -713,8 +894,6 @@ describe('ApprovalService', () => {
   });
 
   it('classifies chat HTTP publish approvals as deploy mutations', async () => {
-    mockGetToolName.mockReturnValue('mcp__lifecycle__publish_http');
-
     const existingLookupQuery: any = {};
     existingLookupQuery.where = jest.fn().mockReturnValue(existingLookupQuery);
     existingLookupQuery.whereRaw = jest.fn().mockReturnValue(existingLookupQuery);
@@ -730,14 +909,14 @@ describe('ApprovalService', () => {
       thread: { id: 7 } as any,
       run: { id: 11 } as any,
       message: { parts: [] } as any,
-      toolPart: {
+      toolPart: toolPart('mcp__workspace_core__publish_http', {
         approval: { id: 'approval-1' },
         input: {
           port: 8000,
         },
         state: 'approval-requested',
         toolCallId: 'tool-call-1',
-      } as any,
+      }) as any,
       capabilityKey: 'external_mcp_write',
     });
 
@@ -745,7 +924,7 @@ describe('ApprovalService', () => {
       expect.objectContaining({
         capabilityKey: 'deploy_k8s_mutation',
         payload: expect.objectContaining({
-          toolName: 'mcp__lifecycle__publish_http',
+          toolName: 'mcp__workspace_core__publish_http',
         }),
       })
     );
@@ -876,7 +1055,11 @@ describe('ApprovalService', () => {
       })
     );
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
-      githubToken: 'sample-gh-token',
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        writeAuthorized: false,
+      }),
     });
     expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
       queuedRun,
@@ -888,6 +1071,435 @@ describe('ApprovalService', () => {
     );
   });
 
+  it('stores approver GitHub auth before approving a git_write action', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: {
+        approvalId: 'approval-1',
+        toolCallId: 'tool-1',
+        input: {
+          repository_owner: 'example-org',
+          repository_name: 'example-repo',
+        },
+      },
+      runUuid: 'run-uuid',
+    };
+    const updatedAction = {
+      ...action,
+      status: 'approved',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action, null, updatedAction);
+    const queuedRun = {
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'queued',
+      usageSummary: {},
+      error: null,
+    };
+    const runQuery = makeTransactionalRunQuery(
+      {
+        id: 11,
+        uuid: 'run-uuid',
+        status: 'waiting_for_approval',
+        usageSummary: {},
+        error: null,
+      },
+      queuedRun
+    );
+
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await ApprovalService.resolvePendingAction(
+      'action-1',
+      'sample-user',
+      'approved',
+      { approved: true },
+      {
+        githubAuth: {
+          githubToken: 'user-token',
+          source: 'user',
+          githubUsername: 'octocat',
+        },
+      }
+    );
+
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('user-token');
+    expect(mockFetchGitHubRepositoryWritePermission).toHaveBeenCalledWith('user-token', 'example-org', 'example-repo');
+    expect(mockStoreApprovalGitHubAuthHandoff).toHaveBeenCalledWith({
+      runUuid: 'run-uuid',
+      actionUuid: 'action-1',
+      toolCallId: 'tool-1',
+      approvedByUserId: 'sample-user',
+      auth: expect.objectContaining({
+        githubToken: 'user-token',
+        source: 'user',
+        githubUsername: 'octocat',
+        writeAuthorized: true,
+      }),
+    });
+    expect(pendingQuery.patchAndFetchById).toHaveBeenCalledWith(
+      99,
+      expect.objectContaining({
+        status: 'approved',
+      })
+    );
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'user-token',
+        source: 'user',
+        githubUsername: 'octocat',
+        writeAuthorized: true,
+      }),
+    });
+  });
+
+  it('rejects git_write approvals without a user GitHub token before mutating the action', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: { approvalId: 'approval-1', toolCallId: 'tool-1' },
+      runUuid: 'run-uuid',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action);
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'waiting_for_approval',
+      usageSummary: {},
+      error: null,
+    });
+
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        {
+          githubAuth: {
+            githubToken: 'app-token',
+            source: 'app',
+          },
+        }
+      )
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+    });
+
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockFetchGitHubAuthenticatedUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects git_write approvals when the user token cannot write the target repository', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: {
+        approvalId: 'approval-1',
+        toolCallId: 'tool-1',
+        input: {
+          repository_owner: 'example-org',
+          repository_name: 'example-repo',
+        },
+      },
+      runUuid: 'run-uuid',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action);
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'waiting_for_approval',
+      usageSummary: {},
+      error: null,
+    });
+
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+    mockFetchGitHubRepositoryWritePermission.mockResolvedValueOnce({
+      ok: true,
+      repository: 'example-org/example-repo',
+      status: 200,
+      permission: 'denied',
+      permissions: { admin: false, maintain: false, push: false },
+      scopes: [],
+      rateLimitRemaining: '42',
+    });
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        {
+          githubAuth: {
+            githubToken: 'user-token',
+            source: 'user',
+            githubUsername: 'octocat',
+          },
+        }
+      )
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+      details: {
+        repository: 'example-org/example-repo',
+        requiredPermission: 'repository_write',
+        permission: 'denied',
+      },
+    });
+
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('user-token');
+    expect(mockFetchGitHubRepositoryWritePermission).toHaveBeenCalledWith('user-token', 'example-org', 'example-repo');
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'the GitHub token probe is unusable',
+      () =>
+        mockFetchGitHubAuthenticatedUser.mockResolvedValueOnce({
+          ok: false,
+          id: null,
+          login: null,
+          status: 401,
+          scopes: ['repo'],
+          rateLimitRemaining: null,
+        }),
+    ],
+    [
+      'the GitHub token probe fails',
+      () => mockFetchGitHubAuthenticatedUser.mockRejectedValueOnce(new Error('GitHub unavailable')),
+    ],
+  ])('rejects git_write approvals when %s', async (_name, arrangeProbe) => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: { approvalId: 'approval-1', toolCallId: 'tool-1' },
+      runUuid: 'run-uuid',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action);
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'waiting_for_approval',
+      usageSummary: {},
+      error: null,
+    });
+
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+    arrangeProbe();
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        {
+          githubAuth: {
+            githubToken: 'user-token',
+            source: 'user',
+            githubUsername: 'octocat',
+          },
+        }
+      )
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+    });
+
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('user-token');
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('reuses an existing handoff when an already-approved git_write action is requeued', async () => {
+    const resolvedAction = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'approved',
+      capabilityKey: 'git_write',
+      payload: { approvalId: 'approval-1', toolCallId: 'tool-1' },
+      runUuid: 'run-uuid',
+      resolution: {
+        approved: true,
+      },
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(resolvedAction, resolvedAction, null);
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'queued',
+      usageSummary: {},
+      error: null,
+    });
+    mockGetApprovalGitHubAuthHandoffByAction.mockResolvedValueOnce({
+      githubToken: 'handoff-token',
+      source: 'user',
+      githubUsername: 'approver',
+      writeAuthorized: true,
+    });
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', {
+      approved: true,
+    });
+
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('handoff-token');
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
+      githubAuth: {
+        githubToken: 'handoff-token',
+        source: 'user',
+        githubUsername: 'approver',
+        writeAuthorized: true,
+      },
+    });
+  });
+
+  it('rejects an existing git_write handoff when its token cannot write the target repository', async () => {
+    const resolvedAction = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'approved',
+      capabilityKey: 'git_write',
+      payload: {
+        approvalId: 'approval-1',
+        toolCallId: 'tool-1',
+        input: {
+          repository_owner: 'example-org',
+          repository_name: 'example-repo',
+        },
+      },
+      runUuid: 'run-uuid',
+      resolution: {
+        approved: true,
+      },
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(resolvedAction, resolvedAction, null);
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'queued',
+      usageSummary: {},
+      error: null,
+    });
+    mockGetApprovalGitHubAuthHandoffByAction.mockResolvedValueOnce({
+      githubToken: 'handoff-token',
+      source: 'user',
+      githubUsername: 'approver',
+      writeAuthorized: true,
+    });
+    mockFetchGitHubRepositoryWritePermission.mockResolvedValueOnce({
+      ok: true,
+      repository: 'example-org/example-repo',
+      status: 200,
+      permission: 'denied',
+      permissions: { admin: false, maintain: false, push: false },
+      scopes: [],
+      rateLimitRemaining: '42',
+    });
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await expect(
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', {
+        approved: true,
+      })
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+    });
+
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('handoff-token');
+    expect(mockFetchGitHubRepositoryWritePermission).toHaveBeenCalledWith(
+      'handoff-token',
+      'example-org',
+      'example-repo'
+    );
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('cleans up a freshly stored git_write handoff if approval persistence fails', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: { approvalId: 'approval-1', toolCallId: 'tool-1' },
+      runUuid: 'run-uuid',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action);
+    pendingQuery.patchAndFetchById.mockRejectedValueOnce(new Error('db write failed'));
+    const runQuery = makeTransactionalRunQuery({
+      id: 11,
+      uuid: 'run-uuid',
+      status: 'waiting_for_approval',
+      usageSummary: {},
+      error: null,
+    });
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        {
+          githubAuth: {
+            githubToken: 'user-token',
+            source: 'user',
+            githubUsername: 'octocat',
+          },
+        }
+      )
+    ).rejects.toThrow('db write failed');
+
+    expect(mockStoreApprovalGitHubAuthHandoff).toHaveBeenCalled();
+    expect(mockClearApprovalGitHubAuthHandoff).toHaveBeenCalledWith('run-uuid', 'action-1', 'tool-1');
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
   it('emits the denial reason before requeueing the waiting run', async () => {
     const action = {
       id: 99,
@@ -895,6 +1507,7 @@ describe('ApprovalService', () => {
       threadId: 7,
       runId: 11,
       status: 'pending',
+      capabilityKey: 'git_write',
       payload: { approvalId: 'approval-1' },
       runUuid: 'run-uuid',
     };
@@ -965,8 +1578,14 @@ describe('ApprovalService', () => {
       })
     );
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
-      githubToken: undefined,
+      githubAuth: expect.objectContaining({
+        githubToken: null,
+        source: 'none',
+        writeAuthorized: false,
+      }),
     });
+    expect(mockFetchGitHubAuthenticatedUser).not.toHaveBeenCalled();
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
   });
 
   it('completes denied Debug repair approvals instead of immediately resuming repair', async () => {
@@ -1110,7 +1729,11 @@ describe('ApprovalService', () => {
     );
     expect(mockPatchStatus).not.toHaveBeenCalled();
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
-      githubToken: undefined,
+      githubAuth: expect.objectContaining({
+        githubToken: null,
+        source: 'none',
+        writeAuthorized: false,
+      }),
     });
   });
 
@@ -1148,7 +1771,11 @@ describe('ApprovalService', () => {
     expect(runQuery.patchAndFetchById).not.toHaveBeenCalled();
     expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
-      githubToken: undefined,
+      githubAuth: expect.objectContaining({
+        githubToken: null,
+        source: 'none',
+        writeAuthorized: false,
+      }),
     });
   });
 

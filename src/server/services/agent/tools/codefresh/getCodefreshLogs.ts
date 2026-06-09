@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolResult } from '../types';
 import { getLogsResult } from 'server/lib/codefresh';
 import { OutputLimiter } from '../outputLimiter';
 
@@ -63,15 +63,13 @@ export class GetCodefreshLogsTool extends BaseTool {
           },
         },
         required: ['pipeline_id'],
-      },
-      ToolSafetyLevel.SAFE,
-      'codefresh'
+      }
     );
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     try {
@@ -92,8 +90,7 @@ export class GetCodefreshLogsTool extends BaseTool {
       if (!hasContent) {
         return this.createErrorResult(
           `No logs returned for pipeline_id ${pipelineId}. It may be wrong, expired, or the build has not started. Verify the buildPipelineId/deployPipelineId from the DEPLOYS section and retry; do NOT assume the build is clean.`,
-          'LOGS_UNAVAILABLE',
-          true
+          'LOGS_UNAVAILABLE'
         );
       }
 
@@ -126,16 +123,11 @@ export class GetCodefreshLogsTool extends BaseTool {
 
       const displayContent = `Codefresh logs: ${returnedLineCount} of ${totalLines} lines`;
 
-      const result = {
-        success: true,
-        logs: truncatedLogs,
-        pipelineId,
-        serviceName: serviceName || undefined,
-        totalLines,
-        returnedLines: returnedLineCount,
-      };
+      const agentContent = `Codefresh logs for pipeline ${pipelineId}${
+        serviceName ? ` (service ${serviceName})` : ''
+      }: showing last ${returnedLineCount} of ${totalLines} lines (deduped).\n\`\`\`\n${truncatedLogs}\n\`\`\``;
 
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return this.createSuccessResult(agentContent, displayContent);
     } catch (error: any) {
       return this.createErrorResult(error.message || 'Failed to fetch Codefresh logs', 'EXECUTION_ERROR');
     }

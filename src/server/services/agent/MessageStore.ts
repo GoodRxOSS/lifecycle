@@ -34,6 +34,9 @@ import {
 const AGENT_MESSAGE_UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const CLIENT_MESSAGE_ID_METADATA_KEY = 'clientMessageId';
 export const AGENT_SWITCH_METADATA_KIND = 'agent_switch';
+// Must match EnvironmentWatchService.ENVIRONMENT_UPDATE_METADATA_KIND.
+export const ENVIRONMENT_UPDATE_METADATA_KIND = 'environment_update';
+const SYSTEM_MESSAGE_METADATA_KINDS = [AGENT_SWITCH_METADATA_KIND, ENVIRONMENT_UPDATE_METADATA_KIND];
 export const DEFAULT_AGENT_MESSAGE_PAGE_LIMIT = 50;
 export const MAX_AGENT_MESSAGE_PAGE_LIMIT = 100;
 
@@ -88,7 +91,7 @@ function normalizeTimestamp(value: unknown): string | null {
 }
 
 function isAgentSwitchMessage(message: AgentMessage): boolean {
-  return message.role === 'system' && message.metadata?.kind === AGENT_SWITCH_METADATA_KIND;
+  return message.role === 'system' && SYSTEM_MESSAGE_METADATA_KINDS.includes(String(message.metadata?.kind));
 }
 
 function getIncomingMessageId(message: Pick<CanonicalAgentInputMessage, 'id'>): string | null {
@@ -408,7 +411,7 @@ export default class AgentMessageStore {
         builder.whereIn('message.role', ['user', 'assistant']).orWhere((systemBuilder) => {
           systemBuilder
             .where('message.role', 'system')
-            .whereRaw('"message"."metadata"->>? = ?', ['kind', AGENT_SWITCH_METADATA_KIND]);
+            .whereRaw('"message"."metadata"->>? in (?, ?)', ['kind', ...SYSTEM_MESSAGE_METADATA_KINDS]);
         });
       })
       .select('message.*', 'run.uuid as runUuid', 'run.startedAt as runStartedAt', 'run.completedAt as runCompletedAt')

@@ -23,7 +23,11 @@ import type { RequestUserIdentity } from 'server/lib/get-user';
 import { ConflictError } from 'server/lib/appError';
 import AgentCapabilityService from './CapabilityService';
 import * as AgentDefinitionRegistry from './AgentDefinitionRegistry';
-import { customAgentDefinitionService } from './CustomAgentDefinitionService';
+import {
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE,
+  customAgentDefinitionNeedsOneAgentConversion,
+  customAgentDefinitionService,
+} from './CustomAgentDefinitionService';
 import AgentMessageStore from './MessageStore';
 import AgentPolicyService from './PolicyService';
 import { TERMINAL_RUN_STATUSES } from './RunService';
@@ -31,11 +35,7 @@ import AgentSourceService from './SourceService';
 import AgentThreadService from './ThreadService';
 import type { AgentDefinitionContract } from './agentDefinitionTypes';
 import type { AgentCapabilitySourceKind } from './capabilityCatalog';
-import {
-  SYSTEM_AGENT_DEFINITION_IDS,
-  sourceKindForSystemAgentDefinitionId,
-  type SystemAgentDefinitionId,
-} from './systemAgentDefinitions';
+import { SYSTEM_VISIBLE_AGENT_DEFINITION_IDS, type SystemAgentDefinitionId } from './systemAgentDefinitions';
 
 export type AgentSelectionGroupId = 'built_in' | 'my_agents';
 
@@ -44,6 +44,7 @@ export type AgentSelectionUnavailableReason =
   | 'active_run'
   | 'disabled_agent'
   | 'requires_workspace'
+  | 'needs_conversion'
   | 'source_incompatible'
   | 'disabled_by_policy';
 
@@ -105,7 +106,7 @@ type ValidationContext = {
 
 function orderSystemDefinitions(definitions: AgentDefinitionContract[]): AgentDefinitionContract[] {
   const byId = new Map(definitions.map((definition) => [definition.id, definition]));
-  return SYSTEM_AGENT_DEFINITION_IDS.flatMap((agentId) => {
+  return SYSTEM_VISIBLE_AGENT_DEFINITION_IDS.flatMap((agentId) => {
     const definition = byId.get(agentId);
     return definition ? [definition] : [];
   });
@@ -144,6 +145,14 @@ function validateDefinition(
       available: false,
       unavailableReason: 'disabled_agent',
       unavailableMessage: `${definition.name} is unavailable.`,
+    };
+  }
+
+  if (customAgentDefinitionNeedsOneAgentConversion(definition)) {
+    return {
+      available: false,
+      unavailableReason: 'needs_conversion',
+      unavailableMessage: CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE,
     };
   }
 
@@ -339,7 +348,7 @@ export default class AgentSelectionService {
       await AgentCapabilityService.resolveSessionContext(session.uuid, userIdentity);
     const activeRun = await hasActiveRun(session.id);
     const context: ValidationContext = {
-      sourceKind: sourceKindForSystemAgentDefinitionId(defaultId),
+      sourceKind: AgentDefinitionRegistry.inferDefaultAgentSourceKind(session, source),
       capabilityPolicy,
       customAgentCreationPolicy,
       approvalPolicy,

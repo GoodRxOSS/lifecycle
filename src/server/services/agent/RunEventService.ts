@@ -17,7 +17,11 @@
 import AgentRun from 'server/models/AgentRun';
 import AgentRunEvent from 'server/models/AgentRunEvent';
 import { getLogger } from 'server/lib/logger';
-import { sanitizeAgentRunStreamChunks, type AgentUiMessageChunk } from './streamChunks';
+import {
+  sanitizeAgentRunStreamChunks,
+  scrubSecretsFromAgentRunStreamChunks,
+  type AgentUiMessageChunk,
+} from './streamChunks';
 import { limitDurablePayloadRecord } from './payloadLimits';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
@@ -40,8 +44,8 @@ export const RUN_EVENT_STREAM_PAGE_LIMIT = 100;
 export const RUN_EVENT_STREAM_POLL_INTERVAL_MS = 250;
 const AGENT_RUN_EVENT_VERSION = 1;
 const RUN_EVENT_NOTIFY_CHANNEL = 'agent_run_events';
-const RUN_EVENT_TERMINAL_STATUSES = new Set<AgentRun['status']>(['completed', 'failed', 'cancelled']);
-const RUN_EVENT_TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.failed', 'run.cancelled']);
+const RUN_EVENT_TERMINAL_STATUSES = new Set<AgentRun['status']>(['transitioned', 'completed', 'failed', 'cancelled']);
+const RUN_EVENT_TERMINAL_EVENT_TYPES = new Set(['run.transitioned', 'run.completed', 'run.failed', 'run.cancelled']);
 const textEncoder = new TextEncoder();
 
 type RunEventPageOptions = {
@@ -503,6 +507,7 @@ export default class AgentRunEventService {
           status: run.status,
           error: runWithError.error || null,
           usageSummary: runWithError.usageSummary || {},
+          transition: run.transition || null,
           repaired: true,
         },
         trx
@@ -633,7 +638,8 @@ export default class AgentRunEventService {
 
     const events: ChunkEvent[] = [];
 
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }
@@ -661,7 +667,8 @@ export default class AgentRunEventService {
 
     const events: ChunkEvent[] = [];
 
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }
@@ -683,7 +690,8 @@ export default class AgentRunEventService {
     }
 
     const events: ChunkEvent[] = [];
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }

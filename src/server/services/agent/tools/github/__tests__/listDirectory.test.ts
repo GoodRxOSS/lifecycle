@@ -19,9 +19,15 @@ import { ListDirectoryTool } from '../listDirectory';
 const mockOctokit = { request: jest.fn() };
 const mockGithubClient = {
   getOctokit: jest.fn().mockResolvedValue(mockOctokit),
+  getOctokitWithAuth: jest.fn().mockResolvedValue({
+    octokit: mockOctokit,
+    auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+  }),
   isFilePathAllowed: jest.fn().mockReturnValue(true),
   isFileExcluded: jest.fn().mockReturnValue(false),
   isRepoAllowed: jest.fn().mockReturnValue(true),
+  getDefaultRepo: jest.fn().mockReturnValue(null),
+  getAllowedBranch: jest.fn().mockReturnValue(null),
 } as any;
 
 describe('ListDirectoryTool', () => {
@@ -37,6 +43,10 @@ describe('ListDirectoryTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
+    mockGithubClient.getOctokitWithAuth.mockResolvedValue({
+      octokit: mockOctokit,
+      auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+    });
     mockGithubClient.isFileExcluded.mockReturnValue(false);
     mockGithubClient.isRepoAllowed.mockReturnValue(true);
     tool = new ListDirectoryTool(mockGithubClient);

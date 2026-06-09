@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 import { OutputLimiter } from '../outputLimiter';
 
@@ -79,15 +79,13 @@ export class GetPodLogsTool extends BaseTool {
           },
         },
         required: ['pod_name'],
-      },
-      ToolSafetyLevel.SAFE,
-      'k8s'
+      }
     );
   }
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     let namespace: string;
@@ -95,7 +93,7 @@ export class GetPodLogsTool extends BaseTool {
       // SECURITY: lock to the build's namespace; reject any foreign namespace.
       namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED', false);
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED');
     }
 
     const previous = args.previous === true;
@@ -140,20 +138,21 @@ export class GetPodLogsTool extends BaseTool {
         previous ? ' (previous instance)' : ''
       } (${dedupedLines.length} total, head=${headLines} tail=${tailLines})`;
 
-      const result = {
-        success: true,
-        previous,
-        logs: processedLogs,
-      };
+      const truncationNote =
+        dedupedLines.length > finalLines.length
+          ? ` (truncated to head=${headLines} tail=${tailLines} of ${dedupedLines.length} deduped lines)`
+          : '';
+      const agentContent = `Logs for pod ${podName}${previous ? ' (previous instance)' : ''}: ${
+        dedupedLines.length
+      } lines after dedupe${truncationNote}\n\`\`\`\n${processedLogs}\n\`\`\``;
 
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return this.createSuccessResult(agentContent, displayContent);
     } catch (error: any) {
       const message: string = error?.message || 'Failed to fetch pod logs';
       if (previous && /previous terminated container|not found/i.test(message)) {
         return this.createErrorResult(
           'No previous (crashed) container instance found — the pod has not restarted yet, or kept no prior instance. Read current logs (omit previous), or check container status and events for the waiting/terminated reason.',
-          'NO_PREVIOUS_CONTAINER',
-          false
+          'NO_PREVIOUS_CONTAINER'
         );
       }
       return this.createErrorResult(message, 'EXECUTION_ERROR');

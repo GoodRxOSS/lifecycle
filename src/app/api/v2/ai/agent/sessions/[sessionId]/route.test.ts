@@ -19,7 +19,7 @@ import { NextRequest } from 'next/server';
 const mockGetRequestUserIdentity = jest.fn();
 const mockGetOwnedSessionRecord = jest.fn();
 const mockGetSession = jest.fn();
-const mockEndSession = jest.fn();
+const mockArchiveSession = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({}));
 
@@ -44,7 +44,7 @@ jest.mock('server/services/agentSession', () => ({
   __esModule: true,
   default: {
     getSession: (...args: unknown[]) => mockGetSession(...args),
-    endSession: (...args: unknown[]) => mockEndSession(...args),
+    archiveSession: (...args: unknown[]) => mockArchiveSession(...args),
   },
 }));
 
@@ -85,12 +85,41 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
     mockGetSession.mockResolvedValue({
       uuid: 'sample-session',
       userId: 'sample-user',
+      status: 'active',
     });
-    mockEndSession.mockResolvedValue(undefined);
+    mockArchiveSession.mockResolvedValue(undefined);
   });
 
-  it('maps canonical workspace action blockers during end to 409', async () => {
-    mockEndSession.mockRejectedValueOnce(
+  it('archives the session and reports the archived state', async () => {
+    const response = await DELETE(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({ archived: true });
+    expect(mockArchiveSession).toHaveBeenCalledWith('sample-session');
+  });
+
+  it('returns archived without re-archiving when the session is already archived', async () => {
+    mockGetSession.mockResolvedValueOnce({
+      uuid: 'sample-session',
+      userId: 'sample-user',
+      status: 'archived',
+    });
+
+    const response = await DELETE(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({ archived: true });
+    expect(mockArchiveSession).not.toHaveBeenCalled();
+  });
+
+  it('maps canonical workspace action blockers during archive to 409', async () => {
+    mockArchiveSession.mockRejectedValueOnce(
       new WorkspaceActionBlockedError(
         'active_run',
         'Wait for the current agent run to finish before changing the workspace.'
@@ -105,7 +134,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
     expect(response.status).toBe(409);
     expect(body.error.message).toBe('Wait for the current agent run to finish before changing the workspace.');
     expect(mockGetSession).toHaveBeenCalledWith('sample-session');
-    expect(mockEndSession).toHaveBeenCalledWith('sample-session');
+    expect(mockArchiveSession).toHaveBeenCalledWith('sample-session');
   });
 
   it('rejects unauthenticated delete requests', async () => {
@@ -119,7 +148,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
     expect(response.status).toBe(401);
     expect(body.error.message).toBe('Authentication is required.');
     expect(mockGetSession).not.toHaveBeenCalled();
-    expect(mockEndSession).not.toHaveBeenCalled();
+    expect(mockArchiveSession).not.toHaveBeenCalled();
   });
 
   it('returns 404 when deleting a missing session', async () => {
@@ -132,7 +161,7 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
 
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Session not found');
-    expect(mockEndSession).not.toHaveBeenCalled();
+    expect(mockArchiveSession).not.toHaveBeenCalled();
   });
 
   it('maps delete ownership failures to 404', async () => {
@@ -148,6 +177,6 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
 
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Session not found');
-    expect(mockEndSession).not.toHaveBeenCalled();
+    expect(mockArchiveSession).not.toHaveBeenCalled();
   });
 });

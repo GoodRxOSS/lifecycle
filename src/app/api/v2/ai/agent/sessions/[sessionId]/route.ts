@@ -65,7 +65,7 @@ import AgentSessionService from 'server/services/agentSession';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   delete:
- *     summary: End an agent session
+ *     summary: Archive an agent session and release its workspace
  *     tags:
  *       - Agent Sessions
  *     operationId: deleteAgentSession
@@ -77,7 +77,7 @@ import AgentSessionService from 'server/services/agentSession';
  *           type: string
  *     responses:
  *       '200':
- *         description: Session ended
+ *         description: Session archived
  *         content:
  *           application/json:
  *             schema:
@@ -89,9 +89,9 @@ import AgentSessionService from 'server/services/agentSession';
  *                 data:
  *                   type: object
  *                   required:
- *                     - ended
+ *                     - archived
  *                   properties:
- *                     ended:
+ *                     archived:
  *                       type: boolean
  *                 error:
  *                   nullable: true
@@ -131,8 +131,12 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
     return errorResponse(new Error('Session not found'), { status: 404 }, req);
   }
 
+  if (session.status === 'archived') {
+    return successResponse({ archived: true }, { status: 200 }, req);
+  }
+
   try {
-    await AgentSessionService.endSession(sessionId);
+    await AgentSessionService.archiveSession(sessionId);
   } catch (error) {
     if (error instanceof WorkspaceActionBlockedError) {
       return errorResponse(error, { status: 409 }, req);
@@ -140,7 +144,7 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
     throw error;
   }
 
-  return successResponse({ ended: true }, { status: 200 }, req);
+  return successResponse({ archived: true }, { status: 200 }, req);
 };
 
 export const GET = createApiHandler(getHandler);

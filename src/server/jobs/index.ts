@@ -25,6 +25,9 @@ import { processAgentSessionPrewarm } from './agentSessionPrewarm';
 import { processAgentSandboxSessionLaunch } from './agentSandboxSessionLaunch';
 import { processAgentRunExecute } from './agentRunExecute';
 import { processAgentRunDispatchRecovery } from './agentRunDispatchRecovery';
+import { processAgentEnvironmentWatch } from './agentEnvironmentWatch';
+import { loadAiSdk } from 'server/services/agent/aiSdkRuntime';
+import { AGENT_ENV_WATCH_QUEUE_NAME } from 'server/services/agent/EnvironmentWatchService';
 import {
   DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
   resolveAgentSessionCleanupConfig,
@@ -36,6 +39,8 @@ export default function bootstrapJobs(services: IServices) {
   }
 
   getLogger().info('Jobs: bootstrapping');
+  // Warm the ESM 'ai' import now so the first agent run/resume in this process skips a ~250ms load.
+  void loadAiSdk().catch((error) => getLogger().warn({ error }, 'Jobs: ai sdk preload failed'));
   const queueManager = QueueManager.getInstance();
 
   queueManager.registerWorker(QUEUE_NAMES.WEBHOOK_PROCESSING, services.GithubService.processWebhooks, {
@@ -144,6 +149,11 @@ export default function bootstrapJobs(services: IServices) {
   queueManager.registerWorker(QUEUE_NAMES.AGENT_RUN_RECOVERY, processAgentRunDispatchRecovery, {
     connection: redisClient.getConnection(),
     concurrency: 1,
+  });
+
+  queueManager.registerWorker(AGENT_ENV_WATCH_QUEUE_NAME, processAgentEnvironmentWatch, {
+    connection: redisClient.getConnection(),
+    concurrency: 2,
   });
 
   const agentCleanupQueue = queueManager.registerQueue(QUEUE_NAMES.AGENT_SESSION_CLEANUP, {
