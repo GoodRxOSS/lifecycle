@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Use a common base image for both stages
-FROM node:20-slim
+FROM node:22-slim
 
 # Set environment variables
 ENV PNPM_HOME="/pnpm"
@@ -26,7 +26,7 @@ RUN corepack enable
 WORKDIR /app
 
 # Install required packages and tools
-RUN apt-get update && apt-get install -y curl awscli jq && \
+RUN apt-get update && apt-get install -y curl awscli jq build-essential python3 && \
   apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Codefresh CLI and other tools
@@ -40,7 +40,7 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
   chmod 700 get_helm.sh && \
   ./get_helm.sh
 
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml .npmrc ./
 
 RUN pnpm install --frozen-lockfile
 

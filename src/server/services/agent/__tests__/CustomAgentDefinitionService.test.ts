@@ -632,7 +632,7 @@ describe('CustomAgentDefinitionService', () => {
         expect.objectContaining({
           capabilityId: 'workspace_shell',
           requiresWorkspace: true,
-          toolCount: 1,
+          toolCount: 4,
           resourceCount: 1,
         }),
       ])

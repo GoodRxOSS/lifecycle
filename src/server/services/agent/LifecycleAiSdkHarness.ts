@@ -14,14 +14,7 @@
  * limitations under the License.
  */
 
-import {
-  createAgentUIStream,
-  createUIMessageStream,
-  readUIMessageStream,
-  safeValidateUIMessages,
-  type ToolSet,
-  type UIMessageChunk,
-} from 'ai';
+import { type ToolSet, type UIMessageChunk } from 'ai';
 import type AgentRunEvent from 'server/models/AgentRunEvent';
 import type AgentRun from 'server/models/AgentRun';
 import AgentSession from 'server/models/AgentSession';
@@ -43,8 +36,17 @@ import { applyApprovalResponsesToFileChangeParts } from './fileChanges';
 import { AgentRunTerminalFailure } from './errors';
 import type { Transaction } from 'objection';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import { loadAiSdk } from './aiSdkRuntime';
+import type { AgentRuntimeContext } from './runtimeContext';
+import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
+import type { AgentRequestGitHubAuth } from './githubAuth';
 
 type AgentUiMessageChunk = UIMessageChunk<AgentUIMessageMetadata, AgentUIDataParts>;
+type ApprovalRequestDraft = {
+  toolName?: string;
+  input?: unknown;
+  fileChangesById: Map<string, AgentFileChangeData>;
+};
 const CONTINUATION_EVENT_PAGE_LIMIT = 500;
 const CONTINUATION_EVENT_MAX_PAGES = 20;
 
@@ -250,9 +252,10 @@ async function validateMessagesForAgentInput({
   tools: ToolSet;
 }): Promise<AgentUIMessage[]> {
   const normalizedMessages = normalizeUnavailableToolPartsForAgentInput(messages, tools);
+  const { safeValidateUIMessages } = await loadAiSdk();
   const validation = await safeValidateUIMessages({
     messages: normalizedMessages,
-    tools,
+    tools: tools as never,
   });
 
   if (validation.success) {
@@ -326,6 +329,7 @@ async function rebuildAssistantMessageFromEvents(runUuid: string): Promise<Agent
 
   const chunks = AgentRunEventService.projectUiChunksFromEvents(events) as AgentUiMessageChunk[];
   let latestMessage: AgentUIMessage | null = null;
+  const { readUIMessageStream } = await loadAiSdk();
 
   for await (const message of readUIMessageStream<AgentUIMessage>({
     stream: createChunkReplayStream(chunks),
@@ -342,12 +346,24 @@ async function rebuildAssistantMessageFromEvents(runUuid: string): Promise<Agent
   return latestMessage ? applyApprovalResponsesToToolParts(latestMessage, approvalResponses) : null;
 }
 
+/** Prior turns' chain-of-thought is dead weight for the model (signatures are not persisted) — keep it for the UI, drop it from model input. */
+function dropReasoningParts(messages: AgentUIMessage[]): AgentUIMessage[] {
+  return messages.flatMap((message) => {
+    if (message.role !== 'assistant' || !message.parts.some((part) => part.type === 'reasoning')) {
+      return [message];
+    }
+
+    const parts = message.parts.filter((part) => part.type !== 'reasoning');
+    return parts.length > 0 ? [{ ...message, parts }] : [];
+  });
+}
+
 async function loadMessagesForRun(
   run: AgentRun,
   thread: AgentThread,
   session: AgentSession
 ): Promise<AgentUIMessage[]> {
-  const storedMessages = await AgentMessageStore.listMessages(thread.uuid, session.userId);
+  const storedMessages = dropReasoningParts(await AgentMessageStore.listMessages(thread.uuid, session.userId));
   const continuationMessage = run.startedAt ? await rebuildAssistantMessageFromEvents(run.uuid) : null;
   if (!continuationMessage) {
     return applyApprovalResponsesToFileChangeParts(storedMessages);
@@ -373,6 +389,7 @@ function getSessionUserIdentity(session: AgentSession): RequestUserIdentity {
     displayName,
     gitUserName: displayName,
     gitUserEmail: githubUsername ? `${githubUsername}@users.noreply.github.com` : `${session.userId}@local.lifecycle`,
+    roles: [],
   };
 }
 
@@ -451,23 +468,16 @@ function createEagerApprovalRequestSync({
   approvalPolicy: Awaited<ReturnType<typeof AgentRunExecutor.execute>>['approvalPolicy'];
   toolRules: Awaited<ReturnType<typeof AgentRunExecutor.execute>>['toolRules'];
 }) {
-  const draftsByToolCallId = new Map<
-    string,
-    {
-      toolName?: string;
-      input?: unknown;
-      fileChangesById: Map<string, AgentFileChangeData>;
-    }
-  >();
+  const draftsByToolCallId = new Map<string, ApprovalRequestDraft>();
   const handledApprovals = new Set<string>();
 
-  const getDraft = (toolCallId: string) => {
+  const getDraft = (toolCallId: string): ApprovalRequestDraft => {
     const existing = draftsByToolCallId.get(toolCallId);
     if (existing) {
       return existing;
     }
 
-    const draft = {
+    const draft: ApprovalRequestDraft = {
       fileChangesById: new Map<string, AgentFileChangeData>(),
     };
     draftsByToolCallId.set(toolCallId, draft);
@@ -480,13 +490,14 @@ function createEagerApprovalRequestSync({
         continue;
       }
 
-      const type = readStringField(chunk, 'type');
+      const chunkRecord = chunk as Record<string, unknown>;
+      const type = readStringField(chunkRecord, 'type');
       if (!type) {
         continue;
       }
 
       if (type === 'data-file-change') {
-        const fileChange = readFileChangeData(chunk.data);
+        const fileChange = readFileChangeData(chunkRecord.data);
         if (fileChange) {
           getDraft(fileChange.toolCallId).fileChangesById.set(fileChange.id, fileChange);
         }
@@ -500,13 +511,13 @@ function createEagerApprovalRequestSync({
 
       if (type === 'tool-input-start' || type === 'tool-input-available' || type === 'tool-input-error') {
         const draft = getDraft(toolCallId);
-        const toolName = readStringField(chunk, 'toolName');
+        const toolName = readStringField(chunkRecord, 'toolName');
         if (toolName) {
           draft.toolName = toolName;
         }
 
-        if (type === 'tool-input-available' && Object.prototype.hasOwnProperty.call(chunk, 'input')) {
-          draft.input = chunk.input;
+        if (type === 'tool-input-available' && Object.prototype.hasOwnProperty.call(chunkRecord, 'input')) {
+          draft.input = chunkRecord.input;
         }
         continue;
       }
@@ -541,7 +552,7 @@ function createEagerApprovalRequestSync({
           trx: options.trx,
         });
         if (action) {
-          chunk.actionId = action.uuid;
+          chunkRecord.actionId = action.uuid;
         }
       } catch (error) {
         getLogger().warn(
@@ -557,6 +568,49 @@ function createEagerApprovalRequestSync({
 // Coalesce chunk flushes to avoid a per-token insert+notify storm.
 const STREAM_FLUSH_BATCH_SIZE = 10;
 const STREAM_FLUSH_INTERVAL_MS = 50;
+const WORKSPACE_CONTINUATION_MESSAGE_KIND = 'workspace_continuation_instruction';
+
+function getWorkspaceContinuationSnapshot(run: AgentRun) {
+  const snapshot = isAgentRunPlanSnapshotV1(run.runPlanSnapshot) ? run.runPlanSnapshot : null;
+  return snapshot?.continuation?.kind === 'workspace_escalation' ? snapshot.continuation : null;
+}
+
+function buildWorkspaceContinuationInstruction(run: AgentRun): AgentUIMessage | null {
+  const continuation = getWorkspaceContinuationSnapshot(run);
+  if (!continuation) {
+    return null;
+  }
+
+  const reason = continuation.reason?.trim();
+  const instruction = [
+    'The workspace is ready. Continue the original user request now as the Develop agent in the prepared workspace.',
+    reason ? `Original request/reason: ${reason}` : null,
+    'Use the available workspace tools directly to inspect files, create or edit files, run commands, start the app, and publish/share a preview URL as needed.',
+    'Do not stop after describing the next step; take the next useful tool action.',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  return {
+    id: `workspace-continuation:${run.uuid}`,
+    role: 'user',
+    metadata: {
+      kind: WORKSPACE_CONTINUATION_MESSAGE_KIND,
+      runId: run.uuid,
+      hidden: true,
+    },
+    parts: [{ type: 'text', text: instruction }],
+  } as AgentUIMessage;
+}
+
+function appendWorkspaceContinuationInstruction(messages: AgentUIMessage[], run: AgentRun): AgentUIMessage[] {
+  const instruction = buildWorkspaceContinuationInstruction(run);
+  return instruction ? [...messages, instruction] : messages;
+}
+
+function stripInternalWorkspaceContinuationMessages(messages: AgentUIMessage[]): AgentUIMessage[] {
+  return messages.filter((message) => message.metadata?.kind !== WORKSPACE_CONTINUATION_MESSAGE_KIND);
+}
 
 async function consumeStream(
   runUuid: string,
@@ -574,7 +628,11 @@ async function consumeStream(
     }
     const chunks = batch.splice(0, batch.length);
     await AgentRunService.appendStreamChunksForExecutionOwner(runUuid, executionOwner, chunks, {
-      beforeAppendChunks: ({ trx, run }) => beforeAppendChunks?.(chunks, { trx, run }),
+      beforeAppendChunks: async ({ trx, run }) => {
+        if (beforeAppendChunks) {
+          await beforeAppendChunks(chunks, { trx, run });
+        }
+      },
     });
     lastFlushAt = Date.now();
   };
@@ -609,6 +667,7 @@ export default class LifecycleAiSdkHarness {
     run: AgentRun,
     options: {
       requestGitHubToken?: string | null;
+      requestGitHubAuth?: AgentRequestGitHubAuth | null;
       dispatchAttemptId?: string;
     } = {}
   ): Promise<void> {
@@ -625,10 +684,10 @@ export default class LifecycleAiSdkHarness {
       session,
       thread,
       userIdentity,
-      messages: normalizedMessages,
       requestedProvider: run.resolvedProvider || run.requestedProvider || undefined,
       requestedModelId: run.resolvedModel || run.requestedModel || undefined,
       requestGitHubToken: options.requestGitHubToken,
+      requestGitHubAuth: options.requestGitHubAuth,
       existingRun: run,
       dispatchAttemptId: options.dispatchAttemptId,
       onFileChange: async (change) => {
@@ -661,23 +720,26 @@ export default class LifecycleAiSdkHarness {
 
     const agentInputMessages = await validateMessagesForAgentInput({
       runUuid: run.uuid,
-      messages: normalizedMessages,
+      messages: appendWorkspaceContinuationInstruction(normalizedMessages, run),
       tools: execution.agent.tools,
     });
 
     let agentUiMessageStream: ReadableStream<AgentUiMessageChunk>;
     try {
+      const { createAgentUIStream } = await loadAiSdk();
       agentUiMessageStream = (await createAgentUIStream<
         never,
         typeof execution.agent.tools,
+        AgentRuntimeContext,
         never,
         AgentUIMessageMetadata
       >({
         agent: execution.agent,
         uiMessages: agentInputMessages,
+        originalMessages: agentInputMessages,
         generateMessageId: () => crypto.randomUUID(),
         abortSignal: execution.abortSignal,
-        onFinish: async ({ finishReason, isAborted }) => {
+        onEnd: async ({ finishReason, isAborted }) => {
           finishContext = {
             finishReason,
             isAborted,
@@ -698,9 +760,24 @@ export default class LifecycleAiSdkHarness {
           }
 
           if (eventType === 'finish') {
-            const totalUsage =
+            const usage =
               (
                 part as {
+                  usage?: {
+                    inputTokens?: number;
+                    outputTokens?: number;
+                    totalTokens?: number;
+                    inputTokenDetails?: {
+                      cacheReadTokens?: number;
+                      cacheWriteTokens?: number;
+                      noCacheTokens?: number;
+                    };
+                    outputTokenDetails?: {
+                      reasoningTokens?: number;
+                      textTokens?: number;
+                    };
+                    raw?: unknown;
+                  };
                   totalUsage?: {
                     inputTokens?: number;
                     outputTokens?: number;
@@ -721,11 +798,33 @@ export default class LifecycleAiSdkHarness {
                   finishReason?: string;
                   rawFinishReason?: string;
                 }
-              ).totalUsage ?? undefined;
-            const usageSummary = totalUsage
+              ).usage ??
+              (
+                part as {
+                  totalUsage?: {
+                    inputTokens?: number;
+                    outputTokens?: number;
+                    totalTokens?: number;
+                    reasoningTokens?: number;
+                    cachedInputTokens?: number;
+                    inputTokenDetails?: {
+                      cacheReadTokens?: number;
+                      cacheWriteTokens?: number;
+                      noCacheTokens?: number;
+                    };
+                    outputTokenDetails?: {
+                      reasoningTokens?: number;
+                      textTokens?: number;
+                    };
+                    raw?: unknown;
+                  };
+                }
+              ).totalUsage ??
+              undefined;
+            const usageSummary = usage
               ? applyConfiguredModelCostEstimate(
                   normalizeSdkUsageSummary({
-                    usage: totalUsage,
+                    usage,
                     finishReason:
                       typeof (part as { finishReason?: unknown }).finishReason === 'string'
                         ? (part as { finishReason: string }).finishReason
@@ -757,6 +856,7 @@ export default class LifecycleAiSdkHarness {
       sanitizeAgentStreamError(run.uuid, error);
     }
 
+    const { createUIMessageStream } = await loadAiSdk();
     const uiMessageStream = createUIMessageStream<AgentUIMessage>({
       originalMessages: agentInputMessages,
       generateId: () => crypto.randomUUID(),
@@ -764,9 +864,9 @@ export default class LifecycleAiSdkHarness {
         writer.merge(agentUiMessageStream as ReadableStream<AgentUiMessageChunk>);
         writer.merge(fileChangeStream.stream);
       },
-      onFinish: async ({ messages }) => {
+      onEnd: async ({ messages }) => {
         streamFinishPayload = {
-          messages,
+          messages: stripInternalWorkspaceContinuationMessages(messages),
           finishReason: finishContext.finishReason,
           isAborted: finishContext.isAborted,
         };

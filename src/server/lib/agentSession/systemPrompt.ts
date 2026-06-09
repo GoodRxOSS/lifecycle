@@ -20,6 +20,7 @@ import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
 import type { LifecycleConfig } from 'server/models/yaml';
 import GlobalConfigService from 'server/services/globalConfig';
+import { buildTriageDossier } from './triageDossier';
 
 export interface AgentSessionPromptServiceContext {
   name: string;
@@ -82,7 +83,9 @@ export interface AgentSessionPromptContext {
   lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   services: AgentSessionPromptServiceContext[];
   selectedDeploy?: AgentSessionPromptServiceContext;
+  userSelectedServices?: boolean;
   diagnosticServices?: AgentSessionPromptServiceContext[];
+  triage?: string;
   skillsAvailable?: boolean;
   toolLines?: string[];
 }
@@ -128,8 +131,14 @@ function formatDetails(details: Array<string | undefined>): string {
   return details.filter((value): value is string => Boolean(value)).join(', ');
 }
 
-function formatOptionalString(value: string | undefined): string {
-  return value || '<none>';
+const STATUS_MESSAGE_MAX_CHARS = 400;
+
+function formatStatusMessage(value: string | undefined): string {
+  if (!value) {
+    return '<none>';
+  }
+
+  return value.length > STATUS_MESSAGE_MAX_CHARS ? `${value.slice(0, STATUS_MESSAGE_MAX_CHARS)}…` : value;
 }
 
 function formatOptionalStringArray(value: string[] | undefined): string {
@@ -172,7 +181,7 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
   if (context.build) {
     const details = formatDetails([
       context.build.status ? `buildStatusAtStart=${context.build.status}` : undefined,
-      `buildStatusMessageAtStart=${formatOptionalString(context.build.statusMessage)}`,
+      `buildStatusMessageAtStart=${formatStatusMessage(context.build.statusMessage)}`,
       context.build.namespace ? `namespace=${context.build.namespace}` : undefined,
       context.build.sha ? `sha=${context.build.sha}` : undefined,
     ]);
@@ -200,7 +209,11 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
     }
   }
 
-  if (!context.selectedDeploy && context.services.length > 0) {
+  const shouldListServices =
+    !context.selectedDeploy &&
+    context.services.length > 0 &&
+    (context.userSelectedServices || !context.diagnosticServices?.length);
+  if (shouldListServices) {
     lines.push('Selected services:');
 
     const services = [...context.services].sort((left, right) => left.name.localeCompare(right.name));
@@ -209,7 +222,7 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
         service.deployUuid ? `deployUuid=${service.deployUuid}` : null,
         service.active !== undefined ? `activeAtStart=${service.active}` : null,
         service.status ? `statusAtStart=${service.status}` : null,
-        service.statusMessage ? `statusMessageAtStart=${service.statusMessage}` : null,
+        service.statusMessage ? `statusMessageAtStart=${formatStatusMessage(service.statusMessage)}` : null,
         service.repo ? `repo=${service.repo}` : null,
         service.branch ? `branch=${service.branch}` : null,
         service.serviceSha ? `serviceSha=${service.serviceSha}` : null,
@@ -232,7 +245,7 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
       service.deployUuid ? `deployUuid=${service.deployUuid}` : undefined,
       service.active !== undefined ? `activeAtStart=${service.active}` : undefined,
       service.status ? `statusAtStart=${service.status}` : undefined,
-      `statusMessageAtStart=${formatOptionalString(service.statusMessage)}`,
+      `statusMessageAtStart=${formatStatusMessage(service.statusMessage)}`,
       service.repo ? `repo=${service.repo}` : undefined,
       service.branch ? `branch=${service.branch}` : undefined,
       service.serviceSha ? `serviceSha=${service.serviceSha}` : undefined,
@@ -263,7 +276,7 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
         service.deployUuid ? `deployUuid=${service.deployUuid}` : undefined,
         service.active !== undefined ? `activeAtStart=${service.active}` : undefined,
         service.status ? `statusAtStart=${service.status}` : undefined,
-        `statusMessageAtStart=${formatOptionalString(service.statusMessage)}`,
+        `statusMessageAtStart=${formatStatusMessage(service.statusMessage)}`,
         service.repo ? `repo=${service.repo}` : undefined,
         service.branch ? `branch=${service.branch}` : undefined,
         service.publicUrl ? `publicUrl=${service.publicUrl}` : undefined,
@@ -274,6 +287,10 @@ export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPrompt
 
       lines.push(`- ${service.name}${details ? `: ${details}` : ''}`);
     }
+  }
+
+  if (context.triage) {
+    lines.push('Triage evidence (collected automatically):', context.triage);
   }
 
   if (context.skillsAvailable) {
@@ -302,6 +319,7 @@ export function combineAgentSessionAppendSystemPrompt(
 type BuildDiagnosticContext = {
   source: { repo?: string; branch?: string };
   build?: AgentSessionPromptBuildContext;
+  buildRow?: Build;
   pullRequest?: AgentSessionPromptPullRequestContext;
   lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   deploys: Deploy[];
@@ -433,6 +451,7 @@ async function resolveBuildDiagnosticContext(
   return {
     source,
     lifecycleConfig,
+    buildRow: build || undefined,
     build: build
       ? {
           uuid: build.uuid,
@@ -564,6 +583,20 @@ export async function resolveAgentSessionPromptContext(
     ).filter((service): service is AgentSessionPromptServiceContext => Boolean(service));
   }
 
+  // Only present a "selected" deploy when the session points at one (explicit selection or
+  // devMode-attached deploys) — the all-build-deploys fallback is DB-ordered and would bias
+  // the model toward an arbitrary service.
+  const hasUserSelection = Boolean(session?.selectedServices?.length) || deploys.length > 0;
+
+  let triage: string | undefined;
+  if (buildSource.buildRow) {
+    try {
+      triage = (await buildTriageDossier(buildSource.buildRow, buildSource.deploys)) ?? undefined;
+    } catch (error) {
+      triage = `- triage: unavailable (${(error as Error)?.message || 'unknown error'})`;
+    }
+  }
+
   return {
     namespace: lookup.namespace,
     buildUuid: lookup.buildUuid,
@@ -572,8 +605,10 @@ export async function resolveAgentSessionPromptContext(
     pullRequest: buildSource.pullRequest,
     ...(buildSource.lifecycleConfig ? { lifecycleConfig: buildSource.lifecycleConfig } : {}),
     services,
-    ...(services[0]?.deployUuid ? { selectedDeploy: services[0] } : {}),
+    userSelectedServices: hasUserSelection,
+    ...(hasUserSelection && services[0]?.deployUuid ? { selectedDeploy: services[0] } : {}),
     diagnosticServices: buildSource.diagnosticServices,
+    ...(triage ? { triage } : {}),
     skillsAvailable: Boolean(session?.skillPlan?.skills?.length),
   };
 }

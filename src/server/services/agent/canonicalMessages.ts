@@ -15,6 +15,7 @@
  */
 
 import { v4 as uuid } from 'uuid';
+import { scrubSecretsFromText } from 'server/lib/secretScrub';
 import type { AgentUIMessage } from './types';
 
 export type CanonicalAgentMessagePart =
@@ -67,7 +68,8 @@ export function normalizeCanonicalAgentMessagePart(value: unknown): CanonicalAge
     }
     case 'reasoning': {
       const text = normalizeText(part.text);
-      return text ? { type: 'reasoning', text } : null;
+      // SECURITY: scrub credentials from chain-of-thought before it persists at rest.
+      return text ? { type: 'reasoning', text: scrubSecretsFromText(text) } : null;
     }
     case 'file_ref': {
       const path = normalizeText(part.path);
@@ -101,10 +103,6 @@ export function normalizeCanonicalAgentMessagePart(value: unknown): CanonicalAge
     default:
       return null;
   }
-}
-
-export function isCanonicalAgentMessagePart(value: unknown): value is CanonicalAgentMessagePart {
-  return normalizeCanonicalAgentMessagePart(value) !== null;
 }
 
 export function normalizeCanonicalAgentMessageParts(value: unknown): CanonicalAgentMessagePart[] {
@@ -153,7 +151,8 @@ export function getCanonicalPartsFromUiMessage(message: AgentUIMessage): Canonic
         parts,
         (() => {
           const text = normalizeText(part.text);
-          return text ? { type: 'reasoning', text } : null;
+          // SECURITY: scrub credentials from the assembled reasoning copy before persistence.
+          return text ? { type: 'reasoning', text: scrubSecretsFromText(text) } : null;
         })()
       );
       continue;
@@ -202,7 +201,8 @@ export function toUiMessageFromCanonicalInput(
     }
 
     if (part.type === 'reasoning') {
-      parts.push({ type: 'reasoning', text: part.text } as AgentUIMessage['parts'][number]);
+      // SECURITY: scrub on the way out too so legacy unscrubbed rows never surface a secret.
+      parts.push({ type: 'reasoning', text: scrubSecretsFromText(part.text) } as AgentUIMessage['parts'][number]);
       continue;
     }
 

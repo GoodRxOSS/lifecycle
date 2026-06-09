@@ -14,26 +14,35 @@
  * limitations under the License.
  */
 
-var mockStepCountIs: jest.Mock;
-
-jest.mock('ai', () => ({
+jest.mock('server/lib/agentSession/runtimeConfig', () => ({
   __esModule: true,
-  stepCountIs: (mockStepCountIs = jest.fn((count: number) => `step-count-${count}`)),
+  DEFAULT_AGENT_SESSION_MAX_RUN_INPUT_TOKENS: 400_000,
 }));
 
 import { resolveDebugToolLoopControls } from '../debugToolLoopControls';
 import type { AgentRuntimeToolMetadata } from '../CapabilityService';
 import type { AgentDebugRunIntent, AgentRunPlanSnapshotV1 } from '../runPlanTypes';
 
+const underBudgetSteps = [{ usage: { inputTokens: 399_999 } }];
+const overBudgetSteps = [{ usage: { inputTokens: 250_000 } }, { usage: { inputTokens: 150_000 } }];
+
+function expectStepCountStopCondition(controls: { stopWhen: Array<unknown> }, stepCount: number) {
+  const stepCountCondition = controls.stopWhen[0] as (options: { steps: unknown[] }) => boolean;
+  expect(stepCountCondition).toEqual(expect.any(Function));
+  expect(stepCountCondition({ steps: Array.from({ length: Math.max(0, stepCount - 1) }) })).toBe(false);
+  expect(stepCountCondition({ steps: Array.from({ length: stepCount }) })).toBe(true);
+}
+
 const tools = {
   mcp__lifecycle__get_codefresh_logs: {},
   mcp__lifecycle__get_file: {},
-  mcp__sandbox__workspace_exec: {},
+  mcp__workspace_core__read_file: {},
   mcp__lifecycle__update_file: {},
   mcp__lifecycle__patch_k8s_resource: {},
-  mcp__sandbox__workspace_write_file: {},
-  mcp__sandbox__workspace_exec_mutation: {},
-  mcp__lifecycle__publish_http: {},
+  mcp__lifecycle__trigger_redeploy: {},
+  mcp__workspace_core__apply_patch: {},
+  mcp__workspace_core__exec: {},
+  mcp__workspace_core__publish_http: {},
   mcp__docs__search_docs: {},
   mcp__docs__update_docs: {},
   mcp__sample__unguarded_repair: {},
@@ -56,10 +65,12 @@ const metadata: AgentRuntimeToolMetadata[] = [
     exposure: 'read',
   },
   {
-    toolKey: 'mcp__sandbox__workspace_exec',
+    toolKey: 'mcp__workspace_core__read_file',
     catalogCapabilityId: 'read_context',
     capabilityKey: 'read',
     approvalMode: 'allow',
+    resourceDomain: 'workspace',
+    workspaceNeed: 'optional',
     exposure: 'read',
   },
   {
@@ -84,21 +95,28 @@ const metadata: AgentRuntimeToolMetadata[] = [
     exposure: 'repair',
   },
   {
-    toolKey: 'mcp__sandbox__workspace_write_file',
+    toolKey: 'mcp__lifecycle__trigger_redeploy',
+    catalogCapabilityId: 'diagnostics_kubernetes',
+    capabilityKey: 'deploy_k8s_mutation',
+    approvalMode: 'require_approval',
+    exposure: 'repair',
+  },
+  {
+    toolKey: 'mcp__workspace_core__apply_patch',
     catalogCapabilityId: 'workspace_files',
     capabilityKey: 'workspace_write',
     approvalMode: 'require_approval',
     exposure: 'repair',
   },
   {
-    toolKey: 'mcp__sandbox__workspace_exec_mutation',
+    toolKey: 'mcp__workspace_core__exec',
     catalogCapabilityId: 'workspace_shell',
     capabilityKey: 'shell_exec',
     approvalMode: 'require_approval',
     exposure: 'repair',
   },
   {
-    toolKey: 'mcp__lifecycle__publish_http',
+    toolKey: 'mcp__workspace_core__publish_http',
     catalogCapabilityId: 'preview_publish',
     capabilityKey: 'deploy_k8s_mutation',
     approvalMode: 'require_approval',
@@ -198,8 +216,24 @@ describe('resolveDebugToolLoopControls', () => {
     jest.clearAllMocks();
   });
 
-  it('leaves non-Debug runs unconstrained except for the configured stop condition', () => {
-    const nonDebugRunPlan = {
+  const freeformTools = {
+    ...tools,
+    mcp__lifecycle__request_workspace: {},
+  } as any;
+  const freeformMetadata: AgentRuntimeToolMetadata[] = [
+    ...metadata,
+    {
+      toolKey: 'mcp__lifecycle__request_workspace',
+      catalogCapabilityId: 'read_context',
+      capabilityKey: 'read',
+      approvalMode: 'allow',
+      resourceDomain: 'lifecycle',
+      exposure: 'read',
+    },
+  ];
+
+  function buildFreeformRunPlan(): AgentRunPlanSnapshotV1 {
+    return {
       ...buildRunPlan(),
       agent: {
         id: 'system.freeform',
@@ -207,17 +241,41 @@ describe('resolveDebugToolLoopControls', () => {
         sourceKind: 'freeform_chat',
       },
     } as AgentRunPlanSnapshotV1;
+  }
+
+  it('strips workspace-requiring tools for freeform chats but keeps the workspace request tool active', () => {
     const controls = resolveDebugToolLoopControls({
-      runPlanSnapshot: nonDebugRunPlan,
-      tools,
-      toolMetadata: metadata,
+      runPlanSnapshot: buildFreeformRunPlan(),
+      tools: freeformTools,
+      toolMetadata: freeformMetadata,
       maxIterations: 14,
     });
 
-    expect(controls.activeTools).toBeUndefined();
-    expect(controls.prepareStep).toBeUndefined();
+    expect(controls.activeTools).toBeDefined();
+    expect(controls.activeTools).not.toEqual(
+      expect.arrayContaining([
+        'mcp__workspace_core__read_file',
+        'mcp__workspace_core__apply_patch',
+        'mcp__workspace_core__exec',
+      ])
+    );
+    // The deliberate workspace request tool must remain so the model can provision on genuine need.
+    expect(controls.activeTools).toContain('mcp__lifecycle__request_workspace');
+    expect(controls.prepareStep).toBeDefined();
     expect(controls.effectiveMaxIterations).toBe(14);
-    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+  });
+
+  it('keeps freeform workspace-requiring tools stripped for the source run', async () => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildFreeformRunPlan(),
+      tools: freeformTools,
+      toolMetadata: freeformMetadata,
+      maxIterations: 14,
+    });
+
+    const strippedStep = await controls.prepareStep?.({ stepNumber: 0, steps: [] } as any);
+    expect((strippedStep as { activeTools: string[] }).activeTools).not.toContain('mcp__workspace_core__read_file');
+    expect((strippedStep as { activeTools: string[] }).activeTools).toContain('mcp__lifecycle__request_workspace');
   });
 
   it('fails closed to diagnosis for Debug build-context snapshots without a resolved intent', () => {
@@ -233,15 +291,15 @@ describe('resolveDebugToolLoopControls', () => {
       'mcp__lifecycle__get_file',
       'mcp__docs__search_docs',
     ]);
-    expect(controls.activeTools).not.toContain('mcp__sandbox__workspace_exec');
+    expect(controls.activeTools).not.toContain('mcp__workspace_core__read_file');
     expect(controls.activeTools).not.toEqual(
       expect.arrayContaining(['mcp__lifecycle__update_file', 'mcp__lifecycle__patch_k8s_resource'])
     );
     expect(controls.effectiveMaxIterations).toBe(14);
-    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+    expectStepCountStopCondition(controls, 14);
   });
 
-  it('strips workspace-provisioning tools for non-Debug build-context runs without an intent', () => {
+  it('strips workspace-requiring tools for non-Debug build-context runs without an intent', async () => {
     const customBuildContextRunPlan = {
       ...buildRunPlan(),
       agent: {
@@ -260,21 +318,21 @@ describe('resolveDebugToolLoopControls', () => {
     expect(controls.activeTools).toBeDefined();
     expect(controls.activeTools).not.toEqual(
       expect.arrayContaining([
-        'mcp__sandbox__workspace_exec',
-        'mcp__sandbox__workspace_write_file',
-        'mcp__sandbox__workspace_exec_mutation',
+        'mcp__workspace_core__read_file',
+        'mcp__workspace_core__apply_patch',
+        'mcp__workspace_core__exec',
       ])
     );
-    // Custom agents aren't constrained to read-only; only workspace-provisioning tools are removed.
+    // Custom agents aren't constrained to read-only; only workspace-requiring tools are removed.
     expect(controls.activeTools).toEqual(
       expect.arrayContaining(['mcp__lifecycle__get_file', 'mcp__lifecycle__update_file'])
     );
-    expect(controls.prepareStep).toBeUndefined();
+    expect(await controls.prepareStep?.({ stepNumber: 1, steps: underBudgetSteps } as any)).toBeUndefined();
     expect(controls.effectiveMaxIterations).toBe(14);
-    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+    expectStepCountStopCondition(controls, 14);
   });
 
-  it('leaves non-build-context runs without an intent unconstrained even if sandbox tools exist', () => {
+  it('leaves non-build-context runs without an intent unconstrained even if workspace tools exist', async () => {
     const customWorkspaceRunPlan = {
       ...buildRunPlan(),
       agent: {
@@ -291,8 +349,41 @@ describe('resolveDebugToolLoopControls', () => {
     });
 
     expect(controls.activeTools).toBeUndefined();
-    expect(controls.prepareStep).toBeUndefined();
+    expect(await controls.prepareStep?.({ stepNumber: 1, steps: underBudgetSteps } as any)).toBeUndefined();
     expect(controls.effectiveMaxIterations).toBe(14);
+  });
+
+  it('forces a tools-off answer step once cumulative input tokens exceed the run budget', async () => {
+    for (const runPlanSnapshot of [buildRunPlan('diagnose'), buildFreeformRunPlan()]) {
+      const controls = resolveDebugToolLoopControls({
+        runPlanSnapshot,
+        tools,
+        toolMetadata: metadata,
+        maxIterations: 14,
+      });
+
+      expect(await controls.prepareStep?.({ stepNumber: 1, steps: overBudgetSteps } as any)).toEqual({
+        activeTools: [],
+        toolChoice: 'none',
+      });
+    }
+  });
+
+  it('stops the loop only after the budget-granted answer step', async () => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildRunPlan('diagnose'),
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 14,
+    });
+
+    const [, budgetCondition] = controls.stopWhen;
+    expectStepCountStopCondition(controls, 14);
+    // Budget tripped after the last recorded step: grant the tools-off answer step first.
+    expect(await (budgetCondition as any)({ steps: overBudgetSteps })).toBe(false);
+    // The granted step already ran (budget was exceeded before it): stop.
+    expect(await (budgetCondition as any)({ steps: [...overBudgetSteps, { usage: { inputTokens: 1 } }] })).toBe(true);
+    expect(await (budgetCondition as any)({ steps: underBudgetSteps })).toBe(false);
   });
 
   it('limits diagnosis to read tools, then reserves a final no-tool answer step', async () => {
@@ -312,19 +403,20 @@ describe('resolveDebugToolLoopControls', () => {
       expect.arrayContaining([
         'mcp__lifecycle__update_file',
         'mcp__lifecycle__patch_k8s_resource',
-        'mcp__sandbox__workspace_write_file',
-        'mcp__sandbox__workspace_exec_mutation',
-        'mcp__lifecycle__publish_http',
+        'mcp__lifecycle__trigger_redeploy',
+        'mcp__workspace_core__apply_patch',
+        'mcp__workspace_core__exec',
+        'mcp__workspace_core__publish_http',
         'mcp__docs__update_docs',
         'mcp__sample__stale_missing_tool',
       ])
     );
     expect(controls.effectiveMaxIterations).toBe(14);
-    expect(mockStepCountIs).toHaveBeenCalledWith(14);
-    expect(await controls.prepareStep?.({ stepNumber: 0 } as any)).toEqual({
+    expectStepCountStopCondition(controls, 14);
+    expect(await controls.prepareStep?.({ stepNumber: 0, steps: [] } as any)).toEqual({
       activeTools: controls.activeTools,
     });
-    expect(await controls.prepareStep?.({ stepNumber: 13 } as any)).toEqual({
+    expect(await controls.prepareStep?.({ stepNumber: 13, steps: [] } as any)).toEqual({
       activeTools: [],
       toolChoice: 'none',
     });
@@ -350,24 +442,25 @@ describe('resolveDebugToolLoopControls', () => {
     ]);
     expect(controls.activeTools).not.toEqual(
       expect.arrayContaining([
-        'mcp__sandbox__workspace_exec',
+        'mcp__workspace_core__read_file',
         'mcp__lifecycle__update_file',
         'mcp__lifecycle__patch_k8s_resource',
-        'mcp__sandbox__workspace_write_file',
-        'mcp__sandbox__workspace_exec_mutation',
-        'mcp__lifecycle__publish_http',
+        'mcp__lifecycle__trigger_redeploy',
+        'mcp__workspace_core__apply_patch',
+        'mcp__workspace_core__exec',
+        'mcp__workspace_core__publish_http',
         'mcp__docs__update_docs',
       ])
     );
     expect(controls.effectiveMaxIterations).toBe(99);
-    expect(mockStepCountIs).toHaveBeenCalledWith(99);
-    expect(await controls.prepareStep?.({ stepNumber: 98 } as any)).toEqual({
+    expectStepCountStopCondition(controls, 99);
+    expect(await controls.prepareStep?.({ stepNumber: 98, steps: [] } as any)).toEqual({
       activeTools: [],
       toolChoice: 'none',
     });
   });
 
-  it('uses the same read-only boundary for investigation', async () => {
+  it('normalizes stored investigate snapshots to the diagnose read-only boundary', async () => {
     const controls = resolveDebugToolLoopControls({
       runPlanSnapshot: buildRunPlan('investigate'),
       tools,
@@ -381,17 +474,17 @@ describe('resolveDebugToolLoopControls', () => {
       'mcp__docs__search_docs',
     ]);
     expect(controls.effectiveMaxIterations).toBe(6);
-    expect(mockStepCountIs).toHaveBeenCalledWith(6);
-    expect(await controls.prepareStep?.({ stepNumber: 4 } as any)).toEqual({
+    expectStepCountStopCondition(controls, 6);
+    expect(await controls.prepareStep?.({ stepNumber: 4, steps: [] } as any)).toEqual({
       activeTools: controls.activeTools,
     });
-    expect(await controls.prepareStep?.({ stepNumber: 5 } as any)).toEqual({
+    expect(await controls.prepareStep?.({ stepNumber: 5, steps: [] } as any)).toEqual({
       activeTools: [],
       toolChoice: 'none',
     });
   });
 
-  it('exposes repair tools during repair only when they still require approval', () => {
+  it('exposes available repair tools during repair even when policy allows them directly', () => {
     const controls = resolveDebugToolLoopControls({
       runPlanSnapshot: buildRunPlan('repair'),
       tools,
@@ -421,20 +514,20 @@ describe('resolveDebugToolLoopControls', () => {
       'mcp__docs__search_docs',
       'mcp__lifecycle__update_file',
       'mcp__lifecycle__patch_k8s_resource',
-      'mcp__lifecycle__publish_http',
+      'mcp__lifecycle__trigger_redeploy',
       'mcp__docs__update_docs',
+      'mcp__sample__unguarded_repair',
     ]);
     expect(controls.activeTools).not.toEqual(
       expect.arrayContaining([
-        'mcp__sandbox__workspace_exec',
-        'mcp__sandbox__workspace_exec_mutation',
-        'mcp__sample__unguarded_repair',
+        'mcp__workspace_core__read_file',
+        'mcp__workspace_core__exec',
+        'mcp__workspace_core__publish_http',
         'mcp__sample__denied_repair',
       ])
     );
-    expect(controls.activeTools).not.toContain('mcp__sample__unguarded_repair');
     expect(controls.activeTools).not.toContain('mcp__sample__denied_repair');
     expect(controls.effectiveMaxIterations).toBe(14);
-    expect(mockStepCountIs).toHaveBeenCalledWith(14);
+    expectStepCountStopCondition(controls, 14);
   });
 });

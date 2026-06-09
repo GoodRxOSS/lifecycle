@@ -59,16 +59,20 @@ import { AgentThreadAgentSwitchError } from 'server/services/agent/AgentSelectio
 
 const agentState = {
   selectedId: null,
-  defaultId: 'system.freeform',
-  currentId: 'system.freeform',
+  defaultId: 'system.agent',
+  currentId: 'system.agent',
   groups: [
     {
       id: 'built_in',
       label: 'Built in',
       agents: [
-        { id: 'system.debug', ownerKind: 'system', label: 'Debug', group: 'built_in', available: true },
-        { id: 'system.develop', ownerKind: 'system', label: 'Develop', group: 'built_in', available: false },
-        { id: 'system.freeform', ownerKind: 'system', label: 'Free-form', group: 'built_in', available: true },
+        {
+          id: 'system.agent',
+          ownerKind: 'system',
+          label: 'Lifecycle Agent',
+          group: 'built_in',
+          available: true,
+        },
       ],
     },
     {

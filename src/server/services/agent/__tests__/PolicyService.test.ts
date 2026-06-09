@@ -33,7 +33,7 @@ describe('AgentPolicyService', () => {
     mockGetEffectiveConfig.mockReset();
   });
 
-  it('keeps read-only sandbox tools in the read capability', () => {
+  it('keeps read-only workspace tools in the read capability', () => {
     expect(
       AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.read_file', {
         readOnlyHint: true,
@@ -43,6 +43,21 @@ describe('AgentPolicyService', () => {
 
   it('keeps session git helpers in the git write capability', () => {
     expect(AgentPolicyService.capabilityForSessionWorkspaceTool('git.branch')).toBe('git_write');
+  });
+
+  it('maps workspace service tools to read or shell capabilities', () => {
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.service_status')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.service_logs')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.service_start')).toBe('shell_exec');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.service_stop')).toBe('shell_exec');
+  });
+
+  it('maps async workspace operation tools to read or shell capabilities', () => {
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.operation_status')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.operation_wait')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.operation_logs')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.operation_list')).toBe('read');
+    expect(AgentPolicyService.capabilityForSessionWorkspaceTool('workspace.operation_cancel')).toBe('shell_exec');
   });
 
   it('maps read-only external MCP tools to external_mcp_read', () => {

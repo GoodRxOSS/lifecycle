@@ -1,4 +1,5 @@
 node_modules
+pnpm-workspace.yaml
 build
 scratchpad
 docker-compose*

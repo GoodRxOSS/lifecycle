@@ -33,6 +33,9 @@ import type { McpStoredUserConnectionState } from 'server/services/agentRuntime/
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 type OAuthConnectionState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
+type OAuthClientInformationWithRedirectUris = NonNullable<OAuthConnectionState['clientInformation']> & {
+  redirect_uris?: string[];
+};
 
 function buildCallbackUrl(slug: string): string {
   const api = new URL(APP_HOST);
@@ -41,7 +44,7 @@ function buildCallbackUrl(slug: string): string {
 }
 
 function hasCompatibleRedirectUri(state: OAuthConnectionState, redirectUrl: string): boolean {
-  const redirectUris = state.clientInformation?.redirect_uris;
+  const redirectUris = (state.clientInformation as OAuthClientInformationWithRedirectUris | undefined)?.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
     return true;
   }

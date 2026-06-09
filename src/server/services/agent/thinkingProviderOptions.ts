@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import type { SystemModelMessage } from 'ai';
+
 // Gemini 2.x takes a numeric budget (-1 = dynamic); 3+ takes a level ('medium' reliably surfaces thinking).
 const GEMINI_DYNAMIC_THINKING_BUDGET = -1;
 const GEMINI_3_THINKING_LEVEL = 'medium';
@@ -53,4 +55,20 @@ export function resolveThinkingProviderOptions(provider: string, modelId: string
     default:
       return undefined;
   }
+}
+
+// Anthropic re-bills the full transcript every loop step; a system-prompt cache breakpoint turns within-run steps into cache reads.
+export function resolveAgentInstructions(
+  provider: string,
+  systemPrompt: string | undefined
+): string | SystemModelMessage | undefined {
+  if (!systemPrompt || provider !== 'anthropic') {
+    return systemPrompt;
+  }
+
+  return {
+    role: 'system',
+    content: systemPrompt,
+    providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+  };
 }

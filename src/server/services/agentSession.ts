@@ -40,7 +40,10 @@ import {
 } from 'server/lib/agentSession/editorServiceFactory';
 import { ensureAgentSessionServiceAccount } from 'server/lib/agentSession/serviceAccountFactory';
 import { isGvisorAvailable } from 'server/lib/agentSession/gvisorCheck';
-import { createOrUpdateChatPreview } from 'server/lib/agentSession/chatPreviewFactory';
+import {
+  buildChatPreviewHostSlug,
+  resolveChatPreviewPublicPublication,
+} from 'server/lib/agentSession/chatPreviewFactory';
 import { DevModeManager } from 'server/lib/agentSession/devModeManager';
 import type { DevModeResourceSnapshot } from 'server/lib/agentSession/devModeManager';
 import { createOrUpdateNamespace, deleteNamespace } from 'server/lib/kubernetes';
@@ -102,9 +105,34 @@ import AgentSessionConfigService from './agentSessionConfig';
 import AgentChatSessionService from './agent/ChatSessionService';
 import AgentPolicyService from './agent/PolicyService';
 import AgentSandboxService from './agent/SandboxService';
+import { assertBackendCapabilities } from './workspaceRuntime/catalog';
+import {
+  LIFECYCLE_GATEWAY_TOKEN_ENV,
+  encryptWorkspaceGatewayToken,
+  mintKubernetesGatewayToken,
+  mintWorkspaceGatewayToken,
+} from './workspaceRuntime/gatewayToken';
+import {
+  resolveRemoteBackendIdForPlan,
+  resolveRemoteRuntimeProviderForPlan,
+  resolveRemoteRuntimeProviderForSandbox,
+} from './workspaceRuntime/registry';
+import {
+  WORKSPACE_EXPIRED_FAILURE_CODE,
+  WorkspaceRuntimeGoneError,
+  WorkspaceRuntimeSecurityError,
+  type RemoteRuntimeHandle,
+  type RemoteWorkspaceRuntimeProvider,
+  type WorkspaceRuntimeEndpoint,
+} from './workspaceRuntime/types';
+import { buildWorkspaceGatewayPreviewEndpoint } from './workspaceRuntime/gatewayPreview';
 import AgentSourceService from './agent/SourceService';
-import WorkspaceRuntimeStateService, { WorkspaceActionBlockedError } from './agent/WorkspaceRuntimeStateService';
-import { buildSessionWorkspacePromptLines } from './agent/sandboxToolCatalog';
+import type { AgentRuntimeToolMetadata } from './agent/toolMetadata';
+import WorkspaceRuntimeStateService, {
+  WorkspaceActionBlockedError,
+  type WorkspaceRuntimeAction,
+} from './agent/WorkspaceRuntimeStateService';
+import { buildWorkspaceCorePromptLines } from './workspaceCoreMcp/prompt';
 import { canSessionAcceptMessages, getSessionMessageBlockReason } from './agent/sessionReadiness';
 import {
   loadAgentSessionServiceCandidates,
@@ -115,6 +143,136 @@ import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
 import type { AgentSessionSkillRef } from 'server/models/yaml/YamlService';
 
 const logger = () => getLogger();
+
+// One-time warning when K8s sessions provision without gateway-token enforcement (ENCRYPTION_KEY unset).
+let warnedK8sGatewayTokenDisabled = false;
+function mintK8sGatewayTokenOrWarn(): { gatewayToken?: string; encryptedGatewayToken?: string } {
+  const minted = mintKubernetesGatewayToken();
+  if (!minted.gatewayToken && !warnedK8sGatewayTokenDisabled) {
+    warnedK8sGatewayTokenDisabled = true;
+    logger().warn(
+      'ENCRYPTION_KEY is not set: Kubernetes workspace sessions will provision without gateway bearer-token enforcement. ' +
+        'Set ENCRYPTION_KEY (secrets.encryptionKey) to enable per-session gateway auth.'
+    );
+  }
+  return minted;
+}
+
+export interface ChatHttpProbeResult {
+  status: 'healthy' | 'unhealthy';
+  reachable: boolean;
+  ok: boolean;
+  checkedAt: string;
+  attempts: number;
+  durationMs: number;
+  statusCode: number | null;
+  statusText: string | null;
+  error: string | null;
+  message: string;
+}
+
+const CHAT_HTTP_PROBE_TIMEOUT_MS = 10000;
+const CHAT_HTTP_PROBE_POLL_MS = 500;
+const CHAT_HTTP_SINGLE_PROBE_TIMEOUT_MS = 2000;
+
+function readProbeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probeWorkspaceHttpEndpointOnce(
+  endpoint: WorkspaceRuntimeEndpoint,
+  timeoutMs: number
+): Promise<Pick<ChatHttpProbeResult, 'reachable' | 'ok' | 'statusCode' | 'statusText' | 'error'>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint.url, {
+      method: 'GET',
+      headers: endpoint.headers || {},
+      signal: controller.signal,
+    });
+    await response.body?.cancel().catch(() => {});
+    return {
+      reachable: true,
+      ok: response.ok,
+      statusCode: response.status,
+      statusText: response.statusText || null,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      ok: false,
+      statusCode: null,
+      statusText: null,
+      error: readProbeErrorMessage(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function verifyWorkspaceHttpEndpoint(endpoint: WorkspaceRuntimeEndpoint): Promise<ChatHttpProbeResult> {
+  const startedAt = Date.now();
+  const deadline = startedAt + CHAT_HTTP_PROBE_TIMEOUT_MS;
+  let attempts = 0;
+  let latestProbe: Pick<ChatHttpProbeResult, 'reachable' | 'ok' | 'statusCode' | 'statusText' | 'error'> = {
+    reachable: false,
+    ok: false,
+    statusCode: null,
+    statusText: null,
+    error: 'Preview target was not probed.',
+  };
+
+  do {
+    attempts += 1;
+    latestProbe = await probeWorkspaceHttpEndpointOnce(
+      endpoint,
+      Math.min(CHAT_HTTP_SINGLE_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now()))
+    );
+    if (latestProbe.ok) {
+      return {
+        status: 'healthy',
+        reachable: true,
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        attempts,
+        durationMs: Date.now() - startedAt,
+        statusCode: latestProbe.statusCode,
+        statusText: latestProbe.statusText,
+        error: null,
+        message: 'Preview target responded with a successful HTTP status.',
+      };
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await sleep(Math.min(CHAT_HTTP_PROBE_POLL_MS, remainingMs));
+    }
+  } while (Date.now() < deadline);
+
+  const detail = latestProbe.reachable
+    ? `HTTP ${latestProbe.statusCode}${latestProbe.statusText ? ` ${latestProbe.statusText}` : ''}`
+    : latestProbe.error || 'No HTTP response';
+
+  return {
+    status: 'unhealthy',
+    reachable: latestProbe.reachable,
+    ok: false,
+    checkedAt: new Date().toISOString(),
+    attempts,
+    durationMs: Date.now() - startedAt,
+    statusCode: latestProbe.statusCode,
+    statusText: latestProbe.statusText,
+    error: latestProbe.error,
+    message: `Preview target did not pass the reachability check before timeout: ${detail}.`,
+  };
+}
+
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
 const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environment_build_unique';
 const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, service, build.[pullRequest.[repository]]]';
@@ -388,7 +546,7 @@ function recordEnabledServicesFromError(
 async function enableServicesInDevModeParallel(opts: {
   namespace: string;
   pvcName: string;
-  services: Array<Pick<SessionService, 'name' | 'deployId' | 'resourceName' | 'devConfig'>>;
+  services: Array<Pick<SessionService, 'name' | 'deployId' | 'devConfig'> & { resourceName?: string | null }>;
   requiredNodeName?: string;
 }): Promise<DevModeEnabledService[]> {
   if (opts.services.length === 0) {
@@ -710,6 +868,10 @@ async function resolveSessionPrewarmByPvc(buildUuid: string | null, pvcName: str
 }
 
 async function shouldDeleteSessionPvc(session: Pick<AgentSession, 'id' | 'buildUuid' | 'pvcName'>): Promise<boolean> {
+  if (!session.pvcName) {
+    return false;
+  }
+
   const runtimePlanPvc = await AgentSandboxService.getLatestRuntimePlanPvcMetadata(session.id);
   if (runtimePlanPvc?.name === session.pvcName) {
     return runtimePlanPvc.ownsPvc;
@@ -725,6 +887,112 @@ function buildCurrentSessionStatePatch(session: AgentSession): Partial<AgentSess
     chatStatus: session.chatStatus,
     workspaceStatus: session.workspaceStatus,
   } as unknown as Partial<AgentSession>;
+}
+
+interface SessionRemoteRuntime {
+  provider: RemoteWorkspaceRuntimeProvider;
+  state: Record<string, unknown>;
+}
+
+/** Resolves the remote provider for the session's latest sandbox row; null for the native K8s path. */
+async function resolveRemoteRuntimeForSession(session: AgentSession): Promise<SessionRemoteRuntime | null> {
+  const sandbox = await AgentSandboxService.getLatestSandboxForSession(session.id);
+  const provider = await resolveRemoteRuntimeProviderForSandbox(sandbox);
+  if (!sandbox || !provider) {
+    return null;
+  }
+
+  return { provider, state: sandbox.providerState || {} };
+}
+
+async function provisionRemoteWorkspaceRuntime(params: {
+  session: AgentSession;
+  runtimePlan: WorkspaceRuntimePlan;
+  provider: RemoteWorkspaceRuntimeProvider;
+  userIdentity?: RequestUserIdentity | null;
+  installCommand?: string;
+  workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
+  runtimePlanMetadata?: WorkspaceRuntimePlanMetadata;
+  expectedLifecycle: { action: WorkspaceRuntimeAction; claimedAt?: string };
+  redisTtlSeconds: number;
+  namespace: string;
+}): Promise<{ podName: string | null; sessionPatch: Partial<AgentSession> }> {
+  const { session, runtimePlan, provider } = params;
+  const readiness = runtimePlan.runtimeConfig.readiness;
+
+  // Retries must reuse the previous sandbox (it holds the user's workspace) instead of leaking it.
+  const existingSandbox = await AgentSandboxService.getLatestSandboxForSession(session.id);
+  const reattached =
+    existingSandbox?.provider === provider.backendId
+      ? await provider.reattach(existingSandbox.providerState, readiness)
+      : null;
+  let handle = reattached;
+  if (!handle) {
+    // Fresh runtimes get a fresh gateway bearer token; encrypt up front so a missing
+    // ENCRYPTION_KEY fails before any backend resources exist.
+    const gatewayToken = mintWorkspaceGatewayToken();
+    const encryptedGatewayToken = encryptWorkspaceGatewayToken(gatewayToken);
+    const provisioned = await provider.provision({
+      plan: runtimePlan,
+      readiness,
+      userIdentity: params.userIdentity || null,
+      installCommand: params.installCommand,
+      gatewayToken,
+    });
+    handle = {
+      ...provisioned,
+      providerState: { ...provisioned.providerState, gatewayToken: encryptedGatewayToken },
+    };
+  }
+  const podName = handle.podNameAlias ?? session.podName ?? null;
+  const sessionPatch = {
+    status: 'active',
+    chatStatus: AgentChatStatus.READY,
+    workspaceStatus: AgentWorkspaceStatus.READY,
+    namespace: params.namespace,
+    podName,
+    pvcName: null,
+  } as unknown as Partial<AgentSession>;
+
+  try {
+    await WorkspaceRuntimeStateService.recordWorkspaceState(
+      session.id,
+      {
+        sessionPatch,
+        sandboxStatus: 'ready',
+        runtimeProvider: provider.backendId,
+        providerState: handle.providerState,
+        capabilitySnapshot: handle.capabilitySnapshot,
+        workspaceStorage: params.workspaceStorage,
+        runtimePlanMetadata: params.runtimePlanMetadata,
+        runtimeLifecycle: null,
+      },
+      { expectedLifecycle: params.expectedLifecycle }
+    );
+    const redis = RedisClient.getInstance().getRedis();
+    await redis.setex(
+      `${SESSION_REDIS_PREFIX}${session.uuid}`,
+      params.redisTtlSeconds,
+      JSON.stringify({ podName, namespace: params.namespace, status: 'active', provider: provider.backendId })
+    );
+    await clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {});
+  } catch (error) {
+    // Destroy the runtime when persistence failed to record this handle's identity. Fresh provisions
+    // always leak; a Modal reattach that recreated from a snapshot also leaks because the prior state
+    // points at the OLD (dead) sandboxId, not the new one on the handle. E2B/Daytona reattach reconnect
+    // the SAME sandboxId the row still references, so they stay alive untouched.
+    const handleSandboxId = (handle.providerState as { sandboxId?: unknown }).sandboxId;
+    const persistedSandboxId = (existingSandbox?.providerState as { sandboxId?: unknown } | undefined)?.sandboxId;
+    if (!reattached || (handleSandboxId && handleSandboxId !== persistedSandboxId)) {
+      await provider.destroy(handle.providerState).catch(() => {});
+    }
+    throw error;
+  }
+
+  logger().info(
+    `Session: workspace runtime ready sessionId=${session.uuid} backend=${provider.backendId} sandboxId=${podName}`
+  );
+  return { podName, sessionPatch };
 }
 
 async function recordCleanupFailure(
@@ -861,6 +1129,7 @@ async function recordUnpersistedCreateSessionStartupFailure(params: {
   runtimePlanMetadata?: WorkspaceRuntimePlanMetadata;
 }): Promise<void> {
   const model = params.runtimePlan?.provider.selection.modelId ?? params.opts.model?.trim() ?? 'unresolved';
+  const remoteBackendId = params.runtimePlan ? resolveRemoteBackendIdForPlan(params.runtimePlan) : null;
   const failedSessionPayload = {
     uuid: params.sessionUuid,
     userId: params.opts.userId,
@@ -868,9 +1137,9 @@ async function recordUnpersistedCreateSessionStartupFailure(params: {
     buildUuid: params.opts.buildUuid || null,
     buildKind: params.buildKind,
     sessionKind: params.sessionKind,
-    podName: params.runtimePlan?.podName ?? null,
+    podName: remoteBackendId ? null : params.runtimePlan?.podName ?? null,
     namespace: params.opts.namespace,
-    pvcName: params.runtimePlan?.prewarm.pvcName ?? null,
+    pvcName: remoteBackendId ? null : params.runtimePlan?.prewarm.pvcName ?? null,
     model,
     defaultModel: model,
     defaultHarness: 'lifecycle_ai_sdk',
@@ -905,6 +1174,7 @@ async function recordUnpersistedCreateSessionStartupFailure(params: {
         ...(params.runtimePlan?.workspaceStorage ? { workspaceStorage: params.runtimePlan.workspaceStorage } : {}),
         failure: params.startupFailure,
         ...(params.runtimePlanMetadata ? { runtimePlanMetadata: params.runtimePlanMetadata } : {}),
+        ...(remoteBackendId ? { runtimeProvider: remoteBackendId } : {}),
       },
       { trx }
     );
@@ -1179,7 +1449,7 @@ export default class AgentSessionService {
       session.workspaceStatus === AgentWorkspaceStatus.READY &&
       session.namespace &&
       session.podName &&
-      session.pvcName
+      (session.pvcName || (await resolveRemoteRuntimeForSession(session)))
     ) {
       return session;
     }
@@ -1239,11 +1509,26 @@ export default class AgentSessionService {
       const skillPlan = runtimePlan.skillPlan;
       const runtimeConfig = runtimePlan.runtimeConfig;
       const sessionPodMcpConfigJson = runtimePlan.startupMcp.serializedConfig;
+      // Sessions stay on the backend that provisioned them: a kubernetes workspace lives in its
+      // PVC, a remote one in its sandbox — flipping the global provider must strand neither.
+      const sessionRemoteRuntime = await resolveRemoteRuntimeForSession(session);
+      // Honor the row's backend only when it actually provisioned a reattachable handle. A row stamped
+      // with a provider at claim time but never provisioned (empty providerState) must fall through to
+      // the currently-configured backend, so a failed remote session can retry onto K8s instead of
+      // staying permanently pinned to a possibly-broken backend.
+      const sessionHasRemoteHandle = Boolean(
+        sessionRemoteRuntime && sessionRemoteRuntime.provider.hasPersistedHandle(sessionRemoteRuntime.state)
+      );
+      const remoteProvider = sessionHasRemoteHandle
+        ? sessionRemoteRuntime!.provider
+        : !session.pvcName
+        ? resolveRemoteRuntimeProviderForPlan(runtimePlan)
+        : null;
 
       const provisioningPatch = {
         namespace,
         podName,
-        pvcName,
+        pvcName: remoteProvider ? null : pvcName,
         status: 'active',
         chatStatus: AgentChatStatus.READY,
         workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
@@ -1263,11 +1548,43 @@ export default class AgentSessionService {
         sandboxStatus: claimSandboxStatus,
         workspaceStorage,
         runtimePlanMetadata,
+        ...(remoteProvider ? { runtimeProvider: remoteProvider.backendId } : {}),
       });
+
+      if (remoteProvider) {
+        if (!opts.failureStage && failureOrigin !== 'resume') {
+          failureStage = 'connect_runtime';
+        }
+
+        const provisioned = await provisionRemoteWorkspaceRuntime({
+          session,
+          runtimePlan,
+          provider: remoteProvider,
+          userIdentity: opts.userIdentity,
+          installCommand: buildCombinedInstallCommand(runtimePlan.servicePlan.services),
+          workspaceStorage,
+          runtimePlanMetadata,
+          expectedLifecycle: { action: workspaceAction, claimedAt: actionClaimedAt },
+          redisTtlSeconds: runtimeConfig.cleanup.redisTtlSeconds,
+          namespace,
+        });
+        podName = provisioned.podName ?? podName;
+
+        const readySession = await AgentSession.query().findOne({ uuid: session.uuid });
+        if (!readySession) {
+          throw new Error('Session not found after runtime provisioning');
+        }
+
+        return readySession;
+      }
 
       if (session.namespace && session.namespace !== namespace) {
         await deleteNamespace(session.namespace).catch(() => {});
       }
+
+      // Suspend deletes the per-session secret, so resume re-mints a fresh token alongside it.
+      // Degrades gracefully on keyless installs (ENCRYPTION_KEY unset → no enforcement, K8s only).
+      const { gatewayToken, encryptedGatewayToken } = mintK8sGatewayTokenOrWarn();
 
       resourcesStarted = true;
       await createOrUpdateNamespace({
@@ -1301,6 +1618,7 @@ export default class AgentSessionService {
           forwardedPlainAgentEnv,
           {
             [SESSION_POD_MCP_CONFIG_SECRET_KEY]: sessionPodMcpConfigJson,
+            ...(gatewayToken ? { [LIFECYCLE_GATEWAY_TOKEN_ENV]: gatewayToken } : {}),
           }
         ),
         ensureAgentSessionServiceAccount(namespace),
@@ -1349,6 +1667,7 @@ export default class AgentSessionService {
             pvcName,
           } as unknown as Partial<AgentSession>,
           sandboxStatus: 'ready',
+          providerState: encryptedGatewayToken ? { gatewayToken: encryptedGatewayToken } : {},
           workspaceStorage,
           runtimePlanMetadata,
           runtimeLifecycle: null,
@@ -1373,6 +1692,10 @@ export default class AgentSessionService {
         throw new Error('Session not found after runtime provisioning');
       }
 
+      if (failureOrigin === 'resume') {
+        await AgentSandboxService.restorePreviewExposures(readySession);
+      }
+
       return readySession;
     } catch (error) {
       if (error instanceof WorkspaceActionBlockedError) {
@@ -1387,7 +1710,8 @@ export default class AgentSessionService {
         error,
         stage: failureStage,
         origin: failureOrigin,
-        retryable: failureRetryable,
+        // A failed security verification must never be retried into a ready workspace.
+        retryable: error instanceof WorkspaceRuntimeSecurityError ? false : failureRetryable,
       });
 
       if (!workspaceStorage) {
@@ -1460,8 +1784,7 @@ export default class AgentSessionService {
     host: string | null;
     path: string;
     port: number;
-    serviceName: string;
-    ingressName: string;
+    upstreamHealth?: ChatHttpProbeResult;
   }> {
     const session = await AgentSession.query().findOne({ uuid: sessionId, userId });
     if (!session) {
@@ -1476,11 +1799,29 @@ export default class AgentSessionService {
       throw new Error('Workspace runtime is not ready yet');
     }
 
-    const publication = await createOrUpdateChatPreview({
-      sessionUuid: session.uuid,
-      namespace: session.namespace,
-      podName: session.podName,
+    const gatewayEndpoint = await AgentSandboxService.resolveWorkspaceGatewayEndpoint(session.uuid);
+    if (!gatewayEndpoint) {
+      throw new Error('Workspace gateway endpoint is not available');
+    }
+
+    const endpoint = buildWorkspaceGatewayPreviewEndpoint(gatewayEndpoint, port);
+    const upstreamHealth = await verifyWorkspaceHttpEndpoint(endpoint);
+    const previewSlug = buildChatPreviewHostSlug({ sessionUuid: session.uuid, port });
+    const publicPreview = resolveChatPreviewPublicPublication({ port, previewSlug });
+    // SECURITY: the raw workspace-gateway endpoint and bearer headers stay in the exposure row only.
+    // Returning them to the model would leak provider hosts and per-workspace gateway credentials.
+    const publication = {
+      ...publicPreview,
       port,
+      upstreamHealth,
+    };
+    await AgentSandboxService.recordPreviewExposure(session, {
+      port,
+      url: publicPreview.url,
+      endpointUrl: endpoint.url,
+      headers: endpoint.headers || {},
+      attachmentKind: 'workspace_gateway_preview',
+      previewSlug,
     });
 
     logger().info(
@@ -1506,6 +1847,97 @@ export default class AgentSessionService {
 
     if (session.workspaceStatus === AgentWorkspaceStatus.HIBERNATED) {
       return session;
+    }
+
+    const remoteRuntime = await resolveRemoteRuntimeForSession(session);
+    if (remoteRuntime) {
+      if (session.workspaceStatus !== AgentWorkspaceStatus.READY || !session.namespace || !session.podName) {
+        throw new Error('Workspace runtime is not ready');
+      }
+
+      const { provider, state } = remoteRuntime;
+      const runtimeConfig = await resolveAgentSessionRuntimeConfig();
+      const redis = RedisClient.getInstance().getRedis();
+      const suspendClaimedAt = new Date().toISOString();
+      await WorkspaceRuntimeStateService.claimWorkspaceAction(session.id, {
+        action: 'suspend',
+        claimedAt: suspendClaimedAt,
+        sessionPatch: {
+          status: 'active',
+          chatStatus: AgentChatStatus.READY,
+          workspaceStatus: AgentWorkspaceStatus.READY,
+        } as unknown as Partial<AgentSession>,
+        sandboxStatus: 'suspending',
+        runtimeProvider: provider.backendId,
+      });
+
+      let suspendedHandle: RemoteRuntimeHandle | undefined;
+      try {
+        // Keep the suspended sandbox alive for the whole hibernated retention window plus reaper slack.
+        suspendedHandle =
+          (await provider.suspend(state, {
+            retainForMs: runtimeConfig.cleanup.hibernatedRetentionMs + 60 * 60 * 1000,
+          })) || undefined;
+      } catch (error) {
+        const failure = buildWorkspaceRuntimeFailure({
+          error,
+          stage: 'suspend',
+          origin: 'suspend',
+          retryable: false,
+        });
+        await WorkspaceRuntimeStateService.recordWorkspaceFailure(
+          session.id,
+          {
+            sessionPatch: {
+              workspaceStatus: AgentWorkspaceStatus.FAILED,
+            } as unknown as Partial<AgentSession>,
+            failure,
+            runtimeProvider: provider.backendId,
+            providerState: state,
+          },
+          {
+            expectedLifecycle: {
+              action: 'suspend',
+              claimedAt: suspendClaimedAt,
+            },
+          }
+        ).catch(() => {});
+        throw error;
+      }
+
+      await Promise.all([
+        redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`).catch(() => {}),
+        clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {}),
+      ]);
+
+      const { session: suspendedSession } = await WorkspaceRuntimeStateService.recordWorkspaceState(
+        session.id,
+        {
+          sessionPatch: {
+            status: 'active',
+            chatStatus: AgentChatStatus.READY,
+            workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+            podName: session.podName,
+            pvcName: null,
+          } as unknown as Partial<AgentSession>,
+          sandboxStatus: 'suspended',
+          runtimeProvider: provider.backendId,
+          providerState: suspendedHandle?.providerState ?? state,
+          capabilitySnapshot: suspendedHandle?.capabilitySnapshot ?? provider.capabilities(state),
+          runtimeLifecycle: null,
+        },
+        {
+          expectedLifecycle: {
+            action: 'suspend',
+            claimedAt: suspendClaimedAt,
+          },
+        }
+      );
+
+      logger().info(
+        `Session: workspace runtime suspended sessionId=${session.uuid} backend=${provider.backendId} sandboxId=${session.podName}`
+      );
+      return suspendedSession;
     }
 
     if (
@@ -1607,6 +2039,112 @@ export default class AgentSessionService {
     if (session.workspaceStatus !== AgentWorkspaceStatus.HIBERNATED) {
       await WorkspaceRuntimeStateService.assertNoActiveWorkspaceAction(session.id);
       throw new Error('Workspace runtime can only be resumed from hibernated state');
+    }
+
+    const remoteRuntime = await resolveRemoteRuntimeForSession(session);
+    if (remoteRuntime) {
+      const { provider, state } = remoteRuntime;
+      const runtimeConfig = await resolveAgentSessionRuntimeConfig();
+      const redis = RedisClient.getInstance().getRedis();
+      const resumeClaimedAt = new Date().toISOString();
+      await WorkspaceRuntimeStateService.claimWorkspaceAction(session.id, {
+        action: 'resume',
+        claimedAt: resumeClaimedAt,
+        activeActionTimeoutMs: runtimeConfig.cleanup.startingTimeoutMs,
+        ...(opts.allowedActiveRunUuid ? { allowedActiveRunUuid: opts.allowedActiveRunUuid } : {}),
+        sessionPatch: {
+          status: 'active',
+          chatStatus: AgentChatStatus.READY,
+          workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
+          podName: session.podName,
+          pvcName: null,
+        } as unknown as Partial<AgentSession>,
+        sandboxStatus: 'resuming',
+        runtimeProvider: provider.backendId,
+        providerState: state,
+      });
+
+      let handle: RemoteRuntimeHandle | undefined;
+      try {
+        handle = await provider.resume(state, runtimeConfig.readiness);
+        const podName = handle.podNameAlias ?? session.podName;
+        const { session: resumedSession } = await WorkspaceRuntimeStateService.recordWorkspaceState(
+          session.id,
+          {
+            sessionPatch: {
+              status: 'active',
+              chatStatus: AgentChatStatus.READY,
+              workspaceStatus: AgentWorkspaceStatus.READY,
+              namespace: session.namespace,
+              podName,
+              pvcName: null,
+            } as unknown as Partial<AgentSession>,
+            sandboxStatus: 'ready',
+            runtimeProvider: provider.backendId,
+            providerState: handle.providerState,
+            capabilitySnapshot: handle.capabilitySnapshot,
+            runtimeLifecycle: null,
+          },
+          {
+            expectedLifecycle: {
+              action: 'resume',
+              claimedAt: resumeClaimedAt,
+            },
+          }
+        );
+        await redis.setex(
+          `${SESSION_REDIS_PREFIX}${session.uuid}`,
+          runtimeConfig.cleanup.redisTtlSeconds,
+          JSON.stringify({ podName, namespace: session.namespace, status: 'active', provider: provider.backendId })
+        );
+        await clearAgentSessionStartupFailure(redis, session.uuid).catch(() => {});
+        const restoredPreviewCount = await AgentSandboxService.restorePreviewExposures(resumedSession);
+
+        logger().info(
+          `Session: workspace runtime resumed sessionId=${session.uuid} backend=${provider.backendId} sandboxId=${podName} restoredPreviews=${restoredPreviewCount}`
+        );
+        return resumedSession;
+      } catch (error) {
+        // A Modal resume recreates the sandbox from its snapshot; if resume succeeded but persistence
+        // failed (e.g. the claim was superseded), the new sandbox leaks because the row still points at
+        // the old sandboxId. Destroy the handle's runtime when its identity differs from the persisted state.
+        const handleSandboxId = (handle?.providerState as { sandboxId?: unknown } | undefined)?.sandboxId;
+        const persistedSandboxId = (state as { sandboxId?: unknown }).sandboxId;
+        if (handle && handleSandboxId && handleSandboxId !== persistedSandboxId) {
+          await provider.destroy(handle.providerState).catch(() => {});
+        }
+        // An expired runtime cannot be resumed: surface the coded non-retryable failure. Chat
+        // retry stays available (FAILED→retry provisions a fresh workspace); see
+        // WORKSPACE_EXPIRED_FAILURE_CODE for the invariant.
+        const runtimeGone = error instanceof WorkspaceRuntimeGoneError;
+        const securityBlocked = error instanceof WorkspaceRuntimeSecurityError;
+        const failure = buildWorkspaceRuntimeFailure({
+          error: runtimeGone ? new Error('Workspace expired — retry to start a fresh workspace.') : error,
+          stage: 'resume',
+          origin: 'resume',
+          retryable: !runtimeGone && !securityBlocked,
+          ...(runtimeGone ? { code: WORKSPACE_EXPIRED_FAILURE_CODE } : {}),
+        });
+        await WorkspaceRuntimeStateService.recordWorkspaceFailure(
+          session.id,
+          {
+            sessionPatch: {
+              workspaceStatus: AgentWorkspaceStatus.FAILED,
+            } as unknown as Partial<AgentSession>,
+            failure,
+            runtimeProvider: provider.backendId,
+            providerState: state,
+          },
+          {
+            expectedLifecycle: {
+              action: 'resume',
+              claimedAt: resumeClaimedAt,
+            },
+          }
+        ).catch(() => {});
+        await redis.del(`${SESSION_REDIS_PREFIX}${session.uuid}`).catch(() => {});
+        throw error;
+      }
     }
 
     return this.provisionChatRuntime({
@@ -1717,6 +2255,7 @@ export default class AgentSessionService {
     let forwardedAgentEnv = runtimePlan.forwardedEnv;
     const redisTtlSeconds = opts.redisTtlSeconds ?? runtimePlan.runtimeConfig.cleanup.redisTtlSeconds;
     const preflightMs = elapsedMs(preflightStartedAt);
+    const remoteProvider = resolveRemoteRuntimeProviderForPlan(runtimePlan);
 
     logger().info(
       `Session: starting sessionId=${sessionUuid} buildKind=${buildKind} namespace=${opts.namespace} buildUuid=${
@@ -1727,6 +2266,10 @@ export default class AgentSessionService {
     );
 
     try {
+      if (remoteProvider && (resolvedServices || []).length > 0) {
+        assertBackendCapabilities(remoteProvider.backendId, ['environmentSessions', 'developWorkspaces']);
+      }
+
       const keepAttachedServicesOnSessionNode =
         opts.keepAttachedServicesOnSessionNode ?? runtimePlan.runtimeConfig.keepAttachedServicesOnSessionNode;
 
@@ -1740,7 +2283,7 @@ export default class AgentSessionService {
           ownerGithubUsername: opts.userIdentity?.githubUsername || null,
           podName,
           namespace: opts.namespace,
-          pvcName,
+          pvcName: remoteProvider ? null : pvcName,
           model: resolvedModelId,
           defaultModel: resolvedModelId,
           defaultHarness: 'lifecycle_ai_sdk',
@@ -1769,6 +2312,7 @@ export default class AgentSessionService {
             sandboxStatus: 'provisioning',
             workspaceStorage,
             runtimePlanMetadata,
+            ...(remoteProvider ? { runtimeProvider: remoteProvider.backendId } : {}),
             runtimeLifecycle: {
               currentAction: 'provision',
               claimedAt: startupActionClaimedAt,
@@ -1781,8 +2325,41 @@ export default class AgentSessionService {
       sessionPersisted = true;
 
       const combinedInstallCommand = buildCombinedInstallCommand(resolvedServices);
+      if (remoteProvider) {
+        failureStage = 'connect_runtime';
+        const provisioned = await provisionRemoteWorkspaceRuntime({
+          session,
+          runtimePlan,
+          provider: remoteProvider,
+          userIdentity: opts.userIdentity,
+          installCommand: combinedInstallCommand,
+          workspaceStorage,
+          runtimePlanMetadata,
+          expectedLifecycle: { action: 'provision', claimedAt: startupActionClaimedAt },
+          redisTtlSeconds,
+          namespace: opts.namespace,
+        });
+
+        session = {
+          ...session,
+          ...provisioned.sessionPatch,
+        } as AgentSession;
+
+        logger().info(
+          `Session: workspace ready sessionId=${sessionUuid} backend=${remoteProvider.backendId} sandboxId=${
+            provisioned.podName
+          } durationMs=${elapsedMs(sessionStartedAt)} preflightMs=${preflightMs}`
+        );
+
+        warmDefaultThread(session.uuid, opts.userId);
+
+        return session!;
+      }
+
       const infraSetupStartedAt = Date.now();
       failureStage = 'prepare_infrastructure';
+      // Degrades gracefully on keyless installs (ENCRYPTION_KEY unset → no enforcement, K8s only).
+      const { gatewayToken, encryptedGatewayToken } = mintK8sGatewayTokenOrWarn();
       if (runtimePlan.prewarm.ownsPvc) {
         await createAgentPvc(
           opts.namespace,
@@ -1812,6 +2389,7 @@ export default class AgentSessionService {
           forwardedPlainAgentEnv,
           {
             [SESSION_POD_MCP_CONFIG_SECRET_KEY]: sessionPodMcpConfigJson,
+            ...(gatewayToken ? { [LIFECYCLE_GATEWAY_TOKEN_ENV]: gatewayToken } : {}),
           }
         ),
         ensureAgentSessionServiceAccount(opts.namespace),
@@ -1953,6 +2531,7 @@ export default class AgentSessionService {
         {
           sessionPatch: readyPatch,
           sandboxStatus: 'ready',
+          providerState: encryptedGatewayToken ? { gatewayToken: encryptedGatewayToken } : {},
           workspaceStorage,
           runtimePlanMetadata,
           runtimeLifecycle: null,
@@ -2031,6 +2610,7 @@ export default class AgentSessionService {
         status: 'error',
         chatStatus: AgentChatStatus.ERROR,
         workspaceStatus: AgentWorkspaceStatus.FAILED,
+        ...(remoteProvider ? { podName: null, pvcName: null } : {}),
         endedAt,
       } as unknown as Partial<AgentSession>;
 
@@ -2082,11 +2662,17 @@ export default class AgentSessionService {
 
       await revertPromise;
 
-      await Promise.all([
-        deleteAgentRuntimeResources(opts.namespace, podName, apiKeySecretName).catch(() => {}),
-        cleanupForwardedAgentEnvSecrets(opts.namespace, sessionUuid, forwardedAgentEnv.secretProviders).catch(() => {}),
-        runtimePlan.prewarm.ownsPvc ? deleteAgentPvc(opts.namespace, pvcName).catch(() => {}) : Promise.resolve(),
-      ]);
+      await Promise.all(
+        remoteProvider
+          ? [redis.del(`${SESSION_REDIS_PREFIX}${sessionUuid}`).catch(() => {})]
+          : [
+              deleteAgentRuntimeResources(opts.namespace, podName, apiKeySecretName).catch(() => {}),
+              cleanupForwardedAgentEnvSecrets(opts.namespace, sessionUuid, forwardedAgentEnv.secretProviders).catch(
+                () => {}
+              ),
+              runtimePlan.prewarm.ownsPvc ? deleteAgentPvc(opts.namespace, pvcName).catch(() => {}) : Promise.resolve(),
+            ]
+      );
 
       if (sessionPersisted && Object.keys(devModeSnapshots).length > 0) {
         await AgentSession.query()
@@ -2105,6 +2691,7 @@ export default class AgentSessionService {
             workspaceStorage,
             failure: startupFailure,
             runtimePlanMetadata,
+            ...(remoteProvider ? { runtimeProvider: remoteProvider.backendId } : {}),
           },
           {
             expectedLifecycle: {
@@ -2179,6 +2766,51 @@ export default class AgentSessionService {
     logger().info(`Session: ending sessionId=${sessionId} status=${session.status} namespace=${session.namespace}`);
 
     try {
+      const remoteRuntime = await resolveRemoteRuntimeForSession(cleanupSession);
+      if (remoteRuntime) {
+        await Promise.all([
+          remoteRuntime.provider.destroy(remoteRuntime.state),
+          redis.del(`${SESSION_REDIS_PREFIX}${cleanupSession.uuid}`),
+          clearAgentSessionStartupFailure(redis, cleanupSession.uuid).catch(() => {}),
+        ]);
+
+        const build = cleanupSession.buildUuid
+          ? await Build.query()
+              .findOne({ uuid: cleanupSession.buildUuid })
+              .withGraphFetched('[deploys.[service, build], pullRequest.[repository]]')
+          : null;
+        if (build?.kind === BuildKind.SANDBOX) {
+          const { default: BuildService } = await import('./build');
+          const buildService = new BuildService();
+
+          try {
+            await buildService.deleteQueue.add('delete', {
+              buildId: build.id,
+              buildUuid: build.uuid,
+              sender: 'agent-session',
+              ...extractContextForQueue(),
+            });
+          } catch (error) {
+            logger().warn(
+              { error, buildUuid: build.uuid, sessionId },
+              `Sandbox: cleanup enqueue failed action=sync_fallback sessionId=${sessionId} buildUuid=${build.uuid}`
+            );
+            await buildService.deleteBuild(build);
+          }
+        }
+
+        await markSessionEnded(cleanupSession, {
+          devModeSnapshots: {},
+          podName: null,
+          pvcName: null,
+        });
+
+        logger().info(
+          `Session: workspace ended sessionId=${sessionId} backend=${remoteRuntime.provider.backendId} sandboxId=${cleanupSession.podName}`
+        );
+        return;
+      }
+
       if (cleanupSession.sessionKind === AgentSessionKind.CHAT && cleanupSession.namespace) {
         await Promise.all([
           deleteNamespace(cleanupSession.namespace),
@@ -2292,6 +2924,12 @@ export default class AgentSessionService {
     const session = await AgentSession.query().findOne({ uuid: sessionId });
     if (!session) {
       throw new Error('Session not found');
+    }
+
+    const remoteRuntime = await resolveRemoteRuntimeForSession(session);
+    if (remoteRuntime) {
+      // Remote backends cannot run dev-mode service attachment (capability floor).
+      assertBackendCapabilities(remoteRuntime.provider.backendId, ['environmentSessions', 'developWorkspaces']);
     }
 
     if (session.status !== 'active') {
@@ -2506,7 +3144,8 @@ export default class AgentSessionService {
   static async getSessionAppendSystemPrompt(
     sessionId: string,
     repoFullName?: string,
-    configuredPrompt?: string
+    configuredPrompt?: string,
+    runtimeToolMetadata?: readonly AgentRuntimeToolMetadata[]
   ): Promise<string | undefined> {
     const [session, effectiveConfig, approvalPolicy] = await Promise.all([
       AgentSession.query()
@@ -2537,10 +3176,10 @@ export default class AgentSessionService {
         Boolean(session.namespace) &&
         Boolean(session.podName);
       const toolLines = hasReadyWorkspace
-        ? buildSessionWorkspacePromptLines({
+        ? buildWorkspaceCorePromptLines({
             approvalPolicy,
             toolRules: effectiveConfig.toolRules,
-            includeSkills: Boolean(session.skillPlan?.skills?.length),
+            runtimeToolMetadata,
           })
         : [];
 

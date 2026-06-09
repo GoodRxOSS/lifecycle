@@ -16,7 +16,6 @@
 
 import { type ToolSet } from 'ai';
 import AgentSession from 'server/models/AgentSession';
-import AgentSessionService from 'server/services/agentSession';
 import { SESSION_WORKSPACE_GATEWAY_PORT } from 'server/lib/agentSession/podFactory';
 import { McpClientManager } from 'server/services/agentRuntime/mcp/client';
 import { usesSessionWorkspaceGatewayExecution } from 'server/services/agentRuntime/mcp/sessionPod';
@@ -26,121 +25,116 @@ import type { AgentSessionToolRule } from 'server/services/types/agentSessionCon
 import AgentPolicyService from './PolicyService';
 import type { ResolvedAgentCapabilityAccess } from './PolicyService';
 import type { AgentApprovalPolicy, AgentCapabilityKey, AgentToolAuditRecord } from './types';
-import type { AgentCapabilityCatalogId } from './capabilityCatalog';
 import type { ResolvedMcpServer } from 'server/services/agentRuntime/mcp/types';
-import { assertSafeWorkspaceMutationCommand, isReadOnlyWorkspaceCommand } from './sandboxExecSafety';
-import { buildProposedFileChanges, buildResultFileChanges, didToolResultFail } from './fileChanges';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
-import {
-  buildAgentToolKey,
-  CHAT_PUBLISH_HTTP_TOOL_NAME,
-  LIFECYCLE_BUILTIN_SERVER_SLUG,
-  SESSION_WORKSPACE_MUTATION_TOOL_NAME,
-  SESSION_WORKSPACE_READONLY_TOOL_NAME,
-  SESSION_WORKSPACE_SERVER_NAME,
-  SESSION_WORKSPACE_SERVER_SLUG,
-  buildWorkspaceMutationExecDescription,
-  buildWorkspaceReadonlyExecDescription,
-} from './toolKeys';
+import { buildAgentToolKey, CHAT_REQUEST_WORKSPACE_TOOL_NAME, LIFECYCLE_BUILTIN_SERVER_SLUG } from './toolKeys';
 import { SessionWorkspaceGatewayUnavailableError } from './errors';
-import AgentSandboxService from './SandboxService';
+import AgentSandboxService, { type WorkspaceRuntimeEndpoint } from './SandboxService';
+import {
+  buildWorkspaceGatewayContractFailureMessage,
+  findMissingWorkspaceGatewayTools,
+} from 'server/services/workspaceRuntime/gatewayContract';
 import type { AgentRuntimeToolMetadata } from './toolMetadata';
 import {
   isCatalogCapabilityAllowed,
+  recordToolApproval,
   recordToolMetadata,
   resolveToolApprovalMode,
   toAiDynamicTool,
   toAiJsonSchema,
+  toAiRuntimeToolContextSchema,
+  type AgentRuntimeToolApprovalConfig,
   type ToolExecutionHooks,
 } from './capabilityToolHelpers';
 import { loadLatestSession } from './capabilitySessionContext';
+import { buildAgentRuntimeToolContextFromMetadataInput, resolveAgentRuntimeToolContext } from './runtimeContext';
 
 type SessionWorkspaceGatewayTimeouts = {
   discoveryTimeoutMs: number;
   executionTimeoutMs: number;
 };
 
-const WORKSPACE_EXEC_RUNTIME_TOOL_NAME = 'workspace.exec';
-const WORKSPACE_WRITE_FILE_RUNTIME_TOOL_NAME = 'workspace.write_file';
-const WORKSPACE_EDIT_FILE_RUNTIME_TOOL_NAME = 'workspace.edit_file';
-export const WORKSPACE_EXEC_INPUT_SCHEMA = {
+const REQUEST_WORKSPACE_INPUT_SCHEMA = {
   type: 'object',
-  required: ['command'],
   additionalProperties: false,
   properties: {
-    command: {
+    reason: {
       type: 'string',
-      minLength: 1,
-      description: 'Command to run with bash -lc',
+      description: 'Short reason the task needs a workspace.',
     },
-    cwd: {
-      type: 'string',
-      description: 'Working directory relative to the workspace',
-    },
-    timeoutMs: {
+    timeout_ms: {
       type: 'integer',
-      minimum: 1,
-      maximum: 120000,
-      description: 'Command timeout in milliseconds',
+      minimum: 1000,
+      maximum: 1800000,
+      description: 'Maximum time to wait for the workspace to become ready.',
     },
   },
 } as const;
-const WORKSPACE_WRITE_FILE_INPUT_SCHEMA = {
-  type: 'object',
-  required: ['path', 'content'],
-  additionalProperties: false,
-  properties: {
-    path: {
-      type: 'string',
-      minLength: 1,
-      description: 'Workspace-relative file path to write',
-    },
-    content: {
-      type: 'string',
-      description: 'Complete file content to write',
-    },
-  },
-} as const;
-const WORKSPACE_EDIT_FILE_INPUT_SCHEMA = {
-  type: 'object',
-  required: ['path', 'oldText', 'newText'],
-  additionalProperties: false,
-  properties: {
-    path: {
-      type: 'string',
-      minLength: 1,
-      description: 'Workspace-relative file path to edit',
-    },
-    oldText: {
-      type: 'string',
-      description: 'Exact existing text to replace',
-    },
-    newText: {
-      type: 'string',
-      description: 'Replacement text',
-    },
-  },
-} as const;
-const PUBLISH_HTTP_INPUT_SCHEMA = {
-  type: 'object',
-  required: ['port'],
-  additionalProperties: false,
-  properties: {
-    port: {
-      type: 'integer',
-      minimum: 1,
-      maximum: 65535,
-      description: 'Workspace HTTP port to expose through ingress',
-    },
-  },
-} as const;
+const REQUEST_WORKSPACE_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const REQUEST_WORKSPACE_POLL_MS = 1000;
 
-function resolveSessionWorkspaceGatewayBaseUrl(session: AgentSession): string | null {
+function readWorkspaceRequestReason(args: Record<string, unknown>): string | null {
+  const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+  return reason || null;
+}
+
+function readRequestWorkspaceTimeoutMs(args: Record<string, unknown>): number {
+  const raw = typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined;
+  if (!Number.isFinite(raw) || !raw) {
+    return REQUEST_WORKSPACE_DEFAULT_TIMEOUT_MS;
+  }
+
+  return Math.min(Math.max(Math.trunc(raw), 1000), 30 * 60 * 1000);
+}
+
+function isWaitableWorkspaceRequestError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = 'reason' in error ? (error as { reason?: unknown }).reason : undefined;
+  return (
+    message.includes('already provisioning') ||
+    message.includes('workspace action to finish') ||
+    reason === 'action_in_progress'
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function joinGatewayPath(baseUrl: string, path: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+}
+
+function resolveSessionWorkspaceGatewayEndpoint(session: AgentSession): WorkspaceRuntimeEndpoint | null {
   if (!session.podName || !session.namespace || session.status !== 'active') {
     return null;
   }
 
-  return `http://${session.podName}.${session.namespace}.svc.cluster.local:${SESSION_WORKSPACE_GATEWAY_PORT}`;
+  return {
+    url: `http://${session.podName}.${session.namespace}.svc.cluster.local:${SESSION_WORKSPACE_GATEWAY_PORT}`,
+  };
+}
+
+export async function resolveSessionGatewayEndpoint(session: AgentSession): Promise<WorkspaceRuntimeEndpoint | null> {
+  try {
+    return (
+      (await AgentSandboxService.resolveWorkspaceGatewayEndpoint(session.uuid)) ||
+      resolveSessionWorkspaceGatewayEndpoint(session)
+    );
+  } catch (error) {
+    // A gateway-token decryption failure (ENCRYPTION_KEY rotation/loss) must surface as the standard
+    // gateway-unavailable tool error (decrypt hint preserved on the cause), not an unclassified throw
+    // on the hot tool path — only the typed error records the session runtime failure downstream.
+    throw new SessionWorkspaceGatewayUnavailableError({ sessionId: session.uuid, cause: error });
+  }
 }
 
 export function isChatWorkspaceRuntimeReady(session: AgentSession): boolean {
@@ -157,25 +151,30 @@ export async function resolveSessionWorkspaceGatewayServer(
   session: AgentSession,
   timeouts: SessionWorkspaceGatewayTimeouts
 ): Promise<ResolvedMcpServer | null> {
-  const baseUrl =
-    (await AgentSandboxService.resolveWorkspaceGatewayBaseUrl(session.uuid)) ||
-    resolveSessionWorkspaceGatewayBaseUrl(session);
-  if (!baseUrl) {
+  const endpoint = await resolveSessionGatewayEndpoint(session);
+  if (!endpoint) {
     return null;
   }
 
-  const url = `${baseUrl}/mcp`;
+  const url = joinGatewayPath(endpoint.url, '/mcp');
   const client = new McpClientManager();
 
   try {
-    await client.connect({ type: 'http', url }, timeouts.discoveryTimeoutMs);
+    await client.connect(
+      { type: 'http', url, ...(endpoint.headers ? { headers: endpoint.headers } : {}) },
+      timeouts.discoveryTimeoutMs
+    );
     const discoveredTools = await client.listTools(timeouts.discoveryTimeoutMs);
+    const missingGatewayTools = findMissingWorkspaceGatewayTools(discoveredTools.map((tool) => tool.name));
+    if (missingGatewayTools.length > 0) {
+      throw new Error(buildWorkspaceGatewayContractFailureMessage(missingGatewayTools));
+    }
 
     return {
       scope: 'session',
       slug: 'sandbox',
       name: 'Session Workspace',
-      transport: { type: 'http', url },
+      transport: { type: 'http', url, ...(endpoint.headers ? { headers: endpoint.headers } : {}) },
       timeout: timeouts.executionTimeoutMs,
       defaultArgs: {},
       env: {},
@@ -195,16 +194,18 @@ export async function resolveSessionWorkspaceGatewayServer(
   }
 }
 
-export function resolveSessionExecutionServer(
+export async function resolveSessionExecutionServer(
   session: AgentSession,
-  server: ResolvedMcpServer
-): ResolvedMcpServer | null {
+  server: ResolvedMcpServer,
+  // Callers routing many servers should resolve the session-scoped endpoint once and pass it in.
+  gatewayEndpoint?: WorkspaceRuntimeEndpoint | null
+): Promise<ResolvedMcpServer | null> {
   if (!usesSessionWorkspaceGatewayExecution(server.transport)) {
     return server;
   }
 
-  const baseUrl = resolveSessionWorkspaceGatewayBaseUrl(session);
-  if (!baseUrl) {
+  const endpoint = gatewayEndpoint !== undefined ? gatewayEndpoint : await resolveSessionGatewayEndpoint(session);
+  if (!endpoint) {
     return null;
   }
 
@@ -212,7 +213,8 @@ export function resolveSessionExecutionServer(
     ...server,
     transport: {
       type: 'http',
-      url: `${baseUrl}/servers/${encodeURIComponent(server.slug)}/mcp`,
+      url: joinGatewayPath(endpoint.url, `/servers/${encodeURIComponent(server.slug)}/mcp`),
+      ...(endpoint.headers ? { headers: endpoint.headers } : {}),
     },
   };
 }
@@ -248,124 +250,123 @@ async function ensureChatWorkspaceRuntime({
   return ensured.session;
 }
 
-async function executeWorkspaceRuntimeTool({
+async function waitForChatWorkspaceRequest({
   session,
-  runtimeToolName,
-  input,
-  timeoutMs,
   userIdentity,
   requestGitHubToken,
   allowedActiveRunUuid,
+  timeoutMs,
 }: {
   session: AgentSession;
-  runtimeToolName: string;
-  input: Record<string, unknown>;
-  timeoutMs: number;
   userIdentity: RequestUserIdentity;
   requestGitHubToken?: string | null;
   allowedActiveRunUuid?: string | null;
+  timeoutMs: number;
 }) {
-  const runtimeSession = await ensureChatWorkspaceRuntime({
-    session,
-    userIdentity,
-    requestGitHubToken,
-    allowedActiveRunUuid,
-  });
-  const baseUrl =
-    (await AgentSandboxService.resolveWorkspaceGatewayBaseUrl(runtimeSession.uuid)) ||
-    resolveSessionWorkspaceGatewayBaseUrl(runtimeSession);
-  if (!baseUrl) {
-    throw new SessionWorkspaceGatewayUnavailableError({
-      sessionId: runtimeSession.uuid,
-      cause: new Error('Session workspace gateway URL is not available'),
-    });
-  }
+  const startedAt = Date.now();
+  let lastError: string | null = null;
 
-  const client = new McpClientManager();
   try {
-    await client.connect({ type: 'http', url: `${baseUrl}/mcp` }, timeoutMs);
-    return await client.callTool(runtimeToolName, input, timeoutMs);
-  } catch (error) {
-    throw new SessionWorkspaceGatewayUnavailableError({
-      sessionId: runtimeSession.uuid,
-      cause: error,
+    const runtimeSession = await ensureChatWorkspaceRuntime({
+      session,
+      userIdentity,
+      requestGitHubToken,
+      allowedActiveRunUuid,
     });
-  } finally {
-    await client.close();
+    if (isChatWorkspaceRuntimeReady(runtimeSession)) {
+      return {
+        status: 'ready' as const,
+        workspaceStatus: runtimeSession.workspaceStatus,
+        message: 'Workspace is ready. Use workspace_core tools for commands, files, git, and previews.',
+      };
+    }
+    if (runtimeSession.workspaceStatus === 'failed' || runtimeSession.status === 'error') {
+      return {
+        status: 'failed' as const,
+        workspaceStatus: runtimeSession.workspaceStatus,
+        message: 'Workspace failed to become ready.',
+      };
+    }
+  } catch (error) {
+    lastError = readErrorMessage(error);
+    if (!isWaitableWorkspaceRequestError(error)) {
+      return {
+        status: 'failed' as const,
+        workspaceStatus: 'failed',
+        message: lastError,
+      };
+    }
   }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const latestSession = await loadLatestSession(session.uuid);
+    if (isChatWorkspaceRuntimeReady(latestSession)) {
+      return {
+        status: 'ready' as const,
+        workspaceStatus: latestSession.workspaceStatus,
+        message: 'Workspace is ready. Use workspace_core tools for commands, files, git, and previews.',
+      };
+    }
+    if (
+      latestSession.workspaceStatus === 'failed' ||
+      latestSession.workspaceStatus === 'ended' ||
+      latestSession.status === 'error' ||
+      latestSession.status === 'ended'
+    ) {
+      return {
+        status: 'failed' as const,
+        workspaceStatus: latestSession.workspaceStatus,
+        message: 'Workspace failed to become ready.',
+      };
+    }
+
+    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    await sleep(Math.min(REQUEST_WORKSPACE_POLL_MS, Math.max(remainingMs, 0)));
+  }
+
+  return {
+    status: 'timed_out' as const,
+    workspaceStatus: (await loadLatestSession(session.uuid)).workspaceStatus,
+    message: lastError
+      ? `Workspace did not become ready before timeout. Last status: ${lastError}`
+      : 'Workspace did not become ready before timeout.',
+  };
 }
 
-export async function emitResultFileChanges({
-  hooks,
-  toolCallId,
-  sourceTool,
-  input,
-  result,
-  failed,
-}: {
-  hooks?: ToolExecutionHooks;
-  toolCallId?: string;
-  sourceTool: string;
-  input: Record<string, unknown>;
-  result: unknown;
-  failed: boolean;
-}) {
-  if (!toolCallId) {
-    return;
-  }
-
-  const changes = buildResultFileChanges({
-    toolCallId,
-    sourceTool,
-    input,
-    result,
-    failed,
-    previewChars: await getFileChangePreviewChars(),
-  });
-
-  for (const change of changes) {
-    await hooks?.onFileChange?.(change);
-  }
-}
-
-function registerChatWorkspaceExecTool({
+export function registerChatRequestWorkspaceTool({
   tools,
   session,
   userIdentity,
   approvalPolicy,
-  workspaceToolExecutionTimeoutMs,
   requestGitHubToken,
   hooks,
   toolRules,
-  toolName,
-  capabilityKey,
-  description,
-  readOnly,
-  catalogCapabilityId,
+  autoProvisionWorkspace,
   resolvedCapabilityAccess,
   toolMetadata,
+  toolApproval,
 }: {
   tools: ToolSet;
   session: AgentSession;
   userIdentity: RequestUserIdentity;
   approvalPolicy: AgentApprovalPolicy;
-  workspaceToolExecutionTimeoutMs: number;
   requestGitHubToken?: string | null;
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
-  toolName: string;
-  capabilityKey: AgentCapabilityKey;
-  description: string;
-  readOnly: boolean;
-  catalogCapabilityId: AgentCapabilityCatalogId;
+  autoProvisionWorkspace: boolean;
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
   toolMetadata?: AgentRuntimeToolMetadata[];
+  toolApproval?: AgentRuntimeToolApprovalConfig;
 }) {
-  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
+  if (session.sessionKind !== 'chat') {
+    return;
+  }
+  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, 'read_context')) {
     return;
   }
 
-  const toolKey = buildAgentToolKey(SESSION_WORKSPACE_SERVER_SLUG, toolName);
+  const toolKey = buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_REQUEST_WORKSPACE_TOOL_NAME);
+  const capabilityKey: AgentCapabilityKey = 'read';
   const mode = resolveToolApprovalMode({
     toolRules,
     toolKey,
@@ -376,425 +377,61 @@ function registerChatWorkspaceExecTool({
     return;
   }
 
-  tools[toolKey] = toAiDynamicTool({
-    description,
-    inputSchema: toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA),
-    needsApproval: mode === 'require_approval',
-    execute: async (input, context) => {
-      const args = (input as Record<string, unknown>) || {};
-      const command = typeof args.command === 'string' ? args.command : '';
-      if (readOnly && !isReadOnlyWorkspaceCommand(command)) {
-        throw new Error(
-          'This command is not a safe read-only inspection command. Use the workspace exec mutation tool for state-changing, networked, or process-managing commands.'
-        );
-      }
-      if (!readOnly) {
-        assertSafeWorkspaceMutationCommand(command);
-      }
+  const requiresApproval = mode === 'require_approval' || !autoProvisionWorkspace;
+  const metadataInput = {
+    toolKey,
+    serverSlug: LIFECYCLE_BUILTIN_SERVER_SLUG,
+    sourceToolName: CHAT_REQUEST_WORKSPACE_TOOL_NAME,
+    catalogCapabilityId: 'read_context' as const,
+    capabilityKey,
+    approvalMode: requiresApproval ? ('require_approval' as const) : ('allow' as const),
+  };
+  const fallbackToolContext = buildAgentRuntimeToolContextFromMetadataInput(metadataInput);
 
+  tools[toolKey] = toAiDynamicTool({
+    description:
+      'Request a Lifecycle workspace for this chat when the task genuinely needs commands, file edits, git, previews, or editor access. ' +
+      'Returns only after the workspace is ready, failed, or timed out. After a ready result, use workspace_core tools in this same run.',
+    inputSchema: toAiJsonSchema(REQUEST_WORKSPACE_INPUT_SCHEMA),
+    contextSchema: toAiRuntimeToolContextSchema(),
+    execute: async (input, context) => {
+      const runtimeToolContext = resolveAgentRuntimeToolContext(context?.context, fallbackToolContext);
+      const args = (input as Record<string, unknown>) || {};
       const toolCallId = context?.toolCallId;
       const audit: AgentToolAuditRecord = {
         source: 'mcp',
-        serverSlug: SESSION_WORKSPACE_SERVER_SLUG,
-        toolName,
+        serverSlug: runtimeToolContext.serverSlug,
+        toolName: runtimeToolContext.sourceToolName,
         toolCallId,
         args,
-        capabilityKey,
+        capabilityKey: runtimeToolContext.capabilityKey,
       };
 
       await hooks?.onToolStarted?.(audit);
 
-      try {
-        const runtimeArgs = readOnly ? args : { ...args, captureFileChanges: true };
-        const result = await executeWorkspaceRuntimeTool({
-          session,
-          runtimeToolName: WORKSPACE_EXEC_RUNTIME_TOOL_NAME,
-          input: runtimeArgs,
-          timeoutMs: workspaceToolExecutionTimeoutMs,
-          userIdentity,
-          requestGitHubToken,
-          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
-        });
-        const failed = result.isError || didToolResultFail(result);
-        if (!readOnly) {
-          await emitResultFileChanges({
-            hooks,
-            toolCallId,
-            sourceTool: toolName,
-            input: args,
-            result,
-            failed,
-          });
-        }
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result,
-          status: failed ? 'failed' : 'completed',
-        });
-        return result;
-      } catch (error) {
-        getLogger().warn({ error }, `AgentExec: chat workspace tool failed sessionId=${session.uuid} tool=${toolName}`);
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result: {
-            error: error instanceof Error ? error.message : String(error),
-          },
-          status: 'failed',
-        });
-        throw error;
-      }
-    },
-  });
-  recordToolMetadata(toolMetadata, {
-    toolKey,
-    catalogCapabilityId,
-    capabilityKey,
-    approvalMode: mode,
-  });
-}
-
-function registerChatWorkspaceFileTool({
-  tools,
-  session,
-  userIdentity,
-  approvalPolicy,
-  workspaceToolExecutionTimeoutMs,
-  requestGitHubToken,
-  hooks,
-  toolRules,
-  toolName,
-  inputSchema,
-  description,
-  catalogCapabilityId,
-  resolvedCapabilityAccess,
-  toolMetadata,
-}: {
-  tools: ToolSet;
-  session: AgentSession;
-  userIdentity: RequestUserIdentity;
-  approvalPolicy: AgentApprovalPolicy;
-  workspaceToolExecutionTimeoutMs: number;
-  requestGitHubToken?: string | null;
-  hooks?: ToolExecutionHooks;
-  toolRules?: AgentSessionToolRule[];
-  toolName: string;
-  inputSchema: Record<string, unknown>;
-  description: string;
-  catalogCapabilityId: AgentCapabilityCatalogId;
-  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
-  toolMetadata?: AgentRuntimeToolMetadata[];
-}) {
-  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
-    return;
-  }
-
-  const toolKey = buildAgentToolKey(SESSION_WORKSPACE_SERVER_SLUG, toolName);
-  const capabilityKey: AgentCapabilityKey = 'workspace_write';
-  const mode = resolveToolApprovalMode({
-    toolRules,
-    toolKey,
-    capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
-  });
-
-  if (mode === 'deny') {
-    return;
-  }
-
-  tools[toolKey] = toAiDynamicTool({
-    description,
-    inputSchema: toAiJsonSchema(inputSchema),
-    needsApproval: mode === 'require_approval',
-    onInputAvailable: async ({ input, toolCallId }) => {
-      if (!toolCallId) {
-        return;
-      }
-
-      const args = (input as Record<string, unknown>) || {};
-      const changes = buildProposedFileChanges({
-        toolCallId,
-        sourceTool: toolName,
-        input: args,
-        previewChars: await getFileChangePreviewChars(),
+      const result = await waitForChatWorkspaceRequest({
+        session,
+        userIdentity,
+        requestGitHubToken,
+        allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
+        timeoutMs: readRequestWorkspaceTimeoutMs(args),
       });
-
-      for (const change of changes) {
-        await hooks?.onFileChange?.(change);
-      }
-    },
-    execute: async (input, context) => {
-      const args = (input as Record<string, unknown>) || {};
-      const toolCallId = context?.toolCallId;
-      const audit: AgentToolAuditRecord = {
-        source: 'mcp',
-        serverSlug: SESSION_WORKSPACE_SERVER_SLUG,
-        toolName,
-        toolCallId,
-        args,
-        capabilityKey,
+      const toolResult = {
+        ...result,
+        workspace_status: result.workspaceStatus,
+        reason: readWorkspaceRequestReason(args),
       };
-
-      await hooks?.onToolStarted?.(audit);
-
-      try {
-        const result = await executeWorkspaceRuntimeTool({
-          session,
-          runtimeToolName: toolName,
-          input: args,
-          timeoutMs: workspaceToolExecutionTimeoutMs,
-          userIdentity,
-          requestGitHubToken,
-          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
-        });
-        const failed = result.isError || didToolResultFail(result);
-        if (toolCallId) {
-          const changes = buildResultFileChanges({
-            toolCallId,
-            sourceTool: toolName,
-            input: args,
-            result,
-            failed,
-            previewChars: await getFileChangePreviewChars(),
-          });
-
-          for (const change of changes) {
-            await hooks?.onFileChange?.(change);
-          }
-        }
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result,
-          status: failed ? 'failed' : 'completed',
-        });
-        return result;
-      } catch (error) {
-        getLogger().warn(
-          { error },
-          `AgentExec: chat workspace file tool failed sessionId=${session.uuid} tool=${toolName}`
-        );
-        if (toolCallId) {
-          const changes = buildResultFileChanges({
-            toolCallId,
-            sourceTool: toolName,
-            input: args,
-            result: {
-              error: error instanceof Error ? error.message : String(error),
-            },
-            failed: true,
-            previewChars: await getFileChangePreviewChars(),
-          });
-
-          for (const change of changes) {
-            await hooks?.onFileChange?.(change);
-          }
-        }
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result: {
-            error: error instanceof Error ? error.message : String(error),
-          },
-          status: 'failed',
-        });
-        throw error;
-      }
+      await hooks?.onToolFinished?.({
+        ...audit,
+        result: toolResult,
+        status: result.status === 'ready' ? 'completed' : 'failed',
+      });
+      return toolResult;
     },
   });
-  recordToolMetadata(toolMetadata, {
+  recordToolMetadata(toolMetadata, metadataInput);
+  recordToolApproval(toolApproval, {
     toolKey,
-    catalogCapabilityId,
-    capabilityKey,
-    approvalMode: mode,
-  });
-}
-
-export function registerChatPublishHttpTool({
-  tools,
-  session,
-  approvalPolicy,
-  userIdentity,
-  requestGitHubToken,
-  hooks,
-  toolRules,
-  resolvedCapabilityAccess,
-  toolMetadata,
-}: {
-  tools: ToolSet;
-  session: AgentSession;
-  approvalPolicy: AgentApprovalPolicy;
-  userIdentity: RequestUserIdentity;
-  requestGitHubToken?: string | null;
-  hooks?: ToolExecutionHooks;
-  toolRules?: AgentSessionToolRule[];
-  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
-  toolMetadata?: AgentRuntimeToolMetadata[];
-}) {
-  const toolKey = buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_PUBLISH_HTTP_TOOL_NAME);
-  if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, 'preview_publish')) {
-    return;
-  }
-
-  const capabilityKey: AgentCapabilityKey = 'deploy_k8s_mutation';
-  const mode = resolveToolApprovalMode({
-    toolRules,
-    toolKey,
-    capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
-  });
-
-  if (mode === 'deny') {
-    return;
-  }
-
-  tools[toolKey] = toAiDynamicTool({
-    description:
-      'Expose a running HTTP app from the chat workspace through lifecycle-managed ingress and return the reachable URL.',
-    inputSchema: toAiJsonSchema(PUBLISH_HTTP_INPUT_SCHEMA),
-    needsApproval: mode === 'require_approval',
-    execute: async (input, context) => {
-      const args = (input as Record<string, unknown>) || {};
-      const toolCallId = context?.toolCallId;
-      const audit: AgentToolAuditRecord = {
-        source: 'mcp',
-        serverSlug: LIFECYCLE_BUILTIN_SERVER_SLUG,
-        toolName: CHAT_PUBLISH_HTTP_TOOL_NAME,
-        toolCallId,
-        args,
-        capabilityKey,
-      };
-
-      await hooks?.onToolStarted?.(audit);
-
-      try {
-        const runtimeSession = await ensureChatWorkspaceRuntime({
-          session,
-          userIdentity,
-          requestGitHubToken,
-          allowedActiveRunUuid: hooks?.getActiveRunUuid?.() ?? null,
-        });
-        const port = Number(args.port);
-        if (!Number.isInteger(port) || port < 1 || port > 65535) {
-          throw new Error('port must be an integer between 1 and 65535');
-        }
-
-        const result = await AgentSessionService.publishChatHttpPort({
-          sessionId: runtimeSession.uuid,
-          userId: userIdentity.userId,
-          port,
-        });
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result,
-          status: 'completed',
-        });
-        return result;
-      } catch (error) {
-        getLogger().warn({ error }, `AgentExec: chat publish failed sessionId=${session.uuid}`);
-        await hooks?.onToolFinished?.({
-          ...audit,
-          result: {
-            error: error instanceof Error ? error.message : String(error),
-          },
-          status: 'failed',
-        });
-        throw error;
-      }
-    },
-  });
-  recordToolMetadata(toolMetadata, {
-    toolKey,
-    catalogCapabilityId: 'preview_publish',
-    capabilityKey,
-    approvalMode: mode,
-  });
-}
-
-export function registerChatWorkspaceTools({
-  tools,
-  session,
-  userIdentity,
-  approvalPolicy,
-  workspaceToolExecutionTimeoutMs,
-  requestGitHubToken,
-  hooks,
-  toolRules,
-  resolvedCapabilityAccess,
-  toolMetadata,
-}: {
-  tools: ToolSet;
-  session: AgentSession;
-  userIdentity: RequestUserIdentity;
-  approvalPolicy: AgentApprovalPolicy;
-  workspaceToolExecutionTimeoutMs: number;
-  requestGitHubToken?: string | null;
-  hooks?: ToolExecutionHooks;
-  toolRules?: AgentSessionToolRule[];
-  resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
-  toolMetadata?: AgentRuntimeToolMetadata[];
-}) {
-  registerChatWorkspaceExecTool({
-    tools,
-    session,
-    userIdentity,
-    approvalPolicy,
-    workspaceToolExecutionTimeoutMs,
-    requestGitHubToken,
-    hooks,
-    toolRules,
-    toolName: SESSION_WORKSPACE_READONLY_TOOL_NAME,
-    capabilityKey: 'read',
-    description: buildWorkspaceReadonlyExecDescription(SESSION_WORKSPACE_SERVER_NAME),
-    readOnly: true,
-    catalogCapabilityId: 'read_context',
-    resolvedCapabilityAccess,
-    toolMetadata,
-  });
-  registerChatWorkspaceExecTool({
-    tools,
-    session,
-    userIdentity,
-    approvalPolicy,
-    workspaceToolExecutionTimeoutMs,
-    requestGitHubToken,
-    hooks,
-    toolRules,
-    toolName: SESSION_WORKSPACE_MUTATION_TOOL_NAME,
-    capabilityKey: 'shell_exec',
-    description: buildWorkspaceMutationExecDescription(SESSION_WORKSPACE_SERVER_NAME),
-    readOnly: false,
-    catalogCapabilityId: 'workspace_shell',
-    resolvedCapabilityAccess,
-    toolMetadata,
-  });
-  registerChatWorkspaceFileTool({
-    tools,
-    session,
-    userIdentity,
-    approvalPolicy,
-    workspaceToolExecutionTimeoutMs,
-    requestGitHubToken,
-    hooks,
-    toolRules,
-    toolName: WORKSPACE_WRITE_FILE_RUNTIME_TOOL_NAME,
-    inputSchema: WORKSPACE_WRITE_FILE_INPUT_SCHEMA,
-    description:
-      'Write a file in the chat workspace. Use this when the user asks to create or replace file contents. This provisions the workspace only when the tool runs.',
-    catalogCapabilityId: 'workspace_files',
-    resolvedCapabilityAccess,
-    toolMetadata,
-  });
-  registerChatWorkspaceFileTool({
-    tools,
-    session,
-    userIdentity,
-    approvalPolicy,
-    workspaceToolExecutionTimeoutMs,
-    requestGitHubToken,
-    hooks,
-    toolRules,
-    toolName: WORKSPACE_EDIT_FILE_RUNTIME_TOOL_NAME,
-    inputSchema: WORKSPACE_EDIT_FILE_INPUT_SCHEMA,
-    description:
-      'Edit a file in the chat workspace by replacing exact text. Use this for targeted file modifications. This provisions the workspace only when the tool runs.',
-    catalogCapabilityId: 'workspace_files',
-    resolvedCapabilityAccess,
-    toolMetadata,
+    mode: requiresApproval ? 'require_approval' : 'allow',
   });
 }

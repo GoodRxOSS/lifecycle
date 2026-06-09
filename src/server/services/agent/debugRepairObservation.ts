@@ -15,26 +15,35 @@
  */
 
 import type AgentSession from 'server/models/AgentSession';
+import AgentToolExecution from 'server/models/AgentToolExecution';
 import Build from 'server/models/Build';
 import { BuildStatus, DeployStatus } from 'shared/constants';
 import type { AgentRunPlanSnapshotV1 } from './runPlanTypes';
 import type { AgentUIMessage } from './types';
 
 const UPDATE_FILE_TOOL_KEY = 'mcp__lifecycle__update_file';
+// Tool executions persist the unprefixed name; UI message parts use the prefixed key.
+const UPDATE_FILE_TOOL_NAMES = ['update_file', UPDATE_FILE_TOOL_KEY];
 const FAILURE_DEPLOY_STATUSES = new Set<string>([
   DeployStatus.ERROR,
   DeployStatus.BUILD_FAILED,
   DeployStatus.DEPLOY_FAILED,
 ]);
-const IN_PROGRESS_BUILD_STATUSES = new Set<string>([
+export const IN_PROGRESS_BUILD_STATUSES = new Set<string>([
   BuildStatus.PENDING,
   BuildStatus.QUEUED,
   BuildStatus.BUILDING,
   BuildStatus.BUILT,
   BuildStatus.DEPLOYING,
 ]);
-const DEFAULT_REPAIR_OBSERVATION_POLL_TIMEOUT_MS = 3_000;
-const DEFAULT_REPAIR_OBSERVATION_POLL_INTERVAL_MS = 1_000;
+export const REPAIR_OBSERVATION_NO_REBUILD_TEXT =
+  'Fresh Lifecycle state: no repair commit was created because the target file already matched the requested content, so no webhook rebuild should be expected from this repair action.';
+const REPAIR_OBSERVATION_DEPLOYED_TEXT =
+  'Fresh Lifecycle state: Lifecycle picked up the repair commit and the environment is deployed.';
+const REPAIR_OBSERVATION_TERMINAL_MARKER = 'the environment is still terminal ';
+// 30s covers typical webhook→queue latency; the poll exits early once the rebuild is observed.
+const DEFAULT_REPAIR_OBSERVATION_POLL_TIMEOUT_MS = 30_000;
+const DEFAULT_REPAIR_OBSERVATION_POLL_INTERVAL_MS = 2_000;
 
 export type DebugRepairCommitObservation = {
   commitUrl?: string | null;
@@ -148,36 +157,75 @@ function extractCommitShaFromUrl(value?: string | null): string | null {
   return match?.[1] || null;
 }
 
+function extractCommitObservationFromValue(value: unknown): DebugRepairCommitObservation | null {
+  const collected = { records: [] as Record<string, unknown>[], strings: [] as string[] };
+  collectRecordsAndStrings(value, collected);
+
+  const commitUrl =
+    readFirstString(collected.records, ['commit_url', 'commitUrl']) || extractCommitUrlFromText(collected.strings);
+  const commitSha =
+    readFirstString(collected.records, ['commit_sha', 'commitSha', 'sha']) || extractCommitShaFromUrl(commitUrl);
+  const changed = readFirstBoolean(collected.records, ['changed']);
+  const commitCreated = readFirstBoolean(collected.records, ['commit_created', 'commitCreated']);
+
+  if (commitUrl || commitSha || changed === false || commitCreated === false) {
+    return {
+      commitUrl,
+      commitSha,
+      changed,
+      commitCreated,
+    };
+  }
+
+  return null;
+}
+
+// AI SDK static tool parts are typed `tool-<name>` with no toolName property; dynamic-tool parts carry toolName.
+function isUpdateFileToolPart(part: Record<string, unknown>): boolean {
+  if (typeof part.toolName === 'string' && UPDATE_FILE_TOOL_NAMES.includes(part.toolName)) {
+    return true;
+  }
+
+  return part.type === `tool-${UPDATE_FILE_TOOL_KEY}`;
+}
+
 export function extractDebugRepairCommitObservation(messages: AgentUIMessage[]): DebugRepairCommitObservation | null {
   for (const message of [...messages].reverse()) {
     if (message.role !== 'assistant') {
       continue;
     }
 
-    for (const part of [...message.parts].reverse()) {
-      if (!isRecord(part) || part.toolName !== UPDATE_FILE_TOOL_KEY) {
+    for (const rawPart of [...message.parts].reverse()) {
+      const part = rawPart as unknown as Record<string, unknown>;
+      if (!isRecord(part) || !isUpdateFileToolPart(part)) {
         continue;
       }
 
-      const collected = { records: [] as Record<string, unknown>[], strings: [] as string[] };
-      collectRecordsAndStrings(part.output, collected);
-      collectRecordsAndStrings(part, collected);
-
-      const commitUrl =
-        readFirstString(collected.records, ['commit_url', 'commitUrl']) || extractCommitUrlFromText(collected.strings);
-      const commitSha =
-        readFirstString(collected.records, ['commit_sha', 'commitSha', 'sha']) || extractCommitShaFromUrl(commitUrl);
-      const changed = readFirstBoolean(collected.records, ['changed']);
-      const commitCreated = readFirstBoolean(collected.records, ['commit_created', 'commitCreated']);
-
-      if (commitUrl || commitSha || changed === false || commitCreated === false) {
-        return {
-          commitUrl,
-          commitSha,
-          changed,
-          commitCreated,
-        };
+      const observation = extractCommitObservationFromValue([part.output, part]);
+      if (observation) {
+        return observation;
       }
+    }
+  }
+
+  return null;
+}
+
+// Tool parts rarely survive into the final UIMessages (canonical persistence keeps only text/reasoning,
+// and approval resumes rebuild history from persisted messages), so the run's recorded tool executions
+// are the durable source for the repair commit.
+export async function extractDebugRepairCommitFromToolExecutions(
+  runId: number
+): Promise<DebugRepairCommitObservation | null> {
+  const executions = await AgentToolExecution.query()
+    .where({ runId, status: 'completed' })
+    .whereIn('toolName', UPDATE_FILE_TOOL_NAMES)
+    .orderBy('id', 'desc');
+
+  for (const execution of executions) {
+    const observation = extractCommitObservationFromValue(execution.result);
+    if (observation) {
+      return observation;
     }
   }
 
@@ -194,7 +242,7 @@ function matchesCommit(observed: string | null | undefined, commitSha: string | 
   return left === right || left.startsWith(right) || right.startsWith(left);
 }
 
-function formatStatus(status?: string | null, statusMessage?: string | null): string {
+export function formatStatus(status?: string | null, statusMessage?: string | null): string {
   const parts = [`status=${status || 'unknown'}`];
   if (statusMessage) {
     parts.push(`message=${statusMessage}`);
@@ -207,7 +255,7 @@ function deployName(deploy: any): string {
   return deploy.deployable?.name || deploy.service?.name || deploy.uuid || 'selected service';
 }
 
-function summarizeFailingDeploys(deploys: any[]): string | null {
+export function summarizeFailingDeploys(deploys: any[]): string | null {
   const failing = deploys.filter((deploy) => FAILURE_DEPLOY_STATUSES.has(String(deploy.status)));
   if (!failing.length) {
     return null;
@@ -313,32 +361,49 @@ async function waitForObservedRepairState({
   return { build, observed: false };
 }
 
+// True when the observation text implies a webhook rebuild is still expected (used to schedule an environment watch).
+export function repairObservationExpectsRebuild(text: string | null | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+
+  return (
+    text !== REPAIR_OBSERVATION_NO_REBUILD_TEXT &&
+    !text.includes(REPAIR_OBSERVATION_DEPLOYED_TEXT) &&
+    !text.includes(REPAIR_OBSERVATION_TERMINAL_MARKER)
+  );
+}
+
 export async function buildDebugRepairObservationText({
   session,
   messages,
   runPlanSnapshot,
+  runId,
   poll,
 }: {
   session: AgentSession;
   messages: AgentUIMessage[];
   runPlanSnapshot?: AgentRunPlanSnapshotV1 | null;
+  runId?: number | null;
   poll?: DebugRepairObservationPollOptions;
 }): Promise<string | null> {
   if (
-    runPlanSnapshot?.agent.id !== 'system.debug' ||
-    runPlanSnapshot.agent.sourceKind !== 'build_context_chat' ||
+    runPlanSnapshot?.agent.sourceKind !== 'build_context_chat' ||
     runPlanSnapshot.debug?.resolvedIntent !== 'repair'
   ) {
     return null;
   }
 
-  const repairCommit = extractDebugRepairCommitObservation(messages);
+  let repairCommit = extractDebugRepairCommitObservation(messages);
+  if (!repairCommit && typeof runId === 'number') {
+    repairCommit = await extractDebugRepairCommitFromToolExecutions(runId);
+  }
   if (!repairCommit) {
     return null;
   }
 
   if (repairCommit.changed === false || repairCommit.commitCreated === false) {
-    return 'Fresh Lifecycle state: no repair commit was created because the target file already matched the requested content, so no webhook rebuild should be expected from this repair action.';
+    return REPAIR_OBSERVATION_NO_REBUILD_TEXT;
   }
 
   if (!session.buildUuid) {
@@ -376,11 +441,11 @@ export async function buildDebugRepairObservationText({
   }
 
   if (buildStatus === BuildStatus.DEPLOYED) {
-    return `${commitLine}Fresh Lifecycle state: Lifecycle picked up the repair commit and the environment is deployed.`;
+    return `${commitLine}${REPAIR_OBSERVATION_DEPLOYED_TEXT}`;
   }
 
   if (buildStatus === BuildStatus.ERROR || buildStatus === BuildStatus.CONFIG_ERROR) {
-    return `${commitLine}Fresh Lifecycle state: Lifecycle picked up the repair commit, but the environment is still terminal ${formatStatus(
+    return `${commitLine}Fresh Lifecycle state: Lifecycle picked up the repair commit, but ${REPAIR_OBSERVATION_TERMINAL_MARKER}${formatStatus(
       build.status,
       build.statusMessage
     )}. ${selectedMoveLine}${

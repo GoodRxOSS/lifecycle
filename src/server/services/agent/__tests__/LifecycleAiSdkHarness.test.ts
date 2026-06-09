@@ -14,17 +14,22 @@
  * limitations under the License.
  */
 
-var mockCreateAgentUIStream: jest.Mock;
-var mockCreateUIMessageStream: jest.Mock;
-var mockSafeValidateUIMessages: jest.Mock;
-var mockReadUIMessageStream: jest.Mock;
+var mockCreateAgentUIStream = jest.fn();
+var mockCreateUIMessageStream = jest.fn();
+var mockSafeValidateUIMessages = jest.fn();
+var mockReadUIMessageStream = jest.fn();
 
 jest.mock('ai', () => ({
   __esModule: true,
-  createAgentUIStream: (mockCreateAgentUIStream = jest.fn()),
-  createUIMessageStream: (mockCreateUIMessageStream = jest.fn()),
-  readUIMessageStream: (mockReadUIMessageStream = jest.fn()),
-  safeValidateUIMessages: (mockSafeValidateUIMessages = jest.fn()),
+  createAgentUIStream: mockCreateAgentUIStream,
+  createUIMessageStream: mockCreateUIMessageStream,
+  readUIMessageStream: mockReadUIMessageStream,
+  safeValidateUIMessages: mockSafeValidateUIMessages,
+}));
+
+jest.mock('server/lib/agentSession/runtimeConfig', () => ({
+  __esModule: true,
+  DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS: 4000,
 }));
 
 jest.mock('server/models/AgentSession', () => ({
@@ -82,6 +87,7 @@ import AgentThread from 'server/models/AgentThread';
 import AgentMessageStore from '../MessageStore';
 import AgentRunExecutor from '../RunExecutor';
 import AgentRunService from '../RunService';
+import ApprovalService from '../ApprovalService';
 import type { AgentUIMessage } from '../types';
 import LifecycleAiSdkHarness from '../LifecycleAiSdkHarness';
 import {
@@ -94,6 +100,7 @@ const mockThreadQuery = AgentThread.query as jest.Mock;
 const mockListMessages = AgentMessageStore.listMessages as jest.Mock;
 const mockExecuteRun = AgentRunExecutor.execute as jest.Mock;
 const mockAppendStreamChunksForExecutionOwner = AgentRunService.appendStreamChunksForExecutionOwner as jest.Mock;
+const mockUpsertApprovalRequestFromStream = ApprovalService.upsertApprovalRequestFromStream as jest.Mock;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -146,11 +153,11 @@ describe('LifecycleAiSdkHarness.executeRun', () => {
         },
       })
     );
-    mockCreateUIMessageStream.mockImplementation(({ onFinish }) => {
+    mockCreateUIMessageStream.mockImplementation(({ onEnd }) => {
       return new ReadableStream({
         async start(controller) {
           controller.enqueue({ type: 'text-delta', id: 'text-1', delta: 'Done.' });
-          await onFinish({ messages: finalMessages });
+          await onEnd({ messages: finalMessages });
           controller.close();
         },
       });
@@ -197,6 +204,351 @@ describe('LifecycleAiSdkHarness.executeRun', () => {
       isAborted: false,
     });
   });
+
+  it('persists approval-request chunks before appending them', async () => {
+    const appendedChunks: Array<Record<string, unknown>> = [];
+    const userMessage = {
+      id: 'user-1',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Repair the deployment.' }],
+    } as AgentUIMessage;
+    const onStreamFinish = jest.fn();
+
+    mockSessionQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 13,
+        uuid: 'session-1',
+        userId: 'sample-user',
+        ownerGithubUsername: null,
+      }),
+    });
+    mockThreadQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'thread-1',
+      }),
+    });
+    mockListMessages.mockResolvedValue([userMessage]);
+    mockSafeValidateUIMessages.mockResolvedValue({
+      success: true,
+      data: [userMessage],
+    });
+    mockCreateAgentUIStream.mockResolvedValue(
+      new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      })
+    );
+    mockCreateUIMessageStream.mockImplementation(({ onEnd }) => {
+      return new ReadableStream({
+        async start(controller) {
+          controller.enqueue({
+            type: 'tool-input-available',
+            toolCallId: 'tool-call-redeploy',
+            toolName: 'mcp__lifecycle__trigger_redeploy',
+            input: { reason: 'Retry failed deployment.' },
+          });
+          controller.enqueue({
+            type: 'tool-approval-request',
+            toolCallId: 'tool-call-redeploy',
+            approvalId: 'approval-redeploy',
+          });
+          await onEnd({ messages: [userMessage] });
+          controller.close();
+        },
+      });
+    });
+    mockExecuteRun.mockResolvedValue({
+      run: {
+        id: 19,
+        uuid: 'run-1',
+        executionOwner: 'owner-1',
+      },
+      agent: {
+        tools: {},
+      },
+      abortSignal: new AbortController().signal,
+      selection: {
+        provider: 'openai',
+        modelId: 'gpt-5.4',
+      },
+      approvalPolicy: {
+        rules: {},
+        defaultMode: 'allow',
+      },
+      toolRules: [],
+      onStreamFinish,
+      dispose: jest.fn(),
+    });
+    mockUpsertApprovalRequestFromStream.mockResolvedValue({
+      uuid: 'pending-action-1',
+    });
+    mockAppendStreamChunksForExecutionOwner.mockImplementation(async (_runUuid, _owner, chunks, options) => {
+      await options.beforeAppendChunks({
+        trx: { trx: true },
+        run: { id: 19, uuid: 'run-1' },
+      });
+      appendedChunks.push(...chunks);
+      return { id: 19, uuid: 'run-1' };
+    });
+
+    await LifecycleAiSdkHarness.executeRun({
+      id: 19,
+      uuid: 'run-1',
+      threadId: 17,
+      sessionId: 13,
+      startedAt: null,
+    } as any);
+
+    expect(mockUpsertApprovalRequestFromStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: 'approval-redeploy',
+        toolCallId: 'tool-call-redeploy',
+        toolName: 'mcp__lifecycle__trigger_redeploy',
+        input: { reason: 'Retry failed deployment.' },
+      })
+    );
+    expect(appendedChunks).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-approval-request',
+        approvalId: 'approval-redeploy',
+        actionId: 'pending-action-1',
+      })
+    );
+  });
+
+  it('adds a non-persisted workspace continuation instruction and starts a fresh assistant message', async () => {
+    const userMessage = {
+      id: 'user-1',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Create a tiny web app.' }],
+    } as AgentUIMessage;
+    const sourceAssistantMessage = {
+      id: 'assistant-source',
+      role: 'assistant',
+      metadata: { runId: 'run-source' },
+      parts: [{ type: 'text', text: 'The workspace is ready.' }],
+    } as AgentUIMessage;
+    const newAssistantMessage = {
+      id: 'assistant-continuation',
+      role: 'assistant',
+      metadata: { runId: 'run-continuation' },
+      parts: [{ type: 'text', text: 'Inspecting files now.' }],
+    } as AgentUIMessage;
+    const onStreamFinish = jest.fn();
+    let agentStreamOptions: { uiMessages?: AgentUIMessage[]; originalMessages?: AgentUIMessage[] } | null = null;
+    let outerOriginalMessages: AgentUIMessage[] | null = null;
+
+    mockSessionQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 13,
+        uuid: 'session-1',
+        userId: 'sample-user',
+        ownerGithubUsername: null,
+      }),
+    });
+    mockThreadQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'thread-1',
+      }),
+    });
+    mockListMessages.mockResolvedValue([userMessage, sourceAssistantMessage]);
+    mockSafeValidateUIMessages.mockImplementation(async ({ messages }) => ({
+      success: true,
+      data: messages,
+    }));
+    mockCreateAgentUIStream.mockImplementation(async (options) => {
+      agentStreamOptions = options;
+      return new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      });
+    });
+    mockCreateUIMessageStream.mockImplementation(({ originalMessages, onEnd }) => {
+      outerOriginalMessages = originalMessages;
+      return new ReadableStream({
+        async start(controller) {
+          await onEnd({
+            messages: [...originalMessages, newAssistantMessage],
+          });
+          controller.close();
+        },
+      });
+    });
+    mockExecuteRun.mockResolvedValue({
+      run: {
+        id: 19,
+        uuid: 'run-continuation',
+        executionOwner: 'owner-1',
+      },
+      agent: {
+        tools: {},
+      },
+      abortSignal: new AbortController().signal,
+      selection: {
+        provider: 'openai',
+        modelId: 'gpt-5.4',
+      },
+      approvalPolicy: {
+        rules: {},
+        defaultMode: 'allow',
+      },
+      toolRules: [],
+      onStreamFinish,
+      dispose: jest.fn(),
+    });
+
+    await LifecycleAiSdkHarness.executeRun({
+      id: 19,
+      uuid: 'run-continuation',
+      threadId: 17,
+      sessionId: 13,
+      startedAt: null,
+      runPlanSnapshot: {
+        version: 1,
+        continuation: {
+          kind: 'workspace_escalation',
+          sourceRunId: 'run-source',
+          sourceToolCallId: 'tool-provision',
+          reason: 'Create a tiny web app.',
+        },
+      },
+    } as any);
+
+    const internalModelMessage = agentStreamOptions?.uiMessages?.at(-1);
+    expect(internalModelMessage).toMatchObject({
+      role: 'user',
+      metadata: {
+        kind: 'workspace_continuation_instruction',
+        hidden: true,
+        runId: 'run-continuation',
+      },
+    });
+    expect(String((internalModelMessage?.parts?.[0] as { text?: unknown } | undefined)?.text)).toContain(
+      'Do not stop after describing the next step'
+    );
+    expect(agentStreamOptions?.originalMessages?.at(-1)).toBe(internalModelMessage);
+    expect(outerOriginalMessages?.at(-1)).toBe(internalModelMessage);
+    expect(onStreamFinish).toHaveBeenCalledWith({
+      messages: [userMessage, sourceAssistantMessage, newAssistantMessage],
+      finishReason: undefined,
+      isAborted: false,
+    });
+  });
+
+  it('drops reasoning-only source assistant turns from continuation model input', async () => {
+    const userMessage = {
+      id: 'user-1',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Create a tiny web app.' }],
+    } as AgentUIMessage;
+    const reasoningOnlySourceAssistant = {
+      id: 'assistant-source',
+      role: 'assistant',
+      metadata: { runId: 'run-source' },
+      parts: [{ type: 'reasoning', text: 'Need to provision a workspace.' }],
+    } as AgentUIMessage;
+    const newAssistantMessage = {
+      id: 'assistant-continuation',
+      role: 'assistant',
+      metadata: { runId: 'run-continuation' },
+      parts: [{ type: 'text', text: 'Creating files now.' }],
+    } as AgentUIMessage;
+    const onStreamFinish = jest.fn();
+    let validatedMessages: AgentUIMessage[] | null = null;
+
+    mockSessionQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 13,
+        uuid: 'session-1',
+        userId: 'sample-user',
+        ownerGithubUsername: null,
+      }),
+    });
+    mockThreadQuery.mockReturnValue({
+      findById: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'thread-1',
+      }),
+    });
+    mockListMessages.mockResolvedValue([userMessage, reasoningOnlySourceAssistant]);
+    mockSafeValidateUIMessages.mockImplementation(async ({ messages }) => {
+      validatedMessages = messages;
+      return {
+        success: true,
+        data: messages,
+      };
+    });
+    mockCreateAgentUIStream.mockResolvedValue(
+      new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      })
+    );
+    mockCreateUIMessageStream.mockImplementation(({ originalMessages, onEnd }) => {
+      return new ReadableStream({
+        async start(controller) {
+          await onEnd({
+            messages: [...originalMessages, newAssistantMessage],
+          });
+          controller.close();
+        },
+      });
+    });
+    mockExecuteRun.mockResolvedValue({
+      run: {
+        id: 19,
+        uuid: 'run-continuation',
+        executionOwner: 'owner-1',
+      },
+      agent: {
+        tools: {},
+      },
+      abortSignal: new AbortController().signal,
+      selection: {
+        provider: 'openai',
+        modelId: 'gpt-5.4',
+      },
+      approvalPolicy: {
+        rules: {},
+        defaultMode: 'allow',
+      },
+      toolRules: [],
+      onStreamFinish,
+      dispose: jest.fn(),
+    });
+
+    await LifecycleAiSdkHarness.executeRun({
+      id: 19,
+      uuid: 'run-continuation',
+      threadId: 17,
+      sessionId: 13,
+      startedAt: null,
+      runPlanSnapshot: {
+        version: 1,
+        continuation: {
+          kind: 'workspace_escalation',
+          sourceRunId: 'run-source',
+          sourceToolCallId: 'tool-provision',
+          reason: 'Create a tiny web app.',
+        },
+      },
+    } as any);
+
+    expect(validatedMessages?.map((message) => message.id)).toEqual([
+      'user-1',
+      'workspace-continuation:run-continuation',
+    ]);
+    expect(onStreamFinish).toHaveBeenCalledWith({
+      messages: [userMessage, newAssistantMessage],
+      finishReason: undefined,
+      isAborted: false,
+    });
+  });
 });
 
 describe('applyApprovalResponsesToToolParts', () => {
@@ -207,7 +559,7 @@ describe('applyApprovalResponsesToToolParts', () => {
       parts: [
         {
           type: 'dynamic-tool',
-          toolName: 'mcp__sandbox__workspace_write_file',
+          toolName: 'mcp__workspace_core__write_file',
           toolCallId: 'call-1',
           state: 'output-error',
           input: {
@@ -253,7 +605,7 @@ describe('applyApprovalResponsesToToolParts', () => {
       role: 'assistant',
       parts: [
         {
-          type: 'tool-mcp__sandbox__workspace_write_file',
+          type: 'tool-mcp__workspace_core__write_file',
           toolCallId: 'call-1',
           state: 'approval-requested',
           input: {
@@ -300,7 +652,7 @@ describe('normalizeUnavailableToolPartsForAgentInput', () => {
       role: 'assistant',
       parts: [
         {
-          type: 'tool-mcp__sandbox__lifecycle__publish_http',
+          type: 'tool-mcp__workspace_core__missing_tool',
           toolCallId: 'call-1',
           state: 'output-error',
           errorText: 'Model tried to call unavailable tool.',
@@ -309,13 +661,13 @@ describe('normalizeUnavailableToolPartsForAgentInput', () => {
     } as unknown as AgentUIMessage;
 
     const [result] = normalizeUnavailableToolPartsForAgentInput([message], {
-      mcp__lifecycle__publish_http: {} as never,
+      mcp__workspace_core__publish_http: {} as never,
     });
 
     expect(result.parts[0]).toEqual(
       expect.objectContaining({
         type: 'dynamic-tool',
-        toolName: 'mcp__sandbox__lifecycle__publish_http',
+        toolName: 'mcp__workspace_core__missing_tool',
         toolCallId: 'call-1',
         state: 'output-error',
         input: undefined,

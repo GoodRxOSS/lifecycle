@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { resolveThinkingProviderOptions } from '../thinkingProviderOptions';
+import { resolveAgentInstructions, resolveThinkingProviderOptions } from '../thinkingProviderOptions';
 
 describe('resolveThinkingProviderOptions', () => {
   it('asks Gemini 3+ for thought summaries via thinkingLevel', () => {
@@ -44,5 +44,20 @@ describe('resolveThinkingProviderOptions', () => {
   it('returns no options for providers without tool-callable reasoning', () => {
     expect(resolveThinkingProviderOptions('openai', 'gpt-x')).toBeUndefined();
     expect(resolveThinkingProviderOptions('unknown', 'x')).toBeUndefined();
+  });
+});
+
+describe('resolveAgentInstructions', () => {
+  it('adds a system-prompt cache breakpoint for anthropic runs', () => {
+    expect(resolveAgentInstructions('anthropic', 'System prompt')).toEqual({
+      role: 'system',
+      content: 'System prompt',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    });
+  });
+
+  it('passes the plain prompt through for other providers and empty prompts', () => {
+    expect(resolveAgentInstructions('openai', 'System prompt')).toBe('System prompt');
+    expect(resolveAgentInstructions('anthropic', undefined)).toBeUndefined();
   });
 });

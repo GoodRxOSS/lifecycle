@@ -25,6 +25,7 @@ import AgentRunService from 'server/services/agent/RunService';
 import { AgentRunOwnershipLostError } from 'server/services/agent/AgentRunOwnershipLostError';
 import { AgentRunTerminalFailure } from 'server/services/agent/errors';
 import type { AgentRunExecuteJob } from 'server/services/agent/RunQueueService';
+import { normalizeAgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
 
 const logger = () => getLogger();
 
@@ -65,8 +66,15 @@ export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Prom
           job.data.reason || 'submit'
         } dispatchAttemptId=${dispatchAttemptId} owner=${executionOwner}`
       );
+      const requestGitHubAuth = normalizeAgentRequestGitHubAuth({
+        githubToken: job.data.encryptedGithubToken ? decrypt(job.data.encryptedGithubToken) : null,
+        source: job.data.githubTokenSource || 'none',
+        githubUsername: job.data.githubUsername || null,
+        writeAuthorized: job.data.githubTokenWriteAuthorized === true,
+      });
       await LifecycleAiSdkHarness.executeRun(run, {
-        requestGitHubToken: job.data.encryptedGithubToken ? decrypt(job.data.encryptedGithubToken) : null,
+        requestGitHubToken: requestGitHubAuth.githubToken,
+        requestGitHubAuth,
         dispatchAttemptId,
       });
       logger().info(

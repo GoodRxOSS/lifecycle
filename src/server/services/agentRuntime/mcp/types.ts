@@ -26,7 +26,14 @@ export interface McpDiscoveredTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+}
+
+export interface McpCallToolResult {
+  content: unknown;
+  structuredContent?: unknown;
+  isError?: boolean;
 }
 
 export type McpTransportConfig =

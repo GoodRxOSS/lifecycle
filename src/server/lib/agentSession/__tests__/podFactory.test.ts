@@ -1075,10 +1075,29 @@ describe('podFactory', () => {
   describe('deleteSessionWorkspacePod', () => {
     it('deletes pod via K8s API', async () => {
       mockDeletePod.mockResolvedValue({});
+      const notFound = new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404);
+      mockReadPod.mockRejectedValue(notFound);
 
       await deleteSessionWorkspacePod('test-ns', 'agent-abc123');
 
       expect(mockDeletePod).toHaveBeenCalledWith('agent-abc123', 'test-ns');
+      expect(mockReadPod).toHaveBeenCalledWith('agent-abc123', 'test-ns');
+    });
+
+    it('waits until the pod name is reusable', async () => {
+      mockDeletePod.mockResolvedValue({});
+      const notFound = new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404);
+      mockReadPod.mockResolvedValueOnce({
+        body: {
+          metadata: { name: 'agent-abc123' },
+          status: { phase: 'Terminating' },
+        },
+      });
+      mockReadPod.mockRejectedValueOnce(notFound);
+
+      await deleteSessionWorkspacePod('test-ns', 'agent-abc123', { pollMs: 0 });
+
+      expect(mockReadPod).toHaveBeenCalledTimes(2);
     });
 
     it('ignores 404 errors', async () => {

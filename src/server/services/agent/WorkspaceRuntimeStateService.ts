@@ -46,6 +46,9 @@ interface WorkspaceRuntimeStateWrite {
   runtimeLifecycle?: AgentSandboxRuntimeLifecycleMetadata | null;
   workspaceStorage?: ResolvedAgentSessionWorkspaceStorageIntent;
   runtimePlanMetadata?: WorkspaceRuntimePlanMetadata;
+  runtimeProvider?: string;
+  providerState?: Record<string, unknown>;
+  capabilitySnapshot?: Record<string, unknown>;
 }
 
 interface WorkspaceRuntimeFailureWrite extends WorkspaceRuntimeStateWrite {
@@ -295,6 +298,9 @@ export class WorkspaceRuntimeStateService {
       ...(state.runtimePlanMetadata ? { runtimePlanMetadata: state.runtimePlanMetadata } : {}),
       ...(state.sandboxStatus ? { sandboxStatus: state.sandboxStatus } : {}),
       ...(state.runtimeLifecycle !== undefined ? { runtimeLifecycle: state.runtimeLifecycle } : {}),
+      ...(state.runtimeProvider ? { runtimeProvider: state.runtimeProvider } : {}),
+      ...(state.providerState ? { providerState: state.providerState } : {}),
+      ...(state.capabilitySnapshot ? { capabilitySnapshot: state.capabilitySnapshot } : {}),
     });
 
     return { session, sandbox };

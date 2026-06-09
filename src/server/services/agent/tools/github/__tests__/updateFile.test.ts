@@ -15,7 +15,20 @@
  */
 
 import { validateDiff, UpdateFileTool, MAX_LINES_CHANGED, MAX_LINES_REMOVED } from '../updateFile';
-import { GitHubClient } from '../../shared/githubClient';
+import { GitHubClient, GitHubUserAuthRequiredError } from '../../shared/githubClient';
+
+const mockParseYamlConfigFromString = jest.fn();
+const mockValidate = jest.fn();
+jest.mock('server/lib/yamlConfigParser', () => ({
+  YamlConfigParser: jest.fn().mockImplementation(() => ({
+    parseYamlConfigFromString: (...args: unknown[]) => mockParseYamlConfigFromString(...args),
+  })),
+}));
+jest.mock('server/lib/yamlConfigValidator', () => ({
+  YamlConfigValidator: jest.fn().mockImplementation(() => ({
+    validate: (...args: unknown[]) => mockValidate(...args),
+  })),
+}));
 
 describe('validateDiff', () => {
   it('allows identical content', () => {
@@ -26,39 +39,45 @@ describe('validateDiff', () => {
     expect(result.linesRemoved).toBe(0);
   });
 
-  it('allows small changes (1-3 lines modified)', () => {
+  it('counts a modified line as one removal plus one addition', () => {
     const old = 'line1\nline2\nline3\nline4\nline5';
     const updated = 'line1\nchanged\nline3\nline4\nline5';
     const result = validateDiff(old, updated);
     expect(result.valid).toBe(true);
-    expect(result.linesChanged).toBe(1);
+    expect(result.linesRemoved).toBe(1);
+    expect(result.linesChanged).toBe(2);
   });
 
   it(`allows changes up to ${MAX_LINES_CHANGED} lines`, () => {
-    const lines = Array.from({ length: MAX_LINES_CHANGED + 20 }, (_, i) => `line${i}`);
-    const oldContent = lines.join('\n');
-    const newLines = [...lines];
-    for (let i = 0; i < MAX_LINES_CHANGED; i++) {
-      newLines[i] = `changed${i}`;
-    }
-    const result = validateDiff(oldContent, newLines.join('\n'));
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+    const inserted = Array.from({ length: MAX_LINES_CHANGED }, (_, i) => `new${i}`);
+    const result = validateDiff(lines.join('\n'), [...inserted, ...lines].join('\n'));
     expect(result.valid).toBe(true);
+    expect(result.linesRemoved).toBe(0);
     expect(result.linesChanged).toBe(MAX_LINES_CHANGED);
   });
 
   it(`rejects excessive changes (>${MAX_LINES_CHANGED} lines changed)`, () => {
-    const lines = Array.from({ length: MAX_LINES_CHANGED + 20 }, (_, i) => `line${i}`);
-    const oldContent = lines.join('\n');
-    const newLines = [...lines];
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
     const changedLineCount = MAX_LINES_CHANGED + 1;
-    for (let i = 0; i < changedLineCount; i++) {
-      newLines[i] = `changed${i}`;
-    }
-    const result = validateDiff(oldContent, newLines.join('\n'));
+    const inserted = Array.from({ length: changedLineCount }, (_, i) => `new${i}`);
+    const result = validateDiff(lines.join('\n'), [...inserted, ...lines].join('\n'));
     expect(result.valid).toBe(false);
     expect(result.linesChanged).toBe(changedLineCount);
     expect(result.error).toContain('SAFETY ERROR');
     expect(result.error).toContain(`changes ${changedLineCount} lines`);
+  });
+
+  it('flags a balanced rewrite as removals even when the line count is unchanged', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line${i}`);
+    const newLines = [...lines];
+    for (let i = 0; i < 15; i++) {
+      newLines[i] = `rewritten${i}`;
+    }
+    const result = validateDiff(lines.join('\n'), newLines.join('\n'));
+    expect(result.valid).toBe(false);
+    expect(result.linesRemoved).toBe(15);
+    expect(result.error).toContain('removes 15 lines');
   });
 
   it(`allows small deletions (up to ${MAX_LINES_REMOVED} lines removed)`, () => {
@@ -85,6 +104,14 @@ describe('validateDiff', () => {
     const result = validateDiff(old, updated);
     expect(result.valid).toBe(true);
   });
+
+  it('allows one line inserted at the top of a 160-line file', () => {
+    const lines = Array.from({ length: 160 }, (_, i) => `line${i}`);
+    const result = validateDiff(lines.join('\n'), ['inserted', ...lines].join('\n'));
+    expect(result.valid).toBe(true);
+    expect(result.linesRemoved).toBe(0);
+    expect(result.linesChanged).toBe(1);
+  });
 });
 
 describe('GitHubClient write path safety', () => {
@@ -101,9 +128,12 @@ describe('GitHubClient write path safety', () => {
 
 describe('UpdateFileTool', () => {
   const mockOctokit = { request: jest.fn() };
+  const userAuth = { provider: 'github' as const, source: 'user' as const, required: true };
   const mockGithubClient = {
     getOctokit: jest.fn().mockResolvedValue(mockOctokit),
+    getOctokitWithAuth: jest.fn().mockResolvedValue({ octokit: mockOctokit, auth: userAuth }),
     isFilePathAllowed: jest.fn().mockReturnValue(true),
+    isRepoAllowed: jest.fn().mockReturnValue(true),
     validateBranch: jest.fn().mockReturnValue({ valid: true }),
   } as any;
 
@@ -121,9 +151,54 @@ describe('UpdateFileTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
+    mockGithubClient.getOctokitWithAuth.mockResolvedValue({ octokit: mockOctokit, auth: userAuth });
     mockGithubClient.isFilePathAllowed.mockReturnValue(true);
+    mockGithubClient.isRepoAllowed.mockReturnValue(true);
     mockGithubClient.validateBranch.mockReturnValue({ valid: true });
+    mockParseYamlConfigFromString.mockReturnValue({ version: '1.0.0' });
+    mockValidate.mockReturnValue(true);
     tool = new UpdateFileTool(mockGithubClient);
+  });
+
+  it('rejects repositories outside the build scope', async () => {
+    mockGithubClient.isRepoAllowed.mockReturnValue(false);
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('REPO_NOT_ALLOWED');
+    expect(mockOctokit.request).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when an approved write has no user GitHub auth', async () => {
+    mockGithubClient.getOctokitWithAuth.mockRejectedValueOnce(
+      new GitHubUserAuthRequiredError({ provider: 'github', source: 'none', required: true })
+    );
+
+    const result = await tool.execute(baseArgs, undefined, { toolCallId: 'tool-1' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('GITHUB_USER_AUTH_REQUIRED');
+    expect(result.auth).toEqual({ provider: 'github', source: 'none', required: true });
+    expect(mockOctokit.request).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid lifecycle.yaml without committing', async () => {
+    mockOctokit.request.mockResolvedValueOnce({
+      data: { sha: 'existing-sha', content: Buffer.from('old').toString('base64') },
+    });
+    mockValidate.mockImplementation(() => {
+      throw new Error('services[0] requires a name');
+    });
+
+    const result = await tool.execute(baseArgs, undefined, { toolCallId: 'tool-update-file' });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('LIFECYCLE_CONFIG_INVALID');
+    expect(result.auth).toEqual(userAuth);
+    expect(result.agentContent).toContain('services[0] requires a name');
+    expect(mockGithubClient.getOctokitWithAuth).toHaveBeenCalledWith('agent-runtime-update-file', {
+      requireUserAuth: true,
+      toolCallId: 'tool-update-file',
+    });
+    expect(mockOctokit.request).toHaveBeenCalledTimes(1);
   });
 
   it('skips validation for new files', async () => {
@@ -172,12 +247,21 @@ describe('UpdateFileTool', () => {
         data: { commit: { sha: 'new-sha', html_url: 'https://github.com/org/repo/commit/new-sha' } },
       });
 
-    const result = await tool.execute({
-      ...baseArgs,
-      new_content: newContent,
-    });
+    const result = await tool.execute(
+      {
+        ...baseArgs,
+        new_content: newContent,
+      },
+      undefined,
+      { toolCallId: 'tool-update-file' }
+    );
 
     expect(result.success).toBe(true);
+    expect(result.auth).toEqual(userAuth);
+    expect(mockGithubClient.getOctokitWithAuth).toHaveBeenCalledWith('agent-runtime-update-file', {
+      requireUserAuth: true,
+      toolCallId: 'tool-update-file',
+    });
     expect(result.displayContent).toEqual({
       type: 'text',
       content: 'Updated lifecycle.yaml\nCommit: https://github.com/org/repo/commit/new-sha',

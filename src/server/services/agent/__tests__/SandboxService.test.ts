@@ -51,10 +51,46 @@ jest.mock('server/services/agentSession', () => ({
 
 jest.mock('server/lib/dependencies', () => ({}));
 
+const mockResolveBackendConfig = jest.fn();
+
+jest.mock('server/lib/agentSession/runtimeConfig', () => ({
+  __esModule: true,
+  resolveAgentSessionWorkspaceBackendConfig: (...args: unknown[]) => mockResolveBackendConfig(...args),
+}));
+
+jest.mock('server/lib/agentSession/chatPreviewFactory', () => ({
+  buildChatPreviewHostSlug: ({ sessionUuid, port }: { sessionUuid: string; port: number }) =>
+    `slug-${sessionUuid}-${port}`,
+  resolveChatPreviewPublicPublication: ({ port, previewSlug }: { port: number; previewSlug: string }) => ({
+    url: `http://${port}--${previewSlug}.localhost:5001/`,
+    host: `${port}--${previewSlug}.localhost:5001`,
+    path: '/',
+  }),
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({
+    debug: jest.fn(),
+    warn: jest.fn(),
+  })),
+}));
+
+jest.mock('server/lib/encryption', () => ({
+  encrypt: jest.fn((value: string) => `enc:${value}`),
+  decrypt: jest.fn((value: string) => {
+    if (!value.startsWith('enc:')) {
+      throw new Error('bad ciphertext');
+    }
+    return value.slice('enc:'.length);
+  }),
+}));
+
 import type { WorkspaceRuntimeFailure } from 'server/lib/agentSession/startupFailureState';
 import AgentSandbox from 'server/models/AgentSandbox';
 import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import AgentSandboxService from '../SandboxService';
+
+const GATEWAY_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_GATEWAY_PORT || '13338', 10);
 
 const mockSandboxQuery = AgentSandbox.query as jest.Mock;
 const mockExposureQuery = AgentSandboxExposure.query as jest.Mock;
@@ -112,11 +148,32 @@ function editorExposureInsertQuery() {
   const existingQuery: Record<string, jest.Mock> = {};
   existingQuery.where = jest.fn(() => existingQuery);
   existingQuery.whereNull = jest.fn(() => existingQuery);
+  existingQuery.orderBy = jest.fn(() => existingQuery);
   existingQuery.first = jest.fn().mockResolvedValue(null);
 
   const insert = jest.fn().mockResolvedValue({ id: 5 });
   mockExposureQuery.mockReturnValueOnce(existingQuery).mockReturnValueOnce({ insert });
   return insert;
+}
+
+function editorExposureReviveQuery(existing: Record<string, unknown>) {
+  const existingQuery: Record<string, jest.Mock> = {};
+  existingQuery.where = jest.fn(() => existingQuery);
+  existingQuery.orderBy = jest.fn(() => existingQuery);
+  existingQuery.first = jest.fn().mockResolvedValue(existing);
+
+  const patchAndFetchById = jest.fn().mockResolvedValue(existing);
+  mockExposureQuery.mockReturnValueOnce(existingQuery).mockReturnValueOnce({ patchAndFetchById });
+  return patchAndFetchById;
+}
+
+function previewExposureListQuery(exposures: Array<Record<string, unknown>>) {
+  const query: Record<string, jest.Mock> = {};
+  query.where = jest.fn(() => query);
+  query.whereNotNull = jest.fn(() => query);
+  query.orderBy = jest.fn().mockResolvedValue(exposures);
+  mockExposureQuery.mockReturnValueOnce(query);
+  return query;
 }
 
 function closeExposureQuery() {
@@ -134,6 +191,8 @@ describe('AgentSandboxService', () => {
     mockFindSession.mockReset();
     mockOpenChatRuntime.mockReset();
     mockProvisionChatRuntime.mockReset();
+    mockResolveBackendConfig.mockReset();
+    mockResolveBackendConfig.mockResolvedValue({ provider: 'lifecycle_kubernetes', opensandbox: {} });
   });
 
   it('persists an explicit canonical failure when inserting a failed sandbox row', async () => {
@@ -709,5 +768,409 @@ describe('AgentSandboxService', () => {
     });
 
     await expect(AgentSandboxService.getLatestRuntimePlanPvcMetadata(17)).resolves.toBeNull();
+  });
+
+  describe('resolveWorkspaceGatewayEndpoint', () => {
+    it('returns null when the session is missing', async () => {
+      mockFindSession.mockResolvedValueOnce(null);
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toBeNull();
+      expect(mockSandboxQuery).not.toHaveBeenCalled();
+    });
+
+    it('returns null when the session is not active', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'ended' }));
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toBeNull();
+      expect(mockSandboxQuery).not.toHaveBeenCalled();
+    });
+
+    it('returns null when no sandbox row exists', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery(null);
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toBeNull();
+    });
+
+    it('resolves an opensandbox gateway endpoint with access headers without writing sandbox state', async () => {
+      const recordSpy = jest.spyOn(AgentSandboxService, 'recordSessionSandboxState');
+      mockResolveBackendConfig.mockResolvedValue({
+        provider: 'lifecycle_kubernetes',
+        opensandbox: { apiKey: 'osb-key' },
+      });
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: {
+          sandboxId: 'sb-1',
+          lifecycleBaseUrl: 'https://osb.example/v1',
+          gatewayUrl: 'https://gw.example',
+          gatewayHeaders: { Host: 'gw.internal' },
+        },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toEqual({
+        url: 'https://gw.example',
+        headers: {
+          'OPEN-SANDBOX-API-KEY': 'osb-key',
+          Host: 'gw.internal',
+        },
+      });
+
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect(mockSandboxQuery).toHaveBeenCalledTimes(1);
+      expect(mockExposureQuery).not.toHaveBeenCalled();
+      recordSpy.mockRestore();
+    });
+
+    it('returns null for an opensandbox sandbox without a gateway url', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: { sandboxId: 'sb-1', lifecycleBaseUrl: 'https://osb.example/v1' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toBeNull();
+    });
+
+    it('adds the decrypted gateway bearer header for kubernetes rows that carry a token', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { podName: 'state-pod', namespace: 'state-ns', gatewayToken: 'enc:k8s-token' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toEqual({
+        url: `http://state-pod.state-ns.svc.cluster.local:${GATEWAY_PORT}`,
+        headers: { Authorization: 'Bearer k8s-token', 'x-lifecycle-gateway-token': 'k8s-token' },
+      });
+    });
+
+    it('adds the gateway bearer header alongside opensandbox access headers', async () => {
+      mockResolveBackendConfig.mockResolvedValue({
+        provider: 'lifecycle_kubernetes',
+        opensandbox: { apiKey: 'osb-key' },
+      });
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: {
+          sandboxId: 'sb-1',
+          lifecycleBaseUrl: 'https://osb.example/v1',
+          gatewayUrl: 'https://gw.example',
+          gatewayHeaders: { Host: 'gw.internal' },
+          gatewayToken: 'enc:osb-token',
+        },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toEqual({
+        url: 'https://gw.example',
+        headers: {
+          'OPEN-SANDBOX-API-KEY': 'osb-key',
+          Host: 'gw.internal',
+          Authorization: 'Bearer osb-token',
+          'x-lifecycle-gateway-token': 'osb-token',
+        },
+      });
+    });
+
+    it('fails clearly when the persisted gateway token cannot be decrypted', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { podName: 'state-pod', namespace: 'state-ns', gatewayToken: 'garbled' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).rejects.toThrow(
+        'could not be decrypted'
+      );
+    });
+
+    it('resolves kubernetes pod DNS from sandbox provider state', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { podName: 'state-pod', namespace: 'state-ns' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toEqual({
+        url: `http://state-pod.state-ns.svc.cluster.local:${GATEWAY_PORT}`,
+      });
+    });
+
+    it('falls back to session pod fields when kubernetes provider state lacks them', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({ id: 9, provider: 'lifecycle_kubernetes', providerState: {} });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toEqual({
+        url: `http://sample-pod.sample-namespace.svc.cluster.local:${GATEWAY_PORT}`,
+      });
+    });
+
+    it('returns null when neither provider state nor session identify the pod', async () => {
+      mockFindSession.mockResolvedValueOnce(
+        buildSession({ status: 'active', workspaceStatus: 'ready', podName: null, namespace: null })
+      );
+      latestSandboxQuery({ id: 9, provider: 'lifecycle_kubernetes', providerState: {} });
+
+      await expect(AgentSandboxService.resolveWorkspaceGatewayEndpoint('session-1')).resolves.toBeNull();
+    });
+  });
+
+  describe('resolveWorkspaceEditorEndpoint', () => {
+    it('returns null for kubernetes sandboxes', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { podName: 'state-pod', namespace: 'state-ns' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceEditorEndpoint('session-1')).resolves.toBeNull();
+    });
+
+    it('returns null for an opensandbox sandbox without an editor url', async () => {
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: { sandboxId: 'sb-1', lifecycleBaseUrl: 'https://osb.example/v1' },
+      });
+
+      await expect(AgentSandboxService.resolveWorkspaceEditorEndpoint('session-1')).resolves.toBeNull();
+    });
+
+    it('resolves the opensandbox editor url with access headers but never the gateway bearer token', async () => {
+      mockResolveBackendConfig.mockResolvedValue({
+        provider: 'lifecycle_kubernetes',
+        opensandbox: { apiKey: 'osb-key' },
+      });
+      mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: {
+          sandboxId: 'sb-1',
+          lifecycleBaseUrl: 'https://osb.example/v1',
+          editorUrl: 'https://editor.example',
+          editorHeaders: { Host: 'editor.internal' },
+          gatewayToken: 'enc:osb-token',
+        },
+      });
+
+      // Exact match: the editor is a separate process, so no Authorization header may leak here.
+      await expect(AgentSandboxService.resolveWorkspaceEditorEndpoint('session-1')).resolves.toEqual({
+        url: 'https://editor.example',
+        headers: {
+          'OPEN-SANDBOX-API-KEY': 'osb-key',
+          Host: 'editor.internal',
+        },
+      });
+    });
+  });
+
+  describe('gateway token persistence', () => {
+    it('carries the encrypted gateway token over kubernetes provider-state rewrites', async () => {
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { namespace: 'sample-namespace', podName: 'sample-pod', gatewayToken: 'enc:tok-1' },
+        metadata: {},
+        error: null,
+      });
+      const patchAndFetchById = patchSandboxQuery({
+        id: 9,
+        status: 'ready',
+        error: null,
+        suspendedAt: null,
+        endedAt: null,
+      });
+      editorExposureInsertQuery();
+
+      await AgentSandboxService.recordSessionSandboxState(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        9,
+        expect.objectContaining({
+          providerState: expect.objectContaining({ gatewayToken: 'enc:tok-1', podName: 'sample-pod' }),
+        })
+      );
+    });
+
+    it('replaces the carried token when a state write provides a fresh ciphertext', async () => {
+      latestSandboxQuery({
+        id: 9,
+        provider: 'lifecycle_kubernetes',
+        providerState: { namespace: 'sample-namespace', podName: 'sample-pod', gatewayToken: 'enc:tok-1' },
+        metadata: {},
+        error: null,
+      });
+      const patchAndFetchById = patchSandboxQuery({
+        id: 9,
+        status: 'ready',
+        error: null,
+        suspendedAt: null,
+        endedAt: null,
+      });
+      editorExposureInsertQuery();
+
+      await AgentSandboxService.recordSessionSandboxState(
+        buildSession({ status: 'active', workspaceStatus: 'ready' }),
+        {
+          providerState: { gatewayToken: 'enc:tok-2' },
+        }
+      );
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        9,
+        expect.objectContaining({
+          providerState: expect.objectContaining({ gatewayToken: 'enc:tok-2' }),
+        })
+      );
+    });
+  });
+
+  it('revives an ended editor exposure row instead of inserting a duplicate', async () => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      providerState: {},
+      metadata: {},
+      error: null,
+    });
+    patchSandboxQuery({ id: 9, status: 'ready', error: null, suspendedAt: null, endedAt: null });
+    const patchExposure = editorExposureReviveQuery({
+      id: 42,
+      kind: 'editor',
+      status: 'ended',
+      endedAt: '2026-05-09T00:00:00.000Z',
+    });
+
+    await AgentSandboxService.recordSessionSandboxState(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+
+    expect(patchExposure).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        status: 'ready',
+        url: '/api/agent-session/workspace-editor/session-1/',
+        lastVerifiedAt: expect.any(String),
+        endedAt: null,
+      })
+    );
+    expect(mockExposureQuery).toHaveBeenCalledTimes(2);
+    const exposureResults = mockExposureQuery.mock.results.map((result) => result.value);
+    expect(exposureResults.some((query) => query.insert)).toBe(false);
+  });
+
+  it('revives an ended preview exposure row instead of inserting a duplicate', async () => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'e2b',
+      providerState: { sandboxId: 'sb-1' },
+      metadata: {},
+      error: null,
+    });
+    const patchExposure = editorExposureReviveQuery({
+      id: 44,
+      kind: 'preview',
+      targetPort: 3000,
+      status: 'ended',
+      endedAt: '2026-05-09T00:00:00.000Z',
+    });
+
+    await AgentSandboxService.recordPreviewExposure(buildSession({ status: 'active', workspaceStatus: 'ready' }), {
+      port: 3000,
+      url: 'http://3000--stable-slug.localhost:5001/',
+      endpointUrl: 'https://3000-sb-1.e2b.app',
+      headers: { 'x-provider': 'secret' },
+      attachmentKind: 'e2b_endpoint',
+      previewSlug: 'stable-slug',
+    });
+
+    expect(patchExposure).toHaveBeenCalledWith(
+      44,
+      expect.objectContaining({
+        status: 'ready',
+        targetPort: 3000,
+        url: 'http://3000--stable-slug.localhost:5001/',
+        metadata: expect.objectContaining({ previewSlug: 'stable-slug' }),
+        providerState: {
+          url: 'https://3000-sb-1.e2b.app',
+          headers: { 'x-provider': 'secret' },
+        },
+        lastVerifiedAt: expect.any(String),
+        endedAt: null,
+      })
+    );
+  });
+
+  it('restores previously published preview ports through the current workspace gateway after resume', async () => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: { podName: 'state-pod', namespace: 'state-ns', gatewayToken: 'enc:k8s-token' },
+      metadata: {},
+      error: null,
+    });
+    previewExposureListQuery([
+      {
+        id: 45,
+        kind: 'preview',
+        targetPort: 3000,
+        status: 'ended',
+        metadata: { previewSlug: 'stable-slug' },
+      },
+      {
+        id: 43,
+        kind: 'preview',
+        targetPort: 3000,
+        status: 'ended',
+        metadata: { previewSlug: 'older-slug' },
+      },
+    ]);
+    const patchExposure = editorExposureReviveQuery({
+      id: 45,
+      kind: 'preview',
+      targetPort: 3000,
+      status: 'ended',
+      endedAt: '2026-05-09T00:00:00.000Z',
+    });
+    mockFindSession.mockResolvedValueOnce(buildSession({ status: 'active', workspaceStatus: 'ready' }));
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: { podName: 'state-pod', namespace: 'state-ns', gatewayToken: 'enc:k8s-token' },
+      metadata: {},
+      error: null,
+    });
+
+    await expect(
+      AgentSandboxService.restorePreviewExposures(buildSession({ status: 'active', workspaceStatus: 'ready' }))
+    ).resolves.toBe(1);
+
+    expect(patchExposure).toHaveBeenCalledWith(
+      45,
+      expect.objectContaining({
+        status: 'ready',
+        url: 'http://3000--stable-slug.localhost:5001/',
+        metadata: expect.objectContaining({ previewSlug: 'stable-slug' }),
+        providerState: {
+          url: `http://state-pod.state-ns.svc.cluster.local:${GATEWAY_PORT}/preview/3000`,
+          headers: {
+            Authorization: 'Bearer k8s-token',
+            'x-lifecycle-gateway-token': 'k8s-token',
+          },
+        },
+        endedAt: null,
+      })
+    );
   });
 });

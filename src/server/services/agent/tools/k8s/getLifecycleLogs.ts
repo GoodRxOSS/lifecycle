@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 import { OutputLimiter } from '../outputLimiter';
 
@@ -58,7 +58,7 @@ export class GetLifecycleLogsTool extends BaseTool {
 
   constructor(private k8sClient: K8sClient) {
     super(
-      "Fetch logs from the Lifecycle control plane services (lifecycle-worker or lifecycle-web pods in lifecycle-app namespace), filtered by THIS build's UUID and correlation ID. First finds logs matching the build UUID, extracts correlationId from matched structured log lines, then expands the search to include all logs sharing that correlationId. This gives a complete picture of the request lifecycle across services. For user service logs, use get_pod_logs instead. build_uuid defaults to this build; any other build UUID is rejected.",
+      'LAST RESORT: fetch Lifecycle CONTROL-PLANE (orchestrator) logs filtered to this build. These are internal scheduling/webhook/queue logs — they rarely contain the application or build error itself. Use ONLY when deploy statuses, pod logs, k8s events, and persisted buildOutput do not explain the failure (e.g. suspected webhook or orchestration problem). For service/build errors use get_pod_logs or query_database deploys select:["buildOutput"] instead. build_uuid defaults to this build; any other build UUID is rejected.',
       {
         type: 'object',
         properties: {
@@ -82,9 +82,7 @@ export class GetLifecycleLogsTool extends BaseTool {
           },
         },
         required: [],
-      },
-      ToolSafetyLevel.SAFE,
-      'k8s'
+      }
     );
   }
 
@@ -118,7 +116,7 @@ export class GetLifecycleLogsTool extends BaseTool {
 
   async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
     let buildUuid: string;
@@ -126,7 +124,7 @@ export class GetLifecycleLogsTool extends BaseTool {
       // SECURITY: lock to this build's UUID; reject any foreign build UUID.
       buildUuid = this.resolveBuildUuid(args.build_uuid as string | undefined);
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'build_uuid not allowed', 'BUILD_NOT_ALLOWED', false);
+      return this.createErrorResult(error.message || 'build_uuid not allowed', 'BUILD_NOT_ALLOWED');
     }
 
     try {
@@ -192,16 +190,10 @@ export class GetLifecycleLogsTool extends BaseTool {
       }
 
       if (totalMatchingLines === 0 && errors.length === 0) {
-        const result = {
-          success: true,
-          message: `No logs found for build UUID ${buildUuid} in ${serviceType} service(s)`,
-          buildUuid,
-          serviceType,
-          timeRange: `Last ${validatedSinceMinutes} minutes`,
-          podsChecked: 0,
-          totalMatchingLines: 0,
-        };
-        return this.createSuccessResult(JSON.stringify(result), `No logs found for ${buildUuid}`);
+        return this.createSuccessResult(
+          `No control-plane logs found for build UUID ${buildUuid} in ${serviceType} service(s) over the last ${validatedSinceMinutes} minutes.`,
+          `No logs found for ${buildUuid}`
+        );
       }
 
       let combinedLogs = '';
@@ -214,35 +206,25 @@ export class GetLifecycleLogsTool extends BaseTool {
         }
       }
 
-      const truncatedLogs = OutputLimiter.truncateLogOutput(combinedLogs.trim(), 30000, 50, 100);
+      const truncatedLogs = OutputLimiter.truncateLogOutput(combinedLogs.trim(), 12000, 30, 60);
 
       const displayContent = `Lifecycle logs: ${totalMatchingLines} lines from ${podsChecked} pods`;
 
-      const result = {
-        success: true,
-        logs: truncatedLogs,
-        buildUuid,
-        serviceType,
-        timeRange: `Last ${validatedSinceMinutes} minutes`,
-        podsChecked,
-        totalMatchingLines,
-        ...(correlationIds.size > 0 && {
-          correlationIds: Array.from(correlationIds),
-          expandedByCorrelation,
-        }),
-        podDetails: finalLogs
-          .filter((l) => l.logs.length > 0)
-          .map((l) => ({
-            pod: l.pod,
-            service: l.service,
-            matchingLines: l.logs.length,
-          })),
-        ...(errors.length > 0 && { warnings: errors }),
-      };
+      const headerNotes = [
+        ...(correlationIds.size > 0
+          ? [`correlationIds=${Array.from(correlationIds).join(',')} expandedByCorrelation=${expandedByCorrelation}`]
+          : []),
+        ...(errors.length > 0 ? [`warnings: ${errors.join('; ')}`] : []),
+      ];
+      const agentContent = [
+        `Lifecycle control-plane logs for build ${buildUuid} (${serviceType}, last ${validatedSinceMinutes} minutes): ${totalMatchingLines} matching lines from ${podsChecked} pod(s).`,
+        ...headerNotes,
+        `\`\`\`\n${truncatedLogs}\n\`\`\``,
+      ].join('\n');
 
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return this.createSuccessResult(agentContent, displayContent);
     } catch (error: any) {
-      return this.createErrorResult(`Failed to fetch Lifecycle logs: ${error.message}`, 'EXECUTION_ERROR', true);
+      return this.createErrorResult(`Failed to fetch Lifecycle logs: ${error.message}`, 'EXECUTION_ERROR');
     }
   }
 

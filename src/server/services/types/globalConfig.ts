@@ -73,6 +73,7 @@ export type AgentSessionControlPlaneConfig = {
   maxIterations?: number;
   workspaceToolDiscoveryTimeoutMs?: number;
   workspaceToolExecutionTimeoutMs?: number;
+  autoProvisionWorkspace?: boolean;
   toolRules?: import('./agentSessionConfig').AgentSessionToolRule[];
 };
 
@@ -106,6 +107,61 @@ export type AgentSessionWorkspaceStorageConfig = {
   accessMode?: AgentSessionWorkspaceStorageAccessMode | null;
 };
 
+export type AgentSessionWorkspaceBackendProvider = 'lifecycle_kubernetes' | 'opensandbox' | 'e2b' | 'daytona' | 'modal';
+
+export type AgentSessionOpenSandboxBackendConfig = {
+  domain?: string | null;
+  protocol?: 'http' | 'https' | null;
+  apiKey?: string | null;
+  image?: string | null;
+  poolRef?: string | null;
+  timeoutSeconds?: number | string | null;
+  useServerProxy?: boolean | null;
+  secureAccess?: boolean | null;
+  resourceLimits?: Record<string, string> | null;
+  execdPort?: number | string | null;
+  gatewayPort?: number | string | null;
+  editorPort?: number | string | null;
+};
+
+export type AgentSessionE2bBackendConfig = {
+  apiKey?: string | null;
+  templateId?: string | null;
+  domain?: string | null;
+  timeoutSeconds?: number | string | null;
+  autoPause?: boolean | null;
+};
+
+export type AgentSessionDaytonaBackendConfig = {
+  apiKey?: string | null;
+  snapshot?: string | null;
+  apiUrl?: string | null;
+  target?: string | null;
+  autoArchiveInterval?: number | string | null;
+};
+
+export type AgentSessionModalBackendConfig = {
+  tokenId?: string | null;
+  tokenSecret?: string | null;
+  environment?: string | null;
+  appName?: string | null;
+  image?: string | null;
+  /** Name of a Modal Secret holding REGISTRY_USERNAME/REGISTRY_PASSWORD (a reference, not a secret value). */
+  imageRegistrySecret?: string | null;
+  timeoutSeconds?: number | string | null;
+  cpu?: number | string | null;
+  memoryMiB?: number | string | null;
+  inboundCidrAllowlist?: string[] | null;
+};
+
+export type AgentSessionWorkspaceBackendConfig = {
+  provider?: AgentSessionWorkspaceBackendProvider | null;
+  opensandbox?: AgentSessionOpenSandboxBackendConfig | null;
+  e2b?: AgentSessionE2bBackendConfig | null;
+  daytona?: AgentSessionDaytonaBackendConfig | null;
+  modal?: AgentSessionModalBackendConfig | null;
+};
+
 export type AgentSessionCleanupConfig = {
   activeIdleSuspendMs?: number | string | null;
   startingTimeoutMs?: number | string | null;
@@ -131,6 +187,7 @@ export type AgentSessionDefaults = {
   readiness?: AgentSessionReadinessConfig;
   resources?: AgentSessionResourcesConfig;
   workspaceStorage?: AgentSessionWorkspaceStorageConfig;
+  workspaceBackend?: AgentSessionWorkspaceBackendConfig;
   cleanup?: AgentSessionCleanupConfig;
   durability?: AgentSessionDurabilityConfig;
   controlPlane?: AgentSessionControlPlaneConfig;

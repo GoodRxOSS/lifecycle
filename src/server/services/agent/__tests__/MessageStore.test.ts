@@ -470,7 +470,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-call-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
             } as any,
           ],
@@ -635,7 +635,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
               output: { ok: true },
             },
@@ -670,7 +670,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_write_file',
+              toolName: 'write_file',
               state: 'output-available',
               output: { ok: true },
             },

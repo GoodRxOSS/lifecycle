@@ -69,7 +69,28 @@ jest.mock('../CustomAgentDefinitionService', () => {
 
   return {
     __esModule: true,
+    CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE: 'This custom agent needs conversion before it can run.',
     CustomAgentDefinitionServiceError: MockCustomAgentDefinitionServiceError,
+    customAgentDefinitionNeedsOneAgentConversion: (definition: {
+      owner?: { kind?: string };
+      resourcePolicy?: {
+        workspaceRequired?: boolean;
+        sandboxRequired?: boolean;
+        sourceKinds?: string[];
+      };
+    }) => {
+      if (definition.owner?.kind !== 'user') {
+        return false;
+      }
+
+      const policy = definition.resourcePolicy || {};
+      const sourceKinds = policy.sourceKinds || [];
+      return Boolean(
+        policy.workspaceRequired ||
+          policy.sandboxRequired ||
+          (sourceKinds.includes('workspace_session') && !sourceKinds.includes('freeform_chat'))
+      );
+    },
     customAgentDefinitionService: {
       getUserDefinition: (...args: unknown[]) => mockGetUserDefinition(...args),
     },
@@ -214,7 +235,10 @@ async function resolve(
     source?: Record<string, unknown>;
     messageText?: string | null;
     requestedDebugIntent?: 'diagnose' | 'investigate' | 'repair' | null;
-    findPriorCompletedDebugIntentRun?: jest.Mock<Promise<boolean>, [{ threadId: number; intents: string[] }]>;
+    findPriorCompletedDebugIntentRun?: jest.Mock<
+      Promise<boolean>,
+      [{ threadId: number; intents: string[]; buildUuid?: string | null; selectedDeployUuid?: string | null }]
+    >;
   } = {}
 ) {
   return AgentRunPlanResolver.resolveForRunAdmission({
@@ -265,16 +289,21 @@ describe('AgentRunPlanResolver', () => {
     });
   });
 
-  it('infers Debug for build-context chat before generic chat', async () => {
+  it('resolves build-context chat to the one Lifecycle Agent with debug behavior', async () => {
     const result = await resolve({
       source: {
         input: { buildUuid: 'build-1', branchName: 'feature-branch' },
       },
     });
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.debug');
-    expect(result.runPlanSnapshot.agent.label).toBe('Debug');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
+    expect(result.runPlanSnapshot.agent.label).toBe('Lifecycle Agent');
     expect(result.runPlanSnapshot.agent.sourceKind).toBe('build_context_chat');
+    expect(result.runPlanSnapshot.profile).toEqual({
+      kind: 'debug',
+      intent: 'diagnose',
+      workspaceCore: 'absent',
+    });
     expect(result.runPlanSnapshot.debug).toEqual({
       requestedIntent: null,
       resolvedIntent: 'diagnose',
@@ -365,20 +394,30 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
-  it('infers Free-form for chat sessions without build context', async () => {
+  it('resolves chat without build context to the one Lifecycle Agent answer profile', async () => {
     const result = await resolve();
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.freeform');
-    expect(result.runPlanSnapshot.agent.label).toBe('Free-form');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
+    expect(result.runPlanSnapshot.agent.label).toBe('Lifecycle Agent');
     expect(result.runPlanSnapshot.agent.sourceKind).toBe('freeform_chat');
+    expect(result.runPlanSnapshot.profile).toEqual({
+      kind: 'answer',
+      intent: 'chat',
+      workspaceCore: 'absent',
+    });
     expect(result.runPlanSnapshot.debug).toBeUndefined();
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(['read_context', 'external_mcp_read']);
     expect(serializeRunPlanSummary(result.runPlanSnapshot)?.agent).toEqual(
       expect.objectContaining({
-        id: 'system.freeform',
-        label: 'Free-form',
+        id: 'system.agent',
+        label: 'Lifecycle Agent',
       })
     );
+    expect(serializeRunPlanSummary(result.runPlanSnapshot)?.profile).toEqual({
+      kind: 'answer',
+      intent: 'chat',
+      workspaceCore: 'absent',
+    });
   });
 
   it('snapshots resolved system instruction content without exposing it in public summaries', async () => {
@@ -419,7 +458,7 @@ describe('AgentRunPlanResolver', () => {
     });
 
     expect(mockResolveInstructionRefs).toHaveBeenCalledWith(['system:debug']);
-    expect(result.runPlanSnapshot.agent.id).toBe('system.debug');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(result.runPlanSnapshot.agent.sourceKind).toBe('build_context_chat');
     expect(result.runPlanSnapshot.prompt.resolvedInstructions).toEqual([
       {
@@ -502,7 +541,11 @@ describe('AgentRunPlanResolver', () => {
       })
     );
 
-    await expect(resolve()).rejects.toMatchObject({
+    await expect(
+      resolve({
+        thread: { metadata: { selectedAgentDefinitionId: 'system.freeform' } },
+      })
+    ).rejects.toMatchObject({
       name: AgentRunPlanInstructionTemplateError.name,
       code: 'instruction_template_invalid',
       httpStatus: 422,
@@ -526,7 +569,13 @@ describe('AgentRunPlanResolver', () => {
       })
     );
 
-    await expect(resolve()).rejects.toMatchObject({
+    await expect(
+      resolve({
+        thread: {
+          metadata: { selectedAgentDefinitionId: 'system.freeform' },
+        },
+      })
+    ).rejects.toMatchObject({
       name: AgentRunPlanInstructionTemplateError.name,
       code: 'instruction_template_invalid',
       httpStatus: 422,
@@ -537,7 +586,7 @@ describe('AgentRunPlanResolver', () => {
     expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves explicit Debug investigation intent for build-context chat', async () => {
+  it('resolves explicit Debug investigation intent to diagnose for build-context chat', async () => {
     const result = await resolve({
       source: {
         input: { buildUuid: 'build-1' },
@@ -545,10 +594,10 @@ describe('AgentRunPlanResolver', () => {
       requestedDebugIntent: 'investigate',
     });
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.debug');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(result.runPlanSnapshot.debug).toEqual({
       requestedIntent: 'investigate',
-      resolvedIntent: 'investigate',
+      resolvedIntent: 'diagnose',
       decisionSource: 'client_request',
       reasonCode: 'explicit_investigate',
     });
@@ -568,6 +617,8 @@ describe('AgentRunPlanResolver', () => {
     expect(findPriorCompletedDebugIntentRun).toHaveBeenCalledWith({
       threadId: 7,
       intents: ['diagnose', 'investigate'],
+      buildUuid: 'build-1',
+      selectedDeployUuid: null,
     });
     expect(result.runPlanSnapshot.debug).toEqual({
       requestedIntent: 'repair',
@@ -582,6 +633,31 @@ describe('AgentRunPlanResolver', () => {
         }),
       ])
     );
+  });
+
+  it('keeps Debug repair eligibility scoped to the selected deploy', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
+
+    await resolve({
+      source: {
+        input: {
+          buildUuid: 'build-1',
+          selectedDeploy: {
+            selectedDeployUuid: 'deploy-1',
+            deployableName: 'service-a',
+          },
+        },
+      },
+      requestedDebugIntent: 'repair',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(findPriorCompletedDebugIntentRun).toHaveBeenCalledWith({
+      threadId: 7,
+      intents: ['diagnose', 'investigate'],
+      buildUuid: 'build-1',
+      selectedDeployUuid: 'deploy-1',
+    });
   });
 
   it('downgrades explicit first Debug repair to diagnosis with a durable warning', async () => {
@@ -682,6 +758,8 @@ describe('AgentRunPlanResolver', () => {
     expect(findPriorCompletedDebugIntentRun).toHaveBeenCalledWith({
       threadId: 99,
       intents: ['diagnose', 'investigate'],
+      buildUuid: 'build-1',
+      selectedDeployUuid: null,
     });
     expect(result.runPlanSnapshot.debug).toEqual({
       requestedIntent: 'repair',
@@ -698,6 +776,89 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
+  it('resolves repair intent from repair-request message language after a completed diagnosis', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
+
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      messageText: 'Yes, fix it',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: null,
+      resolvedIntent: 'repair',
+      decisionSource: 'message_heuristic',
+      reasonCode: 'message_requests_repair',
+    });
+  });
+
+  it('resolves terse approval language as repair after a completed diagnosis', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
+
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      messageText: 'do it, approved',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: null,
+      resolvedIntent: 'repair',
+      decisionSource: 'message_heuristic',
+      reasonCode: 'message_requests_repair',
+    });
+  });
+
+  it('downgrades repair-request message language to diagnose without a prior diagnosis', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(false);
+
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      messageText: 'Please fix the ingress issue',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: null,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'repair_guard',
+      reasonCode: 'repair_requires_prior_diagnosis',
+    });
+    expect(result.runPlanSnapshot.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'debug_repair_requires_prior_diagnosis',
+        }),
+      ])
+    );
+  });
+
+  it('does not treat negative approval language as repair intent', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
+
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      messageText: 'not approved, do not fix it',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: null,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'default',
+      reasonCode: 'default_debug_diagnose',
+    });
+  });
+
   it('uses deeper-investigation message language only for Debug build-context runs', async () => {
     const debug = await resolve({
       source: {
@@ -711,7 +872,7 @@ describe('AgentRunPlanResolver', () => {
 
     expect(debug.runPlanSnapshot.debug).toEqual({
       requestedIntent: null,
-      resolvedIntent: 'investigate',
+      resolvedIntent: 'diagnose',
       decisionSource: 'message_heuristic',
       reasonCode: 'message_requests_investigation',
     });
@@ -731,7 +892,7 @@ describe('AgentRunPlanResolver', () => {
 
     const result = await resolve();
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.freeform');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(['read_context', 'external_mcp_read']);
     expect(result.runPlanSnapshot.capabilities.resolvedCapabilityAccess).toEqual(
       expect.arrayContaining([
@@ -743,7 +904,7 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
-  it('infers Develop for environment and sandbox workspace sessions', async () => {
+  it('resolves environment and sandbox workspace sessions to the one Lifecycle Agent change profile', async () => {
     const environment = await resolve({
       session: {
         sessionKind: AgentSessionKind.ENVIRONMENT,
@@ -761,8 +922,13 @@ describe('AgentRunPlanResolver', () => {
       },
     });
 
-    expect(environment.runPlanSnapshot.agent.id).toBe('system.develop');
+    expect(environment.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(environment.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
+    expect(environment.runPlanSnapshot.profile).toEqual({
+      kind: 'change',
+      intent: 'workspace',
+      workspaceCore: 'requested',
+    });
     expect(environment.runPlanSnapshot.source).toEqual(
       expect.objectContaining({
         adapter: 'lifecycle_environment',
@@ -778,7 +944,7 @@ describe('AgentRunPlanResolver', () => {
         primaryService: 'sample-service',
       })
     );
-    expect(sandbox.runPlanSnapshot.agent.id).toBe('system.develop');
+    expect(sandbox.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(sandbox.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
     expect(sandbox.runPlanSnapshot.source).toEqual(
       expect.objectContaining({
@@ -857,7 +1023,7 @@ describe('AgentRunPlanResolver', () => {
     });
 
     expect(mockGetUserDefinition).toHaveBeenCalledWith('custom.another-user-agent', 'sample-user');
-    expect(result.runPlanSnapshot.agent.id).toBe('system.freeform');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(result.runPlanSnapshot.warnings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -876,7 +1042,7 @@ describe('AgentRunPlanResolver', () => {
       },
     });
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.freeform');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
     expect(result.runPlanSnapshot.warnings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -898,7 +1064,7 @@ describe('AgentRunPlanResolver', () => {
       })
     ).rejects.toThrow('database unavailable');
 
-    expect(mockGetSystemAgentDefinition).not.toHaveBeenCalledWith('system.freeform');
+    expect(mockGetSystemAgentDefinition).not.toHaveBeenCalledWith('system.agent');
   });
 
   it('rejects restricted required capability refs on custom definitions before admission fields are returned', async () => {
@@ -1069,7 +1235,7 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
-  it('allows workspace-required custom agents when a build-context chat workspace is ready', async () => {
+  it('fails closed for legacy workspace custom agents that need one-agent conversion', async () => {
     mockGetUserDefinition.mockResolvedValueOnce({
       ...customDefinition,
       capabilityRefs: ['read_context', 'workspace_files'],
@@ -1082,25 +1248,25 @@ describe('AgentRunPlanResolver', () => {
       },
     });
 
-    const result = await resolve({
-      session: {
-        workspaceStatus: AgentWorkspaceStatus.READY,
-        podName: 'agent-session-pod',
-        pvcName: 'agent-session-pvc',
-      },
-      source: {
-        input: { buildUuid: 'build-1' },
-      },
-      thread: {
-        metadata: { selectedAgentDefinitionId: 'custom.sample-agent' },
-      },
+    await expect(
+      resolve({
+        session: {
+          workspaceStatus: AgentWorkspaceStatus.READY,
+          podName: 'agent-session-pod',
+          pvcName: 'agent-session-pvc',
+        },
+        source: {
+          input: { buildUuid: 'build-1' },
+        },
+        thread: {
+          metadata: { selectedAgentDefinitionId: 'custom.sample-agent' },
+        },
+      })
+    ).rejects.toMatchObject({
+      name: AgentRunPlanAgentUnavailableError.name,
+      agentId: 'custom.sample-agent',
+      reason: 'needs_conversion',
     });
-
-    expect(result.runPlanSnapshot.agent.id).toBe('custom.sample-agent');
-    expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
-    expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(
-      expect.arrayContaining(['workspace_files'])
-    );
   });
 
   it('stores compact repo and service summaries instead of full arrays', async () => {

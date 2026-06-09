@@ -31,6 +31,7 @@ jest.mock('server/lib/get-user', () => {
 
 jest.mock('server/lib/agentSession/githubToken', () => ({
   resolveRequestGitHubToken: jest.fn(),
+  resolveRequestGitHubAuth: jest.fn(),
 }));
 
 jest.mock('server/lib/agentSession/runtimeConfig', () => ({
@@ -171,7 +172,7 @@ jest.mock('server/services/agent/ApprovalService', () => ({
 }));
 
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import AgentChatSessionService from 'server/services/agent/ChatSessionService';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
 import AgentThreadService from 'server/services/agent/ThreadService';
@@ -193,7 +194,7 @@ import { GET as getPendingActions } from '../threads/[threadId]/pending-actions/
 import { POST as respondToPendingAction } from '../pending-actions/[actionId]/respond/route';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
-const mockResolveRequestGitHubToken = resolveRequestGitHubToken as jest.Mock;
+const mockResolveRequestGitHubAuth = resolveRequestGitHubAuth as jest.Mock;
 const mockCreateChatSession = AgentChatSessionService.createChatSession as jest.Mock;
 const mockSerializeSessionRecord = AgentSessionReadService.serializeSessionRecord as jest.Mock;
 const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
@@ -369,14 +370,14 @@ function simulateApprovalRequest() {
     description: 'A workspace edit requires approval.',
     requestedAt: '2026-04-25T00:00:00.000Z',
     expiresAt: null,
-    toolName: 'mcp__sandbox__workspace_edit_file',
+    toolName: 'mcp__workspace_core__edit_file',
     argumentsSummary: [{ name: 'path', value: 'sample-file.txt' }],
     commandPreview: null,
     fileChangePreview: [
       {
         id: 'tool-call-1:sample-file.txt',
         toolCallId: 'tool-call-1',
-        sourceTool: 'workspace_edit_file',
+        sourceTool: 'edit_file',
         path: 'sample-file.txt',
         displayPath: 'sample-file.txt',
         kind: 'edited',
@@ -454,7 +455,11 @@ describe('canonical agent session API acceptance flow', () => {
     state.pendingAction = null;
 
     mockGetRequestUserIdentity.mockReturnValue(sampleUser);
-    mockResolveRequestGitHubToken.mockResolvedValue('sample-gh-token');
+    mockResolveRequestGitHubAuth.mockResolvedValue({
+      githubToken: 'sample-gh-token',
+      source: 'user',
+      githubUsername: 'sample-user',
+    });
     mockCreateChatSession.mockResolvedValue(state.session);
     mockSerializeSessionRecord.mockResolvedValue({
       id: state.session.uuid,
@@ -495,8 +500,8 @@ describe('canonical agent session API acceptance flow', () => {
         version: 1,
         capturedAt: '2026-05-03T00:00:00.000Z',
         agent: {
-          id: 'system.freeform',
-          label: 'Free-form',
+          id: 'system.agent',
+          label: 'Lifecycle Agent',
           ownerKind: 'system',
           version: 1,
           sourceKind: 'freeform_chat',
@@ -693,7 +698,14 @@ describe('canonical agent session API acceptance flow', () => {
         },
       })
     );
-    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', { githubToken: 'sample-gh-token' });
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'submit', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'sample-gh-token',
+        source: 'user',
+        githubUsername: 'sample-user',
+        writeAuthorized: false,
+      }),
+    });
 
     const initialMessagesResponse = await getMessages(
       makeRequest(`http://localhost/api/v2/ai/agent/threads/${threadId}/messages`),
@@ -787,7 +799,13 @@ describe('canonical agent session API acceptance flow', () => {
         reason: 'approved for acceptance flow',
         source: 'endpoint',
       },
-      { githubToken: 'sample-gh-token' }
+      {
+        githubAuth: {
+          githubToken: 'sample-gh-token',
+          source: 'user',
+          githubUsername: 'sample-user',
+        },
+      }
     );
     expect(approvalBody.data).toEqual(
       expect.objectContaining({

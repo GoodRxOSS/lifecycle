@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { getToolName, isToolUIPart, type DynamicToolUIPart, type ToolUIPart, type UITools } from 'ai';
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRun from 'server/models/AgentRun';
 import type AgentThread from 'server/models/AgentThread';
@@ -30,23 +29,46 @@ import type { AgentSessionToolRule } from 'server/services/types/agentSessionCon
 import { listMessageFileChanges } from './fileChanges';
 import AgentThreadService from './ThreadService';
 import AgentRunQueueService from './RunQueueService';
+import ApprovalGitHubAuthHandoffService from './ApprovalGitHubAuthHandoffService';
 import AgentRunEventService from './RunEventService';
 import AgentPolicyService from './PolicyService';
 import { isAgentRunPlanSnapshotV1 } from './runPlanTypes';
+import { buildAgentToolKey, LIFECYCLE_BUILTIN_SERVER_SLUG } from './toolKeys';
 import {
-  buildAgentToolKey,
-  CHAT_PUBLISH_HTTP_TOOL_NAME,
-  LIFECYCLE_BUILTIN_SERVER_SLUG,
-  SESSION_WORKSPACE_SERVER_SLUG,
-} from './toolKeys';
+  getWorkspaceCoreToolDefinition,
+  WORKSPACE_CORE_SERVER_SLUG,
+} from 'server/services/workspaceCoreMcp/toolDefinitions';
+import { ConflictError } from 'server/lib/appError';
+import type { AgentRequestGitHubAuth } from './githubAuth';
+import {
+  buildAgentRequestGitHubAuthFromToken,
+  GITHUB_USER_AUTH_REQUIRED_CODE,
+  GITHUB_USER_AUTH_REQUIRED_MESSAGE,
+  GITHUB_USER_AUTH_REQUIRED_PERMISSION,
+  hasWriteAuthorizedUserGitHubAuth,
+  markGitHubAuthWriteAuthorized,
+  normalizeAgentRequestGitHubAuth,
+} from './githubAuth';
+import {
+  fetchGitHubAuthenticatedUser,
+  fetchGitHubRepositoryWritePermission,
+} from 'server/lib/agentSession/githubToken';
 
-type ToolLikePart = ToolUIPart<UITools> | DynamicToolUIPart;
-const SESSION_WORKSPACE_TOOL_KEY_PREFIX = `mcp__${SESSION_WORKSPACE_SERVER_SLUG}__`;
+type ToolLikePart = {
+  type?: string;
+  toolName?: string;
+  toolCallId?: string;
+  input?: unknown;
+  state?: string;
+  approval?: { id?: string | null } | null;
+};
 const FORCE_APPROVAL_TOOL_CAPABILITIES: Record<string, AgentCapabilityKey> = {
   [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'update_file')]: 'git_write',
   [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'update_pr_labels')]: 'git_write',
   [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'patch_k8s_resource')]: 'deploy_k8s_mutation',
+  [buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, 'trigger_redeploy')]: 'deploy_k8s_mutation',
 };
+const WORKSPACE_CORE_TOOL_KEY_PREFIX = buildAgentToolKey(WORKSPACE_CORE_SERVER_SLUG, '');
 const ARGUMENT_PREVIEW_MAX_LENGTH = 160;
 const PENDING_ACTION_RESPONSE_FIELDS = new Set(['approved', 'reason']);
 
@@ -71,7 +93,20 @@ type ApprovalRequestSyncOptions = {
 };
 
 function isToolLikePart(part: unknown): part is ToolLikePart {
-  return !!part && typeof part === 'object' && isToolUIPart(part as ToolLikePart);
+  if (!part || typeof part !== 'object') {
+    return false;
+  }
+
+  const type = (part as ToolLikePart).type;
+  return type === 'dynamic-tool' || (typeof type === 'string' && type.startsWith('tool-'));
+}
+
+function getToolPartName(part: ToolLikePart): string | null {
+  if (part.toolName?.trim()) {
+    return part.toolName;
+  }
+
+  return part.type?.startsWith('tool-') ? part.type.slice('tool-'.length) : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +115,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function readGitHubRepository(input: unknown): { owner: string; repo: string; fullName: string } | null {
+  if (!isRecord(input)) {
+    return null;
+  }
+
+  const owner = readString(input.repository_owner) || readString(input.owner);
+  const repoName = readString(input.repository_name) || readString(input.name);
+  const repoFullName = readString(input.repository) || readString(input.repo);
+
+  if (owner && repoName) {
+    return { owner, repo: repoName, fullName: `${owner}/${repoName}` };
+  }
+
+  if (repoFullName?.includes('/')) {
+    const [repoOwner, repo] = repoFullName.split('/');
+    if (repoOwner?.trim() && repo?.trim()) {
+      return { owner: repoOwner.trim(), repo: repo.trim(), fullName: `${repoOwner.trim()}/${repo.trim()}` };
+    }
+  }
+
+  return null;
+}
+
+function readGitHubRepositoryFromApprovalPayload(
+  payload: unknown
+): { owner: string; repo: string; fullName: string } | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  return readGitHubRepository(payload.input) || readGitHubRepository(payload);
 }
 
 function readNumber(value: unknown): number | null {
@@ -130,7 +198,10 @@ function summarizeArguments(input: unknown): Array<{ name: string; value: string
   }
 
   return Object.entries(input)
-    .filter(([name]) => !['content', 'new_content', 'oldText', 'newText', 'command', 'cmd'].includes(name))
+    .filter(
+      ([name]) =>
+        !['content', 'new_content', 'oldText', 'newText', 'old_text', 'new_text', 'command', 'cmd'].includes(name)
+    )
     .slice(0, 6)
     .map(([name, value]) => ({
       name,
@@ -239,17 +310,13 @@ function resolveApprovalCapabilityKey(toolName: string, fallback: AgentCapabilit
     return forcedApprovalCapabilityKey;
   }
 
-  if (toolName === buildAgentToolKey(LIFECYCLE_BUILTIN_SERVER_SLUG, CHAT_PUBLISH_HTTP_TOOL_NAME)) {
-    return 'deploy_k8s_mutation';
+  if (toolName.startsWith(WORKSPACE_CORE_TOOL_KEY_PREFIX)) {
+    return (
+      getWorkspaceCoreToolDefinition(toolName.slice(WORKSPACE_CORE_TOOL_KEY_PREFIX.length))?.capabilityKey ?? fallback
+    );
   }
 
-  if (!toolName.startsWith(SESSION_WORKSPACE_TOOL_KEY_PREFIX)) {
-    return fallback;
-  }
-
-  const sessionWorkspaceToolName = toolName.slice(SESSION_WORKSPACE_TOOL_KEY_PREFIX.length).replace(/_/g, '.');
-
-  return AgentPolicyService.capabilityForSessionWorkspaceTool(sessionWorkspaceToolName);
+  return fallback;
 }
 
 function shouldPersistApprovalRequest({
@@ -275,13 +342,10 @@ function shouldPersistApprovalRequest({
     return false;
   }
 
-  if (FORCE_APPROVAL_TOOL_CAPABILITIES[toolName]) {
-    return true;
-  }
-
-  const mode = toolRule?.mode || capabilityMode;
-
-  return mode === 'require_approval';
+  // Once the runtime emits an approval request, Lifecycle must preserve it so the run can pause
+  // and resume. The policy decides whether a request should be produced upstream; this guard only
+  // blocks explicitly denied tools from becoming approve-able.
+  return true;
 }
 
 function shouldCompleteAfterDeniedDebugRepairApproval({
@@ -384,6 +448,53 @@ export default class ApprovalService {
     };
   }
 
+  static async requireGitHubWriteAuthorization(
+    auth: AgentRequestGitHubAuth,
+    actionId: string,
+    toolCallId: string | null,
+    repository: { owner: string; repo: string; fullName: string } | null
+  ): Promise<void> {
+    if (!hasWriteAuthorizedUserGitHubAuth(auth)) {
+      throw new ConflictError(GITHUB_USER_AUTH_REQUIRED_MESSAGE, GITHUB_USER_AUTH_REQUIRED_CODE, {
+        actionId,
+        toolCallId,
+      });
+    }
+
+    const probe = await fetchGitHubAuthenticatedUser(auth.githubToken).catch(() => null);
+    if (!probe?.ok) {
+      throw new ConflictError(GITHUB_USER_AUTH_REQUIRED_MESSAGE, GITHUB_USER_AUTH_REQUIRED_CODE, {
+        actionId,
+        toolCallId,
+        githubStatus: probe?.status ?? null,
+        requiredPermission: GITHUB_USER_AUTH_REQUIRED_PERMISSION,
+        scopes: probe?.scopes ?? [],
+      });
+    }
+
+    if (!repository) {
+      return;
+    }
+
+    const repositoryProbe = await fetchGitHubRepositoryWritePermission(
+      auth.githubToken,
+      repository.owner,
+      repository.repo
+    ).catch(() => null);
+    if (repositoryProbe?.permission === 'denied') {
+      throw new ConflictError(GITHUB_USER_AUTH_REQUIRED_MESSAGE, GITHUB_USER_AUTH_REQUIRED_CODE, {
+        actionId,
+        toolCallId,
+        repository: repository.fullName,
+        githubStatus: repositoryProbe.status,
+        requiredPermission: GITHUB_USER_AUTH_REQUIRED_PERMISSION,
+        permission: repositoryProbe.permission,
+        permissions: repositoryProbe.permissions,
+        scopes: repositoryProbe.scopes,
+      });
+    }
+  }
+
   static async listPendingActions(threadUuid: string, userId: string): Promise<AgentPendingAction[]> {
     const thread = await AgentThreadService.getOwnedThread(threadUuid, userId);
     return AgentPendingAction.query()
@@ -425,7 +536,7 @@ export default class ApprovalService {
       run,
       approvalId,
       toolCallId,
-      toolName: getToolName(toolPart) || 'tool',
+      toolName: getToolPartName(toolPart) || 'tool',
       input: toolPart.input,
       fileChanges,
       capabilityKey,
@@ -506,7 +617,7 @@ export default class ApprovalService {
           continue;
         }
 
-        const toolName = getToolName(part) || 'tool';
+        const toolName = getToolPartName(part) || 'tool';
         if (
           !shouldPersistApprovalRequest({
             toolName,
@@ -552,6 +663,7 @@ export default class ApprovalService {
     resolution?: Record<string, unknown>,
     options: {
       githubToken?: string | null;
+      githubAuth?: AgentRequestGitHubAuth | null;
     } = {}
   ): Promise<AgentPendingAction> {
     const resolvedAt = new Date().toISOString();
@@ -565,6 +677,58 @@ export default class ApprovalService {
     const approved = status === 'approved';
     const eventNotifications: Array<{ runUuid: string; sequence: number }> = [];
     let runToEnqueue: string | null = null;
+    let runToEnqueueAuth: AgentRequestGitHubAuth | null = null;
+    const storedHandoffRefs: Array<{ runUuid: string; actionUuid: string; toolCallId?: string | null }> = [];
+    const incomingGitHubAuth = {
+      ...normalizeAgentRequestGitHubAuth(
+        options.githubAuth || buildAgentRequestGitHubAuthFromToken(options.githubToken, 'user')
+      ),
+      writeAuthorized: false,
+    };
+
+    const requireGitWriteApprovalAuth = async (
+      action: AgentPendingAction & { runUuid?: string },
+      actionRun: AgentRun
+    ): Promise<AgentRequestGitHubAuth> => {
+      if (action.capabilityKey !== 'git_write') {
+        return incomingGitHubAuth;
+      }
+      if (!approved) {
+        return incomingGitHubAuth;
+      }
+
+      const gitWriteGitHubAuth = markGitHubAuthWriteAuthorized(incomingGitHubAuth);
+      const toolCallId =
+        typeof action.payload?.toolCallId === 'string' && action.payload.toolCallId.trim()
+          ? action.payload.toolCallId
+          : null;
+      const repository = readGitHubRepositoryFromApprovalPayload(action.payload);
+      const existingHandoff = await ApprovalGitHubAuthHandoffService.getByAction(actionRun.uuid, action.uuid).catch(
+        () => null
+      );
+      if (existingHandoff) {
+        await ApprovalService.requireGitHubWriteAuthorization(existingHandoff, action.uuid, toolCallId, repository);
+        return existingHandoff;
+      }
+
+      if (!hasWriteAuthorizedUserGitHubAuth(gitWriteGitHubAuth)) {
+        throw new ConflictError(GITHUB_USER_AUTH_REQUIRED_MESSAGE, GITHUB_USER_AUTH_REQUIRED_CODE, {
+          actionId: action.uuid,
+          toolCallId,
+        });
+      }
+      await ApprovalService.requireGitHubWriteAuthorization(gitWriteGitHubAuth, action.uuid, toolCallId, repository);
+
+      await ApprovalGitHubAuthHandoffService.store({
+        runUuid: actionRun.uuid,
+        actionUuid: action.uuid,
+        toolCallId,
+        approvedByUserId: userId,
+        auth: gitWriteGitHubAuth,
+      });
+      storedHandoffRefs.push({ runUuid: actionRun.uuid, actionUuid: action.uuid, toolCallId });
+      return gitWriteGitHubAuth;
+    };
 
     const resumeRunIfApprovalBlocked = async (actionRun: AgentRun, runId: number, trx: Transaction) => {
       const remainingPendingAction = await AgentPendingAction.query(trx).where({ runId, status: 'pending' }).first();
@@ -599,6 +763,7 @@ export default class ApprovalService {
 
       if (actionRun.status === 'queued') {
         runToEnqueue = actionRun.uuid;
+        runToEnqueueAuth = runToEnqueueAuth || incomingGitHubAuth;
         return;
       }
 
@@ -627,6 +792,7 @@ export default class ApprovalService {
         eventNotifications.push({ runUuid: queuedRun.uuid, sequence: queuedSequence });
       }
       runToEnqueue = queuedRun.uuid;
+      runToEnqueueAuth = runToEnqueueAuth || incomingGitHubAuth;
     };
 
     const actionSeed = await AgentPendingAction.query()
@@ -641,86 +807,107 @@ export default class ApprovalService {
       throw new Error('Pending action not found');
     }
 
-    const updatedAction = await AgentPendingAction.transaction(async (trx) => {
-      const actionRun = await AgentRun.query(trx).findById(actionSeed.runId).forUpdate();
-      if (!actionRun) {
-        throw new Error('Agent run not found');
-      }
+    let updatedAction: AgentPendingAction;
+    try {
+      updatedAction = await AgentPendingAction.transaction(async (trx) => {
+        const actionRun = await AgentRun.query(trx).findById(actionSeed.runId).forUpdate();
+        if (!actionRun) {
+          throw new Error('Agent run not found');
+        }
 
-      const action = await AgentPendingAction.query(trx)
-        .alias('action')
-        .joinRelated('[thread, run]')
-        .where('action.id', actionSeed.id)
-        .select('action.*', 'thread.uuid as threadUuid', 'run.uuid as runUuid')
-        .forUpdate()
-        .first();
+        const action = await AgentPendingAction.query(trx)
+          .alias('action')
+          .joinRelated('[thread, run]')
+          .where('action.id', actionSeed.id)
+          .select('action.*', 'thread.uuid as threadUuid', 'run.uuid as runUuid')
+          .forUpdate()
+          .first();
 
-      if (!action) {
-        throw new Error('Pending action not found');
-      }
+        if (!action) {
+          throw new Error('Pending action not found');
+        }
 
-      if (action.status !== 'pending') {
+        if (action.status !== 'pending') {
+          if (
+            approved &&
+            action.status === 'approved' &&
+            ['queued', 'waiting_for_approval', 'running'].includes(actionRun.status)
+          ) {
+            runToEnqueueAuth = await requireGitWriteApprovalAuth(action, actionRun);
+          }
+          await resumeRunIfApprovalBlocked(actionRun, action.runId, trx);
+          return action;
+        }
+
+        if (approved) {
+          runToEnqueueAuth = await requireGitWriteApprovalAuth(action, actionRun);
+        }
+
+        await AgentPendingAction.query(trx).patchAndFetchById(action.id, resolvedActionPatch);
+
+        const approvalId =
+          typeof action.payload?.approvalId === 'string' && action.payload.approvalId.trim()
+            ? action.payload.approvalId
+            : null;
+        const toolCallId =
+          typeof action.payload?.toolCallId === 'string' && action.payload.toolCallId.trim()
+            ? action.payload.toolCallId
+            : null;
+
+        if (approvalId) {
+          const approvalEventPayload = {
+            actionId: action.uuid,
+            approvalId,
+            toolCallId,
+            approved,
+            reason:
+              resolution && typeof resolution.reason === 'string' && resolution.reason.trim()
+                ? String(resolution.reason)
+                : null,
+          };
+          const resolvedSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+            actionRun,
+            'approval.resolved',
+            approvalEventPayload,
+            trx
+          );
+          if (resolvedSequence) {
+            eventNotifications.push({ runUuid: actionRun.uuid, sequence: resolvedSequence });
+          }
+          const respondedSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+            actionRun,
+            'approval.responded',
+            approvalEventPayload,
+            trx
+          );
+          if (respondedSequence) {
+            eventNotifications.push({ runUuid: actionRun.uuid, sequence: respondedSequence });
+          }
+        }
+
         await resumeRunIfApprovalBlocked(actionRun, action.runId, trx);
-        return action;
-      }
 
-      await AgentPendingAction.query(trx).patchAndFetchById(action.id, resolvedActionPatch);
+        const currentAction = await AgentPendingAction.query(trx)
+          .alias('action')
+          .joinRelated('[thread, run]')
+          .where('action.id', action.id)
+          .select('action.*', 'thread.uuid as threadUuid', 'run.uuid as runUuid')
+          .first();
 
-      const approvalId =
-        typeof action.payload?.approvalId === 'string' && action.payload.approvalId.trim()
-          ? action.payload.approvalId
-          : null;
-      const toolCallId =
-        typeof action.payload?.toolCallId === 'string' && action.payload.toolCallId.trim()
-          ? action.payload.toolCallId
-          : null;
-
-      if (approvalId) {
-        const approvalEventPayload = {
-          actionId: action.uuid,
-          approvalId,
-          toolCallId,
-          approved,
-          reason:
-            resolution && typeof resolution.reason === 'string' && resolution.reason.trim()
-              ? String(resolution.reason)
-              : null,
-        };
-        const resolvedSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
-          actionRun,
-          'approval.resolved',
-          approvalEventPayload,
-          trx
-        );
-        if (resolvedSequence) {
-          eventNotifications.push({ runUuid: actionRun.uuid, sequence: resolvedSequence });
+        if (!currentAction) {
+          throw new Error('Pending action not found');
         }
-        const respondedSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
-          actionRun,
-          'approval.responded',
-          approvalEventPayload,
-          trx
-        );
-        if (respondedSequence) {
-          eventNotifications.push({ runUuid: actionRun.uuid, sequence: respondedSequence });
-        }
-      }
 
-      await resumeRunIfApprovalBlocked(actionRun, action.runId, trx);
-
-      const currentAction = await AgentPendingAction.query(trx)
-        .alias('action')
-        .joinRelated('[thread, run]')
-        .where('action.id', action.id)
-        .select('action.*', 'thread.uuid as threadUuid', 'run.uuid as runUuid')
-        .first();
-
-      if (!currentAction) {
-        throw new Error('Pending action not found');
-      }
-
-      return currentAction;
-    });
+        return currentAction;
+      });
+    } catch (error) {
+      await Promise.all(
+        storedHandoffRefs.map((ref) =>
+          ApprovalGitHubAuthHandoffService.clearAction(ref.runUuid, ref.actionUuid, ref.toolCallId)
+        )
+      );
+      throw error;
+    }
 
     for (const notification of eventNotifications) {
       await AgentRunEventService.notifyRunEventsInserted(notification.runUuid, notification.sequence);
@@ -728,7 +915,7 @@ export default class ApprovalService {
 
     if (runToEnqueue) {
       await AgentRunQueueService.enqueueRun(runToEnqueue, 'approval_resolved', {
-        githubToken: options.githubToken,
+        githubAuth: runToEnqueueAuth || incomingGitHubAuth,
       });
     }
 

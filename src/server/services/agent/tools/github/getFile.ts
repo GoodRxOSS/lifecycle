@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolExecutionContext, ToolResult } from '../types';
 import { GitHubClient } from '../shared/githubClient';
 import { OutputLimiter } from '../outputLimiter';
 
@@ -36,49 +36,63 @@ export class GetFileTool extends BaseTool {
             type: 'string',
             description: "Repository name. Defaults to this build's primary repo name.",
           },
-          branch: { type: 'string', description: 'Branch name' },
+          branch: { type: 'string', description: "Branch name. Defaults to this build's PR branch." },
           file_path: {
             type: 'string',
             description:
               'Path to any file in the repository (e.g., lifecycle.yaml, lifecycle.yml, sysops/dockerfiles/app.dockerfile, src/index.ts)',
           },
         },
-        required: ['repository_owner', 'repository_name', 'branch', 'file_path'],
-      },
-      ToolSafetyLevel.SAFE,
-      'github'
+        required: ['file_path'],
+      }
     );
   }
 
-  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
+    let auth: ToolResult['auth'];
     try {
-      const owner = args.repository_owner as string;
-      const repo = args.repository_name as string;
-      const branch = args.branch as string;
+      const defaultRepo = this.githubClient.getDefaultRepo();
+      const owner = (args.repository_owner as string) || defaultRepo?.owner;
+      const repo = (args.repository_name as string) || defaultRepo?.repo;
+      const branch = (args.branch as string) || this.githubClient.getAllowedBranch();
       const filePath = args.file_path as string;
+
+      if (!owner || !repo || !branch) {
+        return this.createErrorResult(
+          'repository_owner, repository_name, and branch are required when no default repository is configured.',
+          'MISSING_REPO'
+        );
+      }
 
       // SECURITY: lock to the build's repositories; reject out-of-scope repos.
       if (!this.githubClient.isRepoAllowed(owner, repo)) {
         return this.createErrorResult(
           `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be accessed.`,
-          'FILE_ACCESS_DENIED',
-          false
+          'FILE_ACCESS_DENIED'
         );
       }
 
       if (!this.githubClient.isFilePathAllowed(filePath, 'read')) {
         return this.createErrorResult(
           `File "${filePath}" is restricted by access control policy and cannot be read.`,
-          'FILE_ACCESS_DENIED',
-          false
+          'FILE_ACCESS_DENIED'
         );
       }
 
-      const octokit = await this.githubClient.getOctokit('agent-runtime-get-file');
+      const octokitWithAuth = await this.githubClient.getOctokitWithAuth('agent-runtime-get-file', {
+        requireUserAuth: false,
+        toolCallId: context?.toolCallId,
+      });
+      const octokit = octokitWithAuth.octokit;
+      auth = octokitWithAuth.auth;
 
       const response = await octokit.request(`GET /repos/${owner}/${repo}/contents/${filePath}`, {
         ref: branch,
@@ -88,21 +102,20 @@ export class GetFileTool extends BaseTool {
         const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
         const totalLines = content.split('\n').length;
 
-        const result = {
-          success: true,
-          path: filePath,
-          content,
-          totalLines,
-          sha: response.data.sha,
-        };
+        const truncatedContent = OutputLimiter.truncate(content, 25000);
+        const truncationNote = truncatedContent.length < content.length ? ', truncated' : '';
+        const agentContent = `File ${filePath} (${totalLines} lines, sha ${response.data.sha}${truncationNote}):\n\`\`\`\n${truncatedContent}\n\`\`\``;
 
         const displayContent = `File: ${filePath} (${totalLines} lines)`;
-        return this.createSuccessResult(OutputLimiter.truncate(JSON.stringify(result), 25000), displayContent);
+        return { ...this.createSuccessResult(agentContent, displayContent), auth };
       }
 
-      return this.createErrorResult(`${filePath} is not a file or does not exist`, 'FILE_NOT_FOUND');
+      return { ...this.createErrorResult(`${filePath} is not a file or does not exist`, 'FILE_NOT_FOUND'), auth };
     } catch (error: any) {
-      return this.createErrorResult(error.message || `Failed to fetch ${args.file_path}`, 'EXECUTION_ERROR');
+      return {
+        ...this.createErrorResult(error.message || `Failed to fetch ${args.file_path}`, 'EXECUTION_ERROR'),
+        auth,
+      };
     }
   }
 }

@@ -39,6 +39,41 @@ function readBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function readPositiveInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function readIterationLimit(error: Record<string, unknown>, usageSummary?: Record<string, unknown>): number | null {
+  const maxIterations = readPositiveInteger(asRecord(error.details).maxIterations);
+  if (!maxIterations) {
+    return null;
+  }
+
+  const observedSteps = readPositiveInteger(usageSummary?.steps);
+  if (observedSteps !== null && observedSteps < maxIterations) {
+    return null;
+  }
+
+  return maxIterations;
+}
+
+function resolveTerminalErrorMessage(
+  error: Record<string, unknown>,
+  fallbackMessage: string,
+  usageSummary?: Record<string, unknown>
+): string {
+  if (readString(error.code) === 'max_iterations_exceeded') {
+    const maxIterations = readIterationLimit(error, usageSummary);
+    if (maxIterations) {
+      return `The agent reached the ${maxIterations}-step limit before it finished. Send a follow-up to continue.`;
+    }
+
+    return 'The agent reached its step limit before it finished. Send a follow-up to continue.';
+  }
+
+  return readString(error.message) || fallbackMessage;
+}
+
 function pickDefined(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
 
@@ -558,9 +593,14 @@ export function chunkFromEvent(event: AgentRunEvent): AgentUiMessageChunk | null
       });
     case 'run.failed': {
       const error = asRecord(payload.error);
+      const usageSummary = asRecord(payload.usageSummary);
       return compactChunk({
         type: 'error',
-        errorText: readString(error.message) || readString(payload.errorText) || 'Agent run failed.',
+        errorText: resolveTerminalErrorMessage(
+          error,
+          readString(payload.errorText) || 'Agent run failed.',
+          usageSummary
+        ),
       });
     }
     default:

@@ -67,6 +67,7 @@ const agentRunEventDiscriminatorMapping = {
   'run.queued': '#/components/schemas/AgentRunStatusEvent',
   'run.started': '#/components/schemas/AgentRunStatusEvent',
   'run.waiting_for_approval': '#/components/schemas/AgentRunStatusEvent',
+  'run.transitioned': '#/components/schemas/AgentRunStatusEvent',
   'run.completed': '#/components/schemas/AgentRunStatusEvent',
   'run.failed': '#/components/schemas/AgentRunStatusEvent',
   'run.cancelled': '#/components/schemas/AgentRunStatusEvent',
@@ -662,7 +663,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             workspaceToolExecutionTimeoutMs: 120000,
             toolRules: [
               {
-                toolKey: 'mcp__sandbox__workspace_edit_file',
+                toolKey: 'mcp__workspace_core__edit_file',
                 mode: 'require_approval',
               },
             ],
@@ -772,7 +773,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         SystemAgentDefinitionId: {
           type: 'string',
-          enum: ['system.debug', 'system.develop', 'system.freeform'],
+          enum: ['system.agent', 'system.debug', 'system.develop', 'system.freeform'],
         },
 
         AgentSelectionSummary: {
@@ -791,6 +792,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 'active_run',
                 'disabled_agent',
                 'requires_workspace',
+                'needs_conversion',
                 'source_incompatible',
                 'disabled_by_policy',
                 null,
@@ -1407,7 +1409,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             maxIterations: {
               type: 'integer',
               minimum: 1,
-              maximum: 100,
             },
           },
           additionalProperties: false,
@@ -1538,6 +1539,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 'running',
                 'waiting_for_approval',
                 'waiting_for_input',
+                'transitioned',
                 'completed',
                 'failed',
                 'cancelled',
@@ -2050,6 +2052,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'running',
             'waiting_for_approval',
             'waiting_for_input',
+            'transitioned',
             'completed',
             'failed',
             'cancelled',
@@ -2123,6 +2126,26 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
+        AgentRunPlanProfileSummary: {
+          type: 'object',
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['answer', 'debug', 'change', 'legacy'],
+            },
+            intent: {
+              type: 'string',
+              enum: ['chat', 'diagnose', 'repair', 'workspace', 'legacy'],
+            },
+            workspaceCore: {
+              type: 'string',
+              enum: ['absent', 'requested'],
+            },
+          },
+          required: ['kind', 'intent', 'workspaceCore'],
+          additionalProperties: false,
+        },
+
         AgentRunPlanSummary: {
           type: 'object',
           nullable: true,
@@ -2168,6 +2191,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             runtime: { $ref: '#/components/schemas/AgentRunPlanRuntimeSummary' },
             approval: { $ref: '#/components/schemas/AgentRunPlanApprovalSummary' },
             capabilities: { $ref: '#/components/schemas/AgentRunPlanCapabilitiesSummary' },
+            profile: { $ref: '#/components/schemas/AgentRunPlanProfileSummary' },
             debug: {
               type: 'object',
               properties: {
@@ -2192,7 +2216,17 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
             },
           },
-          required: ['version', 'agent', 'source', 'model', 'runtime', 'approval', 'capabilities', 'warnings'],
+          required: [
+            'version',
+            'agent',
+            'source',
+            'model',
+            'runtime',
+            'approval',
+            'capabilities',
+            'profile',
+            'warnings',
+          ],
           additionalProperties: false,
         },
 
@@ -2223,6 +2257,51 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: true,
         },
 
+        AgentRunTransitionContinuation: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['queued', 'ui_auto_continue_fallback'] },
+            targetAgentDefinitionId: { type: 'string' },
+            runId: { type: 'string', nullable: true },
+            queuedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['status', 'targetAgentDefinitionId', 'runId'],
+          additionalProperties: false,
+        },
+
+        AgentRunWorkspaceEscalationTransition: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['workspace_escalation'] },
+            reason: { type: 'string', nullable: true },
+            toolCallId: { type: 'string', nullable: true },
+            workspaceStatus: { type: 'string', enum: Object.values(AgentWorkspaceStatus) },
+            targetAgentDefinitionId: { type: 'string' },
+            createdAt: { type: 'string', format: 'date-time' },
+            continuation: { $ref: '#/components/schemas/AgentRunTransitionContinuation' },
+          },
+          required: [
+            'kind',
+            'reason',
+            'toolCallId',
+            'workspaceStatus',
+            'targetAgentDefinitionId',
+            'createdAt',
+            'continuation',
+          ],
+          additionalProperties: false,
+        },
+
+        AgentRunTransition: {
+          oneOf: [{ $ref: '#/components/schemas/AgentRunWorkspaceEscalationTransition' }],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: {
+              workspace_escalation: '#/components/schemas/AgentRunWorkspaceEscalationTransition',
+            },
+          },
+        },
+
         AgentRun: {
           type: 'object',
           properties: {
@@ -2247,6 +2326,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             usageSummary: { type: 'object', additionalProperties: true },
             policySnapshot: { type: 'object', additionalProperties: true },
             runPlan: { $ref: '#/components/schemas/AgentRunPlanSummary' },
+            transition: {
+              allOf: [{ $ref: '#/components/schemas/AgentRunTransition' }],
+              nullable: true,
+            },
             recovery: {
               allOf: [{ $ref: '#/components/schemas/AgentRunRecovery' }],
               nullable: true,
@@ -2274,6 +2357,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'usageSummary',
             'policySnapshot',
             'runPlan',
+            'transition',
             'recovery',
           ],
         },
@@ -2536,6 +2620,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'run.queued',
             'run.started',
             'run.waiting_for_approval',
+            'run.transitioned',
             'run.completed',
             'run.failed',
             'run.cancelled',
@@ -2552,6 +2637,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 nullable: true,
               },
               usageSummary: { type: 'object', additionalProperties: true },
+              transition: {
+                allOf: [{ $ref: '#/components/schemas/AgentRunTransition' }],
+                nullable: true,
+              },
             },
             additionalProperties: false,
           }
@@ -2745,14 +2834,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             description: 'A workspace edit requires approval.',
             requestedAt: '2026-04-25T00:00:03.000Z',
             expiresAt: null,
-            toolName: 'mcp__sandbox__workspace_edit_file',
+            toolName: 'mcp__workspace_core__edit_file',
             argumentsSummary: [{ name: 'path', value: 'sample-file.txt' }],
             commandPreview: null,
             fileChangePreview: [
               {
                 id: 'tool-call-1:sample-file.txt',
                 toolCallId: 'tool-call-1',
-                sourceTool: 'workspace_edit_file',
+                sourceTool: 'edit_file',
                 path: 'sample-file.txt',
                 displayPath: 'sample-file.txt',
                 kind: 'edited',
@@ -2824,8 +2913,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             runId: 'run-1',
             pendingActionId: 'action-1',
             source: 'mcp',
-            serverSlug: 'sandbox',
-            toolName: 'workspace.edit_file',
+            serverSlug: 'workspace_core',
+            toolName: 'edit_file',
             toolCallId: 'tool-call-1',
             args: { path: 'sample-file.txt' },
             result: null,
@@ -2967,6 +3056,67 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'validatedAt',
             'updatedAt',
           ],
+        },
+
+        OpenSandboxPoolCapacitySpec: {
+          type: 'object',
+          properties: {
+            poolMin: { type: 'integer', minimum: 0 },
+            poolMax: { type: 'integer', minimum: 0 },
+            bufferMin: { type: 'integer', minimum: 0 },
+            bufferMax: { type: 'integer', minimum: 0 },
+          },
+          required: ['poolMin', 'poolMax', 'bufferMin', 'bufferMax'],
+          additionalProperties: false,
+        },
+
+        OpenSandboxPoolStatus: {
+          type: 'object',
+          properties: {
+            total: { type: 'integer', minimum: 0 },
+            allocated: { type: 'integer', minimum: 0 },
+            available: { type: 'integer', minimum: 0 },
+            observedGeneration: { type: 'integer', nullable: true },
+            revision: { type: 'string', nullable: true },
+          },
+          required: ['total', 'allocated', 'available'],
+          additionalProperties: false,
+        },
+
+        OpenSandboxPool: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            namespace: { type: 'string' },
+            capacitySpec: { $ref: '#/components/schemas/OpenSandboxPoolCapacitySpec' },
+            status: { $ref: '#/components/schemas/OpenSandboxPoolStatus' },
+            image: { type: 'string', nullable: true },
+            labels: { $ref: '#/components/schemas/AgentSessionStringRecord' },
+            generation: { type: 'integer', nullable: true },
+            resourceVersion: { type: 'string', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['name', 'namespace', 'capacitySpec', 'status', 'labels'],
+          additionalProperties: false,
+        },
+
+        UpdateAdminAgentSandboxPoolRequest: {
+          type: 'object',
+          properties: {
+            capacitySpec: {
+              type: 'object',
+              minProperties: 1,
+              properties: {
+                poolMin: { type: 'integer', minimum: 0 },
+                poolMax: { type: 'integer', minimum: 0 },
+                bufferMin: { type: 'integer', minimum: 0 },
+                bufferMax: { type: 'integer', minimum: 0 },
+              },
+              additionalProperties: false,
+            },
+          },
+          required: ['capacitySpec'],
+          additionalProperties: false,
         },
 
         // ===================================================================
@@ -4393,6 +4543,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             maxIterations: { type: 'integer', minimum: 1 },
             workspaceToolDiscoveryTimeoutMs: { type: 'integer', minimum: 1 },
             workspaceToolExecutionTimeoutMs: { type: 'integer', minimum: 1 },
+            autoProvisionWorkspace: { type: 'boolean' },
             toolRules: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentSessionToolRule' },
@@ -4409,6 +4560,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             maxIterations: { type: 'integer', minimum: 1 },
             workspaceToolDiscoveryTimeoutMs: { type: 'integer', minimum: 1 },
             workspaceToolExecutionTimeoutMs: { type: 'integer', minimum: 1 },
+            autoProvisionWorkspace: { type: 'boolean' },
             toolRules: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentSessionToolRule' },
@@ -4419,6 +4571,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'maxIterations',
             'workspaceToolDiscoveryTimeoutMs',
             'workspaceToolExecutionTimeoutMs',
+            'autoProvisionWorkspace',
             'toolRules',
           ],
           additionalProperties: false,
@@ -4457,6 +4610,339 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             accessMode: { type: 'string', enum: ['ReadWriteOnce', 'ReadWriteMany'] },
           },
           additionalProperties: false,
+        },
+
+        AgentSessionOpenSandboxBackendSettings: {
+          type: 'object',
+          properties: {
+            domain: { type: 'string', minLength: 1, maxLength: 2048 },
+            protocol: { type: 'string', enum: ['http', 'https'] },
+            apiKey: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4096,
+              description: 'Write-only: stored encrypted and never returned.',
+            },
+            apiKeyConfigured: {
+              type: 'boolean',
+              description: 'Read-only: whether an API key is configured; the key itself is never returned.',
+            },
+            image: { type: 'string', minLength: 1, maxLength: 2048 },
+            poolRef: { type: 'string', minLength: 1, maxLength: 253 },
+            timeoutSeconds: { type: 'integer', minimum: 1, nullable: true },
+            useServerProxy: { type: 'boolean' },
+            secureAccess: { type: 'boolean' },
+            resourceLimits: { $ref: '#/components/schemas/AgentSessionStringRecord' },
+            execdPort: { type: 'integer', minimum: 1 },
+            gatewayPort: { type: 'integer', minimum: 1 },
+            editorPort: { type: 'integer', minimum: 1 },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionE2bBackendSettings: {
+          type: 'object',
+          properties: {
+            apiKey: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4096,
+              description: 'Write-only: stored encrypted and never returned.',
+            },
+            apiKeyConfigured: {
+              type: 'boolean',
+              description: 'Read-only: whether an API key is configured; the key itself is never returned.',
+            },
+            templateId: { type: 'string', minLength: 1, maxLength: 253 },
+            domain: { type: 'string', minLength: 1, maxLength: 2048 },
+            timeoutSeconds: { type: 'integer', minimum: 1, nullable: true },
+            autoPause: { type: 'boolean' },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionDaytonaBackendSettings: {
+          type: 'object',
+          properties: {
+            apiKey: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4096,
+              description: 'Write-only: stored encrypted and never returned.',
+            },
+            apiKeyConfigured: {
+              type: 'boolean',
+              description: 'Read-only: whether an API key is configured; the key itself is never returned.',
+            },
+            snapshot: { type: 'string', minLength: 1, maxLength: 253 },
+            apiUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+            target: { type: 'string', minLength: 1, maxLength: 253 },
+            autoArchiveInterval: { type: 'integer', minimum: 0 },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionModalBackendSettings: {
+          type: 'object',
+          properties: {
+            tokenId: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4096,
+              description: 'Write-only: stored encrypted and never returned.',
+            },
+            tokenIdConfigured: {
+              type: 'boolean',
+              description: 'Read-only: whether a token ID is configured; the value itself is never returned.',
+            },
+            tokenSecret: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4096,
+              description: 'Write-only: stored encrypted and never returned.',
+            },
+            tokenSecretConfigured: {
+              type: 'boolean',
+              description: 'Read-only: whether a token secret is configured; the value itself is never returned.',
+            },
+            environment: { type: 'string', minLength: 1, maxLength: 253 },
+            appName: { type: 'string', minLength: 1, maxLength: 253 },
+            image: { type: 'string', minLength: 1, maxLength: 2048 },
+            imageRegistrySecret: { type: 'string', minLength: 1, maxLength: 253 },
+            timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400 },
+            cpu: { type: 'number' },
+            memoryMiB: { type: 'integer', minimum: 1 },
+            inboundCidrAllowlist: {
+              type: 'array',
+              items: { type: 'string', minLength: 1, maxLength: 64 },
+              uniqueItems: true,
+            },
+          },
+          additionalProperties: false,
+        },
+
+        AgentSessionWorkspaceBackendSettings: {
+          type: 'object',
+          description: 'Per-backend blocks merge on write: omitted blocks are preserved, null removes a stored block.',
+          properties: {
+            provider: { $ref: '#/components/schemas/WorkspaceRuntimeProvider' },
+            opensandbox: {
+              allOf: [{ $ref: '#/components/schemas/AgentSessionOpenSandboxBackendSettings' }],
+              nullable: true,
+            },
+            e2b: {
+              allOf: [{ $ref: '#/components/schemas/AgentSessionE2bBackendSettings' }],
+              nullable: true,
+            },
+            daytona: {
+              allOf: [{ $ref: '#/components/schemas/AgentSessionDaytonaBackendSettings' }],
+              nullable: true,
+            },
+            modal: {
+              allOf: [{ $ref: '#/components/schemas/AgentSessionModalBackendSettings' }],
+              nullable: true,
+            },
+          },
+          additionalProperties: false,
+        },
+
+        WorkspaceRuntimeBackendId: {
+          type: 'string',
+          enum: ['lifecycle_kubernetes', 'opensandbox', 'e2b', 'modal', 'daytona', 'substrate'],
+        },
+
+        WorkspaceRuntimeProvider: {
+          type: 'string',
+          enum: ['lifecycle_kubernetes', 'opensandbox', 'e2b', 'daytona', 'modal'],
+        },
+
+        WorkspaceBackendCapabilityKey: {
+          type: 'string',
+          enum: [
+            'newChatWorkspaces',
+            'developWorkspaces',
+            'environmentSessions',
+            'sandboxSessions',
+            'editor',
+            'previewPorts',
+            'hibernateResume',
+            'prewarm',
+          ],
+        },
+
+        WorkspaceBackendCapability: {
+          type: 'object',
+          properties: {
+            supported: { type: 'boolean' },
+            note: { type: 'string' },
+          },
+          required: ['supported'],
+          additionalProperties: false,
+        },
+
+        WorkspaceBackendCapabilities: {
+          type: 'object',
+          properties: {
+            newChatWorkspaces: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            developWorkspaces: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            environmentSessions: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            sandboxSessions: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            editor: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            previewPorts: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            hibernateResume: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+            prewarm: { $ref: '#/components/schemas/WorkspaceBackendCapability' },
+          },
+          required: [
+            'newChatWorkspaces',
+            'developWorkspaces',
+            'environmentSessions',
+            'sandboxSessions',
+            'editor',
+            'previewPorts',
+            'hibernateResume',
+            'prewarm',
+          ],
+          additionalProperties: false,
+        },
+
+        WorkspaceRuntimeBackendCatalogEntry: {
+          type: 'object',
+          properties: {
+            id: { $ref: '#/components/schemas/WorkspaceRuntimeBackendId' },
+            displayName: { type: 'string' },
+            status: { type: 'string', enum: ['available', 'coming_soon'] },
+            capabilities: { $ref: '#/components/schemas/WorkspaceBackendCapabilities' },
+            configured: { type: 'boolean' },
+            selectable: { type: 'boolean' },
+            active: { type: 'boolean', description: 'Whether this backend is the currently selected provider.' },
+            lastVerifiedAt: { type: 'string', description: 'ISO timestamp of the last verification, if any.' },
+            lastVerifyOk: { type: 'boolean' },
+            lastVerifyKind: { type: 'string', enum: ['connection', 'deep'] },
+          },
+          required: ['id', 'displayName', 'status', 'capabilities', 'configured', 'selectable', 'active'],
+          additionalProperties: false,
+        },
+
+        GetWorkspaceRuntimeBackendsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    backends: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/WorkspaceRuntimeBackendCatalogEntry' },
+                    },
+                  },
+                  required: ['backends'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        WorkspaceSourceOption: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            label: { type: 'string' },
+            detail: { type: 'string' },
+            ready: { type: 'boolean' },
+          },
+          required: ['id', 'label', 'ready'],
+          additionalProperties: false,
+        },
+
+        ListWorkspaceRuntimeBackendSourcesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    sources: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/WorkspaceSourceOption' },
+                    },
+                  },
+                  required: ['sources'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        WorkspaceBackendDeepCheckStage: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            status: { type: 'string', enum: ['passed', 'failed', 'skipped'] },
+            detail: { type: 'string' },
+          },
+          required: ['name', 'status'],
+          additionalProperties: false,
+        },
+
+        WorkspaceBackendDeepCheckResult: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            message: { type: 'string' },
+            durationMs: { type: 'integer' },
+            stages: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/WorkspaceBackendDeepCheckStage' },
+            },
+            details: { type: 'object', additionalProperties: true },
+          },
+          required: ['ok', 'message', 'durationMs', 'stages'],
+          additionalProperties: false,
+        },
+
+        DeepCheckWorkspaceRuntimeBackendSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/WorkspaceBackendDeepCheckResult' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        WorkspaceBackendTestConnectionResult: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            message: { type: 'string' },
+            details: { type: 'object', additionalProperties: true },
+          },
+          required: ['ok', 'message'],
+          additionalProperties: false,
+        },
+
+        TestWorkspaceRuntimeBackendSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/WorkspaceBackendTestConnectionResult' },
+              },
+              required: ['data'],
+            },
+          ],
         },
 
         AgentSessionCleanupSettings: {
@@ -4524,6 +5010,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               additionalProperties: false,
             },
             workspaceStorage: { $ref: '#/components/schemas/AgentSessionWorkspaceStorageSettings' },
+            workspaceBackend: { $ref: '#/components/schemas/AgentSessionWorkspaceBackendSettings' },
             cleanup: { $ref: '#/components/schemas/AgentSessionCleanupSettings' },
             durability: { $ref: '#/components/schemas/AgentSessionDurabilitySettings' },
           },
@@ -5526,6 +6013,49 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'object',
               properties: {
                 data: { $ref: '#/components/schemas/AgentAdminSessionDetail' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentSandboxPoolsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    pools: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/OpenSandboxPool' },
+                    },
+                  },
+                  required: ['pools'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        GetAdminAgentSandboxPoolSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    pool: { $ref: '#/components/schemas/OpenSandboxPool' },
+                  },
+                  required: ['pool'],
+                  additionalProperties: false,
+                },
               },
               required: ['data'],
             },

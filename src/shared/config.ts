@@ -15,20 +15,9 @@
  */
 
 import 'dotenv/config';
-import getConfig from 'next/config';
-import { serverRuntimeConfig as fallbackServerRuntimeConfig } from '../../next.config';
-
-let serverRuntimeConfig: Record<string, any> | null = null;
-
-/* There are some situations where getConfig is not initialized because of how next works */
-if (getConfig() === undefined) {
-  serverRuntimeConfig = fallbackServerRuntimeConfig;
-} else {
-  serverRuntimeConfig = getConfig().serverRuntimeConfig;
-}
 
 const getServerRuntimeConfig = (key: string, fallback?: any): any => {
-  return getProp(serverRuntimeConfig!, key, fallback);
+  return getProp(process.env, key, fallback);
 };
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
@@ -64,6 +53,7 @@ export const APP_DB_NAME = getServerRuntimeConfig('APP_DB_NAME', '');
 export const APP_DB_SSL = getServerRuntimeConfig('APP_DB_SSL', '');
 
 export const LIFECYCLE_UI_URL = getServerRuntimeConfig('LIFECYCLE_UI_URL', '');
+export const CHAT_PREVIEW_DOMAIN = getServerRuntimeConfig('CHAT_PREVIEW_DOMAIN', '');
 
 export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID', 'YOUR_VALUE_HERE');
 export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID', 'YOUR_VALUE_HERE');

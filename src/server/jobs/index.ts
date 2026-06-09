@@ -25,6 +25,8 @@ import { processAgentSessionPrewarm } from './agentSessionPrewarm';
 import { processAgentSandboxSessionLaunch } from './agentSandboxSessionLaunch';
 import { processAgentRunExecute } from './agentRunExecute';
 import { processAgentRunDispatchRecovery } from './agentRunDispatchRecovery';
+import { processAgentEnvironmentWatch } from './agentEnvironmentWatch';
+import { AGENT_ENV_WATCH_QUEUE_NAME } from 'server/services/agent/EnvironmentWatchService';
 import {
   DEFAULT_AGENT_SESSION_CLEANUP_INTERVAL_MS,
   resolveAgentSessionCleanupConfig,
@@ -144,6 +146,11 @@ export default function bootstrapJobs(services: IServices) {
   queueManager.registerWorker(QUEUE_NAMES.AGENT_RUN_RECOVERY, processAgentRunDispatchRecovery, {
     connection: redisClient.getConnection(),
     concurrency: 1,
+  });
+
+  queueManager.registerWorker(AGENT_ENV_WATCH_QUEUE_NAME, processAgentEnvironmentWatch, {
+    connection: redisClient.getConnection(),
+    concurrency: 2,
   });
 
   const agentCleanupQueue = queueManager.registerQueue(QUEUE_NAMES.AGENT_SESSION_CLEANUP, {

@@ -14,7 +14,12 @@
  * limitations under the License.
  */
 
-import { buildAgentRuntimeToolMetadata, isApprovalGatedWriteRuntimeTool, isReadOnlyRuntimeTool } from '../toolMetadata';
+import {
+  buildAgentRuntimeToolMetadata,
+  isApprovalGatedWriteRuntimeTool,
+  isReadOnlyRuntimeTool,
+  isRepairRuntimeTool,
+} from '../toolMetadata';
 
 describe('agent runtime tool metadata', () => {
   it('classifies read tools with resource domain and workspace need', () => {
@@ -26,6 +31,8 @@ describe('agent runtime tool metadata', () => {
     });
 
     expect(metadata).toMatchObject({
+      serverSlug: 'lifecycle',
+      sourceToolName: 'get_file',
       effect: 'read',
       exposure: 'read',
       resourceDomain: 'github',
@@ -43,11 +50,26 @@ describe('agent runtime tool metadata', () => {
     });
 
     expect(metadata).toMatchObject({
+      serverSlug: 'lifecycle',
+      sourceToolName: 'update_file',
       effect: 'write',
       exposure: 'repair',
       resourceDomain: 'github',
       workspaceNeed: 'none',
     });
     expect(isApprovalGatedWriteRuntimeTool(metadata)).toBe(true);
+    expect(isRepairRuntimeTool(metadata)).toBe(true);
+  });
+
+  it('classifies allowed write tools as repair-capable but not approval-gated', () => {
+    const metadata = buildAgentRuntimeToolMetadata({
+      toolKey: 'mcp__lifecycle__update_file',
+      catalogCapabilityId: 'github_write',
+      capabilityKey: 'git_write',
+      approvalMode: 'allow',
+    });
+
+    expect(isApprovalGatedWriteRuntimeTool(metadata)).toBe(false);
+    expect(isRepairRuntimeTool(metadata)).toBe(true);
   });
 });

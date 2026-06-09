@@ -20,18 +20,18 @@ describe('buildProposedFileChanges', () => {
   it('keeps workspace edit approvals as before-and-after previews instead of fake diffs', () => {
     const [change] = buildProposedFileChanges({
       toolCallId: 'tool-1',
-      sourceTool: 'workspace.edit_file',
+      sourceTool: 'mcp__workspace_core__edit_file',
       input: {
         path: '/workspace/sample-service/app.js',
-        oldText: 'before',
-        newText: 'after',
+        old_text: 'before',
+        new_text: 'after',
       },
     });
 
     expect(change).toMatchObject({
       id: 'tool-1:sample-service/app.js',
       toolCallId: 'tool-1',
-      sourceTool: 'workspace.edit_file',
+      sourceTool: 'mcp__workspace_core__edit_file',
       path: '/workspace/sample-service/app.js',
       displayPath: 'sample-service/app.js',
       stage: 'awaiting-approval',
@@ -44,7 +44,7 @@ describe('buildProposedFileChanges', () => {
   it('keeps workspace writes as preview-only changes', () => {
     const [change] = buildProposedFileChanges({
       toolCallId: 'tool-2',
-      sourceTool: 'workspace.write_file',
+      sourceTool: 'mcp__workspace_core__write_file',
       input: {
         path: '/workspace/sample-service/README.md',
         content: '# Sample service',
@@ -54,7 +54,7 @@ describe('buildProposedFileChanges', () => {
     expect(change).toMatchObject({
       id: 'tool-2:sample-service/README.md',
       toolCallId: 'tool-2',
-      sourceTool: 'workspace.write_file',
+      sourceTool: 'mcp__workspace_core__write_file',
       path: '/workspace/sample-service/README.md',
       displayPath: 'sample-service/README.md',
       stage: 'awaiting-approval',

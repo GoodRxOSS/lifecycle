@@ -25,16 +25,9 @@ const mockResolveSessionPodServersForRepo = jest.fn().mockResolvedValue([]);
 const mockGetDefaultThreadForSession = jest.fn().mockResolvedValue({ uuid: 'default-thread-1' });
 const mockCreateOrUpdateNamespace = jest.fn().mockResolvedValue(undefined);
 const mockDeleteNamespace = jest.fn().mockResolvedValue(undefined);
-const mockCreateOrUpdateChatPreview = jest.fn().mockResolvedValue({
-  url: 'https://chat-aaaaaaaa-3000.example.test',
-  host: 'chat-aaaaaaaa-3000.example.test',
-  path: '/',
-  port: 3000,
-  serviceName: 'agent-preview-aaaaaaaa-3000',
-  ingressName: 'agent-preview-ingress-aaaaaaaa-3000',
-});
 const mockResolveWorkspaceRuntimePlan = jest.fn();
 const mockToWorkspaceRuntimePlanMetadata = jest.fn();
+const mockCreateOpenSandboxRuntimeService = jest.fn();
 
 jest.mock('server/models/AgentSession');
 jest.mock('server/models/AgentThread');
@@ -45,6 +38,11 @@ jest.mock('server/models/AgentRun');
 jest.mock('server/models/Build');
 jest.mock('server/models/Deploy');
 jest.mock('server/lib/dependencies', () => ({}));
+jest.mock('server/lib/encryption', () => ({
+  encrypt: jest.fn((value: string) => `enc:${value}`),
+  decrypt: jest.fn((value: string) => value.replace(/^enc:/, '')),
+  isEncryptionKeyConfigured: jest.fn(() => true),
+}));
 jest.mock('server/lib/agentSession/pvcFactory');
 jest.mock('server/lib/agentSession/apiKeySecretFactory');
 jest.mock('server/lib/agentSession/podFactory');
@@ -63,8 +61,21 @@ jest.mock('server/lib/agentSession/workspaceRuntimePlan', () => {
     toWorkspaceRuntimePlanMetadata: (...args: unknown[]) => mockToWorkspaceRuntimePlanMetadata(...args),
   };
 });
+jest.mock('server/services/workspaceRuntime/providers/opensandbox', () => {
+  const actual = jest.requireActual('server/services/workspaceRuntime/providers/opensandbox');
+  return {
+    __esModule: true,
+    ...actual,
+    createOpenSandboxRuntimeService: (...args: unknown[]) => mockCreateOpenSandboxRuntimeService(...args),
+  };
+});
 jest.mock('server/lib/agentSession/chatPreviewFactory', () => ({
-  createOrUpdateChatPreview: (...args: unknown[]) => mockCreateOrUpdateChatPreview(...args),
+  buildChatPreviewHostSlug: () => 'abcdef1234567890abcdef1234567890',
+  resolveChatPreviewPublicPublication: () => ({
+    url: 'http://3000--abcdef1234567890abcdef1234567890.localhost:5001/',
+    host: '3000--abcdef1234567890abcdef1234567890.localhost:5001',
+    path: '/',
+  }),
 }));
 jest.mock('server/lib/kubernetes', () => ({
   createOrUpdateNamespace: (...args: unknown[]) => mockCreateOrUpdateNamespace(...args),
@@ -285,6 +296,7 @@ import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind } fr
 import WorkspaceRuntimeStateService, {
   WorkspaceActionBlockedError,
 } from 'server/services/agent/WorkspaceRuntimeStateService';
+import AgentSandboxService from 'server/services/agent/SandboxService';
 
 const mockRedis = {
   setex: jest.fn().mockResolvedValue('OK'),
@@ -336,6 +348,7 @@ jest.spyOn(RedisClient, 'getInstance').mockReturnValue({
   getConnection: () => ({} as any),
   close: jest.fn(),
 } as any);
+const mockRestorePreviewExposures = jest.spyOn(AgentSandboxService, 'restorePreviewExposures');
 
 const mockEnableDevMode = jest.fn().mockResolvedValue(buildDevModeSnapshot());
 const mockDisableDevMode = jest.fn().mockResolvedValue(undefined);
@@ -402,8 +415,11 @@ const mockSandboxQuery = {
 const mockSandboxExposureQuery = {
   where: jest.fn().mockReturnThis(),
   whereNull: jest.fn().mockReturnThis(),
+  orderBy: jest.fn().mockReturnThis(),
   first: jest.fn(),
   insert: jest.fn().mockResolvedValue({}),
+  insertAndFetch: jest.fn(),
+  patch: jest.fn().mockResolvedValue(1),
   patchAndFetchById: jest.fn(),
 };
 (AgentSandboxExposure.query as jest.Mock) = jest.fn().mockReturnValue(mockSandboxExposureQuery);
@@ -439,6 +455,42 @@ const actualWorkspaceRuntimePlan = jest.requireActual(
   'server/lib/agentSession/workspaceRuntimePlan'
 ) as typeof import('server/lib/agentSession/workspaceRuntimePlan');
 
+function buildWorkspaceBackendConfig(provider: 'lifecycle_kubernetes' | 'opensandbox' = 'lifecycle_kubernetes') {
+  return {
+    provider,
+    opensandbox: {
+      domain: 'opensandbox.example.test',
+      protocol: 'https' as const,
+      timeoutSeconds: 3600,
+      useServerProxy: false,
+      secureAccess: true,
+      resourceLimits: {},
+      execdPort: 13337,
+      gatewayPort: 13338,
+      editorPort: 13339,
+    },
+    e2b: {
+      domain: 'e2b.app',
+      timeoutSeconds: 3600,
+      autoPause: true,
+      gatewayPort: 13338,
+      editorPort: 13337,
+    },
+    daytona: {
+      apiUrl: 'https://app.daytona.io/api',
+      autoArchiveInterval: 0,
+      gatewayPort: 13338,
+      editorPort: 13337,
+    },
+    modal: {
+      appName: 'lifecycle-workspaces',
+      image: 'lifecycleoss/workspace:latest',
+      timeoutSeconds: 14400,
+      gatewayPort: 13338,
+    },
+  };
+}
+
 function buildRuntimePlan(overrides: Partial<WorkspaceRuntimePlan> = {}): WorkspaceRuntimePlan {
   const basePlan: WorkspaceRuntimePlan = {
     version: 1,
@@ -451,6 +503,7 @@ function buildRuntimePlan(overrides: Partial<WorkspaceRuntimePlan> = {}): Worksp
       workspaceImage: 'lifecycle-agent:latest',
       workspaceEditorImage: 'codercom/code-server:4.98.2',
       workspaceGatewayImage: 'lifecycle-agent:latest',
+      workspaceBackend: buildWorkspaceBackendConfig(),
       nodeSelector: undefined,
       keepAttachedServicesOnSessionNode: true,
       readiness: undefined,
@@ -628,6 +681,44 @@ function mockPersistedSandboxMetadata(metadata: Record<string, unknown>): void {
     });
 }
 
+function mockOpenSandboxRuntime() {
+  const runtime = {
+    backendId: 'opensandbox',
+    reattach: jest.fn().mockResolvedValue(null),
+    provision: jest.fn(),
+    destroy: jest.fn().mockResolvedValue(undefined),
+    suspend: jest.fn().mockResolvedValue(undefined),
+    resume: jest.fn(),
+    resolveGatewayEndpoint: jest.fn().mockReturnValue(null),
+    resolveEditorEndpoint: jest.fn().mockReturnValue(null),
+    capabilities: jest.fn().mockReturnValue({ backend: 'opensandbox' }),
+    hasPersistedHandle: jest.fn((state: unknown) => Boolean((state as { sandboxId?: unknown })?.sandboxId)),
+  };
+  mockCreateOpenSandboxRuntimeService.mockReturnValue(runtime);
+  return runtime;
+}
+
+// Persisted opensandbox sandbox row that still reflects subsequent lifecycle writes.
+function mockOpenSandboxSandboxRow(): void {
+  const row = {
+    id: 654,
+    sessionId: 321,
+    generation: 1,
+    provider: 'opensandbox',
+    status: 'ready',
+    providerState: {
+      sandboxId: 'sbx-123',
+      lifecycleBaseUrl: 'https://opensandbox.example.test/v1',
+    },
+    metadata: {},
+    endedAt: null,
+  };
+  mockSandboxQuery.first.mockImplementation(async () => {
+    const latestPayload = sandboxWritePayloads().at(-1);
+    return latestPayload ? { ...row, ...latestPayload } : row;
+  });
+}
+
 function queuePatchedSession(baseSession: Record<string, unknown>): void {
   mockSessionQuery.patchAndFetchById.mockImplementationOnce(async (_id, patch) => ({
     ...baseSession,
@@ -703,6 +794,7 @@ describe('AgentSessionService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRestorePreviewExposures.mockResolvedValue(0);
     delete process.env.ANTHROPIC_API_KEY;
     (AgentSession.query as jest.Mock) = jest.fn().mockReturnValue(mockSessionQuery);
     (AgentSession.transaction as jest.Mock) = jest.fn(async (callback) => callback({ trx: true }));
@@ -820,8 +912,11 @@ describe('AgentSessionService', () => {
     });
     mockSandboxExposureQuery.where.mockReturnThis();
     mockSandboxExposureQuery.whereNull.mockReturnThis();
+    mockSandboxExposureQuery.orderBy.mockReturnThis();
     mockSandboxExposureQuery.first.mockResolvedValue(null);
     mockSandboxExposureQuery.insert.mockResolvedValue({});
+    mockSandboxExposureQuery.insertAndFetch.mockResolvedValue({});
+    mockSandboxExposureQuery.patch.mockResolvedValue(1);
     mockSandboxExposureQuery.patchAndFetchById.mockResolvedValue({});
     mockRunQuery.where.mockReturnThis();
     mockRunQuery.whereNotIn.mockReturnThis();
@@ -871,14 +966,6 @@ describe('AgentSessionService', () => {
     mockGetDefaultThreadForSession.mockResolvedValue({ uuid: 'default-thread-1' });
     mockCreateOrUpdateNamespace.mockResolvedValue(undefined);
     mockDeleteNamespace.mockResolvedValue(undefined);
-    mockCreateOrUpdateChatPreview.mockResolvedValue({
-      url: 'https://chat-aaaaaaaa-3000.example.test',
-      host: 'chat-aaaaaaaa-3000.example.test',
-      path: '/',
-      port: 3000,
-      serviceName: 'agent-preview-aaaaaaaa-3000',
-      ingressName: 'agent-preview-ingress-aaaaaaaa-3000',
-    });
     mockExecInPod.mockImplementation(
       async (
         _namespace: string,
@@ -914,6 +1001,7 @@ describe('AgentSessionService', () => {
     (cleanupForwardedAgentEnvSecrets as jest.Mock).mockResolvedValue(undefined);
     mockResolveWorkspaceRuntimePlan.mockImplementation(actualWorkspaceRuntimePlan.resolveWorkspaceRuntimePlan);
     mockToWorkspaceRuntimePlanMetadata.mockImplementation(actualWorkspaceRuntimePlan.toWorkspaceRuntimePlanMetadata);
+    mockCreateOpenSandboxRuntimeService.mockReset();
     mockResolveSessionPodServersForRepo.mockResolvedValue([]);
     (runtimeConfig.resolveAgentSessionControlPlaneConfig as jest.Mock).mockResolvedValue({
       appendSystemPrompt: undefined,
@@ -922,6 +1010,7 @@ describe('AgentSessionService', () => {
       workspaceImage: 'lifecycle-agent:latest',
       workspaceEditorImage: 'codercom/code-server:4.98.2',
       workspaceGatewayImage: 'lifecycle-agent:latest',
+      workspaceBackend: buildWorkspaceBackendConfig(),
       nodeSelector: undefined,
       keepAttachedServicesOnSessionNode: true,
       readiness: undefined,
@@ -1137,6 +1226,7 @@ describe('AgentSessionService', () => {
       {},
       {
         LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+        LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
       }
     );
     expect(createSessionWorkspacePod).toHaveBeenCalledWith(
@@ -1168,6 +1258,152 @@ describe('AgentSessionService', () => {
     );
     expect(session.workspaceStatus).toBe('ready');
     expect(session.namespace).toBe('chat-aaaaaaaa');
+  });
+
+  it('persists the freshly minted gateway token encrypted in kubernetes provider state', async () => {
+    const chatSession = buildChatRuntimeSession({ userId: 'user-123' });
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'agent-aaaaaaaa',
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: { userId: 'user-123', githubUsername: 'sample-user' } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    const secretData = (createAgentApiKeySecret as jest.Mock).mock.calls[0][6] as Record<string, string>;
+    const mintedToken = secretData.LIFECYCLE_GATEWAY_TOKEN;
+    expect(mintedToken).toMatch(/^[0-9a-f]{64}$/);
+    // The pod sees the plaintext via the secret; the DB row only ever sees the ciphertext.
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'ready',
+        providerState: expect.objectContaining({ gatewayToken: `enc:${mintedToken}` }),
+      })
+    );
+    expect(JSON.stringify(sandboxWritePayloads())).not.toContain(`"${mintedToken}"`);
+  });
+
+  it('re-mints the gateway token on kubernetes resume instead of reusing the stale one', async () => {
+    const hibernatedSession = buildChatRuntimeSession({
+      namespace: 'chat-aaaaaaaa',
+      podName: null,
+      pvcName: 'agent-pvc-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+    });
+    const readyChatSession = {
+      ...hibernatedSession,
+      podName: 'agent-aaaaaaaa',
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    };
+    // The suspended row still carries the previous (now-orphaned) encrypted token.
+    const sandboxRow = {
+      id: 654,
+      sessionId: 321,
+      generation: 1,
+      provider: 'lifecycle_kubernetes',
+      status: 'suspended',
+      providerState: { namespace: 'chat-aaaaaaaa', pvcName: 'agent-pvc-aaaaaaaa', gatewayToken: 'enc:stale-token' },
+      metadata: {},
+      endedAt: null,
+    };
+    mockSandboxQuery.first.mockImplementation(async () => {
+      const payloads = sandboxWritePayloads();
+      const latestPayload = payloads[payloads.length - 1];
+      return latestPayload ? { ...sandboxRow, ...latestPayload } : sandboxRow;
+    });
+    mockSessionQuery.findOne
+      .mockResolvedValueOnce(hibernatedSession)
+      .mockResolvedValueOnce(hibernatedSession)
+      .mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(hibernatedSession);
+    queuePatchedSession(hibernatedSession);
+    queuePatchedSession(readyChatSession);
+
+    await AgentSessionService.resumeChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'sample-user',
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    // The suspend deleted the per-session secret, so resume must mint a fresh token...
+    const secretData = (createAgentApiKeySecret as jest.Mock).mock.calls[0][6] as Record<string, string>;
+    const mintedToken = secretData.LIFECYCLE_GATEWAY_TOKEN;
+    expect(mintedToken).toMatch(/^[0-9a-f]{64}$/);
+    // ...while the claim write carries the stale ciphertext over instead of clobbering it...
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'resuming',
+        providerState: expect.objectContaining({ gatewayToken: 'enc:stale-token' }),
+      })
+    );
+    // ...and the ready write replaces it with the re-minted one.
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        status: 'ready',
+        providerState: expect.objectContaining({ gatewayToken: `enc:${mintedToken}` }),
+      })
+    );
+  });
+
+  it('passes a freshly minted gateway token to remote provisioning and persists only the ciphertext', async () => {
+    const runtime = mockOpenSandboxRuntime();
+    runtime.provision.mockResolvedValue({
+      providerState: { sandboxId: 'sbx-9', lifecycleBaseUrl: 'https://opensandbox.example.test/v1' },
+      capabilitySnapshot: { backend: 'opensandbox' },
+      podNameAlias: 'sbx-9',
+    });
+    mockResolveWorkspaceRuntimePlan.mockResolvedValue(
+      buildRuntimePlan({
+        kind: 'chat',
+        runtimeConfig: {
+          workspaceBackend: buildWorkspaceBackendConfig('opensandbox'),
+        } as Partial<WorkspaceRuntimePlan>['runtimeConfig'],
+      })
+    );
+    const chatSession = buildChatRuntimeSession({ userId: 'user-123' });
+    const readyChatSession = {
+      ...chatSession,
+      namespace: 'chat-aaaaaaaa',
+      podName: 'sbx-9',
+      pvcName: null,
+      workspaceStatus: AgentWorkspaceStatus.READY,
+    };
+    mockSessionQuery.findOne.mockResolvedValueOnce(chatSession).mockResolvedValueOnce(readyChatSession);
+    mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+    queuePatchedSession(chatSession);
+    queuePatchedSession(readyChatSession);
+
+    await AgentSessionService.provisionChatRuntime({
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      userId: 'user-123',
+      userIdentity: { userId: 'user-123', githubUsername: 'sample-user' } as any,
+      githubToken: 'sample-gh-token',
+    });
+
+    expect(runtime.provision).toHaveBeenCalledWith(
+      expect.objectContaining({ gatewayToken: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    );
+    const mintedToken = (runtime.provision.mock.calls[0][0] as { gatewayToken: string }).gatewayToken;
+    expect(sandboxWritePayloads()).toContainEqual(
+      expect.objectContaining({
+        provider: 'opensandbox',
+        status: 'ready',
+        providerState: expect.objectContaining({ sandboxId: 'sbx-9', gatewayToken: `enc:${mintedToken}` }),
+      })
+    );
+    expect(JSON.stringify(sandboxWritePayloads())).not.toContain(`"${mintedToken}"`);
   });
 
   it('opens an already-ready chat runtime without lifecycle or Kubernetes side effects', async () => {
@@ -1430,7 +1666,8 @@ describe('AgentSessionService', () => {
     });
     mockSessionQuery.findOne.mockResolvedValue(failedChatSession);
     mockSessionQuery.forUpdate.mockResolvedValueOnce(failedChatSession);
-    mockSandboxQuery.first.mockResolvedValueOnce({
+    // The backend-stickiness probe reads the sandbox before the claim, so the row must persist.
+    mockSandboxQuery.first.mockResolvedValue({
       id: 654,
       metadata: {
         runtimeLifecycle: {
@@ -1606,7 +1843,8 @@ describe('AgentSessionService', () => {
     };
     mockSessionQuery.findOne.mockResolvedValue(chatSession);
     mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
-    mockSandboxQuery.first.mockResolvedValueOnce({
+    // The backend-stickiness probe reads the sandbox before the claim, so the row must persist.
+    mockSandboxQuery.first.mockResolvedValue({
       id: 654,
       metadata: {
         runtimeLifecycle: {
@@ -1900,6 +2138,7 @@ describe('AgentSessionService', () => {
       {},
       {
         LIFECYCLE_SESSION_MCP_CONFIG_JSON: serializedMcpConfig,
+        LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
       }
     );
   });
@@ -2114,6 +2353,7 @@ describe('AgentSessionService', () => {
       undefined,
       {},
       {
+        LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
         LIFECYCLE_SESSION_MCP_CONFIG_JSON: JSON.stringify([
           {
             slug: 'sample-stdio',
@@ -2676,7 +2916,7 @@ describe('AgentSessionService', () => {
     expect(mockDeleteNamespace).toHaveBeenCalledWith('chat-aaaaaaaa');
   });
 
-  it('publishes a chat session HTTP port through ingress', async () => {
+  it('publishes a chat session HTTP port through the workspace gateway preview proxy', async () => {
     mockSessionQuery.findOne.mockResolvedValue({
       id: 321,
       uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -2687,6 +2927,23 @@ describe('AgentSessionService', () => {
       workspaceStatus: 'ready',
       status: 'active',
     });
+    mockSandboxQuery.first.mockResolvedValue({
+      id: 654,
+      sessionId: 321,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: {
+        gatewayToken: 'enc:gateway-token',
+      },
+    });
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      body: {
+        cancel: jest.fn().mockResolvedValue(undefined),
+      },
+    } as any);
 
     const publication = await AgentSessionService.publishChatHttpPort({
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -2694,13 +2951,46 @@ describe('AgentSessionService', () => {
       port: 3000,
     });
 
-    expect(mockCreateOrUpdateChatPreview).toHaveBeenCalledWith({
-      sessionUuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-      namespace: 'chat-aaaaaaaa',
-      podName: 'agent-aaaaaaaa',
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://agent-aaaaaaaa.chat-aaaaaaaa.svc.cluster.local:13338/preview/3000',
+      expect.objectContaining({
+        headers: {
+          Authorization: 'Bearer gateway-token',
+          'x-lifecycle-gateway-token': 'gateway-token',
+        },
+      })
+    );
+    expect(mockSandboxExposureQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandboxId: 654,
+        kind: 'preview',
+        targetPort: 3000,
+        status: 'ready',
+        url: 'http://3000--abcdef1234567890abcdef1234567890.localhost:5001/',
+        metadata: {
+          attachmentKind: 'workspace_gateway_preview',
+          previewSlug: 'abcdef1234567890abcdef1234567890',
+        },
+        providerState: {
+          url: 'http://agent-aaaaaaaa.chat-aaaaaaaa.svc.cluster.local:13338/preview/3000',
+          headers: {
+            Authorization: 'Bearer gateway-token',
+            'x-lifecycle-gateway-token': 'gateway-token',
+          },
+        },
+        endedAt: null,
+      })
+    );
+    expect(publication).toMatchObject({
+      url: 'http://3000--abcdef1234567890abcdef1234567890.localhost:5001/',
+      host: '3000--abcdef1234567890abcdef1234567890.localhost:5001',
+      path: '/',
       port: 3000,
+      upstreamHealth: expect.objectContaining({ status: 'healthy', ok: true }),
     });
-    expect(publication.url).toBe('https://chat-aaaaaaaa-3000.example.test');
+    expect(publication).not.toHaveProperty('ingressName');
+    expect(publication).not.toHaveProperty('gatewayUrl');
+    fetchMock.mockRestore();
   });
 
   describe('createSession', () => {
@@ -3142,6 +3432,7 @@ describe('AgentSessionService', () => {
         {},
         {
           LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+          LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
         }
       );
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
@@ -3364,6 +3655,7 @@ describe('AgentSessionService', () => {
         },
         {
           LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+          LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
         }
       );
     });
@@ -3672,6 +3964,7 @@ describe('AgentSessionService', () => {
         },
         {
           LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+          LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
         }
       );
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
@@ -3736,6 +4029,7 @@ describe('AgentSessionService', () => {
         {},
         {
           LIFECYCLE_SESSION_MCP_CONFIG_JSON: '[]',
+          LIFECYCLE_GATEWAY_TOKEN: expect.stringMatching(/^[0-9a-f]{64}$/),
         }
       );
       expect(createSessionWorkspacePod).toHaveBeenCalledWith(
@@ -4823,21 +5117,7 @@ describe('AgentSessionService', () => {
     });
 
     it('honors the session stored same-node policy when attaching services', async () => {
-      const globalConfigService = jest.requireMock('server/services/globalConfig').default;
-      globalConfigService.getInstance.mockReturnValueOnce({
-        getConfig: jest.fn().mockImplementation(async (key: string) => {
-          if (key === 'agentSessionDefaults') {
-            return {
-              scheduling: {
-                keepAttachedServicesOnSessionNode: false,
-              },
-            };
-          }
-
-          return null;
-        }),
-      });
-
+      // The stored boolean short-circuits the global-config fallback, so no config stub is queued.
       mockSessionQuery.findOne.mockResolvedValue({
         id: 321,
         uuid: 'sess-1',
@@ -5809,6 +6089,236 @@ describe('AgentSessionService', () => {
         expect.objectContaining({ status: 'ended' })
       );
       expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    });
+  });
+
+  describe('OpenSandbox-backed sessions', () => {
+    it('rejects createSession when an OpenSandbox runtime plan resolves Lifecycle services', async () => {
+      const runtime = mockOpenSandboxRuntime();
+      mockResolveWorkspaceRuntimePlan.mockResolvedValueOnce(
+        buildRuntimePlan({
+          runtimeConfig: {
+            workspaceBackend: buildWorkspaceBackendConfig('opensandbox'),
+          } as Partial<WorkspaceRuntimePlan>['runtimeConfig'],
+          servicePlan: {
+            workspaceRepos: [
+              {
+                repo: 'example-org/example-repo',
+                repoUrl: 'https://github.com/example-org/example-repo.git',
+                branch: 'feature/example-session',
+                mountPath: '/workspace',
+                primary: true,
+              },
+            ],
+            services: [
+              {
+                name: 'web',
+                deployId: 1,
+                resourceName: 'web-build-uuid',
+                devConfig: { image: 'node:20', command: 'pnpm dev' },
+              },
+            ],
+            selectedServices: [],
+          } as unknown as Partial<WorkspaceRuntimePlan>['servicePlan'],
+        })
+      );
+
+      await expect(AgentSessionService.createSession(baseOpts)).rejects.toThrow(
+        'The OpenSandbox workspace backend does not support environment sessions or dev-mode service attachment.'
+      );
+
+      expect(runtime.reattach).not.toHaveBeenCalled();
+      expect(runtime.provision).not.toHaveBeenCalled();
+      expect(runtime.destroy).not.toHaveBeenCalled();
+      expect(mockEnableDevMode).not.toHaveBeenCalled();
+      expectSandboxFailure({
+        stage: 'create_session',
+        origin: 'agent_session',
+        message: 'does not support environment sessions or dev-mode service attachment',
+      });
+      expect(sandboxWritePayloads()).toContainEqual(
+        expect.objectContaining({ provider: 'opensandbox', status: 'failed' })
+      );
+      expectNoCreateSessionKubernetesHelpersCalled();
+    });
+
+    it('rejects attachServices before any service validation', async () => {
+      mockOpenSandboxRuntime();
+      mockOpenSandboxSandboxRow();
+      mockSessionQuery.findOne.mockResolvedValueOnce({
+        id: 321,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        buildKind: BuildKind.ENVIRONMENT,
+        buildUuid: 'build-123',
+        namespace: 'test-ns',
+        podName: 'sbx-123',
+        pvcName: null,
+        workspaceRepos: [],
+      });
+
+      await expect(AgentSessionService.attachServices('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', ['web'])).rejects.toThrow(
+        'The OpenSandbox workspace backend does not support environment sessions or dev-mode service attachment.'
+      );
+
+      expect(mockEnableDevMode).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
+    });
+
+    it('destroys the sandbox on endSession instead of deleting the chat namespace', async () => {
+      const runtime = mockOpenSandboxRuntime();
+      mockOpenSandboxSandboxRow();
+      const chatSession = {
+        id: 321,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        status: 'active',
+        chatStatus: AgentChatStatus.READY,
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        sessionKind: AgentSessionKind.CHAT,
+        buildKind: null,
+        buildUuid: null,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'sbx-123',
+        pvcName: null,
+        forwardedAgentSecretProviders: [],
+        devModeSnapshots: {},
+      };
+      mockEndSessionSession(chatSession);
+      queueEndedSession(chatSession, { devModeSnapshots: {}, podName: null, pvcName: null });
+
+      await AgentSessionService.endSession('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+
+      expect(runtime.destroy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sandboxId: 'sbx-123',
+          lifecycleBaseUrl: 'https://opensandbox.example.test/v1',
+        })
+      );
+      expect(mockDeleteNamespace).not.toHaveBeenCalled();
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(deleteAgentPvc).not.toHaveBeenCalled();
+      expect(mockRedis.del).toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(
+        321,
+        expect.objectContaining({ status: 'ended', podName: null, pvcName: null })
+      );
+      expect(sandboxWritePayloads()).toContainEqual(
+        expect.objectContaining({ provider: 'opensandbox', status: 'ended' })
+      );
+    });
+
+    it('restores previously published preview exposures after remote resume', async () => {
+      const runtime = mockOpenSandboxRuntime();
+      const previousProviderState = {
+        sandboxId: 'sbx-123',
+        lifecycleBaseUrl: 'https://opensandbox.example.test/v1',
+      };
+      const resumedProviderState = {
+        sandboxId: 'sbx-456',
+        lifecycleBaseUrl: 'https://opensandbox.example.test/v1',
+        editorUrl: 'https://sbx-456.opensandbox.example.test/editor',
+      };
+      runtime.resume.mockResolvedValue({
+        providerState: resumedProviderState,
+        capabilitySnapshot: { backend: 'opensandbox', portExposure: true },
+        podNameAlias: 'sbx-456',
+      });
+      const persistedSandbox = {
+        id: 654,
+        sessionId: 321,
+        generation: 1,
+        provider: 'opensandbox',
+        status: 'suspended',
+        providerState: previousProviderState,
+        metadata: {},
+        endedAt: null,
+      };
+      mockSandboxQuery.first.mockImplementation(async () => {
+        const latestPayload = sandboxWritePayloads().at(-1);
+        return latestPayload ? { ...persistedSandbox, ...latestPayload } : persistedSandbox;
+      });
+      const hibernatedSession = buildChatRuntimeSession({
+        namespace: 'chat-aaaaaaaa',
+        podName: 'sbx-123',
+        workspaceStatus: AgentWorkspaceStatus.HIBERNATED,
+      });
+      const readySession = {
+        ...hibernatedSession,
+        podName: 'sbx-456',
+        workspaceStatus: AgentWorkspaceStatus.READY,
+      };
+      mockSessionQuery.findOne.mockResolvedValueOnce(hibernatedSession);
+      mockSessionQuery.forUpdate.mockResolvedValueOnce(hibernatedSession);
+      queuePatchedSession(hibernatedSession);
+      queuePatchedSession(readySession);
+
+      await AgentSessionService.resumeChatRuntime({
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' } as any,
+        githubToken: 'sample-gh-token',
+      });
+
+      expect(runtime.resume.mock.calls[0][0]).toEqual(previousProviderState);
+      expect(mockRestorePreviewExposures).toHaveBeenCalledWith(
+        expect.objectContaining({
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          workspaceStatus: AgentWorkspaceStatus.READY,
+          podName: 'sbx-456',
+        })
+      );
+    });
+
+    it('records a workspace failure and rethrows when suspend fails', async () => {
+      const runtime = mockOpenSandboxRuntime();
+      runtime.suspend.mockRejectedValueOnce(new Error('opensandbox suspend failed'));
+      mockOpenSandboxSandboxRow();
+      const chatSession = {
+        id: 321,
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        userId: 'sample-user',
+        sessionKind: AgentSessionKind.CHAT,
+        status: 'active',
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        chatStatus: AgentChatStatus.READY,
+        namespace: 'chat-aaaaaaaa',
+        podName: 'sbx-123',
+        pvcName: null,
+      };
+      mockSessionQuery.findOne.mockResolvedValueOnce(chatSession);
+      mockSessionQuery.forUpdate.mockResolvedValueOnce(chatSession);
+      queuePatchedSession(chatSession);
+      queuePatchedSession({ ...chatSession, workspaceStatus: AgentWorkspaceStatus.FAILED });
+      const recordFailureSpy = jest.spyOn(WorkspaceRuntimeStateService, 'recordWorkspaceFailure');
+
+      await expect(
+        AgentSessionService.suspendChatRuntime({
+          sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          userId: 'sample-user',
+        })
+      ).rejects.toThrow('opensandbox suspend failed');
+
+      expect(runtime.suspend).toHaveBeenCalledWith(expect.objectContaining({ sandboxId: 'sbx-123' }), {
+        retainForMs: 24 * 60 * 60 * 1000 + 60 * 60 * 1000,
+      });
+      expect(recordFailureSpy).toHaveBeenCalledWith(
+        321,
+        expect.objectContaining({
+          failure: expect.objectContaining({ stage: 'suspend', origin: 'suspend' }),
+          runtimeProvider: 'opensandbox',
+          providerState: expect.objectContaining({ sandboxId: 'sbx-123' }),
+        }),
+        expect.objectContaining({
+          expectedLifecycle: { action: 'suspend', claimedAt: expect.any(String) },
+        })
+      );
+      expectSandboxFailure({ stage: 'suspend', origin: 'suspend', message: 'opensandbox suspend failed' });
+      expect(deleteSessionWorkspacePod).not.toHaveBeenCalled();
+      expect(mockSessionQuery.patchAndFetchById).toHaveBeenLastCalledWith(
+        321,
+        expect.objectContaining({ workspaceStatus: AgentWorkspaceStatus.FAILED })
+      );
+      recordFailureSpy.mockRestore();
     });
   });
 

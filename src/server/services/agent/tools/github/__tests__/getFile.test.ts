@@ -19,9 +19,15 @@ import { GetFileTool } from '../getFile';
 const mockOctokit = { request: jest.fn() };
 const mockGithubClient = {
   getOctokit: jest.fn().mockResolvedValue(mockOctokit),
+  getOctokitWithAuth: jest.fn().mockResolvedValue({
+    octokit: mockOctokit,
+    auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+  }),
   isFilePathAllowed: jest.fn().mockReturnValue(true),
   isFileExcluded: jest.fn().mockReturnValue(false),
   isRepoAllowed: jest.fn().mockReturnValue(true),
+  getDefaultRepo: jest.fn().mockReturnValue(null),
+  getAllowedBranch: jest.fn().mockReturnValue(null),
   validateBranch: jest.fn().mockReturnValue({ valid: true }),
 } as any;
 
@@ -38,6 +44,10 @@ describe('GetFileTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
+    mockGithubClient.getOctokitWithAuth.mockResolvedValue({
+      octokit: mockOctokit,
+      auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+    });
     mockGithubClient.isFilePathAllowed.mockReturnValue(true);
     mockGithubClient.isRepoAllowed.mockReturnValue(true);
     tool = new GetFileTool(mockGithubClient);
@@ -55,11 +65,8 @@ describe('GetFileTool', () => {
 
     const result = await tool.execute(baseArgs);
     expect(result.success).toBe(true);
-    const data = JSON.parse(result.agentContent);
-    expect(data.path).toBe('src/index.ts');
-    expect(data.sha).toBe('abc123');
-    expect(data.content).toBe('hello world\nsecond line');
-    expect(data.totalLines).toBe(2);
+    expect(result.agentContent).toContain('File src/index.ts (2 lines, sha abc123)');
+    expect(result.agentContent).toContain('```\nhello world\nsecond line\n```');
   });
 
   it('returns error for access denied', async () => {

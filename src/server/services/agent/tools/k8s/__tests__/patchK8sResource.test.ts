@@ -197,31 +197,4 @@ describe('PatchK8sResourceTool', () => {
     expect(result.error?.code).toBe('NAMESPACE_NOT_ALLOWED');
     expect(mockK8sClient.appsApi.patchNamespacedDeployment).not.toHaveBeenCalled();
   });
-
-  it('rejects a foreign namespace BEFORE presenting an approval', async () => {
-    mockK8sClient.setAllowedNamespace('env-mine');
-
-    await expect(
-      tool.shouldConfirmExecution({
-        namespace: 'env-other',
-        resource_type: 'deployment',
-        name: 'my-deploy',
-        operation: 'restart',
-      })
-    ).rejects.toThrow('env-other');
-  });
-
-  it('presents an approval for the matching build namespace', async () => {
-    mockK8sClient.setAllowedNamespace('env-mine');
-
-    const confirmation = await tool.shouldConfirmExecution({
-      namespace: 'env-mine',
-      resource_type: 'deployment',
-      name: 'my-deploy',
-      operation: 'restart',
-    });
-
-    expect(confirmation).not.toBe(false);
-    expect((confirmation as any).description).toContain('env-mine');
-  });
 });

@@ -16,6 +16,45 @@
 
 import { createOctokitClient } from 'server/lib/github/client';
 import picomatch from 'picomatch';
+import type { AgentRequestGitHubAuth, AgentGitHubAuthSource } from 'server/services/agent/githubAuth';
+import {
+  GITHUB_USER_AUTH_REQUIRED_CODE,
+  GITHUB_USER_AUTH_REQUIRED_MESSAGE,
+  normalizeAgentRequestGitHubAuth,
+} from 'server/services/agent/githubAuth';
+import type { ToolAuthProvenance } from '../types';
+
+type DiagnosticGitHubAuthSource = AgentGitHubAuthSource;
+
+export type DiagnosticGitHubAuthProvenance = ToolAuthProvenance & {
+  provider: 'github';
+  source: DiagnosticGitHubAuthSource;
+};
+
+export type DiagnosticGitHubApprovalAuthResolver = (context: {
+  runUuid?: string | null;
+  toolCallId?: string | null;
+}) => Promise<AgentRequestGitHubAuth | null>;
+
+export class GitHubUserAuthRequiredError extends Error {
+  readonly code = GITHUB_USER_AUTH_REQUIRED_CODE;
+  readonly auth: DiagnosticGitHubAuthProvenance;
+
+  constructor(auth: DiagnosticGitHubAuthProvenance) {
+    super(GITHUB_USER_AUTH_REQUIRED_MESSAGE);
+    this.name = 'GitHubUserAuthRequiredError';
+    this.auth = auth;
+  }
+}
+
+export function isGitHubUserAuthorizationError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const status = (error as { status?: unknown }).status;
+  return status === 401 || status === 403;
+}
 
 export class GitHubClient {
   private allowedBranch: string | null = null;
@@ -24,6 +63,12 @@ export class GitHubClient {
   private allowedWritePatterns: string[] = [];
   // SECURITY: owner/repo set this build spans; reads outside it are rejected to prevent cross-tenant access.
   private allowedRepos: Set<string> | null = null;
+  private defaultRepo: { owner: string; repo: string } | null = null;
+  // SECURITY: the build's own PR number; PR mutations targeting any other PR are rejected.
+  private allowedPullRequestNumber: number | null = null;
+  private requestAuth: AgentRequestGitHubAuth = normalizeAgentRequestGitHubAuth(null);
+  private requestAuthResolver: DiagnosticGitHubApprovalAuthResolver | null = null;
+  private runUuid: string | null = null;
 
   private normalizeFilePath(filePath: string): string {
     return filePath.trim().replace(/^\/+/, '').replace(/^\.\//, '');
@@ -35,6 +80,17 @@ export class GitHubClient {
 
   setAllowedBranch(branch: string) {
     this.allowedBranch = branch;
+  }
+
+  setRunUuid(runUuid: string | null | undefined): void {
+    this.runUuid = runUuid || null;
+  }
+
+  setRequestAuth(
+    auth: (AgentRequestGitHubAuth & { resolveApprovalAuth?: DiagnosticGitHubApprovalAuthResolver }) | null | undefined
+  ): void {
+    this.requestAuth = normalizeAgentRequestGitHubAuth(auth);
+    this.requestAuthResolver = auth?.resolveApprovalAuth || null;
   }
 
   setAllowedRepos(repos: string[] | null | undefined): void {
@@ -58,6 +114,23 @@ export class GitHubClient {
 
   getAllowedRepos(): string[] {
     return this.allowedRepos ? [...this.allowedRepos] : [];
+  }
+
+  setDefaultRepo(fullName: string | null | undefined): void {
+    const [owner, repo] = (fullName || '').trim().split('/');
+    this.defaultRepo = owner && repo ? { owner, repo } : null;
+  }
+
+  setAllowedPullRequestNumber(pullRequestNumber: number | null | undefined): void {
+    this.allowedPullRequestNumber = typeof pullRequestNumber === 'number' ? pullRequestNumber : null;
+  }
+
+  getAllowedPullRequestNumber(): number | null {
+    return this.allowedPullRequestNumber;
+  }
+
+  getDefaultRepo(): { owner: string; repo: string } | null {
+    return this.defaultRepo;
   }
 
   /**
@@ -167,6 +240,64 @@ export class GitHubClient {
     }
 
     return [...new Set(referencedFiles)];
+  }
+
+  private provenance(
+    source: DiagnosticGitHubAuthSource,
+    required: boolean,
+    githubUsername?: string | null
+  ): DiagnosticGitHubAuthProvenance {
+    return {
+      provider: 'github',
+      source,
+      required,
+      githubUsername: githubUsername || null,
+    };
+  }
+
+  private async resolveApprovalAuth(toolCallId?: string | null): Promise<AgentRequestGitHubAuth | null> {
+    if (!this.requestAuthResolver) {
+      return null;
+    }
+
+    return normalizeAgentRequestGitHubAuth(
+      await this.requestAuthResolver({
+        runUuid: this.runUuid,
+        toolCallId,
+      })
+    );
+  }
+
+  async getOctokitWithAuth(
+    caller: string,
+    options: { requireUserAuth: boolean; toolCallId?: string | null }
+  ): Promise<{ octokit: Awaited<ReturnType<typeof createOctokitClient>>; auth: DiagnosticGitHubAuthProvenance }> {
+    const requestAuth = normalizeAgentRequestGitHubAuth(this.requestAuth);
+
+    if (options.requireUserAuth) {
+      const approvalAuth = normalizeAgentRequestGitHubAuth(await this.resolveApprovalAuth(options.toolCallId));
+      const auth = approvalAuth.githubToken ? approvalAuth : requestAuth;
+      if (auth.source !== 'user' || !auth.githubToken || auth.writeAuthorized !== true) {
+        throw new GitHubUserAuthRequiredError(this.provenance('none', true, auth.githubUsername));
+      }
+
+      return {
+        octokit: await createOctokitClient({ accessToken: auth.githubToken, caller }),
+        auth: this.provenance('user', true, auth.githubUsername),
+      };
+    }
+
+    if (requestAuth.source === 'user' && requestAuth.githubToken) {
+      return {
+        octokit: await createOctokitClient({ accessToken: requestAuth.githubToken, caller }),
+        auth: this.provenance('user', false, requestAuth.githubUsername),
+      };
+    }
+
+    return {
+      octokit: await createOctokitClient({ caller }),
+      auth: this.provenance('app', false),
+    };
   }
 
   async getOctokit(caller: string) {

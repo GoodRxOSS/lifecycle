@@ -152,9 +152,9 @@ describe('InstructionTemplateService', () => {
   });
 
   it('defines one deterministic seed for every built-in system instruction ref', () => {
-    const builtInRefs = Object.values(SYSTEM_AGENT_DEFINITIONS)
-      .flatMap((definition) => definition.instructionRefs)
-      .sort();
+    const builtInRefs = [
+      ...new Set(Object.values(SYSTEM_AGENT_DEFINITIONS).flatMap((definition) => definition.instructionRefs)),
+    ].sort();
     const debugDefinition = SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS.find(
       (definition) => definition.ref === 'system:debug'
     );
@@ -167,7 +167,7 @@ describe('InstructionTemplateService', () => {
 
     expect([...SYSTEM_INSTRUCTION_TEMPLATE_REFS].sort()).toEqual(builtInRefs);
     expect(SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS).toHaveLength(3);
-    expect(debugDefinition?.defaultVersion).toBe(4);
+    expect(debugDefinition?.defaultVersion).toBe(8);
     expect(developDefinition?.defaultVersion).toBe(1);
     expect(freeformDefinition?.defaultVersion).toBe(1);
 
@@ -175,24 +175,28 @@ describe('InstructionTemplateService', () => {
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('comparing desired vs actual'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Investigation order:'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Failure playbooks'));
+    expect(debugDefinition?.defaultContent).toEqual(
+      expect.stringContaining('Triage evidence (collected automatically)')
+    );
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('get_build_logs'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('previous:true'));
+    expect(debugDefinition?.defaultContent).toEqual(
+      expect.stringContaining("approving signed-in user's GitHub authorization")
+    );
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Cite the specific evidence'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Repair'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Investigate more'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Open workspace'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Continue in Develop'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Start workspace'));
-    expect(debugDefinition?.defaultContent).toEqual(
-      expect.stringContaining('Only perform mutating fixes through approval-gated actions')
-    );
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('start one'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Tool economy:'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Response contract:'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('trigger_redeploy'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Apply fixes through the repair tools'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('plain commit URL'));
     expect(debugDefinition?.defaultContent).toEqual(
       expect.stringContaining('Do not run tests or arbitrary workspace commands in Debug repair')
     );
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('webhook starts a new build'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('previous issue was fixed'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Do not say you will keep monitoring'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('do not name an Observe action'));
 
     for (const definition of SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS) {
       expect(definition.defaultVersion).toBeGreaterThanOrEqual(1);
@@ -264,26 +268,30 @@ describe('InstructionTemplateService', () => {
 
   it('reseeds changed release defaults without overwriting admin overrides', async () => {
     await InstructionTemplateService.seedSystemTemplates();
+    const initialTemplate = await InstructionTemplateService.getTemplate('system:debug');
     await InstructionTemplateService.updateOverride('system:debug', {
       content: 'Keep this sample admin override.',
       updatedBy: 'sample-admin',
     });
 
     const updatedDefault = 'Use updated release-owned sample debug instructions.';
-    await InstructionTemplateService.seedSystemTemplates(releaseUpdate('system:debug', updatedDefault, 4));
+    const updatedDefaultVersion = initialTemplate.default.version + 1;
+    await InstructionTemplateService.seedSystemTemplates(
+      releaseUpdate('system:debug', updatedDefault, updatedDefaultVersion)
+    );
 
     const template = await InstructionTemplateService.getTemplate('system:debug');
     expect(template.default).toEqual(
       expect.objectContaining({
         content: updatedDefault,
-        version: 4,
+        version: updatedDefaultVersion,
         hash: computeInstructionTemplateContentHash(updatedDefault),
       })
     );
     expect(template.override).toEqual(
       expect.objectContaining({
         content: 'Keep this sample admin override.',
-        baseDefaultVersion: 4,
+        baseDefaultVersion: initialTemplate.default.version,
       })
     );
     expect(template.effective).toEqual(
@@ -296,20 +304,24 @@ describe('InstructionTemplateService', () => {
 
   it('reset clears override fields and returns effective content to the current default', async () => {
     await InstructionTemplateService.seedSystemTemplates();
+    const initialTemplate = await InstructionTemplateService.getTemplate('system:debug');
     await InstructionTemplateService.updateOverride('system:debug', {
       content: 'Temporary sample override.',
       updatedBy: 'sample-admin',
     });
 
     const updatedDefault = 'Use reset target sample debug instructions.';
-    await InstructionTemplateService.seedSystemTemplates(releaseUpdate('system:debug', updatedDefault, 4));
+    const updatedDefaultVersion = initialTemplate.default.version + 1;
+    await InstructionTemplateService.seedSystemTemplates(
+      releaseUpdate('system:debug', updatedDefault, updatedDefaultVersion)
+    );
 
     const reset = await InstructionTemplateService.resetOverride('system:debug');
     expect(reset.override).toBeNull();
     expect(reset.effective).toEqual(
       expect.objectContaining({
         source: 'default',
-        version: 4,
+        version: updatedDefaultVersion,
         content: updatedDefault,
         hash: computeInstructionTemplateContentHash(updatedDefault),
       })
@@ -318,9 +330,11 @@ describe('InstructionTemplateService', () => {
 
   it('preserves a Debug override across the default migration and reset returns to the current Debug default', async () => {
     const versionOneDebugDefault = 'Use the release-owned sample Debug v1 instructions.';
-    const debugV2Default = SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS.find(
+    const currentDebugDefinition = SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS.find(
       (definition) => definition.ref === 'system:debug'
-    )?.defaultContent;
+    );
+    const debugV2Default = currentDebugDefinition?.defaultContent;
+    const debugV2Version = currentDebugDefinition?.defaultVersion;
 
     await InstructionTemplateService.seedSystemTemplates(releaseUpdate('system:debug', versionOneDebugDefault, 1));
     await InstructionTemplateService.updateOverride('system:debug', {
@@ -334,7 +348,7 @@ describe('InstructionTemplateService', () => {
     expect(template.default).toEqual(
       expect.objectContaining({
         content: debugV2Default,
-        version: 4,
+        version: debugV2Version,
         hash: computeInstructionTemplateContentHash(debugV2Default as string),
       })
     );
@@ -357,7 +371,7 @@ describe('InstructionTemplateService', () => {
     expect(reset.effective).toEqual(
       expect.objectContaining({
         source: 'default',
-        version: 4,
+        version: debugV2Version,
         content: debugV2Default,
         hash: computeInstructionTemplateContentHash(debugV2Default as string),
       })
