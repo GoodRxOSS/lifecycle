@@ -543,9 +543,9 @@ export default class BuildService extends BaseService {
       }
 
       await this.deleteQueue.add('delete', {
+        ...extractContextForQueue(),
         buildId: build.id,
         buildUuid: build.uuid,
-        ...extractContextForQueue(),
       });
 
       getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: delete queued');

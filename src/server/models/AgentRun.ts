@@ -26,6 +26,7 @@ export default class AgentRun extends Model {
     | 'running'
     | 'waiting_for_approval'
     | 'waiting_for_input'
+    | 'transitioned'
     | 'completed'
     | 'failed'
     | 'cancelled';
@@ -49,6 +50,7 @@ export default class AgentRun extends Model {
   usageSummary!: Record<string, unknown>;
   policySnapshot!: Record<string, unknown>;
   runPlanSnapshot!: Record<string, unknown> | null;
+  transition!: Record<string, unknown> | null;
   error!: Record<string, unknown> | null;
 
   static tableName = 'agent_runs';
@@ -74,6 +76,7 @@ export default class AgentRun extends Model {
           'running',
           'waiting_for_approval',
           'waiting_for_input',
+          'transitioned',
           'completed',
           'failed',
           'cancelled',
@@ -99,12 +102,13 @@ export default class AgentRun extends Model {
       usageSummary: { type: 'object', default: {} },
       policySnapshot: { type: 'object', default: {} },
       runPlanSnapshot: { type: ['object', 'null'], default: null },
+      transition: { type: ['object', 'null'], default: null },
       error: { type: ['object', 'null'], default: null },
     },
   };
 
   static get jsonAttributes() {
-    return ['sandboxRequirement', 'usageSummary', 'policySnapshot', 'runPlanSnapshot', 'error'];
+    return ['sandboxRequirement', 'usageSummary', 'policySnapshot', 'runPlanSnapshot', 'transition', 'error'];
   }
 
   static get relationMappings() {

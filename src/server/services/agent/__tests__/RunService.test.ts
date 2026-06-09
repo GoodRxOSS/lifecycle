@@ -30,6 +30,20 @@ jest.mock('server/models/AgentSession', () => ({
   },
 }));
 
+jest.mock('server/models/AgentThread', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(),
+  },
+}));
+
+jest.mock('server/models/AgentPendingAction', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(),
+  },
+}));
+
 jest.mock('server/lib/dependencies', () => ({}));
 
 jest.mock('../RunEventService', () => ({
@@ -43,10 +57,8 @@ jest.mock('../RunEventService', () => ({
 }));
 
 jest.mock('server/lib/agentSession/runtimeConfig', () => {
-  const actual = jest.requireActual('server/lib/agentSession/runtimeConfig');
   return {
     __esModule: true,
-    ...actual,
     resolveAgentSessionDurabilityConfig: jest.fn().mockResolvedValue({
       runExecutionLeaseMs: 30 * 60 * 1000,
       queuedRunDispatchStaleMs: 30 * 1000,
@@ -61,14 +73,18 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 import AgentRunService from '../RunService';
 import AgentRun from 'server/models/AgentRun';
 import AgentSession from 'server/models/AgentSession';
+import AgentThread from 'server/models/AgentThread';
+import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRunEventService from '../RunEventService';
 import { AgentRunOwnershipLostError } from '../AgentRunOwnershipLostError';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 
 const mockRunQuery = AgentRun.query as jest.Mock;
+const mockPendingActionQuery = AgentPendingAction.query as jest.Mock;
 const mockRunTransaction = AgentRun.transaction as jest.Mock;
 const mockRunKnex = AgentRun.knex as jest.Mock;
 const mockSessionQuery = AgentSession.query as jest.Mock;
+const mockThreadQuery = AgentThread.query as jest.Mock;
 const mockAppendStatusEvent = AgentRunEventService.appendStatusEvent as jest.Mock;
 const mockAppendStatusEventForRunInTransaction = AgentRunEventService.appendStatusEventForRunInTransaction as jest.Mock;
 const mockAppendChunkEventsForRunInTransaction = AgentRunEventService.appendChunkEventsForRunInTransaction as jest.Mock;
@@ -147,6 +163,9 @@ describe('AgentRunService', () => {
     jest.clearAllMocks();
     mockRunTransaction.mockImplementation(async (callback) => callback({ trx: true }));
     mockRunKnex.mockReturnValue({ raw: jest.fn().mockResolvedValue(undefined) });
+    mockPendingActionQuery.mockReturnValue({
+      where: jest.fn().mockReturnValue({ delete: jest.fn().mockResolvedValue(0) }),
+    });
     mockResolveDurabilityConfig.mockResolvedValue({
       runExecutionLeaseMs: 30 * 60 * 1000,
       queuedRunDispatchStaleMs: 30 * 1000,
@@ -256,9 +275,141 @@ describe('AgentRunService', () => {
       ).resolves.toBe(true);
 
       expect(query.where).toHaveBeenCalledWith({ threadId: 7, status: 'completed' });
-      expect(query.whereRaw).toHaveBeenCalledWith(`"runPlanSnapshot"->'agent'->>'id' = ?`, ['system.debug']);
+      expect(query.whereRaw).toHaveBeenCalledWith(`"runPlanSnapshot"->'agent'->>'sourceKind' = ?`, [
+        'build_context_chat',
+      ]);
       expect(query.whereIn).toHaveBeenCalledWith(expect.anything(), ['diagnose', 'investigate']);
       expect(query.first).toHaveBeenCalled();
+    });
+
+    it('scopes completed Debug run snapshots to the current build and selected deploy', async () => {
+      const query: any = {
+        where: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 1 }),
+      };
+      mockRunQuery.mockReturnValue(query);
+
+      await expect(
+        AgentRunService.hasPriorCompletedDebugIntentRun({
+          threadId: 7,
+          intents: ['diagnose', 'investigate'],
+          buildUuid: 'build-1',
+          selectedDeployUuid: 'deploy-1',
+        })
+      ).resolves.toBe(true);
+
+      expect(query.whereRaw).toHaveBeenCalledWith(`"runPlanSnapshot"->'agent'->>'sourceKind' = ?`, [
+        'build_context_chat',
+      ]);
+      expect(query.whereRaw).toHaveBeenCalledWith(`"runPlanSnapshot"->'source'->>'buildUuid' = ?`, ['build-1']);
+      expect(query.whereRaw).toHaveBeenCalledWith(
+        `"runPlanSnapshot"->'source'->'selectedDeploy'->>'selectedDeployUuid' = ?`,
+        ['deploy-1']
+      );
+      expect(query.first).toHaveBeenCalled();
+    });
+  });
+
+  describe('createQueuedContinuationRunInTransaction', () => {
+    it('creates a queued continuation run while excluding the locked source run from active-run checks', async () => {
+      const thread = {
+        id: 7,
+        uuid: 'thread-1',
+        metadata: {
+          selectedAgentDefinitionId: 'system.develop',
+        },
+      };
+      const session = {
+        id: 17,
+        uuid: 'session-1',
+      };
+      const sourceRun = {
+        id: 11,
+      };
+      const queuedRun = {
+        id: 12,
+        uuid: 'run-continuation-1',
+        status: 'queued',
+        queuedAt: '2026-05-01T00:00:06.000Z',
+      };
+      const sessionForUpdate = jest.fn().mockResolvedValue(session);
+      const findById = jest.fn().mockReturnValue({ forUpdate: sessionForUpdate });
+      const activeRunQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNot: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue(null),
+      };
+      const insertAndFetch = jest.fn().mockResolvedValue(queuedRun);
+      const patchAndFetchById = jest.fn().mockResolvedValue(undefined);
+      mockSessionQuery.mockReturnValue({ findById });
+      mockRunQuery.mockReturnValueOnce(activeRunQuery).mockReturnValueOnce({ insertAndFetch });
+      mockThreadQuery.mockReturnValue({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(77);
+
+      await expect(
+        AgentRunService.createQueuedContinuationRunInTransaction({
+          thread: thread as any,
+          session: session as any,
+          sourceRun: sourceRun as any,
+          policy: { defaultMode: 'require_approval', rules: {} as any },
+          requestedHarness: null,
+          requestedProvider: null,
+          requestedModel: null,
+          resolvedHarness: 'lifecycle_ai_sdk',
+          resolvedProvider: 'openai',
+          resolvedModel: 'gpt-5.4',
+          sandboxRequirement: { filesystem: 'persistent' },
+          runPlanSnapshot: runPlanSnapshot as any,
+          trx: { trx: true } as any,
+        })
+      ).resolves.toEqual({
+        run: queuedRun,
+        queuedEventSequence: 77,
+      });
+
+      expect(findById).toHaveBeenCalledWith(17);
+      expect(activeRunQuery.where).toHaveBeenCalledWith({ sessionId: 17 });
+      expect(activeRunQuery.whereNot).toHaveBeenCalledWith('id', 11);
+      expect(activeRunQuery.whereNotIn).toHaveBeenCalledWith('status', [
+        'transitioned',
+        'completed',
+        'failed',
+        'cancelled',
+      ]);
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 7,
+          sessionId: 17,
+          status: 'queued',
+          resolvedHarness: 'lifecycle_ai_sdk',
+          resolvedProvider: 'openai',
+          resolvedModel: 'gpt-5.4',
+          transition: null,
+          error: null,
+        })
+      );
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            selectedAgentDefinitionId: 'system.develop',
+            latestRunId: 'run-continuation-1',
+          }),
+        })
+      );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        queuedRun,
+        'run.queued',
+        {
+          threadId: 'thread-1',
+          sessionId: 'session-1',
+        },
+        { trx: true }
+      );
     });
   });
 
@@ -284,6 +435,7 @@ describe('AgentRunService', () => {
       cancelledAt: null,
       usageSummary: {},
       policySnapshot: { defaultMode: 'require_approval', rules: {} },
+      transition: null,
       error: null,
       createdAt: '2026-05-01T00:00:00.000Z',
       updatedAt: '2026-05-01T00:00:00.000Z',
@@ -294,6 +446,38 @@ describe('AgentRunService', () => {
         expect.objectContaining({
           runPlan: null,
           recovery: null,
+          transition: null,
+        })
+      );
+    });
+
+    it('exposes workspace escalation transition metadata', () => {
+      const transition = {
+        kind: 'workspace_escalation',
+        reason: 'create a React app',
+        toolCallId: 'tool-provision',
+        workspaceStatus: 'provisioning',
+        targetAgentDefinitionId: 'system.develop',
+        createdAt: '2026-05-01T00:00:05.000Z',
+        continuation: {
+          status: 'ui_auto_continue_fallback',
+          targetAgentDefinitionId: 'system.develop',
+          runId: null,
+        },
+      };
+
+      expect(
+        AgentRunService.serializeRun({
+          ...baseRun,
+          status: 'transitioned',
+          completedAt: '2026-05-01T00:00:05.000Z',
+          transition,
+          runPlanSnapshot: null,
+        } as any)
+      ).toEqual(
+        expect.objectContaining({
+          status: 'transitioned',
+          transition,
         })
       );
     });
@@ -377,6 +561,11 @@ describe('AgentRunService', () => {
             toolChoiceIds: ['choice-read-context'],
             mcpChoiceIds: ['choice-sample-mcp'],
           },
+        },
+        profile: {
+          kind: 'answer',
+          intent: 'chat',
+          workspaceCore: 'absent',
         },
         warnings: [{ code: 'sample_warning', message: 'Sample warning' }],
       });
@@ -560,9 +749,14 @@ describe('AgentRunService', () => {
       mockRunQuery.mockReturnValueOnce({ findById }).mockReturnValueOnce({ patchAndFetchById });
       const raw = jest.fn().mockResolvedValue(undefined);
       mockRunKnex.mockReturnValue({ raw });
+      const pendingDelete = jest.fn().mockResolvedValue(1);
+      const pendingWhere = jest.fn().mockReturnValue({ delete: pendingDelete });
+      mockPendingActionQuery.mockReturnValue({ where: pendingWhere });
 
       await expect(AgentRunService.cancelRun(VALID_RUN_UUID, 'sample-user')).resolves.toBe(cancelledRun);
 
+      expect(pendingWhere).toHaveBeenCalledWith({ runId: 1, status: 'pending' });
+      expect(pendingDelete).toHaveBeenCalled();
       expect(findById).toHaveBeenCalledWith(1);
       expect(patchAndFetchById).toHaveBeenCalledWith(
         1,
@@ -622,6 +816,72 @@ describe('AgentRunService', () => {
       // No cancellation transition occurred, so no cross-process abort is broadcast.
       expect(raw).not.toHaveBeenCalled();
       expect(getOwnedRun).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('supersedeRecoveryPausedRunForSession', () => {
+    const buildPausedLookup = (paused: unknown) => {
+      const first = jest.fn().mockResolvedValue(paused);
+      const orderBy = jest.fn().mockReturnValue({ first });
+      const whereStatus = jest.fn().mockReturnValue({ orderBy });
+      const whereSession = jest.fn().mockReturnValue({ where: whereStatus });
+      mockRunQuery.mockReturnValueOnce({ where: whereSession });
+      return { whereSession, whereStatus };
+    };
+
+    it('cancels a waiting_for_input run so a new message is not dead-ended', async () => {
+      const { whereSession, whereStatus } = buildPausedLookup({
+        id: 5,
+        uuid: VALID_RUN_UUID,
+        status: 'waiting_for_input',
+      });
+      const cancelSpy = jest
+        .spyOn(AgentRunService, 'cancelRun')
+        .mockResolvedValue({ uuid: VALID_RUN_UUID } as Awaited<ReturnType<typeof AgentRunService.cancelRun>>);
+
+      await AgentRunService.supersedeRecoveryPausedRunForSession(42, 'sample-user');
+
+      expect(whereSession).toHaveBeenCalledWith({ sessionId: 42 });
+      expect(whereStatus).toHaveBeenCalledWith('status', 'waiting_for_input');
+      expect(cancelSpy).toHaveBeenCalledWith(VALID_RUN_UUID, 'sample-user');
+    });
+
+    it('no-ops when the session has no paused run', async () => {
+      buildPausedLookup(undefined);
+      const cancelSpy = jest.spyOn(AgentRunService, 'cancelRun');
+
+      await AgentRunService.supersedeRecoveryPausedRunForSession(42, 'sample-user');
+
+      expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
+    it('resolves an owned session by uuid before superseding', async () => {
+      const findOne = jest.fn().mockResolvedValue({ id: 42 });
+      const select = jest.fn().mockReturnValue({ findOne });
+      mockSessionQuery.mockReturnValueOnce({ select });
+      const supersedeSpy = jest
+        .spyOn(AgentRunService, 'supersedeRecoveryPausedRunForSession')
+        .mockResolvedValue(undefined);
+
+      await AgentRunService.supersedeRecoveryPausedRunForSessionUuid('session-1', 'sample-user');
+
+      expect(findOne).toHaveBeenCalledWith({ uuid: 'session-1', userId: 'sample-user' });
+      expect(supersedeSpy).toHaveBeenCalledWith(42, 'sample-user');
+      supersedeSpy.mockRestore();
+    });
+
+    it('does not supersede when the session uuid is not owned by the user', async () => {
+      const findOne = jest.fn().mockResolvedValue(undefined);
+      const select = jest.fn().mockReturnValue({ findOne });
+      mockSessionQuery.mockReturnValueOnce({ select });
+      const supersedeSpy = jest
+        .spyOn(AgentRunService, 'supersedeRecoveryPausedRunForSession')
+        .mockResolvedValue(undefined);
+
+      await AgentRunService.supersedeRecoveryPausedRunForSessionUuid('session-1', 'other-user');
+
+      expect(supersedeSpy).not.toHaveBeenCalled();
+      supersedeSpy.mockRestore();
     });
   });
 
@@ -962,6 +1222,103 @@ describe('AgentRunService', () => {
         { trx: true }
       );
       expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 12);
+    });
+
+    it('settles pending approval actions when a run fails, not just on cancel', async () => {
+      const ownedRun = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+      };
+      const failedRun = { ...ownedRun, status: 'failed', executionOwner: null };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(ownedRun),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(failedRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(14);
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+      const pendingDelete = jest.fn().mockResolvedValue(1);
+      const pendingWhere = jest.fn().mockReturnValue({ delete: pendingDelete });
+      mockPendingActionQuery.mockReturnValue({ where: pendingWhere });
+
+      await AgentRunService.markFailedForExecutionOwner(VALID_RUN_UUID, 'worker-1', new Error('boom'));
+
+      expect(pendingWhere).toHaveBeenCalledWith({ runId: 17, status: 'pending' });
+      expect(pendingDelete).toHaveBeenCalled();
+    });
+
+    it('finalizes a transitioned run as terminal and emits run.transitioned', async () => {
+      const ownedRun = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: 'worker-1',
+      };
+      const transition = {
+        kind: 'workspace_escalation',
+        reason: 'create a React app',
+        toolCallId: 'tool-provision',
+        workspaceStatus: 'provisioning',
+        targetAgentDefinitionId: 'system.develop',
+        createdAt: '2026-05-01T00:00:05.000Z',
+        continuation: {
+          status: 'ui_auto_continue_fallback',
+          targetAgentDefinitionId: 'system.develop',
+          runId: null,
+        },
+      };
+      const transitionedRun = {
+        ...ownedRun,
+        status: 'transitioned',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        usageSummary: {
+          totalTokens: 12,
+        },
+        transition,
+      };
+      const findOne = jest.fn().mockReturnValue({
+        forUpdate: jest.fn().mockResolvedValue(ownedRun),
+      });
+      const patchAndFetchById = jest.fn().mockResolvedValue(transitionedRun);
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(13);
+
+      mockRunQuery.mockReturnValueOnce({ findOne }).mockReturnValueOnce({ patchAndFetchById });
+
+      await expect(
+        AgentRunService.finalizeRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', async () => ({
+          status: 'transitioned',
+          patch: {
+            usageSummary: {
+              totalTokens: 12,
+            },
+            transition,
+          } as any,
+        }))
+      ).resolves.toBe(transitionedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'transitioned',
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          transition,
+        })
+      );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        transitionedRun,
+        'run.transitioned',
+        expect.objectContaining({
+          status: 'transitioned',
+          transition,
+        }),
+        { trx: true }
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 13);
     });
 
     it('throws ownership loss without patching or appending a status event when the owner is stale', async () => {

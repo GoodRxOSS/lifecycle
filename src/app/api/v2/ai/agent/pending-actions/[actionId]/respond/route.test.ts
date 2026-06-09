@@ -31,6 +31,7 @@ jest.mock('server/lib/get-user', () => {
 
 jest.mock('server/lib/agentSession/githubToken', () => ({
   resolveRequestGitHubToken: jest.fn(),
+  resolveRequestGitHubAuth: jest.fn(),
 }));
 
 jest.mock('server/services/agent/ApprovalService', () => ({
@@ -45,11 +46,12 @@ jest.mock('server/services/agent/ApprovalService', () => ({
 
 import { POST } from './route';
 import { getRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import ApprovalService from 'server/services/agent/ApprovalService';
+import { ConflictError } from 'server/lib/appError';
 
 const mockGetRequestUserIdentity = getRequestUserIdentity as jest.Mock;
-const mockResolveRequestGitHubToken = resolveRequestGitHubToken as jest.Mock;
+const mockResolveRequestGitHubAuth = resolveRequestGitHubAuth as jest.Mock;
 const mockResolvePendingAction = ApprovalService.resolvePendingAction as jest.Mock;
 const mockSerializePendingAction = ApprovalService.serializePendingAction as jest.Mock;
 
@@ -76,7 +78,11 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
-    mockResolveRequestGitHubToken.mockResolvedValue('sample-gh-token');
+    mockResolveRequestGitHubAuth.mockResolvedValue({
+      githubToken: 'sample-gh-token',
+      source: 'user',
+      githubUsername: 'octocat',
+    });
     mockResolvePendingAction.mockResolvedValue({
       id: 'action-1',
       status: 'denied',
@@ -91,7 +97,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
       description: 'A workspace edit requires approval.',
       requestedAt: '2026-04-11T00:00:00.000Z',
       expiresAt: null,
-      toolName: 'mcp__sandbox__workspace_edit_file',
+      toolName: 'mcp__workspace_core__edit_file',
       argumentsSummary: [],
       commandPreview: null,
       fileChangePreview: [],
@@ -127,7 +133,14 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
         reason: 'not needed',
         source: 'endpoint',
       },
-      { githubToken: 'sample-gh-token' }
+      {
+        githubAuth: {
+          githubToken: 'sample-gh-token',
+          source: 'user',
+          githubUsername: 'octocat',
+        },
+        alwaysAllow: false,
+      }
     );
     expect(body.data).toEqual({
       id: 'action-1',
@@ -139,7 +152,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
       description: 'A workspace edit requires approval.',
       requestedAt: '2026-04-11T00:00:00.000Z',
       expiresAt: null,
-      toolName: 'mcp__sandbox__workspace_edit_file',
+      toolName: 'mcp__workspace_core__edit_file',
       argumentsSummary: [],
       commandPreview: null,
       fileChangePreview: [],
@@ -171,7 +184,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
       await expect(response.json()).resolves.toMatchObject({
         error: { message: testCase.message },
       });
-      expect(mockResolveRequestGitHubToken).not.toHaveBeenCalled();
+      expect(mockResolveRequestGitHubAuth).not.toHaveBeenCalled();
       expect(mockResolvePendingAction).not.toHaveBeenCalled();
     }
   });
@@ -183,7 +196,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { message: 'Request body must be a JSON object' },
     });
-    expect(mockResolveRequestGitHubToken).not.toHaveBeenCalled();
+    expect(mockResolveRequestGitHubAuth).not.toHaveBeenCalled();
     expect(mockResolvePendingAction).not.toHaveBeenCalled();
   });
 
@@ -207,7 +220,38 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
         reason: null,
         source: 'endpoint',
       },
-      { githubToken: 'sample-gh-token' }
+      {
+        githubAuth: {
+          githubToken: 'sample-gh-token',
+          source: 'user',
+          githubUsername: 'octocat',
+        },
+        alwaysAllow: false,
+      }
     );
+  });
+
+  it('returns a typed 409 when GitHub user auth is required for approval', async () => {
+    mockResolvePendingAction.mockRejectedValue(
+      new ConflictError('GitHub authorization is required to approve this repair.', 'GITHUB_USER_AUTH_REQUIRED', {
+        actionId: 'action-1',
+        toolCallId: 'tool-1',
+      })
+    );
+
+    const response = await POST(makeRequest({ approved: true }), {
+      params: Promise.resolve({ actionId: 'action-1' }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'GITHUB_USER_AUTH_REQUIRED',
+        details: {
+          actionId: 'action-1',
+          toolCallId: 'tool-1',
+        },
+      },
+    });
   });
 });

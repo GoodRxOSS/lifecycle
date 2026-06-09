@@ -106,12 +106,49 @@ describe('agentRunExecute', () => {
         dispatchAttemptId: 'attempt-1',
         reason: 'submit',
         encryptedGithubToken: 'encrypted-token',
+        githubTokenSource: 'user',
+        githubUsername: 'sample-github-user',
+        githubTokenWriteAuthorized: true,
       },
     } as any);
 
     expect(mockExecuteRun).toHaveBeenCalledWith(run, {
       requestGitHubToken: 'decrypted:encrypted-token',
+      requestGitHubAuth: {
+        githubToken: 'decrypted:encrypted-token',
+        source: 'user',
+        githubUsername: 'sample-github-user',
+        writeAuthorized: true,
+      },
       dispatchAttemptId: 'attempt-1',
+      dispatchReason: 'submit',
+    });
+  });
+
+  it('treats legacy encrypted-token jobs without source metadata as read-only none-source auth', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockExecuteRun.mockResolvedValue({ run });
+
+    await processAgentRunExecute({
+      data: {
+        runId: 'run-1',
+        dispatchAttemptId: 'attempt-1',
+        reason: 'submit',
+        encryptedGithubToken: 'encrypted-token',
+      },
+    } as any);
+
+    expect(mockExecuteRun).toHaveBeenCalledWith(run, {
+      requestGitHubToken: 'decrypted:encrypted-token',
+      requestGitHubAuth: {
+        githubToken: 'decrypted:encrypted-token',
+        source: 'none',
+        githubUsername: null,
+        writeAuthorized: false,
+      },
+      dispatchAttemptId: 'attempt-1',
+      dispatchReason: 'submit',
     });
   });
 

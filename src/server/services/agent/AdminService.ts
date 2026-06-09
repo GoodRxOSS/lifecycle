@@ -212,7 +212,7 @@ function serializeSessionSummary(
     selectedServices: session.selectedServices || [],
     startupFailure: session.startupFailure || null,
     lastActivity: session.lastActivity,
-    endedAt: session.endedAt,
+    archivedAt: session.archivedAt,
     threadCount: counts?.threadCount ?? 0,
     pendingActionsCount: counts?.pendingActionsCount ?? 0,
     lastRunAt: counts?.lastRunAt ?? null,

@@ -15,11 +15,16 @@
  */
 
 import { UpdatePrLabelsTool } from '../updatePrLabels';
+import { GitHubUserAuthRequiredError } from '../../shared/githubClient';
 
 describe('UpdatePrLabelsTool', () => {
   const mockOctokit = { request: jest.fn() };
+  const userAuth = { provider: 'github' as const, source: 'user' as const, required: true };
   const mockGithubClient = {
     getOctokit: jest.fn().mockResolvedValue(mockOctokit),
+    getOctokitWithAuth: jest.fn().mockResolvedValue({ octokit: mockOctokit, auth: userAuth }),
+    isRepoAllowed: jest.fn().mockReturnValue(true),
+    getAllowedPullRequestNumber: jest.fn().mockReturnValue(null),
   } as any;
 
   let tool: UpdatePrLabelsTool;
@@ -35,6 +40,9 @@ describe('UpdatePrLabelsTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
+    mockGithubClient.getOctokitWithAuth.mockResolvedValue({ octokit: mockOctokit, auth: userAuth });
+    mockGithubClient.isRepoAllowed.mockReturnValue(true);
+    mockGithubClient.getAllowedPullRequestNumber.mockReturnValue(null);
     tool = new UpdatePrLabelsTool(mockGithubClient);
   });
 
@@ -42,6 +50,19 @@ describe('UpdatePrLabelsTool', () => {
     const result = await tool.execute(baseArgs, { aborted: true } as any);
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('CANCELLED');
+  });
+
+  it('fails closed when an approved label mutation has no user GitHub auth', async () => {
+    mockGithubClient.getOctokitWithAuth.mockRejectedValueOnce(
+      new GitHubUserAuthRequiredError({ provider: 'github', source: 'none', required: true })
+    );
+
+    const result = await tool.execute(baseArgs, undefined, { toolCallId: 'tool-1' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('GITHUB_USER_AUTH_REQUIRED');
+    expect(result.auth).toEqual({ provider: 'github', source: 'none', required: true });
+    expect(mockOctokit.request).not.toHaveBeenCalled();
   });
 
   it('adds missing labels and preserves existing labels', async () => {
@@ -53,13 +74,22 @@ describe('UpdatePrLabelsTool', () => {
       })
       .mockResolvedValueOnce({ data: {} });
 
-    const result = await tool.execute({
-      ...baseArgs,
-      action: 'add',
-      labels: ['lifecycle-deploy!', 'BUG'],
-    });
+    const result = await tool.execute(
+      {
+        ...baseArgs,
+        action: 'add',
+        labels: ['lifecycle-deploy!', 'BUG'],
+      },
+      undefined,
+      { toolCallId: 'tool-labels' }
+    );
 
     expect(result.success).toBe(true);
+    expect(result.auth).toEqual(userAuth);
+    expect(mockGithubClient.getOctokitWithAuth).toHaveBeenCalledWith('agent-runtime-update-pr-labels', {
+      requireUserAuth: true,
+      toolCallId: 'tool-labels',
+    });
     expect(mockOctokit.request).toHaveBeenNthCalledWith(
       2,
       'PUT /repos/{owner}/{repo}/issues/{issue_number}/labels',
@@ -84,7 +114,7 @@ describe('UpdatePrLabelsTool', () => {
     const result = await tool.execute({
       ...baseArgs,
       action: 'remove',
-      labels: ['LIFECYCLE-DEPLOY!'],
+      labels: ['ENHANCEMENT'],
     });
 
     expect(result.success).toBe(true);
@@ -92,13 +122,15 @@ describe('UpdatePrLabelsTool', () => {
       2,
       'PUT /repos/{owner}/{repo}/issues/{issue_number}/labels',
       expect.objectContaining({
-        labels: ['enhancement'],
+        labels: ['lifecycle-deploy!'],
       })
     );
   });
 
-  it('sets labels directly without fetching current labels', async () => {
-    mockOctokit.request.mockResolvedValueOnce({ data: {} });
+  it('sets labels after checking current labels for protected drops', async () => {
+    mockOctokit.request
+      .mockResolvedValueOnce({ data: { labels: [{ name: 'bug' }] } })
+      .mockResolvedValueOnce({ data: {} });
 
     const result = await tool.execute({
       ...baseArgs,
@@ -107,13 +139,84 @@ describe('UpdatePrLabelsTool', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(mockOctokit.request).toHaveBeenCalledTimes(1);
-    expect(mockOctokit.request).toHaveBeenCalledWith(
+    expect(mockOctokit.request).toHaveBeenCalledTimes(2);
+    expect(mockOctokit.request).toHaveBeenNthCalledWith(
+      2,
       'PUT /repos/{owner}/{repo}/issues/{issue_number}/labels',
       expect.objectContaining({
         labels: ['lifecycle-deploy!', 'ready-for-qa'],
       })
     );
+  });
+
+  it('refuses to remove the deploy label', async () => {
+    mockOctokit.request.mockResolvedValueOnce({
+      data: { labels: [{ name: 'lifecycle-deploy!' }, { name: 'bug' }] },
+    });
+
+    const result = await tool.execute(
+      {
+        ...baseArgs,
+        action: 'remove',
+        labels: ['lifecycle-deploy!'],
+      },
+      undefined,
+      { toolCallId: 'tool-labels' }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('PROTECTED_LABEL');
+    expect(result.auth).toEqual(userAuth);
+    expect(mockGithubClient.getOctokitWithAuth).toHaveBeenCalledWith('agent-runtime-update-pr-labels', {
+      requireUserAuth: true,
+      toolCallId: 'tool-labels',
+    });
+    expect(mockOctokit.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a set that drops the deploy label', async () => {
+    mockOctokit.request.mockResolvedValueOnce({
+      data: { labels: [{ name: 'lifecycle-deploy!' }] },
+    });
+
+    const result = await tool.execute({
+      ...baseArgs,
+      action: 'set',
+      labels: ['ready-for-qa'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('PROTECTED_LABEL');
+  });
+
+  it('rejects repositories outside the build scope', async () => {
+    mockGithubClient.isRepoAllowed.mockReturnValue(false);
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('REPO_NOT_ALLOWED');
+    expect(mockGithubClient.getOctokit).not.toHaveBeenCalled();
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a pull request number outside the build scope', async () => {
+    mockGithubClient.getAllowedPullRequestNumber.mockReturnValue(999);
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('PR_NOT_ALLOWED');
+    expect(result.agentContent).toContain('#123');
+    expect(result.agentContent).toContain('#999');
+    expect(mockGithubClient.getOctokit).not.toHaveBeenCalled();
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('allows the build pull request when a PR scope is configured', async () => {
+    mockGithubClient.getAllowedPullRequestNumber.mockReturnValue(123);
+    mockOctokit.request.mockResolvedValueOnce({ data: { labels: [] } }).mockResolvedValueOnce({ data: {} });
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(true);
   });
 
   it('rejects empty labels', async () => {
@@ -135,6 +238,7 @@ describe('UpdatePrLabelsTool', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('INVALID_ACTION');
     expect(mockGithubClient.getOctokit).not.toHaveBeenCalled();
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported action value', async () => {
@@ -146,5 +250,6 @@ describe('UpdatePrLabelsTool', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('INVALID_ACTION');
     expect(mockGithubClient.getOctokit).not.toHaveBeenCalled();
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
   });
 });

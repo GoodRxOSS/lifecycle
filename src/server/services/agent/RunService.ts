@@ -20,7 +20,9 @@ import { getLogger } from 'server/lib/logger';
 import AgentRun from 'server/models/AgentRun';
 import AgentThread from 'server/models/AgentThread';
 import AgentSession from 'server/models/AgentSession';
-import type { AgentApprovalPolicy, AgentRunStatus, AgentRunUsageSummary } from './types';
+import AgentPendingAction from 'server/models/AgentPendingAction';
+import { PgNotificationListener, type PgListenKnexClient } from 'server/lib/pgNotificationListener';
+import type { AgentApprovalPolicy, AgentRunStatus, AgentRunTransition, AgentRunUsageSummary } from './types';
 import type { AgentUiMessageChunk } from './streamChunks';
 import AgentRunEventService from './RunEventService';
 import { isAgentRunPlanSnapshotV1, type AgentDebugRunIntent, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
@@ -33,25 +35,11 @@ import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/run
 
 const activeRunControllers = new Map<string, AbortController>();
 const RUN_NOT_FOUND_ERROR = 'Agent run not found';
-export const TERMINAL_RUN_STATUSES: AgentRunStatus[] = ['completed', 'failed', 'cancelled'];
+export const TERMINAL_RUN_STATUSES: AgentRunStatus[] = ['transitioned', 'completed', 'failed', 'cancelled'];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // Best-effort fast cross-process abort; the ownership fence still stops a missed worker.
 const RUN_CANCEL_NOTIFY_CHANNEL = 'agent_run_cancel';
-
-type PgListenConnection = {
-  on(event: 'notification', listener: (notification: { channel?: string; payload?: string }) => void): void;
-  on(event: 'error', listener: (error: unknown) => void): void;
-  query(sql: string): Promise<unknown>;
-};
-
-let cancelNotificationConnection: PgListenConnection | null = null;
-let cancelNotificationListenPromise: Promise<void> | null = null;
-
-function clearCancelNotificationConnection(): void {
-  cancelNotificationConnection = null;
-  cancelNotificationListenPromise = null;
-}
 
 function parseCancelNotification(payload: string | undefined): string | null {
   if (!payload) {
@@ -68,21 +56,17 @@ function parseCancelNotification(payload: string | undefined): string | null {
   }
 }
 
-function handleCancelNotification(notification: { channel?: string; payload?: string }): void {
-  if (notification.channel !== RUN_CANCEL_NOTIFY_CHANNEL) {
-    return;
-  }
-
-  const runUuid = parseCancelNotification(notification.payload);
-  if (runUuid) {
-    activeRunControllers.get(runUuid)?.abort();
-  }
-}
-
-function handleCancelNotificationError(error: unknown): void {
-  getLogger().warn({ error }, 'AgentExec: run-cancel notification listener failed');
-  clearCancelNotificationConnection();
-}
+const runCancelNotificationListener = new PgNotificationListener({
+  channel: RUN_CANCEL_NOTIFY_CHANNEL,
+  getKnex: () => AgentRun.knex() as unknown as PgListenKnexClient,
+  onNotification: (payload) => {
+    const runUuid = parseCancelNotification(payload);
+    if (runUuid) {
+      activeRunControllers.get(runUuid)?.abort();
+    }
+  },
+  logLabel: 'AgentExec run-cancel',
+});
 
 export class ActiveAgentRunError extends ConflictError {
   constructor() {
@@ -230,6 +214,8 @@ function statusEventType(status: AgentRunStatus): string {
     ? 'run.queued'
     : status === 'completed'
     ? 'run.completed'
+    : status === 'transitioned'
+    ? 'run.transitioned'
     : status === 'failed'
     ? 'run.failed'
     : status === 'cancelled'
@@ -263,6 +249,20 @@ type OwnerStatusEventContext = {
   dispatchAttemptId?: string;
 };
 
+type QueuedRunRecordInput = {
+  thread: AgentThread;
+  session: AgentSession;
+  policy: AgentApprovalPolicy;
+  requestedHarness?: string | null;
+  requestedProvider?: string | null;
+  requestedModel?: string | null;
+  resolvedHarness: string;
+  resolvedProvider: string;
+  resolvedModel: string;
+  sandboxRequirement?: Record<string, unknown>;
+  runPlanSnapshot: AgentRunPlanSnapshotV1;
+};
+
 type RecoveryPauseOptions = {
   now?: Date;
   expectedExecutionOwner?: string | null;
@@ -275,31 +275,12 @@ type RecoveryPauseOptions = {
 };
 
 export default class AgentRunService {
-  static async createQueuedRun({
-    thread,
-    session,
-    policy,
-    requestedHarness,
-    requestedProvider,
-    requestedModel,
+  private static validateQueuedRunRecordInput({
     resolvedHarness,
     resolvedProvider,
     resolvedModel,
-    sandboxRequirement,
     runPlanSnapshot,
-  }: {
-    thread: AgentThread;
-    session: AgentSession;
-    policy: AgentApprovalPolicy;
-    requestedHarness?: string | null;
-    requestedProvider?: string | null;
-    requestedModel?: string | null;
-    resolvedHarness: string;
-    resolvedProvider: string;
-    resolvedModel: string;
-    sandboxRequirement?: Record<string, unknown>;
-    runPlanSnapshot: AgentRunPlanSnapshotV1;
-  }): Promise<AgentRun> {
+  }: QueuedRunRecordInput): void {
     if (!resolvedHarness?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run harness is required.');
     }
@@ -312,9 +293,25 @@ export default class AgentRunService {
     if (!isAgentRunPlanSnapshotV1(runPlanSnapshot)) {
       throw new InvalidAgentRunDefaultsError('Agent run plan snapshot is required.');
     }
+  }
 
-    const now = new Date().toISOString();
-    const record: PartialModelObject<AgentRun> = {
+  private static buildQueuedRunRecord(
+    {
+      thread,
+      session,
+      policy,
+      requestedHarness,
+      requestedProvider,
+      requestedModel,
+      resolvedHarness,
+      resolvedProvider,
+      resolvedModel,
+      sandboxRequirement,
+      runPlanSnapshot,
+    }: QueuedRunRecordInput,
+    now: string
+  ): PartialModelObject<AgentRun> {
+    return {
       threadId: thread.id,
       sessionId: session.id,
       status: 'queued',
@@ -333,8 +330,17 @@ export default class AgentRunService {
       usageSummary: {},
       policySnapshot: policy as unknown as Record<string, unknown>,
       runPlanSnapshot: runPlanSnapshot as unknown as Record<string, unknown>,
+      transition: null,
       error: null,
     };
+  }
+
+  static async createQueuedRun(input: QueuedRunRecordInput): Promise<AgentRun> {
+    this.validateQueuedRunRecordInput(input);
+
+    const { thread, session } = input;
+    const now = new Date().toISOString();
+    const record = this.buildQueuedRunRecord(input, now);
 
     const run = await AgentRun.transaction(async (trx) => {
       await AgentSession.query(trx).findById(session.id).forUpdate();
@@ -369,6 +375,51 @@ export default class AgentRunService {
     return run;
   }
 
+  static async createQueuedContinuationRunInTransaction(
+    input: QueuedRunRecordInput & {
+      sourceRun: Pick<AgentRun, 'id'>;
+      trx: Transaction;
+    }
+  ): Promise<{ run: AgentRun; queuedEventSequence: number | null }> {
+    this.validateQueuedRunRecordInput(input);
+
+    const { thread, session, sourceRun, trx } = input;
+    const now = new Date().toISOString();
+    await AgentSession.query(trx).findById(session.id).forUpdate();
+
+    const activeRun = await AgentRun.query(trx)
+      .where({ sessionId: session.id })
+      .whereNot('id', sourceRun.id)
+      .whereNotIn('status', TERMINAL_RUN_STATUSES)
+      .orderBy('createdAt', 'desc')
+      .orderBy('id', 'desc')
+      .first();
+    if (activeRun) {
+      throw new ActiveAgentRunError();
+    }
+
+    const queuedRun = await AgentRun.query(trx).insertAndFetch(this.buildQueuedRunRecord(input, now));
+    await AgentThread.query(trx).patchAndFetchById(thread.id, {
+      lastRunAt: now,
+      metadata: {
+        ...(thread.metadata || {}),
+        latestRunId: queuedRun.uuid,
+      },
+    } as Partial<AgentThread>);
+
+    const queuedEventSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
+      queuedRun,
+      'run.queued',
+      {
+        threadId: thread.uuid,
+        sessionId: session.uuid,
+      },
+      trx
+    );
+
+    return { run: queuedRun, queuedEventSequence };
+  }
+
   static registerAbortController(runUuid: string, controller: AbortController): void {
     activeRunControllers.set(runUuid, controller);
     // Lazily start the cross-process cancel listener once this worker owns a controller.
@@ -376,48 +427,14 @@ export default class AgentRunService {
   }
 
   static clearAbortController(runUuid: string): void {
+    // Abort before deregistering — a failed/ownership-lost run otherwise leaves a zombie stream cancel can't reach.
+    activeRunControllers.get(runUuid)?.abort();
     activeRunControllers.delete(runUuid);
   }
 
-  // Single shared LISTEN connection per process; a connection drop clears the cache so the next caller re-listens.
+  // Single shared LISTEN connection per process; errors release the pool slot and the next caller re-listens.
   private static async ensureCancelNotificationListener(): Promise<void> {
-    if (cancelNotificationConnection) {
-      return;
-    }
-
-    if (cancelNotificationListenPromise) {
-      return cancelNotificationListenPromise;
-    }
-
-    cancelNotificationListenPromise = (async () => {
-      const knex = AgentRun.knex() as unknown as {
-        client: {
-          acquireConnection(): Promise<PgListenConnection>;
-          releaseConnection(connection: PgListenConnection): Promise<void>;
-        };
-      };
-      const connection = await knex.client.acquireConnection();
-
-      try {
-        connection.on('notification', handleCancelNotification);
-        connection.on('error', handleCancelNotificationError);
-        await connection.query(`LISTEN ${RUN_CANCEL_NOTIFY_CHANNEL}`);
-        cancelNotificationConnection = connection;
-      } catch (error) {
-        await knex.client.releaseConnection(connection);
-        throw error;
-      }
-    })()
-      .catch((error) => {
-        clearCancelNotificationConnection();
-        getLogger().warn({ error }, 'AgentExec: run-cancel notification listener unavailable');
-        throw error;
-      })
-      .finally(() => {
-        cancelNotificationListenPromise = null;
-      });
-
-    return cancelNotificationListenPromise;
+    return runCancelNotificationListener.ensureListening();
   }
 
   // Best-effort broadcast so workers on other replicas abort their local controller.
@@ -444,19 +461,32 @@ export default class AgentRunService {
   static async hasPriorCompletedDebugIntentRun({
     threadId,
     intents,
+    buildUuid,
+    selectedDeployUuid,
   }: {
     threadId: number;
     intents: AgentDebugRunIntent[];
+    buildUuid?: string | null;
+    selectedDeployUuid?: string | null;
   }): Promise<boolean> {
     if (!Number.isInteger(threadId) || threadId <= 0 || intents.length === 0) {
       return false;
     }
 
-    const run = await AgentRun.query()
+    const query = AgentRun.query()
       .where({ threadId, status: 'completed' })
-      .whereRaw(`"runPlanSnapshot"->'agent'->>'id' = ?`, ['system.debug'])
-      .whereIn(raw(`"runPlanSnapshot"->'debug'->>'resolvedIntent'`), intents)
-      .first();
+      .whereRaw(`"runPlanSnapshot"->'agent'->>'sourceKind' = ?`, ['build_context_chat'])
+      .whereIn(raw(`"runPlanSnapshot"->'debug'->>'resolvedIntent'`), intents);
+
+    if (buildUuid) {
+      query.whereRaw(`"runPlanSnapshot"->'source'->>'buildUuid' = ?`, [buildUuid]);
+    }
+
+    if (selectedDeployUuid) {
+      query.whereRaw(`"runPlanSnapshot"->'source'->'selectedDeploy'->>'selectedDeployUuid' = ?`, [selectedDeployUuid]);
+    }
+
+    const run = await query.first();
 
     return Boolean(run);
   }
@@ -650,6 +680,8 @@ export default class AgentRunService {
         heartbeatAt: null,
       } as Partial<AgentRun>);
 
+      await this.settlePendingActionsForRunInTransaction(lockedRun.id, trx);
+
       latestSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
         cancelledRun,
         statusEventType('cancelled'),
@@ -662,6 +694,9 @@ export default class AgentRunService {
       await AgentRunEventService.notifyRunEventsInserted(run.uuid, latestSequence);
       // Fast cross-process abort for a worker executing this run on another replica.
       await this.notifyRunCancelled(run.uuid);
+      // Lazy import: RunService <-> harness cycle.
+      const { persistInterruptedRunAssistantMessage } = await import('./runInterruptedMessagePersistence');
+      await persistInterruptedRunAssistantMessage(run);
     }
 
     this.clearAbortController(run.uuid);
@@ -670,6 +705,30 @@ export default class AgentRunService {
 
   static isTerminalStatus(status: AgentRunStatus): boolean {
     return TERMINAL_RUN_STATUSES.includes(status);
+  }
+
+  // A terminal run has no one left to answer its approvals; stranded 'pending' rows block new threads.
+  private static async settlePendingActionsForRunInTransaction(runId: number, trx: Transaction): Promise<void> {
+    await AgentPendingAction.query(trx).where({ runId, status: 'pending' }).delete();
+  }
+
+  /** Cancels a recovery-paused (waiting_for_input) run so new work is not dead-ended by the active-run guard. */
+  static async supersedeRecoveryPausedRunForSession(sessionId: number, userId: string): Promise<void> {
+    const paused = await AgentRun.query()
+      .where({ sessionId })
+      .where('status', 'waiting_for_input')
+      .orderBy('id', 'desc')
+      .first();
+    if (paused) {
+      await this.cancelRun(paused.uuid, userId);
+    }
+  }
+
+  static async supersedeRecoveryPausedRunForSessionUuid(sessionUuid: string, userId: string): Promise<void> {
+    const session = await AgentSession.query().select('id').findOne({ uuid: sessionUuid, userId });
+    if (session) {
+      await this.supersedeRecoveryPausedRunForSession(session.id, userId);
+    }
   }
 
   static async assertRunExecutionOwner(runUuid: string, executionOwner: string): Promise<AgentRun> {
@@ -729,6 +788,10 @@ export default class AgentRunService {
           : {}),
       } as Partial<AgentRun>);
 
+      if (TERMINAL_RUN_STATUSES.includes(status)) {
+        await this.settlePendingActionsForRunInTransaction(run.id, trx);
+      }
+
       latestSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
         nextRun,
         statusEventType(status),
@@ -767,6 +830,7 @@ export default class AgentRunService {
         startedAt: now,
         completedAt: null,
         cancelledAt: null,
+        transition: null,
         error: null,
         resolvedHarness: resolved.resolvedHarness,
         resolvedProvider: resolved.provider,
@@ -837,6 +901,8 @@ export default class AgentRunService {
       eventContext
     );
     this.clearAbortController(runUuid);
+    const { persistInterruptedRunAssistantMessage } = await import('./runInterruptedMessagePersistence');
+    await persistInterruptedRunAssistantMessage(failedRun);
     return failedRun;
   }
 
@@ -924,6 +990,10 @@ export default class AgentRunService {
           : {}),
       } as Partial<AgentRun>);
 
+      if (TERMINAL_RUN_STATUSES.includes(result.status)) {
+        await this.settlePendingActionsForRunInTransaction(run.id, trx);
+      }
+
       latestSequence = await AgentRunEventService.appendStatusEventForRunInTransaction(
         nextRun,
         statusEventType(result.status),
@@ -955,6 +1025,7 @@ export default class AgentRunService {
       status,
       error: updatedRun.error || null,
       usageSummary: updatedRun.usageSummary || {},
+      transition: updatedRun.transition || null,
       ...(executionOwner ? { executionOwner } : {}),
       ...(eventContext.dispatchAttemptId ? { dispatchAttemptId: eventContext.dispatchAttemptId } : {}),
     };
@@ -1146,6 +1217,7 @@ export default class AgentRunService {
       usageSummary: run.usageSummary || {},
       policySnapshot: run.policySnapshot || {},
       runPlan: serializeRunPlanSummary(run.runPlanSnapshot),
+      transition: (run.transition || null) as unknown as AgentRunTransition | null,
       recovery: readRunRecovery(run.error),
       error: run.error,
       createdAt: run.createdAt || null,

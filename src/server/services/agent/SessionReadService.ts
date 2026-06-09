@@ -23,6 +23,7 @@ import type { PaginationMetadata } from 'server/lib/paginate';
 import { raw } from 'objection';
 import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import { normalizeWorkspaceRuntimeFailure } from 'server/lib/agentSession/startupFailureState';
+import { resolveAgentSessionCleanupConfig } from 'server/lib/agentSession/runtimeConfig';
 import AgentThreadService from './ThreadService';
 import AgentSandboxService from './SandboxService';
 import AgentUsageService, { type AgentUsageAggregate } from './AgentUsageService';
@@ -31,7 +32,7 @@ export const DEFAULT_AGENT_SESSION_LIST_LIMIT = 25;
 export const MAX_AGENT_SESSION_LIST_LIMIT = 100;
 
 interface ListOwnedSessionRecordOptions {
-  includeEnded?: boolean;
+  includeArchived?: boolean;
   page?: number;
   limit?: number;
 }
@@ -41,6 +42,9 @@ interface SessionRecordRelations {
   sandbox: AgentSandbox | null;
   exposures: AgentSandboxExposure[];
   defaultThread: AgentThread | null;
+  title: string | null;
+  /** When the suspended workspace will be reclaimed; null when kept or not suspended. */
+  workspaceRetainedUntil: string | null;
   conversationSummary: AgentSessionConversationSummary;
   usage: AgentUsageAggregate;
 }
@@ -57,9 +61,9 @@ interface AgentThreadConversationSummaryRow {
   lastActivityAt?: string | Date | null;
 }
 
-function mapSessionStatus(session: AgentSession): 'ready' | 'ended' | 'error' {
-  if (session.status === 'ended') {
-    return 'ended';
+function mapSessionStatus(session: AgentSession): 'ready' | 'archived' | 'error' {
+  if (session.status === 'archived') {
+    return 'archived';
   }
 
   if (session.status === 'error' || session.chatStatus === AgentChatStatus.ERROR) {
@@ -185,6 +189,7 @@ function serializeEmptySandbox(session: AgentSession) {
     providerState: {},
     exposures: [],
     suspendedAt: null,
+    retainedUntil: null,
     endedAt: null,
     error: failedWorkspace
       ? normalizeWorkspaceRuntimeFailure(null, {
@@ -244,6 +249,62 @@ function readUsefulThreadTitle(thread: AgentThread | null): string | null {
   return title;
 }
 
+const SESSION_TITLE_MAX_LENGTH = 80;
+
+interface FirstUserMessageRow {
+  sessionId: number | string;
+  parts: unknown;
+}
+
+function deriveTitleFromMessageParts(parts: unknown): string | null {
+  if (!Array.isArray(parts)) {
+    return null;
+  }
+
+  for (const part of parts) {
+    if (!isRecord(part) || part.type !== 'text') {
+      continue;
+    }
+
+    const text = readString(part.text);
+    if (!text) {
+      continue;
+    }
+
+    const singleLine = text.replace(/\s+/g, ' ').trim();
+    if (!singleLine) {
+      continue;
+    }
+
+    return singleLine.length > SESSION_TITLE_MAX_LENGTH
+      ? `${singleLine.slice(0, SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}…`
+      : singleLine;
+  }
+
+  return null;
+}
+
+/** First user message per session, as the title fallback when no thread was explicitly titled. */
+async function loadFirstUserMessageParts(sessionIds: number[]): Promise<Map<number, unknown>> {
+  const rows = (await AgentThread.knex().raw(
+    `
+    select distinct on (t."sessionId") t."sessionId" as "sessionId", m.parts as parts
+    from agent_messages m
+    join agent_threads t on t.id = m."threadId"
+    where t."sessionId" = any(?) and m.role = 'user'
+    order by t."sessionId", m."createdAt" asc, m.id asc
+  `,
+    [sessionIds]
+  )) as { rows: FirstUserMessageRow[] };
+
+  const partsBySessionId = new Map<number, unknown>();
+  for (const row of rows.rows || []) {
+    partsBySessionId.set(Number(row.sessionId), row.parts);
+  }
+
+  return partsBySessionId;
+}
+
 function resolveConversationSummary(
   session: AgentSession,
   activeDefaultThread: AgentThread | null,
@@ -285,7 +346,7 @@ export default class AgentSessionReadService {
         : DEFAULT_AGENT_SESSION_LIST_LIMIT;
     const query = AgentSession.query().where({ userId });
 
-    if (!options?.includeEnded) {
+    if (!options?.includeArchived) {
       query.whereIn('status', ['starting', 'active']);
     }
 
@@ -326,8 +387,10 @@ export default class AgentSessionReadService {
           harness: session.defaultHarness,
         },
         defaultThreadId: defaultThread?.uuid || null,
+        title: relations.title,
+        keepWorkspace: session.keepWorkspace === true,
         lastActivity: session.lastActivity || null,
-        endedAt: session.endedAt || null,
+        archivedAt: session.archivedAt || null,
         createdAt: session.createdAt || null,
         updatedAt: session.updatedAt || null,
       },
@@ -353,6 +416,7 @@ export default class AgentSessionReadService {
             providerState: serializeProviderState(sandbox.providerState),
             exposures: relations.exposures.map((exposure) => AgentSandboxService.serializeSandboxExposure(exposure)),
             suspendedAt: sandbox.suspendedAt,
+            retainedUntil: relations.workspaceRetainedUntil,
             endedAt: sandbox.endedAt,
             error: serializeSandboxError(sandbox),
             createdAt: sandbox.createdAt || null,
@@ -373,36 +437,42 @@ export default class AgentSessionReadService {
     const defaultThreadIds = sessions
       .map((session) => session.defaultThreadId)
       .filter((threadId): threadId is number => Number.isInteger(threadId));
-    const [sources, sandboxes, defaultThreads, activeDefaultThreads, threadSummaryRows, usageBySessionId] =
-      await Promise.all([
-        AgentSource.query().whereIn('sessionId', sessionIds),
-        AgentSandbox.query()
-          .whereIn('sessionId', sessionIds)
-          .orderBy('generation', 'desc')
-          .orderBy('createdAt', 'desc'),
-        defaultThreadIds.length ? AgentThread.query().whereIn('id', defaultThreadIds) : Promise.resolve([]),
-        AgentThread.query()
-          .whereIn('sessionId', sessionIds)
-          .where({ isDefault: true })
-          .whereNull('archivedAt')
-          .orderBy('createdAt', 'asc'),
-        AgentThread.query()
-          .whereIn('sessionId', sessionIds)
-          .whereNull('archivedAt')
-          .select(
-            'sessionId',
-            raw('count("id")::int as "conversationCount"'),
-            raw(`
+    const [
+      sources,
+      sandboxes,
+      defaultThreads,
+      activeDefaultThreads,
+      threadSummaryRows,
+      usageBySessionId,
+      firstUserMessagePartsBySessionId,
+    ] = await Promise.all([
+      AgentSource.query().whereIn('sessionId', sessionIds),
+      AgentSandbox.query().whereIn('sessionId', sessionIds).orderBy('generation', 'desc').orderBy('createdAt', 'desc'),
+      defaultThreadIds.length ? AgentThread.query().whereIn('id', defaultThreadIds) : Promise.resolve([]),
+      AgentThread.query()
+        .whereIn('sessionId', sessionIds)
+        .where({ isDefault: true })
+        .whereNull('archivedAt')
+        .orderBy('createdAt', 'asc'),
+      AgentThread.query()
+        .whereIn('sessionId', sessionIds)
+        .whereNull('archivedAt')
+        .select(
+          'sessionId',
+          raw('count("id")::int as "conversationCount"'),
+          raw(`
             max(greatest(
               coalesce("lastRunAt", '-infinity'::timestamp),
               coalesce("updatedAt", '-infinity'::timestamp),
               coalesce("createdAt", '-infinity'::timestamp)
             )) as "lastActivityAt"
           `)
-          )
-          .groupBy('sessionId'),
-        AgentUsageService.aggregateSessionsUsage(sessionIds),
-      ]);
+        )
+        .groupBy('sessionId'),
+      AgentUsageService.aggregateSessionsUsage(sessionIds),
+      loadFirstUserMessageParts(sessionIds),
+    ]);
+    const cleanupConfig = await resolveAgentSessionCleanupConfig();
     const sourceBySessionId = new Map<number, AgentSource>();
     for (const source of sources) {
       sourceBySessionId.set(source.sessionId, source);
@@ -432,7 +502,7 @@ export default class AgentSessionReadService {
     }
 
     const threadSummaryBySessionId = new Map<number, AgentThreadConversationSummaryRow>();
-    for (const row of threadSummaryRows as AgentThreadConversationSummaryRow[]) {
+    for (const row of threadSummaryRows as unknown as AgentThreadConversationSummaryRow[]) {
       threadSummaryBySessionId.set(Number(row.sessionId), row);
     }
 
@@ -455,10 +525,23 @@ export default class AgentSessionReadService {
         fallbackThreadBySessionId.get(session.id) ||
         null;
 
+      const activeDefaultThread = fallbackThreadBySessionId.get(session.id) || null;
+      // Mirror the reaper's clock (session.updatedAt + retention) so the shown expiry is honest.
+      const suspendedSince =
+        sandbox?.status === 'suspended' && !session.keepWorkspace ? normalizeTimestamp(session.updatedAt) : null;
+      const workspaceRetainedUntil = suspendedSince
+        ? new Date(suspendedSince.time + cleanupConfig.hibernatedRetentionMs).toISOString()
+        : null;
+
       return this.serializeSessionRecordWithRelations(session, {
         source,
         sandbox,
         defaultThread,
+        title:
+          readUsefulThreadTitle(activeDefaultThread) ||
+          readUsefulThreadTitle(defaultThread) ||
+          deriveTitleFromMessageParts(firstUserMessagePartsBySessionId.get(session.id)),
+        workspaceRetainedUntil,
         conversationSummary: resolveConversationSummary(
           session,
           fallbackThreadBySessionId.get(session.id) || null,

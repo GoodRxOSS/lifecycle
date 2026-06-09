@@ -59,6 +59,7 @@ import AgentThread from 'server/models/AgentThread';
 import AgentMessageStore from '../MessageStore';
 import AgentRunAdmissionService from '../RunAdmissionService';
 import AgentRunEventService from '../RunEventService';
+import AgentRunService from '../RunService';
 
 const mockRunQuery = AgentRun.query as jest.Mock;
 const mockRunTransaction = AgentRun.transaction as jest.Mock;
@@ -206,8 +207,11 @@ function buildActiveRunQuery(activeRun: unknown = null) {
 }
 
 describe('AgentRunAdmissionService', () => {
+  let supersedeSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    supersedeSpy = jest.spyOn(AgentRunService, 'supersedeRecoveryPausedRunForSession').mockResolvedValue(undefined);
     mockRunTransaction.mockImplementation(async (callback) => callback({ trx: true }));
     mockSessionQuery.mockReturnValue({
       findById: jest.fn().mockReturnValue({
@@ -220,6 +224,40 @@ describe('AgentRunAdmissionService', () => {
     mockFindCanonicalMessageByClientMessageId.mockResolvedValue(undefined);
     mockInsertUserMessageForRun.mockResolvedValue({ id: 31, uuid: 'message-1' });
     mockAppendStatusEvent.mockResolvedValue(undefined);
+  });
+
+  it('supersedes a recovery-paused run before the active-run admission guard evaluates', async () => {
+    const activeRunQuery = buildActiveRunQuery();
+    const insertRunQuery = {
+      insertAndFetch: jest.fn().mockResolvedValue({ id: 23, uuid: 'run-1', status: 'queued' }),
+    };
+    mockRunQuery.mockReturnValueOnce(activeRunQuery).mockReturnValueOnce(insertRunQuery);
+    const callOrder: string[] = [];
+    supersedeSpy.mockImplementation(async () => {
+      callOrder.push('supersede');
+    });
+    mockRunTransaction.mockImplementation(async (callback) => {
+      callOrder.push('transaction');
+      return callback({ trx: true });
+    });
+
+    await AgentRunAdmissionService.createQueuedRunWithMessage({
+      thread: { id: 7, uuid: 'thread-1', metadata: {} } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['thread'],
+      session: { id: 17, uuid: 'session-1', userId: 'sample-user' } as Parameters<
+        typeof AgentRunAdmissionService.createQueuedRunWithMessage
+      >[0]['session'],
+      policy: { defaultMode: 'require_approval', rules: {} } as any,
+      message: { parts: [{ type: 'text', text: 'Hi' }] },
+      resolvedHarness: 'lifecycle_ai_sdk',
+      resolvedProvider: 'openai',
+      resolvedModel: 'gpt-5.4',
+      runPlanSnapshot,
+    });
+
+    expect(supersedeSpy).toHaveBeenCalledWith(17, 'sample-user');
+    expect(callOrder).toEqual(['supersede', 'transaction']);
   });
 
   it('persists submitted message and queued run in the same transaction', async () => {

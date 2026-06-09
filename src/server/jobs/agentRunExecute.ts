@@ -25,6 +25,7 @@ import AgentRunService from 'server/services/agent/RunService';
 import { AgentRunOwnershipLostError } from 'server/services/agent/AgentRunOwnershipLostError';
 import { AgentRunTerminalFailure } from 'server/services/agent/errors';
 import type { AgentRunExecuteJob } from 'server/services/agent/RunQueueService';
+import { normalizeAgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
 
 const logger = () => getLogger();
 
@@ -40,8 +41,11 @@ function buildExecutionOwner(jobId: string): string {
   return `bull:${jobId}:${os.hostname()}:${process.pid}:${randomBytes(6).toString('hex')}`;
 }
 
-function isResumeStateInvalidFailure(error: unknown): error is AgentRunTerminalFailure {
-  return error instanceof AgentRunTerminalFailure && error.code === 'run_resume_state_invalid';
+// Saved-state failures park for recovery; the next message supersedes the paused run.
+const RECOVERY_PAUSABLE_FAILURE_CODES = new Set(['run_resume_state_invalid', 'run_event_history_exhausted']);
+
+function isRecoveryPausableFailure(error: unknown): error is AgentRunTerminalFailure {
+  return error instanceof AgentRunTerminalFailure && RECOVERY_PAUSABLE_FAILURE_CODES.has(error.code);
 }
 
 export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Promise<void> {
@@ -65,9 +69,17 @@ export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Prom
           job.data.reason || 'submit'
         } dispatchAttemptId=${dispatchAttemptId} owner=${executionOwner}`
       );
+      const requestGitHubAuth = normalizeAgentRequestGitHubAuth({
+        githubToken: job.data.encryptedGithubToken ? decrypt(job.data.encryptedGithubToken) : null,
+        source: job.data.githubTokenSource || 'none',
+        githubUsername: job.data.githubUsername || null,
+        writeAuthorized: job.data.githubTokenWriteAuthorized === true,
+      });
       await LifecycleAiSdkHarness.executeRun(run, {
-        requestGitHubToken: job.data.encryptedGithubToken ? decrypt(job.data.encryptedGithubToken) : null,
+        requestGitHubToken: requestGitHubAuth.githubToken,
+        requestGitHubAuth,
         dispatchAttemptId,
+        dispatchReason: job.data.reason || 'submit',
       });
       logger().info(
         `AgentExec: queued run finish runId=${run.uuid} dispatchAttemptId=${dispatchAttemptId} owner=${executionOwner}`
@@ -86,12 +98,13 @@ export async function processAgentRunExecute(job: Job<AgentRunExecuteJob>): Prom
         return;
       }
 
-      if ((job.data.reason || 'submit') === 'resume' && isResumeStateInvalidFailure(error)) {
+      const dispatchReason = job.data.reason || 'submit';
+      if ((dispatchReason === 'resume' || dispatchReason === 'approval_resolved') && isRecoveryPausableFailure(error)) {
         await AgentRunService.markWaitingForInputForRecovery(
           run.uuid,
           {
             decision: 'manual_recovery_required',
-            reason: 'saved_state_invalid',
+            reason: error.code === 'run_event_history_exhausted' ? 'event_history_exhausted' : 'saved_state_invalid',
             previousStatus: run.status,
             previousOwner: executionOwner,
             leaseExpiresAt: run.leaseExpiresAt || null,

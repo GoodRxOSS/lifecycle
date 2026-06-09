@@ -322,9 +322,9 @@ export default class TTLCleanupService extends Service {
     );
 
     await this.db.services.BuildService.deleteQueue.add('delete', {
+      ...extractContextForQueue(),
       buildId,
       buildUuid: build.uuid,
-      ...extractContextForQueue(),
     });
   }
 

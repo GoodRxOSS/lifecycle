@@ -546,6 +546,30 @@ export async function deleteBuild(build: Build) {
   }
 }
 
+export type WorkspacePodPresence = 'present' | 'pod_missing' | 'namespace_missing';
+
+/**
+ * Existence probe for workspace-loss reconciliation. Only a definitive 404 reports an absence;
+ * any other API failure rethrows so callers treat the state as unknown, never as gone.
+ */
+export async function probeWorkspacePodPresence(namespace: string, podName: string): Promise<WorkspacePodPresence> {
+  const client = getK8sApi();
+  if (!(await namespaceExists(client, namespace))) {
+    return 'namespace_missing';
+  }
+
+  try {
+    await client.readNamespacedPod(podName, namespace);
+    return 'present';
+  } catch (err) {
+    if (err?.response?.statusCode === 404) {
+      return 'pod_missing';
+    }
+    getLogger({ namespace, error: err }).error('Pod: read failed');
+    throw err;
+  }
+}
+
 /**
  * Deletes the given namespace
  * @param name namespace to delete
@@ -2210,7 +2234,67 @@ function generateSingleDeploymentManifest({
   return yaml.dump(deploymentSpec, { lineWidth: -1 });
 }
 
-export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
+export interface DeployPodReadiness {
+  ready: boolean;
+  causeSummary?: string;
+}
+
+function truncateCause(value: string | undefined | null, max = 160): string {
+  const compact = (value || '').replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
+}
+
+function summarizeContainerState(status: k8s.V1ContainerStatus, initContainer: boolean): string | undefined {
+  const prefix = initContainer ? 'init ' : '';
+  const restarts = status.restartCount ? ` restarts=${status.restartCount}` : '';
+  const waiting = status.state?.waiting;
+  const terminated = status.state?.terminated || status.lastState?.terminated;
+
+  if (waiting && waiting.reason !== 'ContainerCreating') {
+    const message = truncateCause(waiting.message || terminated?.message);
+    return `${prefix}${status.name} waiting=${waiting.reason || 'unknown'}${message ? ` (${message})` : ''}${restarts}`;
+  }
+
+  if (terminated && (terminated.reason !== 'Completed' || initContainer)) {
+    const message = truncateCause(terminated.message);
+    const exitCode = terminated.exitCode !== undefined ? ` exit=${terminated.exitCode}` : '';
+    return `${prefix}${status.name} terminated=${terminated.reason || 'unknown'}${exitCode}${
+      message ? ` (${message})` : ''
+    }${restarts}`;
+  }
+
+  if (status.restartCount) {
+    return `${prefix}${status.name}${restarts}`;
+  }
+
+  return undefined;
+}
+
+// Compact per-pod failure causes (container waiting/terminated reasons, restarts, init states) from the last poll.
+export function summarizeDeployPodFailures(pods: k8s.V1Pod[]): string | undefined {
+  const podSummaries: string[] = [];
+
+  for (const pod of pods) {
+    const readyCondition = pod.status?.conditions?.find((c) => c.type === 'Ready');
+    if (readyCondition?.status === 'True') {
+      continue;
+    }
+
+    const containerCauses = [
+      ...(pod.status?.initContainerStatuses || []).map((status) => summarizeContainerState(status, true)),
+      ...(pod.status?.containerStatuses || []).map((status) => summarizeContainerState(status, false)),
+    ].filter((cause): cause is string => Boolean(cause));
+
+    const detail = containerCauses.length
+      ? containerCauses.join('; ')
+      : truncateCause(readyCondition?.message) || `phase=${pod.status?.phase || 'unknown'}`;
+    podSummaries.push(`pod ${pod.metadata?.name || 'unknown'}: ${detail}`);
+  }
+
+  return podSummaries.length ? podSummaries.join(' | ') : undefined;
+}
+
+export async function waitForDeployPodReady(deploy: Deploy): Promise<DeployPodReadiness> {
   const { uuid, build } = deploy;
   const { namespace } = build;
   const deployableName = deploy.deployable?.name || deploy.service?.name || 'unknown';
@@ -2243,10 +2327,14 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
 
   if (retries >= 60) {
     getLogger(logCtx).warn('Pod: not found timeout=5m');
-    return false;
+    return {
+      ready: false,
+      causeSummary: `no application pods appeared within 5m (label deploy_uuid=${uuid} in namespace ${namespace})`,
+    };
   }
 
   retries = 0;
+  let lastPods: k8s.V1Pod[] = [];
 
   while (retries < 180) {
     const k8sApi = getK8sApi();
@@ -2260,10 +2348,11 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
     );
     const allPods = resp?.body?.items || [];
     const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+    lastPods = pods;
 
     if (pods.length === 0) {
       getLogger(logCtx).warn('Pod: deployment pods not found');
-      return false;
+      return { ready: false, causeSummary: 'deployment pods disappeared while waiting for readiness' };
     }
 
     const allReady = pods.every((pod) => {
@@ -2274,13 +2363,14 @@ export async function waitForDeployPodReady(deploy: Deploy): Promise<boolean> {
 
     if (allReady) {
       getLogger({ ...logCtx, podCount: pods.length }).info('Deploy: pods ready');
-      return true;
+      return { ready: true };
     }
 
     retries += 1;
     await new Promise((r) => setTimeout(r, 5000));
   }
 
-  getLogger(logCtx).warn('Pod: not ready timeout=15m');
-  return false;
+  const causeSummary = summarizeDeployPodFailures(lastPods);
+  getLogger({ ...logCtx, causeSummary }).warn('Pod: not ready timeout=15m');
+  return { ready: false, causeSummary };
 }

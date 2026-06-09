@@ -377,12 +377,57 @@ export function sumSdkUsageSummaries(left: AgentRunUsageSummary, right: AgentRun
   };
 }
 
+const BASELINE_USAGE_NUMERIC_FIELDS = [
+  'inputTokens',
+  'outputTokens',
+  'totalTokens',
+  'reasoningTokens',
+  'cachedInputTokens',
+  'cacheCreationInputTokens',
+  'cacheReadInputTokens',
+  'nonCachedInputTokens',
+  'textOutputTokens',
+  'totalCostUsd',
+  'toolCalls',
+] as const;
+
+// Prior executions' persisted usage; only additive numeric fields carry over between segments.
+export function toUsageSummaryBaseline(value: unknown): AgentRunUsageSummary | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const baseline: AgentRunUsageSummary = {};
+  for (const field of BASELINE_USAGE_NUMERIC_FIELDS) {
+    const amount = parseFiniteNumber(record[field]);
+    if (amount !== undefined) {
+      baseline[field] = amount;
+    }
+  }
+
+  return Object.keys(baseline).length > 0 ? baseline : null;
+}
+
 export class AgentRunObservabilityTracker {
   private summary: AgentRunUsageSummary = {};
+  private readonly baseline: AgentRunUsageSummary | null;
 
-  constructor(private readonly costEstimateConfig?: AgentModelCostEstimateConfig | null) {}
+  // Accumulates on top of prior executions' usage so a resume never lowers persisted totals.
+  constructor(
+    private readonly costEstimateConfig?: AgentModelCostEstimateConfig | null,
+    baselineUsageSummary?: unknown
+  ) {
+    this.baseline = toUsageSummaryBaseline(baselineUsageSummary);
+  }
 
   private getEstimatedSummary(): AgentRunUsageSummary {
+    const total = this.baseline ? sumSdkUsageSummaries(this.baseline, this.summary) : this.summary;
+    return applyConfiguredModelCostEstimate(total, this.costEstimateConfig);
+  }
+
+  // Baseline excluded: loop budgets are enforced per execution.
+  getSegmentSummary(): AgentRunUsageSummary {
     return applyConfiguredModelCostEstimate(this.summary, this.costEstimateConfig);
   }
 

@@ -23,17 +23,23 @@ import AgentThread from 'server/models/AgentThread';
 import type { Transaction } from 'objection';
 import { NotFoundError, ConflictError } from 'server/lib/appError';
 import { canSessionAcceptMessages, getSessionMessageBlockReason } from './sessionReadiness';
-import { TERMINAL_RUN_STATUSES } from './RunService';
+import AgentRunService, { TERMINAL_RUN_STATUSES } from './RunService';
 import WorkspaceRuntimeStateService from './WorkspaceRuntimeStateService';
 import type { AgentUsageAggregate, AgentUsageRunRecord } from './AgentUsageService';
 
 export const AGENT_THREAD_SELECTED_AGENT_DEFINITION_METADATA_KEY = 'selectedAgentDefinitionId';
 export const AGENT_THREAD_RUNTIME_CONTROL_CHOICES_METADATA_KEY = 'runtimeControlChoices';
+export const AGENT_THREAD_TOOL_APPROVAL_ALLOWLIST_METADATA_KEY = 'toolApprovalAllowlist';
 
 export type AgentThreadRuntimeControlChoicesMetadata = {
   version: 1;
   toolChoiceIds: string[];
   mcpChoiceIds: string[];
+};
+
+export type AgentThreadToolApprovalAllowlistMetadata = {
+  version: 1;
+  toolKeys: string[];
 };
 
 export type CreateAgentThreadInput = {
@@ -192,6 +198,30 @@ export function buildRuntimeControlChoicesMetadataPatch(
       version: 1,
       toolChoiceIds: [...choices.toolChoiceIds],
       mcpChoiceIds: [...choices.mcpChoiceIds],
+    },
+  };
+}
+
+export function getToolApprovalAllowlist(thread: AgentThread): string[] {
+  const metadata = readRecord(thread.metadata)[AGENT_THREAD_TOOL_APPROVAL_ALLOWLIST_METADATA_KEY];
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return [];
+  }
+
+  const record = metadata as Record<string, unknown>;
+  const toolKeys = normalizeChoiceIds(record.toolKeys);
+  if (record.version !== 1 || !toolKeys) {
+    return [];
+  }
+
+  return toolKeys;
+}
+
+export function buildToolApprovalAllowlistMetadataPatch(toolKeys: string[]): Record<string, unknown> {
+  return {
+    [AGENT_THREAD_TOOL_APPROVAL_ALLOWLIST_METADATA_KEY]: {
+      version: 1,
+      toolKeys: Array.from(new Set(toolKeys.map((key) => key.trim()).filter(Boolean))),
     },
   };
 }
@@ -469,12 +499,15 @@ export default class AgentThreadService {
   ): Promise<AgentThread> {
     const { title, sourceThreadId } = normalizeCreateThreadInput(input);
 
+    // A waiting_for_input run has no in-product resume; a new thread supersedes it instead of 409ing forever.
+    await AgentRunService.supersedeRecoveryPausedRunForSessionUuid(sessionUuid, userId);
+
     return AgentSession.transaction(async (trx) => {
       const session = await AgentSession.query(trx).findOne({ uuid: sessionUuid, userId }).forUpdate();
       if (!session) {
         throw new AgentThreadCreateNotFoundError('session_not_found', 'Agent session not found');
       }
-      if (session.status === 'ended' || session.status === 'error') {
+      if (session.status === 'archived' || session.status === 'error') {
         throw new AgentThreadCreateConflictError('inactive_session', 'Cannot create a thread for an inactive session');
       }
       if (!canSessionAcceptMessages(session)) {
@@ -571,6 +604,38 @@ export default class AgentThreadService {
       metadata: {
         ...(thread.metadata || {}),
         ...buildRuntimeControlChoicesMetadataPatch(choices),
+      },
+    } as Partial<AgentThread>);
+  }
+
+  static async setToolApprovalAllowlist(threadId: number, toolKeys: string[], trx?: Transaction): Promise<AgentThread> {
+    const thread = await AgentThread.query(trx).findById(threadId);
+    if (!thread) {
+      throw new Error('Agent thread not found');
+    }
+
+    return AgentThread.query(trx).patchAndFetchById(threadId, {
+      metadata: {
+        ...(thread.metadata || {}),
+        ...buildToolApprovalAllowlistMetadataPatch(toolKeys),
+      },
+    } as Partial<AgentThread>);
+  }
+
+  static async addToolApprovalAllowlistEntry(
+    threadId: number,
+    toolKey: string,
+    trx?: Transaction
+  ): Promise<AgentThread> {
+    const thread = await AgentThread.query(trx).findById(threadId);
+    if (!thread) {
+      throw new Error('Agent thread not found');
+    }
+
+    return AgentThread.query(trx).patchAndFetchById(threadId, {
+      metadata: {
+        ...(thread.metadata || {}),
+        ...buildToolApprovalAllowlistMetadataPatch([...getToolApprovalAllowlist(thread), toolKey]),
       },
     } as Partial<AgentThread>);
   }

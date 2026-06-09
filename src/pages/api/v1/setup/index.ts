@@ -75,13 +75,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     callback_urls: [`${appUrl}/api/v1/setup/callback`, `${githubAppAuthCallback}`],
     public: false,
     default_permissions: {
-      contents: 'read',
+      contents: 'write',
       deployments: 'write',
       issues: 'write',
       members: 'read',
       metadata: 'read',
       pull_requests: 'write',
       statuses: 'read',
+      // The update_file tool commits arbitrary paths; GitHub rejects writes to .github/workflows/*
+      // with contents:write alone, so the debug agent needs the dedicated workflows permission.
+      workflows: 'write',
       emails: 'read',
     },
     default_events: [

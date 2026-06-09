@@ -18,6 +18,7 @@ import {
   AgentRunObservabilityTracker,
   buildMessageObservabilityMetadataPatch,
   normalizeSdkUsageSummary,
+  toUsageSummaryBaseline,
 } from '../observability';
 
 describe('agent observability helpers', () => {
@@ -200,6 +201,63 @@ describe('agent observability helpers', () => {
       usage: finalSummary,
       finishReason: 'stop',
       responseId: 'resp_final',
+    });
+  });
+
+  it('accumulates a resumed execution on top of the persisted baseline so totals never drop (L9)', () => {
+    const tracker = new AgentRunObservabilityTracker(
+      { inputCostPerMillion: 1, outputCostPerMillion: 2 },
+      {
+        inputTokens: 400_000,
+        outputTokens: 9_000,
+        totalTokens: 409_000,
+        totalCostUsd: 0.5,
+        toolCalls: 4,
+        finishReason: 'stop',
+        responseId: 'resp_segment_1',
+      }
+    );
+
+    expect(tracker.getSummary()).toMatchObject({
+      inputTokens: 400_000,
+      totalTokens: 409_000,
+    });
+
+    tracker.updateFromStep({
+      usage: { inputTokens: 100_000, outputTokens: 1_000, totalTokens: 101_000 },
+      stepNumber: 1,
+      toolCalls: [{}],
+    });
+    expect(tracker.getSummary()).toMatchObject({
+      inputTokens: 500_000,
+      totalTokens: 510_000,
+      toolCalls: 5,
+    });
+
+    const settled = tracker.finalize({
+      usage: { inputTokens: 100_000, outputTokens: 2_000, totalTokens: 102_000 },
+      finishReason: 'stop',
+    });
+    expect(settled).toMatchObject({
+      inputTokens: 500_000,
+      outputTokens: 11_000,
+      totalTokens: 511_000,
+      totalCostUsd: 0.5,
+      finishReason: 'stop',
+    });
+    expect(settled.estimatedCostUsd).toBeCloseTo(0.522);
+    expect(settled.responseId).toBeUndefined();
+
+    // Loop budgets are per execution: classification sees only segment 2's usage.
+    expect(tracker.getSegmentSummary()).toMatchObject({ inputTokens: 100_000 });
+  });
+
+  it('extracts only additive numeric fields into a usage baseline', () => {
+    expect(toUsageSummaryBaseline({ finishReason: 'stop', responseId: 'x', steps: 3 })).toBeNull();
+    expect(toUsageSummaryBaseline({})).toBeNull();
+    expect(toUsageSummaryBaseline(null)).toBeNull();
+    expect(toUsageSummaryBaseline({ inputTokens: 10, estimatedCostUsd: 1, costSource: 'y' })).toEqual({
+      inputTokens: 10,
     });
   });
 

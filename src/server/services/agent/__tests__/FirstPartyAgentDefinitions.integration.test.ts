@@ -352,17 +352,24 @@ describe('First-party agent definition integration regressions', () => {
     }));
   });
 
-  it('seeds public system agent definitions without reserved capability leakage or compat ids', async () => {
+  it('seeds the one visible system agent plus legacy readable system definitions', async () => {
     const seeded = await ensureSystemAgentDefinitionsSeeded();
 
-    expect(mockDefinitionUpsert).toHaveBeenCalledTimes(3);
+    expect(mockDefinitionUpsert).toHaveBeenCalledTimes(4);
     expect(seeded.map((definition) => definition.id).sort()).toEqual([
+      'system.agent',
       'system.debug',
       'system.develop',
       'system.freeform',
     ]);
     expect(seeded).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          id: 'system.agent',
+          owner: { kind: 'system', userId: null, organizationId: null },
+          codeOwned: true,
+          readOnly: true,
+        }),
         expect.objectContaining({
           id: 'system.debug',
           owner: { kind: 'system', userId: null, organizationId: null },
@@ -385,6 +392,7 @@ describe('First-party agent definition integration regressions', () => {
     );
 
     expect(seeded.map((definition) => serializeAgentDefinitionSummary(definition).id).sort()).toEqual([
+      'system.agent',
       'system.debug',
       'system.develop',
       'system.freeform',
@@ -421,7 +429,12 @@ describe('First-party agent definition integration regressions', () => {
       },
     });
 
-    expect(result.runPlanSnapshot.agent.id).toBe('system.debug');
+    expect(result.runPlanSnapshot.agent.id).toBe('system.agent');
+    expect(result.runPlanSnapshot.profile).toEqual({
+      kind: 'debug',
+      intent: 'diagnose',
+      workspaceCore: 'absent',
+    });
     expect(result.runPlanSnapshot.source.repoFullName).toBe('example-org/example-repo');
     expect(getCapabilityAccess(result, 'diagnostics_kubernetes')).toEqual(
       expect.objectContaining({
@@ -439,7 +452,7 @@ describe('First-party agent definition integration regressions', () => {
     expect(getCapabilityAccess(result, 'external_mcp_write')?.allowed).not.toBe(true);
   });
 
-  it('fails Develop without prepared workspace/source resources and keeps Free-form minimal capabilities', async () => {
+  it('keeps legacy system ids readable while default chat resolves to the one Lifecycle Agent', async () => {
     const develop = await getSystemAgentDefinition('system.develop');
     const freeform = await getSystemAgentDefinition('system.freeform');
 
@@ -448,12 +461,22 @@ describe('First-party agent definition integration regressions', () => {
     expect(freeform.requiredCapabilityRefs).toEqual(['read_context', 'external_mcp_read']);
 
     const freeformRun = await resolveRunPlan();
-    expect(freeformRun.runPlanSnapshot.agent.id).toBe('system.freeform');
+    expect(freeformRun.runPlanSnapshot.agent.id).toBe('system.agent');
+    expect(freeformRun.runPlanSnapshot.profile).toEqual({
+      kind: 'answer',
+      intent: 'chat',
+      workspaceCore: 'absent',
+    });
     expect(freeformRun.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual([
       'read_context',
       'external_mcp_read',
+      'workspace_files',
+      'workspace_shell',
+      'workspace_git',
+      'network_access',
+      'preview_publish',
     ]);
-    expect(serializeRunPlanSummary(freeformRun.runPlanSnapshot)?.agent.id).toBe('system.freeform');
+    expect(serializeRunPlanSummary(freeformRun.runPlanSnapshot)?.agent.id).toBe('system.agent');
 
     await expect(
       resolveRunPlan({
