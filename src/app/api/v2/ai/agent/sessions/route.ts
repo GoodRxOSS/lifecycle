@@ -253,10 +253,10 @@ async function resolveRequestedServices(
  *     operationId: getAgentSessions
  *     parameters:
  *       - in: query
- *         name: includeEnded
+ *         name: includeArchived
  *         schema:
  *           type: boolean
- *         description: When true, include ended and errored sessions in the response.
+ *         description: When true, include archived and errored sessions in the response.
  *       - in: query
  *         name: page
  *         schema:
@@ -393,7 +393,10 @@ async function resolveRequestedServices(
 const getHandler = async (req: NextRequest) => {
   const userIdentity = requireRequestUserIdentity(req);
 
-  const includeEnded = req.nextUrl.searchParams.get('includeEnded') === 'true';
+  const includeArchived =
+    req.nextUrl.searchParams.get('includeArchived') === 'true' ||
+    // Legacy param name, kept so pre-rename clients keep working.
+    req.nextUrl.searchParams.get('includeEnded') === 'true';
   const page = parseInt(req.nextUrl.searchParams.get('page') || '1', 10);
   const requestedLimit = parseInt(
     req.nextUrl.searchParams.get('limit') || String(DEFAULT_AGENT_SESSION_LIST_LIMIT),
@@ -403,7 +406,7 @@ const getHandler = async (req: NextRequest) => {
     ? Math.min(requestedLimit, MAX_AGENT_SESSION_LIST_LIMIT)
     : DEFAULT_AGENT_SESSION_LIST_LIMIT;
   const result = await AgentSessionReadService.listOwnedSessionRecords(userIdentity.userId, {
-    includeEnded,
+    includeArchived,
     page,
     limit,
   });

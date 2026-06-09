@@ -19,29 +19,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { requireRequestUserIdentity } from 'server/lib/get-user';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { APP_HOST } from 'shared/config';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
+  buildMcpOAuthCallbackUrl,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
 } from 'server/services/agentRuntime/mcp/connectionConfig';
 import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
 import McpOAuthFlowService from 'server/services/agentRuntime/mcp/oauthFlow';
 import { PersistentOAuthClientProvider } from 'server/services/agentRuntime/mcp/oauthProvider';
-import type { McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
+import type { McpDiscoveredTool, McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 type OAuthConnectionState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
-
-function buildCallbackUrl(slug: string): string {
-  const api = new URL(APP_HOST);
-  api.pathname = `/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`;
-  return api.toString();
-}
+type OAuthClientInformationWithRedirectUris = NonNullable<OAuthConnectionState['clientInformation']> & {
+  redirect_uris?: string[];
+};
 
 function hasCompatibleRedirectUri(state: OAuthConnectionState, redirectUrl: string): boolean {
-  const redirectUris = state.clientInformation?.redirect_uris;
+  const redirectUris = (state.clientInformation as OAuthClientInformationWithRedirectUris | undefined)?.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
     return true;
   }
@@ -167,7 +164,7 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
     sharedConfig: config.sharedConfig,
     authConfig,
   });
-  const callbackUrl = buildCallbackUrl(slug);
+  const callbackUrl = buildMcpOAuthCallbackUrl(slug);
   const existing = await UserMcpConnectionService.getDecryptedConnection(
     userIdentity.userId,
     scope,
@@ -198,6 +195,7 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
     initialState,
     discoveredTools: existing?.discoveredTools,
     validatedAt: existing?.validatedAt,
+    validationError: existing?.validationError,
     interactive: true,
   });
   const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
@@ -223,6 +221,48 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
 
     if (result !== 'REDIRECT') {
       await McpOAuthFlowService.invalidate(flow.flowId);
+    }
+
+    // A silent-refresh AUTHORIZED skips the callback's discovery; a row that failed with 0 tools
+    // must re-validate here or it stays broken until delete + reconnect.
+    if (result === 'AUTHORIZED' && (existing?.discoveredTools?.length ?? 0) === 0) {
+      const validatedAt = new Date().toISOString();
+      let discoveredTools: McpDiscoveredTool[] = [];
+      let validationError: string | null = null;
+      try {
+        discoveredTools = await configService.discoverTools(transport, config.timeout);
+        if (discoveredTools.length === 0) {
+          validationError = `MCP validation failed for ${slug}: server returned 0 tools`;
+        }
+      } catch (discoveryError) {
+        validationError = sanitizeMcpErrorMessage(discoveryError, [
+          {
+            values: {
+              oauthState: provider.currentState.oauthState,
+              codeVerifier: provider.currentState.codeVerifier,
+            },
+            compiledConfig,
+            transport,
+            extraSecrets: [provider.currentState.tokens, provider.currentState.clientInformation],
+          },
+        ]);
+      }
+
+      await UserMcpConnectionService.upsertConnection({
+        userId: userIdentity.userId,
+        ownerGithubUsername: userIdentity.githubUsername,
+        scope,
+        slug,
+        state: provider.currentState,
+        definitionFingerprint,
+        discoveredTools: validationError ? [] : discoveredTools,
+        validationError,
+        validatedAt,
+      });
+
+      if (validationError) {
+        return errorResponse(new Error(validationError), { status: 422 }, req);
+      }
     }
 
     return successResponse(

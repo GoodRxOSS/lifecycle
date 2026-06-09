@@ -20,6 +20,12 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
 
+/** True when ENCRYPTION_KEY is set to a usable 64-char hex string (does not throw). */
+export function isEncryptionKeyConfigured(): boolean {
+  const hex = process.env.ENCRYPTION_KEY;
+  return Boolean(hex && hex.length === 64);
+}
+
 function getKey(): Buffer {
   const hex = process.env.ENCRYPTION_KEY;
   if (!hex || hex.length !== 64) {
@@ -50,6 +56,28 @@ export function decrypt(ciphertext: string): string {
   const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(authTag);
   return decipher.update(encrypted) + decipher.final('utf8');
+}
+
+// Discriminates ciphertext from legacy plaintext config secrets (migrate-on-write).
+const CONFIG_SECRET_PREFIX = 'lc-enc:v1:';
+
+export function encryptConfigSecret(plaintext: string): string {
+  return CONFIG_SECRET_PREFIX + encrypt(plaintext);
+}
+
+export function isEncryptedConfigSecret(value: string): boolean {
+  return value.startsWith(CONFIG_SECRET_PREFIX);
+}
+
+export function decryptConfigSecret(value: string): string {
+  try {
+    return decrypt(value.slice(CONFIG_SECRET_PREFIX.length));
+  } catch {
+    // Never hand a garbled value upstream as a credential.
+    throw new Error(
+      'Stored credential could not be decrypted; verify ENCRYPTION_KEY matches the key used when it was saved.'
+    );
+  }
 }
 
 export function maskApiKey(key: string): string {

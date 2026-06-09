@@ -309,6 +309,65 @@ describe('AgentMessageStore', () => {
     });
   });
 
+  describe('createRuntimeControlsUpdateEvent', () => {
+    it('inserts a runtime_controls_update system event describing the tool diff', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createRuntimeControlsUpdateEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user', label: 'Sample User' },
+        enabled: [{ id: 'rtc_a', label: 'GitHub' }],
+        disabled: [
+          { id: 'rtc_b', label: 'Workspace files' },
+          { id: 'rtc_c', label: 'Sample MCP' },
+        ],
+        occurredAt: '2026-07-04T00:00:00.000Z',
+      });
+
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 17,
+          runId: null,
+          role: 'system',
+          parts: [
+            {
+              type: 'text',
+              text: 'Sample User changed the available tools: enabled GitHub; disabled Workspace files, Sample MCP. Applies to future runs.',
+            },
+          ],
+          metadata: expect.objectContaining({
+            kind: 'runtime_controls_update',
+            actor: { userId: 'sample-user', label: 'Sample User' },
+            enabled: [{ id: 'rtc_a', label: 'GitHub' }],
+            disabled: [
+              { id: 'rtc_b', label: 'Workspace files' },
+              { id: 'rtc_c', label: 'Sample MCP' },
+            ],
+            appliesTo: 'future_runs',
+            occurredAt: '2026-07-04T00:00:00.000Z',
+          }),
+        })
+      );
+    });
+
+    it('phrases an enable-only change without a dangling separator', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createRuntimeControlsUpdateEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user' },
+        enabled: [{ id: 'rtc_a', label: 'Slack' }],
+        disabled: [],
+      });
+
+      expect(insertAndFetch.mock.calls[0][0].parts).toEqual([
+        { type: 'text', text: 'You changed the available tools: enabled Slack. Applies to future runs.' },
+      ]);
+    });
+  });
+
   describe('listMessages', () => {
     it('omits stored messages with no canonical parts', async () => {
       const orderBy = jest.fn().mockResolvedValue([
@@ -470,7 +529,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-call-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
             } as any,
           ],
@@ -635,7 +694,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
               output: { ok: true },
             },
@@ -670,7 +729,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_write_file',
+              toolName: 'write_file',
               state: 'output-available',
               output: { ok: true },
             },

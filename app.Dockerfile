@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE_TAG=v1
+ARG BASE_IMAGE_TAG=v2
 FROM lifecycleoss/app-base:${BASE_IMAGE_TAG} AS packages
 
 ARG PORT

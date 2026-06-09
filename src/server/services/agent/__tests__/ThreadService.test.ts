@@ -485,7 +485,7 @@ describe('AgentThreadService', () => {
     ]);
   });
 
-  it.each(['ended', 'error'])('blocks new threads for %s sessions', async (status) => {
+  it.each(['archived', 'error'])('blocks new threads for %s sessions', async (status) => {
     mockOwnedSessionLock(buildSession({ status }));
 
     await expect(AgentThreadService.createThread('sample-session', 'sample-user', 'New chat')).rejects.toThrow(

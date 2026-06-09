@@ -74,7 +74,7 @@ export interface EvaluateRunResumeEligibilityInput {
   heartbeatStaleMs?: number;
 }
 
-const TERMINAL_STATUSES = new Set<AgentRunStatus>(['completed', 'failed', 'cancelled']);
+const TERMINAL_STATUSES = new Set<AgentRunStatus>(['transitioned', 'completed', 'failed', 'cancelled']);
 const AUTO_RESUME_SAFE_CAPABILITY_KEYS = new Set<AgentCapabilityKey>(['read', 'external_mcp_read']);
 
 function decision(
@@ -230,7 +230,7 @@ export default class AgentRunResumeEligibilityService {
       return decision(input, 'manual_recovery_required', 'invalid_run_plan');
     }
 
-    if (runPlan.agent?.id === 'system.debug' && runPlan.debug?.resolvedIntent === 'repair') {
+    if (runPlan.agent?.sourceKind === 'build_context_chat' && runPlan.debug?.resolvedIntent === 'repair') {
       return decision(input, 'manual_recovery_required', 'debug_repair');
     }
 

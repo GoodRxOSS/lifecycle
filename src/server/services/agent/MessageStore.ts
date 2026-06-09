@@ -34,6 +34,14 @@ import {
 const AGENT_MESSAGE_UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const CLIENT_MESSAGE_ID_METADATA_KEY = 'clientMessageId';
 export const AGENT_SWITCH_METADATA_KIND = 'agent_switch';
+// Must match EnvironmentWatchService.ENVIRONMENT_UPDATE_METADATA_KIND.
+export const ENVIRONMENT_UPDATE_METADATA_KIND = 'environment_update';
+export const RUNTIME_CONTROLS_UPDATE_METADATA_KIND = 'runtime_controls_update';
+const SYSTEM_MESSAGE_METADATA_KINDS = [
+  AGENT_SWITCH_METADATA_KIND,
+  ENVIRONMENT_UPDATE_METADATA_KIND,
+  RUNTIME_CONTROLS_UPDATE_METADATA_KIND,
+];
 export const DEFAULT_AGENT_MESSAGE_PAGE_LIMIT = 50;
 export const MAX_AGENT_MESSAGE_PAGE_LIMIT = 100;
 
@@ -51,6 +59,23 @@ export type AgentSwitchEventMetadata = {
     id: string;
     label: string;
   };
+  appliesTo: 'future_runs';
+  occurredAt: string;
+};
+
+export type RuntimeControlsUpdateChoice = {
+  id: string;
+  label: string;
+};
+
+export type RuntimeControlsUpdateEventMetadata = {
+  kind: typeof RUNTIME_CONTROLS_UPDATE_METADATA_KIND;
+  actor: {
+    userId: string;
+    label: string;
+  };
+  enabled: RuntimeControlsUpdateChoice[];
+  disabled: RuntimeControlsUpdateChoice[];
   appliesTo: 'future_runs';
   occurredAt: string;
 };
@@ -88,7 +113,7 @@ function normalizeTimestamp(value: unknown): string | null {
 }
 
 function isAgentSwitchMessage(message: AgentMessage): boolean {
-  return message.role === 'system' && message.metadata?.kind === AGENT_SWITCH_METADATA_KIND;
+  return message.role === 'system' && SYSTEM_MESSAGE_METADATA_KINDS.includes(String(message.metadata?.kind));
 }
 
 function getIncomingMessageId(message: Pick<CanonicalAgentInputMessage, 'id'>): string | null {
@@ -408,7 +433,10 @@ export default class AgentMessageStore {
         builder.whereIn('message.role', ['user', 'assistant']).orWhere((systemBuilder) => {
           systemBuilder
             .where('message.role', 'system')
-            .whereRaw('"message"."metadata"->>? = ?', ['kind', AGENT_SWITCH_METADATA_KIND]);
+            .whereRaw(`"message"."metadata"->>? in (${SYSTEM_MESSAGE_METADATA_KINDS.map(() => '?').join(', ')})`, [
+              'kind',
+              ...SYSTEM_MESSAGE_METADATA_KINDS,
+            ]);
         });
       })
       .select('message.*', 'run.uuid as runUuid', 'run.startedAt as runStartedAt', 'run.completedAt as runCompletedAt')
@@ -515,6 +543,58 @@ export default class AgentMessageStore {
       },
       beforeAgent,
       afterAgent,
+      appliesTo: 'future_runs',
+      occurredAt,
+    };
+
+    return AgentMessage.query(trx).insertAndFetch({
+      uuid: uuid(),
+      threadId: thread.id,
+      runId: null,
+      role: 'system',
+      parts: [{ type: 'text', text }] as unknown as Record<string, unknown>[],
+      uiMessage: null,
+      clientMessageId: null,
+      metadata: metadata as unknown as Record<string, unknown>,
+    });
+  }
+
+  /**
+   * Durable narrative for a composer tool-selection change: the model only learns about tool
+   * availability from history (schemas appear/disappear silently between runs), so the change is
+   * recorded where every future run reads it. Informational only — enforcement stays in the
+   * run-plan snapshot and tool registration.
+   */
+  static async createRuntimeControlsUpdateEvent({
+    thread,
+    actor,
+    enabled,
+    disabled,
+    occurredAt = new Date().toISOString(),
+    trx,
+  }: {
+    thread: Pick<AgentThread, 'id'>;
+    actor: { userId: string; label?: string | null };
+    enabled: RuntimeControlsUpdateChoice[];
+    disabled: RuntimeControlsUpdateChoice[];
+    occurredAt?: string;
+    trx?: Transaction;
+  }): Promise<AgentMessage> {
+    const actorLabel = actor.label?.trim() || 'You';
+    const describe = (choices: RuntimeControlsUpdateChoice[]) => choices.map((choice) => choice.label).join(', ');
+    const changes = [
+      ...(enabled.length > 0 ? [`enabled ${describe(enabled)}`] : []),
+      ...(disabled.length > 0 ? [`disabled ${describe(disabled)}`] : []),
+    ].join('; ');
+    const text = `${actorLabel} changed the available tools: ${changes}. Applies to future runs.`;
+    const metadata: RuntimeControlsUpdateEventMetadata = {
+      kind: RUNTIME_CONTROLS_UPDATE_METADATA_KIND,
+      actor: {
+        userId: actor.userId,
+        label: actorLabel,
+      },
+      enabled,
+      disabled,
       appliesTo: 'future_runs',
       occurredAt,
     };

@@ -57,8 +57,8 @@ describe('GetPodLogsTool', () => {
 
     const result = await tool.execute({ pod_name: 'my-pod', namespace: 'test-ns' });
     expect(result.success).toBe(true);
-    const data = JSON.parse(result.agentContent);
-    expect(data.logs).toBe('line1\nline2\nline3');
+    expect(result.agentContent).toContain('Logs for pod my-pod: 3 lines after dedupe');
+    expect(result.agentContent).toContain('```\nline1\nline2\nline3\n```');
     expect(mockK8sClient.coreApi.readNamespacedPodLog).toHaveBeenCalledWith(
       'my-pod',
       'test-ns',
@@ -96,8 +96,8 @@ describe('GetPodLogsTool', () => {
 
     const result = await tool.execute({ pod_name: 'my-pod', namespace: 'test-ns', previous: true });
     expect(result.success).toBe(true);
-    const data = JSON.parse(result.agentContent as string);
-    expect(data.previous).toBe(true);
+    expect(result.agentContent).toContain('(previous instance)');
+    expect(result.agentContent).toContain('crash output');
     expect(mockK8sClient.coreApi.readNamespacedPodLog).toHaveBeenCalledWith(
       'my-pod',
       'test-ns',

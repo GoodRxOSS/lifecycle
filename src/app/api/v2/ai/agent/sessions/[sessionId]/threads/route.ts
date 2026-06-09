@@ -20,6 +20,7 @@ import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { requireRequestUserIdentity } from 'server/lib/get-user';
 import AgentThreadService from 'server/services/agent/ThreadService';
+import AgentSessionService from 'server/services/agentSession';
 
 type CreateThreadBody = {
   title?: string;
@@ -205,6 +206,11 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ses
   }
 
   try {
+    // Starting a conversation in an archived session revives it first.
+    const session = await AgentSessionService.getSession(routeParams.sessionId);
+    if (session && session.userId === userIdentity.userId) {
+      await AgentSessionService.ensureSessionActive(session, userIdentity.userId);
+    }
     const thread = await AgentThreadService.createThread(routeParams.sessionId, userIdentity.userId, body);
 
     return successResponse(AgentThreadService.serializeThread(thread, routeParams.sessionId), { status: 201 }, req);

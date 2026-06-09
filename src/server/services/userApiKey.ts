@@ -57,13 +57,16 @@ export default class UserApiKeyService {
       return this.reconcileRecordOwnership(ownerMatch, userId, canonicalOwner);
     }
 
-    if (canonicalOwner === userId) {
-      return null;
-    }
-
+    // A key saved before the user linked GitHub gets migrated to a username owner; it still belongs to
+    // this userId, so fall back by userId (even when canonicalOwner === userId) or an anonymous lookup
+    // would strand it. Don't reconcile in the no-username case — that would downgrade the username
+    // owner back to the bare userId and ping-pong ownership on every alternating lookup.
     const fallbackMatch = await UserApiKey.query().where({ userId, provider: normalizedProvider }).first();
     if (!fallbackMatch) {
       return null;
+    }
+    if (canonicalOwner === userId) {
+      return fallbackMatch;
     }
 
     return this.reconcileRecordOwnership(fallbackMatch, userId, canonicalOwner);

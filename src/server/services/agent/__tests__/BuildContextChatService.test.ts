@@ -542,6 +542,10 @@ describe('BuildContextChatService', () => {
             initDockerfilePath: 'services/sample/init.Dockerfile',
             deployStatus: 'build_failed',
             deployStatusMessage: 'Dockerfile not found',
+            dockerImage: 'registry.example.test/sample-service:service-sha-1',
+            buildPipelineId: 'build-pipeline-1',
+            deployPipelineId: 'deploy-pipeline-1',
+            source: 'yaml',
           }),
         ],
       })
@@ -557,6 +561,10 @@ describe('BuildContextChatService', () => {
             branchName: 'feature/service-change',
             serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
             dockerfilePath: 'services/sample/Dockerfile',
+            initDockerfilePath: 'services/sample/init.Dockerfile',
+            dockerImage: 'registry.example.test/sample-service:service-sha-1',
+            buildPipelineId: 'build-pipeline-1',
+            deployPipelineId: 'deploy-pipeline-1',
           }),
         }),
         preparedSource: expect.objectContaining({
@@ -573,6 +581,9 @@ describe('BuildContextChatService', () => {
         repositoryFullName: 'example-org/service-repo',
         branchName: 'feature/service-change',
         serviceSha: 'abcdef0123456789abcdef0123456789abcdef01',
+        dockerImage: 'registry.example.test/sample-service:service-sha-1',
+        buildPipelineId: 'build-pipeline-1',
+        deployPipelineId: 'deploy-pipeline-1',
       })
     );
   });

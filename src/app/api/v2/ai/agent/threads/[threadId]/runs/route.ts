@@ -19,7 +19,7 @@ import 'server/lib/dependencies';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { requireRequestUserIdentity } from 'server/lib/get-user';
-import { resolveRequestGitHubToken } from 'server/lib/agentSession/githubToken';
+import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import { buildWorkspaceFailureLinkData } from 'server/lib/agentSession/workspaceFailureLink';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
@@ -32,12 +32,13 @@ import {
   type AgentRunRuntimeOptions,
   type CanonicalAgentRunMessageInput,
 } from 'server/services/agent/canonicalMessages';
+import type { AgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
+import { normalizeAgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
 import { isAgentDebugRunIntent, type AgentDebugRunIntent } from 'server/services/agent/runPlanTypes';
 import AgentSourceService from 'server/services/agent/SourceService';
 import AgentSessionService from 'server/services/agentSession';
 import AgentMessageStore from 'server/services/agent/MessageStore';
 
-const MAX_RUN_MAX_ITERATIONS = 100;
 const DISPATCH_GITHUB_TOKEN_WAIT_MS = 250;
 
 function getUnknownKeys(value: Record<string, unknown>, allowedKeys: string[]): string[] {
@@ -98,16 +99,23 @@ function normalizeCanonicalRunMessage(value: unknown): CanonicalAgentRunMessageI
   };
 }
 
-async function resolveDispatchGitHubToken(req: NextRequest): Promise<string | null> {
+async function resolveDispatchGitHubAuth(req: NextRequest): Promise<AgentRequestGitHubAuth> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
 
   try {
-    return await Promise.race([
-      resolveRequestGitHubToken(req),
-      new Promise<null>((resolve) => {
-        timeout = setTimeout(() => resolve(null), DISPATCH_GITHUB_TOKEN_WAIT_MS);
+    const auth = await Promise.race([
+      resolveRequestGitHubAuth(req),
+      new Promise<AgentRequestGitHubAuth>((resolve) => {
+        timeout = setTimeout(
+          () => resolve(normalizeAgentRequestGitHubAuth({ githubToken: null, source: 'none' })),
+          DISPATCH_GITHUB_TOKEN_WAIT_MS
+        );
       }),
     ]);
+    return {
+      ...normalizeAgentRequestGitHubAuth(auth),
+      writeAuthorized: false,
+    };
   } finally {
     if (timeout) {
       clearTimeout(timeout);
@@ -163,8 +171,7 @@ function normalizeRuntimeOptions(value: unknown): AgentRunRuntimeOptions | null 
     if (
       typeof options.maxIterations !== 'number' ||
       !Number.isInteger(options.maxIterations) ||
-      options.maxIterations < 1 ||
-      options.maxIterations > MAX_RUN_MAX_ITERATIONS
+      options.maxIterations < 1
     ) {
       return null;
     }
@@ -332,7 +339,9 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ thr
     throw error;
   }
 
-  const { thread, session } = threadWithSession;
+  const { thread } = threadWithSession;
+  // A message to an archived session revives it; the workspace re-provisions lazily on demand.
+  const session = await AgentSessionService.ensureSessionActive(threadWithSession.session, userIdentity.userId);
   if (!AgentSessionService.canAcceptMessages(session)) {
     return errorResponse(new Error(AgentSessionService.getMessageBlockReason(session)), { status: 409 }, req);
   }
@@ -406,8 +415,8 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ thr
   }
 
   if (admission.created || admission.run.status === 'queued') {
-    const githubToken = await resolveDispatchGitHubToken(req);
-    await AgentRunQueueService.enqueueRun(admission.run.uuid, 'submit', { githubToken });
+    const githubAuth = await resolveDispatchGitHubAuth(req);
+    await AgentRunQueueService.enqueueRun(admission.run.uuid, 'submit', { githubAuth });
   }
 
   return successResponse(

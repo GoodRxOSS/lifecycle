@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolExecutionContext, ToolResult } from '../types';
 import { GitHubClient } from '../shared/githubClient';
 
 export class ListDirectoryTool extends BaseTool {
@@ -35,48 +35,63 @@ export class ListDirectoryTool extends BaseTool {
             type: 'string',
             description: "Repository name. Defaults to this build's primary repo name.",
           },
-          branch: { type: 'string', description: 'Branch name' },
+          branch: { type: 'string', description: "Branch name. Defaults to this build's PR branch." },
           directory_path: {
             type: 'string',
             description:
               'Any directory path to list (e.g., sysops/dockerfiles, src, helm/charts). Use empty string "" for root directory.',
           },
         },
-        required: ['repository_owner', 'repository_name', 'branch', 'directory_path'],
-      },
-      ToolSafetyLevel.SAFE,
-      'github'
+        required: ['directory_path'],
+      }
     );
   }
 
-  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
+    let auth: ToolResult['auth'];
     try {
-      const owner = args.repository_owner as string;
-      const repo = args.repository_name as string;
-      const branch = args.branch as string;
+      const defaultRepo = this.githubClient.getDefaultRepo();
+      const owner = (args.repository_owner as string) || defaultRepo?.owner;
+      const repo = (args.repository_name as string) || defaultRepo?.repo;
+      const branch = (args.branch as string) || this.githubClient.getAllowedBranch();
       const directoryPath = args.directory_path as string;
+
+      if (!owner || !repo || !branch) {
+        return this.createErrorResult(
+          'repository_owner, repository_name, and branch are required when no default repository is configured.',
+          'MISSING_REPO'
+        );
+      }
 
       // SECURITY: lock to the build's repositories; reject out-of-scope repos.
       if (!this.githubClient.isRepoAllowed(owner, repo)) {
         return this.createErrorResult(
           `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be accessed.`,
-          'FILE_ACCESS_DENIED',
-          false
+          'FILE_ACCESS_DENIED'
         );
       }
 
-      const octokit = await this.githubClient.getOctokit('agent-runtime-list-directory');
+      const octokitWithAuth = await this.githubClient.getOctokitWithAuth('agent-runtime-list-directory', {
+        requireUserAuth: false,
+        toolCallId: context?.toolCallId,
+      });
+      const octokit = octokitWithAuth.octokit;
+      auth = octokitWithAuth.auth;
 
       const response = await octokit.request(`GET /repos/${owner}/${repo}/contents/${directoryPath}`, {
         ref: branch,
       });
 
       if (!Array.isArray(response.data)) {
-        return this.createErrorResult(`Path "${directoryPath}" is not a directory`, 'NOT_A_DIRECTORY');
+        return { ...this.createErrorResult(`Path "${directoryPath}" is not a directory`, 'NOT_A_DIRECTORY'), auth };
       }
 
       const items = response.data.map((item: any) => ({
@@ -97,12 +112,15 @@ export class ListDirectoryTool extends BaseTool {
       };
 
       const displayContent = `Directory: ${directoryPath || '/'} (${filteredItems.length} items)`;
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return { ...this.createSuccessResult(JSON.stringify(result), displayContent), auth };
     } catch (error: any) {
-      return this.createErrorResult(
-        error.message || `Failed to list directory ${args.directory_path}`,
-        'EXECUTION_ERROR'
-      );
+      return {
+        ...this.createErrorResult(
+          error.message || `Failed to list directory ${args.directory_path}`,
+          'EXECUTION_ERROR'
+        ),
+        auth,
+      };
     }
   }
 }

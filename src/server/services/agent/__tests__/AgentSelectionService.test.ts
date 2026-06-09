@@ -21,6 +21,7 @@ const mockResolveSessionContext = jest.fn();
 const mockEnsureSeeded = jest.fn();
 const mockListSystemDefinitions = jest.fn();
 const mockInferDefaultAgentDefinitionId = jest.fn();
+const mockInferDefaultAgentSourceKind = jest.fn();
 const mockCreateAgentSwitchEvent = jest.fn();
 const mockGetSessionSource = jest.fn();
 const mockGetOwnedThreadWithSession = jest.fn();
@@ -56,11 +57,20 @@ jest.mock('../AgentDefinitionRegistry', () => {
     ensureSystemAgentDefinitionsSeeded: (...args: unknown[]) => mockEnsureSeeded(...args),
     listSystemAgentDefinitions: (...args: unknown[]) => mockListSystemDefinitions(...args),
     inferDefaultSystemAgentDefinitionId: (...args: unknown[]) => mockInferDefaultAgentDefinitionId(...args),
+    inferDefaultAgentSourceKind: (...args: unknown[]) => mockInferDefaultAgentSourceKind(...args),
   };
 });
 
 jest.mock('../CustomAgentDefinitionService', () => ({
   __esModule: true,
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE:
+    'This custom agent needs conversion before it can run in the one-agent harness.',
+  customAgentDefinitionNeedsOneAgentConversion: (definition: any) =>
+    definition.owner.kind === 'user' &&
+    (definition.resourcePolicy.workspaceRequired ||
+      definition.resourcePolicy.sandboxRequired ||
+      (definition.resourcePolicy.sourceKinds.includes('workspace_session') &&
+        !definition.resourcePolicy.sourceKinds.includes('freeform_chat'))),
   customAgentDefinitionService: {
     listUserDefinitions: (...args: unknown[]) => mockListUserDefinitions(...args),
   },
@@ -177,7 +187,8 @@ describe('AgentSelectionService', () => {
     });
     mockEnsureSeeded.mockResolvedValue(Object.values(SYSTEM_AGENT_DEFINITIONS));
     mockListSystemDefinitions.mockResolvedValue(Object.values(SYSTEM_AGENT_DEFINITIONS));
-    mockInferDefaultAgentDefinitionId.mockReturnValue('system.freeform');
+    mockInferDefaultAgentDefinitionId.mockReturnValue('system.agent');
+    mockInferDefaultAgentSourceKind.mockReturnValue('freeform_chat');
     mockGetOwnedThreadWithSession.mockResolvedValue({ thread, session });
     mockGetSessionSource.mockResolvedValue(source);
     mockListUserDefinitions.mockResolvedValue([customDefinition]);
@@ -192,16 +203,12 @@ describe('AgentSelectionService', () => {
     expect(state).toEqual(
       expect.objectContaining({
         selectedId: null,
-        defaultId: 'system.freeform',
-        currentId: 'system.freeform',
+        defaultId: 'system.agent',
+        currentId: 'system.agent',
       })
     );
     expect(state.groups.map((group) => group.id)).toEqual(['built_in', 'my_agents']);
-    expect(state.groups[0].agents.map((agent) => agent.id)).toEqual([
-      'system.debug',
-      'system.develop',
-      'system.freeform',
-    ]);
+    expect(state.groups[0].agents.map((agent) => agent.id)).toEqual(['system.agent']);
     expect(state.groups[1].agents).toEqual([
       expect.objectContaining({
         id: 'custom.sample-agent',
@@ -259,7 +266,7 @@ describe('AgentSelectionService', () => {
     );
     expect(mockCreateAgentSwitchEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        beforeAgent: { id: 'system.freeform', label: 'Free-form' },
+        beforeAgent: { id: 'system.agent', label: 'Lifecycle Agent' },
         afterAgent: { id: 'custom.sample-agent', label: 'Sample custom agent' },
       })
     );
@@ -280,15 +287,26 @@ describe('AgentSelectionService', () => {
     expect(mockCreateAgentSwitchEvent).not.toHaveBeenCalled();
   });
 
-  it('rejects source-incompatible agents and writes no preference', async () => {
+  it('marks workspace custom agents as needing conversion and writes no preference', async () => {
+    mockListUserDefinitions.mockResolvedValueOnce([
+      {
+        ...customDefinition,
+        resourcePolicy: {
+          sourceKinds: ['workspace_session'],
+          workspaceRequired: true,
+          sandboxRequired: true,
+        },
+      },
+    ]);
+
     await expect(
       AgentSelectionService.switchThreadAgent({
         threadId: 'thread-1',
         userIdentity,
-        agentId: 'system.develop',
+        agentId: 'custom.sample-agent',
       })
     ).rejects.toMatchObject({
-      reason: 'requires_workspace',
+      reason: 'needs_conversion',
     });
 
     expect(mockThreadQuery().patchAndFetchById).not.toHaveBeenCalled();

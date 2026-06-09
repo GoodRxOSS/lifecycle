@@ -15,20 +15,9 @@
  */
 
 import 'dotenv/config';
-import getConfig from 'next/config';
-import { serverRuntimeConfig as fallbackServerRuntimeConfig } from '../../next.config';
-
-let serverRuntimeConfig: Record<string, any> | null = null;
-
-/* There are some situations where getConfig is not initialized because of how next works */
-if (getConfig() === undefined) {
-  serverRuntimeConfig = fallbackServerRuntimeConfig;
-} else {
-  serverRuntimeConfig = getConfig().serverRuntimeConfig;
-}
 
 const getServerRuntimeConfig = (key: string, fallback?: any): any => {
-  return getProp(serverRuntimeConfig!, key, fallback);
+  return getProp(process.env, key, fallback);
 };
 
 const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
@@ -64,6 +53,7 @@ export const APP_DB_NAME = getServerRuntimeConfig('APP_DB_NAME', '');
 export const APP_DB_SSL = getServerRuntimeConfig('APP_DB_SSL', '');
 
 export const LIFECYCLE_UI_URL = getServerRuntimeConfig('LIFECYCLE_UI_URL', '');
+export const CHAT_PREVIEW_DOMAIN = getServerRuntimeConfig('CHAT_PREVIEW_DOMAIN', '');
 
 export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID', 'YOUR_VALUE_HERE');
 export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID', 'YOUR_VALUE_HERE');
@@ -123,13 +113,22 @@ export const QUEUE_NAMES = {
   AGENT_SANDBOX_SESSION_LAUNCH: 'agent_sandbox_session_launch',
   AGENT_RUN_EXECUTE: 'agent_run_execute',
   AGENT_RUN_RECOVERY: 'agent_run_recovery',
+  WORKSPACE_TEMPLATE_BUILD: 'workspace_template_build',
 } as const;
 
 export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');
 
+// The Keycloak GitHub-broker callback is the issuer + /broker/github/endpoint. Derive it from the
+// configured issuer so /setup never bakes the localhost default into the GitHub App manifest on a
+// real deployment; an explicit GITHUB_APP_AUTH_CALLBACK still wins, and localhost only remains when
+// no Keycloak issuer is configured (i.e. auth is off and there is no broker anyway).
+const KEYCLOAK_ISSUER = getServerRuntimeConfig('KEYCLOAK_ISSUER', '');
+
 export const GITHUB_APP_AUTH_CALLBACK = getServerRuntimeConfig(
   'GITHUB_APP_AUTH_CALLBACK',
-  'http://localhost/realms/lifecycle/broker/github/endpoint'
+  KEYCLOAK_ISSUER
+    ? `${String(KEYCLOAK_ISSUER).replace(/\/+$/, '')}/broker/github/endpoint`
+    : 'http://localhost/realms/lifecycle/broker/github/endpoint'
 );
 
 export const APP_AUTH = {

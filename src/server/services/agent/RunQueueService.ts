@@ -20,12 +20,17 @@ import { encrypt } from 'server/lib/encryption';
 import { extractContextForQueue } from 'server/lib/logger';
 import { QUEUE_NAMES } from 'shared/config';
 import { randomUUID } from 'crypto';
+import type { AgentRequestGitHubAuth, AgentGitHubAuthSource } from './githubAuth';
+import { buildAgentRequestGitHubAuthFromToken, normalizeAgentRequestGitHubAuth } from './githubAuth';
 
 export type AgentRunExecuteJob = {
   runId: string;
   dispatchAttemptId: string;
   reason?: 'submit' | 'approval_resolved' | 'resume';
   encryptedGithubToken?: string | null;
+  githubTokenSource?: AgentGitHubAuthSource;
+  githubUsername?: string | null;
+  githubTokenWriteAuthorized?: boolean;
   correlationId?: string;
   buildUuid?: string;
   deployUuid?: string;
@@ -40,6 +45,7 @@ export type AgentRunExecuteJob = {
 
 type EnqueueRunOptions = {
   githubToken?: string | null;
+  githubAuth?: AgentRequestGitHubAuth | null;
 };
 
 type EnqueueRunResult = {
@@ -61,7 +67,10 @@ export default class AgentRunQueueService {
     reason: AgentRunExecuteJob['reason'] = 'submit',
     options: EnqueueRunOptions = {}
   ): Promise<EnqueueRunResult> {
-    const githubToken = options.githubToken?.trim();
+    const githubAuth = normalizeAgentRequestGitHubAuth(
+      options.githubAuth || buildAgentRequestGitHubAuthFromToken(options.githubToken, 'user')
+    );
+    const githubToken = githubAuth.githubToken?.trim();
     const dispatchAttemptId = randomUUID();
     await this.queue.add(
       'execute-run',
@@ -70,6 +79,9 @@ export default class AgentRunQueueService {
         dispatchAttemptId,
         reason,
         encryptedGithubToken: githubToken ? encrypt(githubToken) : null,
+        githubTokenSource: githubAuth.source,
+        githubUsername: githubAuth.githubUsername || null,
+        githubTokenWriteAuthorized: githubAuth.writeAuthorized === true,
         ...extractContextForQueue(),
       },
       {

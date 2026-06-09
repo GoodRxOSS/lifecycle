@@ -18,21 +18,26 @@ import { buildUpdateFilePreview, shouldRequestUpdateFileApproval } from '../diag
 import type { GitHubClient } from '../tools/shared/githubClient';
 
 function buildGithubClient(currentContent: string | null): GitHubClient {
+  const octokit = {
+    request: jest.fn(async () => {
+      if (currentContent === null) {
+        throw new Error('not found');
+      }
+
+      return {
+        data: {
+          content: Buffer.from(currentContent).toString('base64'),
+        },
+      };
+    }),
+  };
   return {
     isFilePathAllowed: jest.fn(() => true),
     validateBranch: jest.fn(() => ({ valid: true })),
-    getOctokit: jest.fn(async () => ({
-      request: jest.fn(async () => {
-        if (currentContent === null) {
-          throw new Error('not found');
-        }
-
-        return {
-          data: {
-            content: Buffer.from(currentContent).toString('base64'),
-          },
-        };
-      }),
+    getOctokit: jest.fn(async () => octokit),
+    getOctokitWithAuth: jest.fn(async () => ({
+      octokit,
+      auth: { provider: 'github', source: 'app', required: false },
     })),
   } as unknown as GitHubClient;
 }
