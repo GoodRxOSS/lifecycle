@@ -16,7 +16,12 @@
 
 require('dotenv').config();
 
+const SITES_UPLOAD_BODY_LIMIT_BYTES = 200 * 1000 * 1000;
+
 module.exports = {
+  experimental: {
+    middlewareClientMaxBodySize: SITES_UPLOAD_BODY_LIMIT_BYTES,
+  },
   serverExternalPackages: [
     '@kubernetes/client-node',
     '@octokit/core',
