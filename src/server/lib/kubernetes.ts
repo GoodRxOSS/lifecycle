@@ -20,7 +20,7 @@ import _ from 'lodash';
 import { Build, Deploy, Deployable, Service } from 'server/models';
 import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
 import { shellPromise } from './shell';
-import { flattenObject, getKeepLabel, parsePullRequestLabels, waitUntil } from 'server/lib/utils';
+import { flattenObject, getKeepLabel, parsePullRequestLabels } from 'server/lib/utils';
 import { ServiceDiskConfig } from 'server/models/yaml';
 import * as k8s from '@kubernetes/client-node';
 import { HttpError, V1Status, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
@@ -28,7 +28,6 @@ import { IncomingMessage } from 'http';
 import { APP_ENV, TMP_PATH } from 'shared/config';
 import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
-import { setupServiceAccountWithRBAC } from './kubernetes/rbac';
 import { staticEnvTolerations } from './helm/constants';
 import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
 import { generateSecretName } from './kubernetes/externalSecret';
@@ -380,100 +379,6 @@ export async function createOrUpdateNamespace({
     }
   } catch (err) {
     getLogger({ namespace: name, error: err }).error('Namespace: create failed');
-    throw err;
-  }
-}
-
-export async function createOrUpdateServiceAccount({ namespace, role }: { namespace: string; role: string }) {
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
-  const client = kc.makeApiClient(k8s.CoreV1Api);
-
-  // Get the service account name from global config
-  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
-  const serviceAccountName = serviceAccount?.name || 'default';
-
-  const serviceAccountExists = async () => {
-    try {
-      const saResponse = await client.readNamespacedServiceAccount(serviceAccountName, namespace);
-      return Boolean(saResponse?.body);
-    } catch (error) {
-      return false;
-    }
-  };
-
-  // If it's not the default service account, create it first
-  if (serviceAccountName !== 'default') {
-    const serviceAccountManifest = {
-      apiVersion: 'v1',
-      kind: 'ServiceAccount',
-      metadata: {
-        name: serviceAccountName,
-      },
-    };
-
-    try {
-      if (!(await serviceAccountExists())) {
-        getLogger({ namespace, serviceAccountName }).debug('ServiceAccount: creating');
-        await client.createNamespacedServiceAccount(namespace, serviceAccountManifest);
-        getLogger({ namespace, serviceAccountName }).debug('Created service account');
-      } else {
-        getLogger({ namespace, serviceAccountName }).debug('Service account already exists');
-      }
-    } catch (err) {
-      getLogger({
-        namespace,
-        serviceAccountName,
-        error: err,
-        statusCode: err?.response?.statusCode,
-        statusMessage: err?.response?.statusMessage,
-      }).error('ServiceAccount: create failed');
-      throw err;
-    }
-  } else {
-    try {
-      await waitUntil(serviceAccountExists, {
-        timeoutMs: 120000,
-        intervalMs: 2000,
-      });
-    } catch (error) {
-      getLogger({ namespace, serviceAccountName, error }).error('ServiceAccount: wait timeout');
-      throw error;
-    }
-  }
-
-  // patch the service account with the role
-  const patch = {
-    metadata: {
-      annotations: {
-        'eks.amazonaws.com/role-arn': role,
-      },
-    },
-  };
-
-  try {
-    await client.patchNamespacedServiceAccount(
-      serviceAccountName,
-      namespace,
-      patch,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      { headers: { 'Content-Type': 'application/merge-patch+json' } }
-    );
-    getLogger({ namespace, serviceAccountName }).debug('Annotated service account');
-
-    await setupServiceAccountWithRBAC({
-      namespace,
-      serviceAccountName,
-      awsRoleArn: role,
-      permissions: 'deploy',
-    });
-    getLogger({ namespace, serviceAccountName }).debug('RBAC: configured');
-  } catch (err) {
-    getLogger({ namespace, serviceAccountName, error: err }).error('ServiceAccount: setup failed');
     throw err;
   }
 }

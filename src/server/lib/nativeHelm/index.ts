@@ -31,7 +31,6 @@ export {
   constructHelmCustomValues,
   constructHelmCommand,
   generateHelmInstallScript,
-  setupServiceAccountInNamespace,
   calculateJobTTL,
   createHelmJob,
   validateHelmConfiguration,

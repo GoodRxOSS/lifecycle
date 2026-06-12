@@ -39,6 +39,7 @@ import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValid
 import { type LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import type { DeployableReconciliationResult } from 'server/services/deployable';
 import { DeploymentManager } from 'server/lib/deploymentManager/deploymentManager';
+import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
 import { Tracer } from 'server/lib/tracer';
 import { redisClient } from 'server/lib/dependencies';
 import { generateGraph } from 'server/lib/dependencyGraph';
@@ -1590,10 +1591,7 @@ export default class BuildService extends BaseService {
           staticEnv: build.isStatic,
           pullRequest: build.pullRequest,
         });
-        await k8s.createOrUpdateServiceAccount({
-          namespace: build.namespace,
-          role: serviceAccount?.role,
-        });
+        await ensureServiceAccountForJob(build.namespace, 'deploy');
         if (build.kind === BuildKind.ENVIRONMENT && build.uuid) {
           await new AgentPrewarmService(this.db, this.redis, this.redlock, this.queueManager)
             .queueBuildPrewarm(build.uuid)

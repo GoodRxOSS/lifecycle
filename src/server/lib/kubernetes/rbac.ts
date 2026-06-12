@@ -14,15 +14,16 @@
  * limitations under the License.
  */
 
-import { V1ServiceAccount, V1Role, V1RoleBinding } from '@kubernetes/client-node';
+import { V1Role, V1RoleBinding } from '@kubernetes/client-node';
 import * as k8s from '@kubernetes/client-node';
 import { getLogger } from '../logger';
+
+export type ServiceAccountPermissions = 'build' | 'deploy' | 'full' | 'read';
 
 export interface RBACConfig {
   namespace: string;
   serviceAccountName: string;
-  awsRoleArn?: string;
-  permissions: 'build' | 'deploy' | 'full' | 'read';
+  permissions: ServiceAccountPermissions;
 }
 
 const PERMISSION_RULES = {
@@ -106,48 +107,12 @@ const PERMISSION_RULES = {
   ],
 };
 
-export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<void> {
-  const { namespace, serviceAccountName, awsRoleArn, permissions } = config;
+export async function ensureRoleAndBinding(config: RBACConfig): Promise<void> {
+  const { namespace, serviceAccountName, permissions } = config;
 
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();
-  const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
   const rbacApi = kc.makeApiClient(k8s.RbacAuthorizationV1Api);
-
-  // Create or update ServiceAccount
-  const serviceAccount: V1ServiceAccount = {
-    metadata: {
-      name: serviceAccountName,
-      namespace,
-      annotations: awsRoleArn
-        ? {
-            'eks.amazonaws.com/role-arn': awsRoleArn,
-          }
-        : {},
-    },
-  };
-
-  try {
-    await coreV1Api.createNamespacedServiceAccount(namespace, serviceAccount);
-    getLogger().debug(`ServiceAccount: created ${serviceAccountName} namespace=${namespace}`);
-  } catch (error) {
-    if (error?.response?.statusCode === 409) {
-      await coreV1Api.patchNamespacedServiceAccount(
-        serviceAccountName,
-        namespace,
-        serviceAccount,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { headers: { 'Content-Type': 'application/merge-patch+json' } }
-      );
-      getLogger().debug(`ServiceAccount: updated ${serviceAccountName} namespace=${namespace}`);
-    } else {
-      throw error;
-    }
-  }
 
   // Create or update Role
   const roleName = `${serviceAccountName}-role`;
@@ -221,58 +186,4 @@ export async function setupServiceAccountWithRBAC(config: RBACConfig): Promise<v
       throw error;
     }
   }
-}
-
-export async function setupBuildServiceAccountInNamespace(
-  namespace: string,
-  serviceAccountName: string = 'native-build-sa',
-  awsRoleArn?: string
-): Promise<void> {
-  await setupServiceAccountWithRBAC({
-    namespace,
-    serviceAccountName,
-    awsRoleArn,
-    permissions: 'build',
-  });
-}
-
-export async function setupReadOnlyServiceAccountInNamespace(
-  namespace: string,
-  serviceAccountName: string = 'agent-sa'
-): Promise<void> {
-  await setupServiceAccountWithRBAC({
-    namespace,
-    serviceAccountName,
-    permissions: 'read',
-  });
-}
-
-export async function setupDeployServiceAccountInNamespace(
-  namespace: string,
-  serviceAccountName: string = 'default',
-  awsRoleArn?: string
-): Promise<void> {
-  await setupServiceAccountWithRBAC({
-    namespace,
-    serviceAccountName,
-    awsRoleArn,
-    permissions: 'deploy',
-  });
-
-  if (serviceAccountName !== 'default') {
-    await setupServiceAccountWithRBAC({
-      namespace,
-      serviceAccountName: 'default',
-      permissions: 'deploy',
-    });
-  }
-}
-
-export async function createServiceAccountUsingExistingFunction(
-  namespace: string,
-  _serviceAccountName: string,
-  role?: string
-): Promise<void> {
-  const { createOrUpdateServiceAccount } = await import('../kubernetes');
-  await createOrUpdateServiceAccount({ namespace, role });
 }
