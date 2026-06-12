@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { setupReadOnlyServiceAccountInNamespace } from 'server/lib/kubernetes/rbac';
+import { ensureServiceAccount } from 'server/lib/kubernetes/common/serviceAccount';
 
 export const AGENT_SESSION_SERVICE_ACCOUNT_NAME = 'agent-sa';
 const serviceAccountSetupByNamespace = new Map<string, Promise<string>>();
@@ -23,7 +23,7 @@ export async function ensureAgentSessionServiceAccount(namespace: string): Promi
   let setupPromise = serviceAccountSetupByNamespace.get(namespace);
   if (!setupPromise) {
     setupPromise = (async () => {
-      await setupReadOnlyServiceAccountInNamespace(namespace, AGENT_SESSION_SERVICE_ACCOUNT_NAME);
+      await ensureServiceAccount({ namespace, name: AGENT_SESSION_SERVICE_ACCOUNT_NAME, permissions: 'read' });
       return AGENT_SESSION_SERVICE_ACCOUNT_NAME;
     })();
     serviceAccountSetupByNamespace.set(namespace, setupPromise);

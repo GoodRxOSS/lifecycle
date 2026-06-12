@@ -87,7 +87,10 @@ jest.mock('server/lib/kubernetes', () => ({
   applyManifests: (...args: any[]) => mockApplyManifests(...args),
   waitForPodReady: (...args: any[]) => mockWaitForPodReady(...args),
   createOrUpdateNamespace: jest.fn(),
-  createOrUpdateServiceAccount: jest.fn(),
+}));
+
+jest.mock('server/lib/kubernetes/common/serviceAccount', () => ({
+  ensureServiceAccountForJob: jest.fn().mockResolvedValue('default'),
 }));
 
 jest.mock('server/lib/github', () => ({

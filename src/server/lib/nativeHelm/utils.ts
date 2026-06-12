@@ -29,10 +29,6 @@ import {
   scaffoldHelmSecretRefs,
 } from 'server/lib/helm/utils';
 import { staticEnvTolerations } from 'server/lib/helm/constants';
-import {
-  createServiceAccountUsingExistingFunction,
-  setupDeployServiceAccountInNamespace,
-} from 'server/lib/kubernetes/rbac';
 import { getLogger } from 'server/lib/logger';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
@@ -366,16 +362,6 @@ function mergeChartConfig(defaultChart: any, chartConfig: any, helmChart: any): 
         ? chartConfig.valueFiles
         : defaultChart?.valueFiles || helmChart?.valueFiles || [],
   };
-}
-
-export async function setupServiceAccountInNamespace(
-  namespace: string,
-  serviceAccountName: string,
-  role: string
-): Promise<void> {
-  await createServiceAccountUsingExistingFunction(namespace, serviceAccountName, role);
-  await setupDeployServiceAccountInNamespace(namespace, serviceAccountName, role);
-  getLogger().debug(`RBAC: configured serviceAccount=${serviceAccountName} namespace=${namespace}`);
 }
 
 export async function createNamespacedRoleAndBinding(namespace: string, serviceAccountName: string): Promise<void> {

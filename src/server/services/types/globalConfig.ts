@@ -172,8 +172,11 @@ export type SitesConfig = {
 };
 
 export type RoleSettings = {
-  role: string;
   name?: string;
+  /** Annotations applied to service accounts in environment namespaces, e.g. cloud workload identity keys. */
+  annotations?: Record<string, string>;
+  /** @deprecated AWS-only: emitted as eks.amazonaws.com/role-arn. Use annotations instead. */
+  role?: string;
 };
 
 export type DatabaseSettings = {
