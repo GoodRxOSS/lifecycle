@@ -519,6 +519,10 @@ export default class GithubService extends Service {
     const branchName = ref.split('refs/heads/')[1];
     if (!branchName) return;
     const hasVoidCommit = [previousCommit, latestCommit].some((commit) => this.isVoidCommit(commit));
+    // The pushed head commit is the deploy trigger used to keep distinct commits from collapsing onto one dedupe
+    // key. Guard on the head commit only (the value that enters the key); a void head means there is nothing to
+    // deploy, so fall back to the commit-agnostic key.
+    const deployTriggerRef = latestCommit && !this.isVoidCommit(latestCommit) ? latestCommit : undefined;
     getLogger({}).debug(`Push event repo=${repoName} branch=${branchName}`);
     const models = this.db.models;
     let changedFilesForPush: github.ChangedFilesForPushResult | null = null;
@@ -568,7 +572,11 @@ export default class GithubService extends Service {
 
       if (!allDeploys.length) {
         // additional check for static env branch
-        await this.handlePushForStaticEnv({ githubRepositoryId, branchName });
+        await this.handlePushForStaticEnv({
+          githubRepositoryId,
+          branchName,
+          headCommit: deployTriggerRef ?? null,
+        });
         return;
       }
       const deploysToRebuild = allDeploys.filter((deploy) => {
@@ -676,6 +684,10 @@ export default class GithubService extends Service {
         await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId,
           ...(hasFailedDeploys ? {} : { githubRepositoryId }),
+          // The pushed commit is the deploy trigger. It keeps back-to-back pushes to the same branch from collapsing
+          // onto one dedupe key (which would silently drop the later commit), while a redelivered webhook for the
+          // same commit still coalesces.
+          ...(deployTriggerRef ? { triggerRef: deployTriggerRef } : {}),
           ...extractContextForQueue(),
         });
       }
@@ -693,9 +705,11 @@ export default class GithubService extends Service {
   handlePushForStaticEnv = async ({
     githubRepositoryId,
     branchName,
+    headCommit,
   }: {
     githubRepositoryId: number;
     branchName: string;
+    headCommit?: string | null;
   }): Promise<void> => {
     try {
       const build = await this.db.models.Build.query()
@@ -720,6 +734,10 @@ export default class GithubService extends Service {
       getLogger().info(`Push: redeploying reason=staticEnv`);
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build?.id,
+        // The pushed commit is the deploy trigger, so a later push to the tracked branch is not coalesced onto an
+        // in-flight or recent deploy of an earlier commit. Static envs rebuild on every tracked-branch push by
+        // design, so this only prevents wrongly dropping a distinct commit.
+        ...(headCommit ? { triggerRef: headCommit } : {}),
         ...extractContextForQueue(),
       });
     } catch (error) {

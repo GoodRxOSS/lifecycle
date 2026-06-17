@@ -866,6 +866,7 @@ describe('BuildService queue fingerprinting', () => {
   let mockBuildQuery: any;
   let mockBuildQueueAdd: jest.Mock;
   let mockResolveQueueAdd: jest.Mock;
+  let mockBuildQueueGetJob: jest.Mock;
 
   const createMockBuild = (overrides: any = {}) =>
     ({
@@ -909,6 +910,7 @@ describe('BuildService queue fingerprinting', () => {
 
     mockBuildQueueAdd = jest.fn().mockResolvedValue(undefined);
     mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
+    mockBuildQueueGetJob = jest.fn().mockResolvedValue(undefined);
 
     mockBuildQuery = {
       findOne: jest.fn().mockReturnThis(),
@@ -936,7 +938,7 @@ describe('BuildService queue fingerprinting', () => {
       {} as any,
       queueManager as any
     );
-    (buildService as any).buildQueue = { add: mockBuildQueueAdd };
+    (buildService as any).buildQueue = { add: mockBuildQueueAdd, getJob: mockBuildQueueGetJob };
     (buildService as any).resolveAndDeployBuildQueue = { add: mockResolveQueueAdd };
   });
 
@@ -1026,6 +1028,72 @@ describe('BuildService queue fingerprinting', () => {
         jobId: `build:1:${expectedFingerprint}`,
       })
     );
+  });
+
+  test('appends triggerRef to the resolve dedupe key so distinct triggers get distinct keys', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      triggerRef: 'commit-a',
+    });
+    await buildService.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      triggerRef: 'commit-b',
+    });
+
+    const firstKey = mockResolveQueueAdd.mock.calls[0][2].deduplication.id;
+    const secondKey = mockResolveQueueAdd.mock.calls[1][2].deduplication.id;
+
+    expect(firstKey).toBe(`resolve:1:${expectedFingerprint}:commit-a`);
+    expect(secondKey).toBe(`resolve:1:${expectedFingerprint}:commit-b`);
+    expect(firstKey).not.toBe(secondKey);
+    // The trigger is forwarded into the job payload so the resolve step can hand it to the build step.
+    expect(mockResolveQueueAdd.mock.calls[0][1]).toEqual(expect.objectContaining({ triggerRef: 'commit-a' }));
+  });
+
+  test('keeps the dedupe key commit-agnostic when no triggerRef is provided', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
+
+    expect(mockResolveQueueAdd.mock.calls[0][2].deduplication.id).toBe(`resolve:1:${expectedFingerprint}`);
+    expect(mockResolveQueueAdd.mock.calls[0][1]).not.toHaveProperty('triggerRef');
+  });
+
+  test('the same triggerRef yields the same build job id so genuine duplicates still coalesce', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
+    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
+
+    expect(mockBuildQueueAdd.mock.calls[0][2].jobId).toBe(`build:1:${expectedFingerprint}:commit-a`);
+    expect(mockBuildQueueAdd.mock.calls[1][2].jobId).toBe(mockBuildQueueAdd.mock.calls[0][2].jobId);
+  });
+
+  test('logs a dedupe skip when a matching build job already exists', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+    mockBuildQueueGetJob.mockResolvedValue({ id: 'existing' });
+
+    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+
+    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
+
+    expect(mockBuildQueueGetJob).toHaveBeenCalledWith(`build:1:${expectedFingerprint}:commit-a`);
+    // add() is still invoked; it is a no-op when the job already exists.
+    expect(mockBuildQueueAdd).toHaveBeenCalled();
   });
 
   test('service redeploy queues scoped build without deleted-service reconciliation', async () => {

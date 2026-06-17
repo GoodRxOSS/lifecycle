@@ -165,14 +165,21 @@ export default class BuildService extends BaseService {
   async enqueueResolveAndDeployBuild({
     buildId,
     githubRepositoryId,
+    triggerRef,
     ...jobData
   }: {
     buildId: number;
     githubRepositoryId?: number | null;
+    triggerRef?: string | null;
     [key: string]: any;
   }) {
     const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
-    const dedupeId = `resolve:${buildId}:${fingerprint}`;
+    // The fingerprint only captures build configuration, not the commit being deployed. Without a per-trigger
+    // suffix, two deploys of the same build (e.g. two pushes to a tracked branch landing close together) collapse
+    // onto one dedupe key, and the later one is silently dropped. triggerRef (the pushed commit, or a redeploy id)
+    // makes each distinct trigger its own key while still coalescing genuine duplicates of the same trigger.
+    const suffix = triggerRef ? `:${triggerRef}` : '';
+    const dedupeId = `resolve:${buildId}:${fingerprint}${suffix}`;
     getLogger({ stage: LogStage.BUILD_QUEUED }).info(
       `Build queue: name=resolve-deploy buildId=${buildId} scope=${githubRepositoryId || 'all'} dedupeKey=${dedupeId}`
     );
@@ -181,6 +188,7 @@ export default class BuildService extends BaseService {
       {
         buildId,
         ...(githubRepositoryId ? { githubRepositoryId } : {}),
+        ...(triggerRef ? { triggerRef } : {}),
         ...jobData,
       },
       {
@@ -195,22 +203,37 @@ export default class BuildService extends BaseService {
   async enqueueBuildJob({
     buildId,
     githubRepositoryId,
+    triggerRef,
     ...jobData
   }: {
     buildId: number;
     githubRepositoryId?: number | null;
+    triggerRef?: string | null;
     [key: string]: any;
   }) {
     const fingerprint = await this.computeBuildRequestFingerprint(buildId, githubRepositoryId ?? undefined);
-    const jobId = `build:${buildId}:${fingerprint}`;
+    // Mirror the suffix used by the resolve step so both queue layers agree on identity. A build job is keyed by
+    // jobId, which makes add() idempotent: an enqueue whose jobId matches an existing job is a no-op rather than new
+    // work. Including triggerRef ensures a distinct trigger yields a distinct job instead of being dropped.
+    const suffix = triggerRef ? `:${triggerRef}` : '';
+    const jobId = `build:${buildId}:${fingerprint}${suffix}`;
     getLogger({ stage: LogStage.BUILD_QUEUED }).info(
       `Build queue: name=build buildId=${buildId} scope=${githubRepositoryId || 'all'} jobId=${jobId}`
     );
+    // Best-effort visibility: a matching job here means this enqueue will be coalesced into existing work rather
+    // than building. Without this log the drop is invisible, since the dedupe happens inside the queue.
+    const existing = await this.buildQueue.getJob(jobId);
+    if (existing) {
+      getLogger({ stage: LogStage.BUILD_QUEUED }).info(
+        `Build queue: skipped reason=deduped buildId=${buildId} jobId=${jobId}`
+      );
+    }
     return this.buildQueue.add(
       'build',
       {
         buildId,
         ...(githubRepositoryId ? { githubRepositoryId } : {}),
+        ...(triggerRef ? { triggerRef } : {}),
         ...jobData,
       },
       {
@@ -441,6 +464,8 @@ export default class BuildService extends BaseService {
       githubRepositoryId,
       skipDeletedServiceReconciliation: true,
       runUUID,
+      // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
+      triggerRef: runUUID,
       ...extractContextForQueue(),
     });
 
@@ -483,10 +508,13 @@ export default class BuildService extends BaseService {
       }
 
       const buildId = build.id;
+      const runUUID = nanoid();
 
       await this.enqueueResolveAndDeployBuild({
         buildId,
-        runUUID: nanoid(),
+        runUUID,
+        // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
+        triggerRef: runUUID,
         correlationId,
       });
 
@@ -1910,7 +1938,7 @@ export default class BuildService extends BaseService {
    * @param done the Bull callback to invoke when we're done
    */
   processResolveAndDeployBuildQueue = async (job) => {
-    const { sender, correlationId, skipDeletedServiceReconciliation, _ddTraceContext } = job.data;
+    const { sender, correlationId, skipDeletedServiceReconciliation, triggerRef, _ddTraceContext } = job.data;
 
     return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
       let jobId;
@@ -1938,11 +1966,13 @@ export default class BuildService extends BaseService {
           getLogger().info('Deploy: skipping reason=deployOnUpdateDisabled');
           return;
         }
-        // Enqueue a standard resolve build
+        // Enqueue a standard resolve build. Forward triggerRef so the build job shares the resolve step's dedupe
+        // identity; otherwise the two layers would disagree and idempotent coalescing of genuine duplicates breaks.
         await this.enqueueBuildJob({
           buildId,
           githubRepositoryId,
           skipDeletedServiceReconciliation,
+          triggerRef,
           ...extractContextForQueue(),
         });
       } catch (error) {
