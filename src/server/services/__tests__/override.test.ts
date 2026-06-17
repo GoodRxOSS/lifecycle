@@ -299,6 +299,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
   });
@@ -444,6 +445,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
   });
@@ -475,6 +477,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
     expect(result).toEqual({
@@ -946,6 +949,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
     expect(result).toMatchObject({
@@ -978,6 +982,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
     expect(result).toMatchObject({
@@ -1081,6 +1086,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
     expect(result).toMatchObject({
@@ -1134,6 +1140,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(mockFallbackEnqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      triggerRef: 'run-uuid',
       correlationId: 'test-correlation',
     });
   });

@@ -558,6 +558,8 @@ export default class OverrideService extends BaseService {
     await buildService.enqueueResolveAndDeployBuild({
       buildId: build.id,
       runUUID: runUuid,
+      // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
+      triggerRef: runUuid,
       ...extractContextForQueue(),
     });
     return true;

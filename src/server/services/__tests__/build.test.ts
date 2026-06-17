@@ -1161,4 +1161,29 @@ describe('BuildService queue fingerprinting', () => {
       })
     );
   });
+
+  test('forwards triggerRef from the resolve job to the build job so both layers share dedupe identity', async () => {
+    const build = createMockBuild({
+      id: 1449,
+      uuid: 'good-dev-0',
+      pullRequest: {
+        latestCommit: 'abcdef123456',
+        deployOnUpdate: true,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+    mockBuildQuery.findOne.mockResolvedValue(build);
+    const enqueueBuildJob = jest.spyOn(buildService, 'enqueueBuildJob').mockResolvedValue(undefined as any);
+
+    await buildService.processResolveAndDeployBuildQueue({
+      data: {
+        buildId: 1449,
+        githubRepositoryId: 425935548,
+        triggerRef: 'head-commit-sha',
+      },
+    });
+
+    expect(enqueueBuildJob).toHaveBeenCalledWith(expect.objectContaining({ triggerRef: 'head-commit-sha' }));
+  });
 });
