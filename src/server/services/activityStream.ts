@@ -149,6 +149,8 @@ export default class ActivityStream extends BaseService {
           await this.db.services.BuildService.enqueueResolveAndDeployBuild({
             buildId,
             runUUID: runUuid,
+            // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
+            triggerRef: runUuid,
             ...extractContextForQueue(),
           });
           return;

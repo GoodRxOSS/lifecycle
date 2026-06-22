@@ -565,10 +565,13 @@ describe('Github Service - handlePushWebhook', () => {
       const pushEvent = createMockPushEvent();
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+        })
+      );
     });
 
     test('should omit githubRepositoryId when deploys have ERROR status', async () => {
@@ -596,9 +599,12 @@ describe('Github Service - handlePushWebhook', () => {
       const pushEvent = createMockPushEvent();
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+        })
+      );
 
       const addCall = mockDb.services.BuildService.resolveAndDeployBuildQueue.add.mock.calls[0];
       expect(addCall[1]).not.toHaveProperty('githubRepositoryId');
@@ -633,9 +639,12 @@ describe('Github Service - handlePushWebhook', () => {
       const pushEvent = createMockPushEvent();
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+        })
+      );
     });
 
     test('should handle multiple builds and check each for failures independently', async () => {
@@ -674,14 +683,22 @@ describe('Github Service - handlePushWebhook', () => {
       const pushEvent = createMockPushEvent();
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenNthCalledWith(1, 'resolve-deploy', {
-        buildId: buildId1,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenNthCalledWith(
+        1,
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId: buildId1,
+          githubRepositoryId: 12345,
+        })
+      );
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenNthCalledWith(2, 'resolve-deploy', {
-        buildId: buildId2,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenNthCalledWith(
+        2,
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId: buildId2,
+        })
+      );
     });
 
     test('updates latestCommit for a matching previous commit', async () => {
@@ -786,10 +803,13 @@ describe('Github Service - handlePushWebhook', () => {
 
       expect(mockDb.services.GlobalConfig.getAllConfigs).toHaveBeenCalled();
       expect(mockLoggerInfo).toHaveBeenCalledWith('Push: dry-run would skip deploy reason=ignoreFiles');
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+        })
+      );
       expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
     });
 
@@ -826,10 +846,13 @@ describe('Github Service - handlePushWebhook', () => {
       await githubService.handlePushWebhook(pushEvent);
 
       expect(mockLoggerInfo).toHaveBeenCalledWith('Push: dry-run would skip deploy reason=ignoreFiles');
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+        })
+      );
       expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
     });
 
@@ -894,10 +917,13 @@ describe('Github Service - handlePushWebhook', () => {
 
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+        })
+      );
       expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
     });
 
@@ -932,10 +958,13 @@ describe('Github Service - handlePushWebhook', () => {
 
       await githubService.handlePushWebhook(pushEvent);
 
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-        githubRepositoryId: 12345,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+        })
+      );
       expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
       expect(mockLoggerInfo).toHaveBeenCalledWith('Push: deploying reason=ignoreFiles_not_matched');
     });
@@ -960,9 +989,12 @@ describe('Github Service - handlePushWebhook', () => {
       await githubService.handlePushWebhook(pushEvent);
 
       expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
-      });
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+        })
+      );
     });
 
     test('queues skipped-push webhooks only for supported current build statuses', async () => {
@@ -1016,9 +1048,103 @@ describe('Github Service - handlePushWebhook', () => {
       await githubService.handlePushWebhook(pushEvent);
 
       expect(mockGetChangedFilesForPush).not.toHaveBeenCalled();
-      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
-        buildId,
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({
+          buildId,
+        })
+      );
+    });
+
+    test('forwards the pushed commit as triggerRef so distinct commits are not coalesced', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
       });
+
+      // Keep the default void `before` so the deploy routes directly without changed-files setup; triggerRef
+      // derives only from the pushed head commit (`after`).
+      const pushEvent = {
+        ...createMockPushEvent(),
+        after: 'head-commit-sha',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({ buildId, triggerRef: 'head-commit-sha' })
+      );
+    });
+
+    test('omits triggerRef when the pushed head commit is void', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId);
+
+      let queryCount = 0;
+      mockDb.models.Deploy.query.mockImplementation(() => {
+        queryCount++;
+        return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
+      });
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: '0000000000000000000000000000000000000000',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      const addCall = mockDb.services.BuildService.resolveAndDeployBuildQueue.add.mock.calls[0];
+      expect(addCall[1]).not.toHaveProperty('triggerRef');
+    });
+
+    test('forwards the pushed commit as triggerRef for static environments', async () => {
+      const buildId = 701;
+      const repoBuilder = {
+        from: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+      };
+      const prBuilder = {
+        from: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((_column, callback) => {
+          callback(repoBuilder);
+          return prBuilder;
+        }),
+      };
+      const buildQuery = {
+        whereIn: jest.fn((_column, callback) => {
+          callback(prBuilder);
+          return buildQuery;
+        }),
+        andWhere: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: buildId }),
+      };
+
+      mockDb.models.Build = { query: jest.fn().mockReturnValue(buildQuery) };
+      mockDb.models.PullRequest.tableName = 'pull_requests';
+      mockDb.models.Repository = { tableName: 'repositories' };
+      mockDb.models.Deploy.query.mockReturnValue(createAllDeploysQuery([]));
+
+      const pushEvent = {
+        ...createMockPushEvent(),
+        before: 'previous-commit',
+        after: 'static-head-sha',
+      } as PushEvent;
+
+      await githubService.handlePushWebhook(pushEvent);
+
+      expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+        'resolve-deploy',
+        expect.objectContaining({ buildId, triggerRef: 'static-head-sha' })
+      );
     });
 
     test('should not add to queue when PR is closed', async () => {
