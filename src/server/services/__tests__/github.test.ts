@@ -350,6 +350,7 @@ describe('Github Service - handlePullRequestHook', () => {
     expect(mockDb.models.Build.findOne).toHaveBeenCalledWith({ pullRequestId: 1 });
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
       buildId: 10,
+      triggerRef: 'latest-commit',
     });
   });
 

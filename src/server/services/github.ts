@@ -304,6 +304,11 @@ export default class GithubService extends Service {
         );
         await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId: build.id,
+          // Pass the same commit SHA the concurrent push event uses as triggerRef so both events produce the same
+          // dedupe key and coalesce to one resolveAndDeployBuild run. Without this the push path (added in PR #218)
+          // carries a triggerRef while the synchronize path does not, giving them different keys and causing two
+          // concurrent runs for every PR branch push.
+          ...(branchSha ? { triggerRef: branchSha } : {}),
           ...extractContextForQueue(),
         });
       }
