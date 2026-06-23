@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-const mockSetupReadOnlyServiceAccountInNamespace = jest.fn();
+const mockEnsureServiceAccount = jest.fn();
 
-jest.mock('server/lib/kubernetes/rbac', () => ({
-  setupReadOnlyServiceAccountInNamespace: mockSetupReadOnlyServiceAccountInNamespace,
+jest.mock('server/lib/kubernetes/common/serviceAccount', () => ({
+  ensureServiceAccount: mockEnsureServiceAccount,
 }));
 
 function loadModule() {
@@ -36,7 +36,7 @@ describe('serviceAccountFactory', () => {
 
   it('reuses the in-flight setup promise for the same namespace', async () => {
     let resolveSetup!: () => void;
-    mockSetupReadOnlyServiceAccountInNamespace.mockImplementationOnce(
+    mockEnsureServiceAccount.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           resolveSetup = resolve;
@@ -47,7 +47,7 @@ describe('serviceAccountFactory', () => {
     const firstCall = ensureAgentSessionServiceAccount('test-ns');
     const secondCall = ensureAgentSessionServiceAccount('test-ns');
 
-    expect(mockSetupReadOnlyServiceAccountInNamespace).toHaveBeenCalledTimes(1);
+    expect(mockEnsureServiceAccount).toHaveBeenCalledTimes(1);
 
     resolveSetup();
 
@@ -57,12 +57,12 @@ describe('serviceAccountFactory', () => {
 
   it('clears the namespace cache after a failed setup', async () => {
     const setupError = new Error('setup failed');
-    mockSetupReadOnlyServiceAccountInNamespace.mockRejectedValueOnce(setupError).mockResolvedValueOnce(undefined);
+    mockEnsureServiceAccount.mockRejectedValueOnce(setupError).mockResolvedValueOnce(undefined);
 
     const { ensureAgentSessionServiceAccount } = loadModule();
 
     await expect(ensureAgentSessionServiceAccount('test-ns')).rejects.toThrow('setup failed');
     await expect(ensureAgentSessionServiceAccount('test-ns')).resolves.toBe('agent-sa');
-    expect(mockSetupReadOnlyServiceAccountInNamespace).toHaveBeenCalledTimes(2);
+    expect(mockEnsureServiceAccount).toHaveBeenCalledTimes(2);
   });
 });

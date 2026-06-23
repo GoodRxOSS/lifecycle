@@ -17,16 +17,7 @@
 import { V1Job } from '@kubernetes/client-node';
 import GlobalConfigService from '../../services/globalConfig';
 import { createBuildJob } from '../kubernetes/jobFactory';
-import { setupBuildServiceAccountInNamespace as setupServiceAccountWithRBAC } from '../kubernetes/rbac';
 import { JobMonitor } from '../kubernetes/JobMonitor';
-
-export async function setupBuildServiceAccountInNamespace(
-  namespace: string,
-  serviceAccountName: string = 'native-build-sa',
-  awsRoleArn?: string
-): Promise<void> {
-  return setupServiceAccountWithRBAC(namespace, serviceAccountName, awsRoleArn);
-}
 
 export function createJob(
   name: string,
