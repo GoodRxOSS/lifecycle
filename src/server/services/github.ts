@@ -155,7 +155,6 @@ export default class GithubService extends Service {
       action as GithubPullRequestActions
     );
     const isClosed = action === GithubPullRequestActions.CLOSED;
-    const isSynchronized = action === GithubPullRequestActions.SYNCHRONIZE;
     let lifecycleConfig = {} as LifecycleYamlConfigOptions;
     let pullRequest: PullRequest, repository: Repository | undefined, build: Build;
 
@@ -277,33 +276,6 @@ export default class GithubService extends Service {
           action: 'disable',
           waitForComment: false,
           labels: labels.map((l) => l.name),
-          ...extractContextForQueue(),
-        });
-      } else if (isSynchronized) {
-        if (branchSha && latestCommit !== branchSha) {
-          await pullRequest.$query().patch({ latestCommit: branchSha });
-        }
-
-        if (status !== PullRequestStatus.OPEN || pullRequestState?.deployOnUpdate !== true) {
-          getLogger({}).info(
-            `PR sync decision: repo=${fullName} branch=${branch} pullRequestId=${pullRequestId} decision=no-deploy deployOnUpdate=${pullRequestState?.deployOnUpdate}`
-          );
-          return;
-        }
-
-        build = await this.db.models.Build.findOne({
-          pullRequestId,
-        });
-        if (!build) {
-          getLogger({}).warn(`Build: not found for synchronized PR repo=${fullName}/${branch}`);
-          return;
-        }
-
-        getLogger({}).info(
-          `PR sync decision: repo=${fullName} branch=${branch} pullRequestId=${pullRequestId} decision=queue-build`
-        );
-        await this.db.services.BuildService.enqueueResolveAndDeployBuild({
-          buildId: build.id,
           ...extractContextForQueue(),
         });
       }
