@@ -19,12 +19,14 @@ import shell, { ExecOptions } from 'shelljs';
 
 interface Options extends ExecOptions {
   debug?: boolean;
+  redactCommand?: string;
 }
 
 export { shell };
 
 export async function shellPromise(cmd: string, options: Options = {}): Promise<string> {
-  const { debug, ...shellOpts } = options;
+  const { debug, redactCommand, ...shellOpts } = options;
+  const displayCommand = redactCommand || cmd;
 
   return new Promise((resolve, reject) => {
     const opts = {
@@ -35,11 +37,11 @@ export async function shellPromise(cmd: string, options: Options = {}): Promise<
     shell.exec(cmd, opts, (code, stdout, stderr) => {
       if (code !== 0) {
         if (stderr.length > 0) {
-          getLogger().debug(`Shell command failed: cmd=${cmd} stderr=${stderr}`);
+          getLogger().debug(`Shell command failed: cmd=${displayCommand} stderr=${stderr}`);
         }
         const options = opts ? JSON.stringify(opts) : '';
         reject(
-          `shellPromise command failed:\nExit code: ${code}\nOptions: ${options}\nCommand:\n${cmd},\n\nstderr:\n${stderr}\n\nstdout:\n${stdout}`
+          `shellPromise command failed:\nExit code: ${code}\nOptions: ${options}\nCommand:\n${displayCommand},\n\nstderr:\n${stderr}\n\nstdout:\n${stdout}`
         );
       } else {
         resolve(stdout);

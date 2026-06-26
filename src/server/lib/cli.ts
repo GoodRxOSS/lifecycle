@@ -21,6 +21,11 @@ import { shellPromise } from './shell';
 import { getLogger, withLogContext, updateLogContext } from './logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DatabaseSettings } from 'server/services/types/globalConfig';
+import {
+  cleanupCodefreshExternalSecrets,
+  hasCodefreshExternalSecretRefs,
+  resolveCodefreshExternalSecrets,
+} from 'server/lib/codefreshExternalSecrets';
 
 /**
  * Deploys the build
@@ -69,12 +74,19 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, service: Ser
   getLogger().debug('Invoking the codefresh CLI to deploy this deploy');
 
   const envVariables = merge(deploy.env || {}, deploy.build.commentRuntimeEnv);
-
-  const variables = Object.keys(envVariables).map((key) => {
-    return ` -v '${key}'='${
-      typeof envVariables[key] === 'object' ? JSON.stringify(envVariables[key]) : envVariables[key]
-    }'`;
+  const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
+  const globalConfigs = hasCodefreshExternalSecretRefs(envVariables)
+    ? await GlobalConfigService.getInstance().getAllConfigs()
+    : undefined;
+  const resolvedEnv = await resolveCodefreshExternalSecrets({
+    env: envVariables,
+    serviceName,
+    namespace: build?.namespace,
+    buildUuid: build?.uuid,
+    staticEnv: build?.isStatic,
+    secretProviders: globalConfigs?.secretProviders,
   });
+  const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
 
   let deployTrigger: string;
   let serviceDeployPipelineId: string;
@@ -86,11 +98,14 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, service: Ser
     serviceDeployPipelineId = service.deployPipelineId;
   }
 
-  const command = `codefresh run ${serviceDeployPipelineId} -b "${deploy.branchName}" ${variables.join(
-    ' '
-  )} ${deployTrigger} -d`;
-  getLogger().debug(`About to run codefresh command: command=${command}`);
-  const output = await shellPromise(command);
+  const command = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
+    deploy.branchName
+  )} ${variables.join(' ')} ${deployTrigger} -d`;
+  const redactedCommand = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
+    deploy.branchName
+  )} ${redactedVariables.join(' ')} ${deployTrigger} -d`;
+  getLogger().debug(`About to run codefresh command: command=${redactedCommand}`);
+  const output = await shellPromise(command, { redactCommand: redactedCommand });
   getLogger().debug(`Codefresh run output: output=${output}`);
   const id = output.trim();
   return id;
@@ -120,37 +135,75 @@ export async function codefreshDestroy(deploy: Deploy) {
       deploy.env || {},
       deploy.build.commentRuntimeEnv
     );
+    const serviceName = deploy.build.enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+    const hasExternalSecretRefs = hasCodefreshExternalSecretRefs(envVariables);
+    const globalConfigs = hasExternalSecretRefs ? await GlobalConfigService.getInstance().getAllConfigs() : undefined;
 
-    const variables = Object.keys(envVariables).map((key) => {
-      return ` -v '${key}'='${
-        typeof envVariables[key] === 'object' ? JSON.stringify(envVariables[key]) : envVariables[key]
-      }'`;
-    });
+    try {
+      const resolvedEnv = await resolveCodefreshExternalSecrets({
+        env: envVariables,
+        serviceName,
+        namespace: deploy.build?.namespace,
+        buildUuid: deploy.build?.uuid,
+        staticEnv: deploy.build?.isStatic,
+        secretProviders: globalConfigs?.secretProviders,
+      });
+      const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
 
-    let destroyTrigger: string;
-    let destroyPipelineId: string;
-    let serviceBranchName: string;
-    if (deploy.build.enableFullYaml) {
-      destroyTrigger = deploy.deployable.destroyTrigger ? `--trigger ${deploy.deployable.destroyTrigger}` : ``;
-      destroyPipelineId = deploy.deployable.destroyPipelineId;
-      serviceBranchName = deploy.deployable.branchName;
-    } else {
-      destroyTrigger = deploy.service.destroyTrigger ? `--trigger ${deploy.service.destroyTrigger}` : ``;
-      destroyPipelineId = deploy.service.destroyPipelineId;
-      serviceBranchName = deploy.service.branchName;
+      let destroyTrigger: string;
+      let destroyPipelineId: string;
+      let serviceBranchName: string;
+      if (deploy.build.enableFullYaml) {
+        destroyTrigger = deploy.deployable.destroyTrigger ? `--trigger ${deploy.deployable.destroyTrigger}` : ``;
+        destroyPipelineId = deploy.deployable.destroyPipelineId;
+        serviceBranchName = deploy.deployable.branchName;
+      } else {
+        destroyTrigger = deploy.service.destroyTrigger ? `--trigger ${deploy.service.destroyTrigger}` : ``;
+        destroyPipelineId = deploy.service.destroyPipelineId;
+        serviceBranchName = deploy.service.branchName;
+      }
+
+      const command = `codefresh run ${shellQuote(destroyPipelineId)} -b ${shellQuote(
+        serviceBranchName
+      )} ${variables.join(' ')} ${destroyTrigger} -d`;
+      const redactedCommand = `codefresh run ${shellQuote(destroyPipelineId)} -b ${shellQuote(
+        serviceBranchName
+      )} ${redactedVariables.join(' ')} ${destroyTrigger} -d`;
+      getLogger().debug(`Destroy command: command=${redactedCommand}`);
+      const output = await shellPromise(command, { redactCommand: redactedCommand });
+      const id = output?.trim();
+      return id;
+    } finally {
+      if (hasExternalSecretRefs) {
+        await cleanupCodefreshExternalSecrets({
+          env: envVariables,
+          serviceName,
+          namespace: deploy.build?.namespace,
+        });
+      }
     }
-
-    const command = `codefresh run ${destroyPipelineId} -b "${serviceBranchName}" ${variables.join(
-      ' '
-    )} ${destroyTrigger} -d`;
-    getLogger().debug(`Destroy command: command=${command}`);
-    const output = await shellPromise(command);
-    const id = output?.trim();
-    return id;
   } catch (error) {
     getLogger({ error }).error('Codefresh: pipeline destroy failed');
     throw error;
   }
+}
+
+function codefreshVariables(envVariables: Record<string, any>, secretEnvKeys: Set<string>) {
+  const variables = Object.keys(envVariables).map((key) => codefreshVariable(key, envVariables[key]));
+  const redactedVariables = Object.keys(envVariables).map((key) =>
+    codefreshVariable(key, secretEnvKeys.has(key) ? '[REDACTED]' : envVariables[key])
+  );
+
+  return { variables, redactedVariables };
+}
+
+function codefreshVariable(key: string, value: any) {
+  const variableValue = typeof value === 'object' ? JSON.stringify(value) : value;
+  return ` -v ${shellQuote(key)}=${shellQuote(variableValue)}`;
+}
+
+function shellQuote(value: string | number | boolean | null | undefined): string {
+  return `'${String(value ?? '').replace(/'/g, "'\\''")}'`;
 }
 
 /**
