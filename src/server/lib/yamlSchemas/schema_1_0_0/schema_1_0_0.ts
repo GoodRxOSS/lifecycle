@@ -292,10 +292,10 @@ const schema_1_0_0 = {
             type: 'object',
             additionalProperties: false,
             properties: {
-              defaultTag: { type: 'string' },
+              data: { type: 'object', additionalProperties: { type: 'string' } },
               branchName: { type: 'string' },
             },
-            required: ['defaultTag', 'branchName'],
+            required: ['data'],
           },
           dev: {
             type: 'object',

@@ -255,17 +255,36 @@ export abstract class EnvironmentVariables {
     if (!this?.db?.models) this.db = new Database();
 
     const configurations = await Promise.all(
-      configurationDeploys.map((deploy) => {
+      configurationDeploys.map(async (deploy) => {
+        // Full-yaml: configuration data is declared inline in lifecycle.yaml and
+        // materialized onto the deployable's env at ingestion (see YamlService.getEnvironmentVariables).
+        // Source it directly from the deployable instead of the configurations table.
+        if (fullYamlSupport) {
+          return deploy.deployable?.env ?? null;
+        }
+
+        // Classic: configuration data lives in the configurations table, keyed by the
+        // referenced serviceId + branchName.
         if (deploy.serviceId != null) {
-          return this.db.models.Configuration.query()
+          const configuration = await this.db.models.Configuration.query()
             .where('serviceId', deploy.serviceId)
             .where('key', deploy.branchName)
             .first();
+          return configuration ? configuration.data : null;
         }
+
+        // A YAML-defined configuration service has no serviceId, so in classic mode its
+        // data cannot be resolved and would be silently dropped. Warn so the misconfiguration
+        // is visible (configuration via YAML requires full-yaml support).
+        getLogger().warn(
+          { deployName: deploy.deployable?.name ?? deploy.service?.name },
+          'EnvVars: configuration service defined in YAML is ignored without full-yaml support'
+        );
+        return null;
       })
     );
 
-    return _.compact(configurations.map((configuration) => (configuration ? configuration.data : null)));
+    return _.compact(configurations);
   }
 
   /**

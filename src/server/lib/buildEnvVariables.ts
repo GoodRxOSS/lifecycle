@@ -140,6 +140,14 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
       const useDeafulttUUID =
         !Array.isArray(build?.enabledFeatures) || !build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
       const promises = deploys.map(async (deploy) => {
+        // Configuration deploys are never built or deployed; their data is consumed
+        // directly into availableEnv from deployable.env (see configurationServiceEnvironments).
+        // Skip patching deploy.env so we never persist the (possibly secret-ref-bearing)
+        // configuration data as plaintext on the unused configuration deploy.
+        if (build.enableFullYaml && deploy.deployable?.type === DeployTypes.CONFIGURATION) {
+          return;
+        }
+
         await deploy
           .$query()
           .patch({

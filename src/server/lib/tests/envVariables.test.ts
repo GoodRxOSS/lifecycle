@@ -19,6 +19,8 @@ import { EnvironmentVariables } from '../envVariables';
 import GlobalConfigService from 'server/services/globalConfig';
 import { IServices } from 'server/services/types';
 import * as models from 'server/models';
+import { DeployTypes } from 'shared/constants';
+import { Deploy } from 'server/models';
 
 jest.mock('server/database');
 jest.mock('redlock', () => {
@@ -257,5 +259,56 @@ describe('EnvironmentVariables library', () => {
 
     const customRenderResult = JSON.parse(await envVariables.customRender(template, data, true, 'testns'));
     expect(customRenderResult).toEqual(result);
+  });
+
+  describe('configurationServiceEnvironments', () => {
+    test('full-yaml: sources configuration data from the deployable env (not the configurations table)', async () => {
+      const configurationQuery = jest.spyOn(models.Configuration, 'query');
+      const deploys = [
+        {
+          deployable: {
+            type: DeployTypes.CONFIGURATION,
+            name: 'gdrx-auth-descope',
+            env: { DESCOPE_KEY: '{{aws:secret/path:key}}' },
+          },
+        },
+        // A non-configuration deploy is ignored by this method.
+        { deployable: { type: DeployTypes.GITHUB, name: 'web', env: { FOO: 'bar' } } },
+      ] as unknown as Deploy[];
+
+      const result = await envVariables.configurationServiceEnvironments(deploys, true);
+
+      expect(result).toEqual([{ DESCOPE_KEY: '{{aws:secret/path:key}}' }]);
+      expect(configurationQuery).not.toHaveBeenCalled();
+    });
+
+    test('classic: reads configuration data from the configurations table keyed by serviceId and branchName', async () => {
+      const first = jest.fn().mockResolvedValue({ data: { DESCOPE_KEY: 'classic-value' } });
+      const whereInner = jest.fn().mockReturnValue({ first });
+      const whereOuter = jest.fn().mockReturnValue({ where: whereInner });
+      jest.spyOn(models.Configuration, 'query').mockReturnValue({ where: whereOuter } as any);
+
+      const deploys = [
+        { service: { type: DeployTypes.CONFIGURATION }, serviceId: 256, branchName: 'main' },
+      ] as unknown as Deploy[];
+
+      const result = await envVariables.configurationServiceEnvironments(deploys, false);
+
+      expect(result).toEqual([{ DESCOPE_KEY: 'classic-value' }]);
+      expect(whereOuter).toHaveBeenCalledWith('serviceId', 256);
+      expect(whereInner).toHaveBeenCalledWith('key', 'main');
+    });
+
+    test('classic: a yaml-defined configuration (no serviceId) resolves to nothing instead of querying the table', async () => {
+      const configurationQuery = jest.spyOn(models.Configuration, 'query');
+      const deploys = [
+        { service: { type: DeployTypes.CONFIGURATION, name: 'gdrx-auth-descope' }, serviceId: null },
+      ] as unknown as Deploy[];
+
+      const result = await envVariables.configurationServiceEnvironments(deploys, false);
+
+      expect(result).toEqual([]);
+      expect(configurationQuery).not.toHaveBeenCalled();
+    });
   });
 });

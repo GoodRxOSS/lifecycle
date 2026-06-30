@@ -174,8 +174,8 @@ export interface AuroraRestoreServiceConfig extends Service {
 }
 export interface ConfigurationService extends Service {
   readonly configuration: {
-    readonly defaultTag: string;
-    readonly branchName: string;
+    readonly data: Record<string, string>;
+    readonly branchName?: string;
   };
 }
 
@@ -450,6 +450,12 @@ export function getEnvironmentVariables(service: Service): Record<string, string
       break;
     case DeployTypes.HELM:
       result = (service as HelmService).helm?.docker?.app?.env ?? undefined;
+      break;
+    case DeployTypes.CONFIGURATION:
+      // Configuration services declare their key/value data inline in YAML. We
+      // materialize it as the deployable's env so it flows through the standard
+      // full-yaml env pipeline (deployable.env) instead of the configurations table.
+      result = (service as ConfigurationService).configuration?.data ?? undefined;
       break;
     default:
       break;

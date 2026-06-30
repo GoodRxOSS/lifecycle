@@ -739,10 +739,10 @@ services:
       arguments: ''
     # @param services.configuration
     configuration:
-      # @param services.configuration.defaultTag (required)
-      defaultTag: ''
-      # @param services.configuration.branchName (required)
+      # @param services.configuration.branchName
       branchName: ''
+      # @param services.configuration.data (required)
+      data:
     # @param services.dev
     dev:
       # @param services.dev.image (required)
