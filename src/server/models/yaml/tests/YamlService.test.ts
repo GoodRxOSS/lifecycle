@@ -126,7 +126,9 @@ describe('Yaml Service', () => {
         arguments: '-arg foobar'
     - name: 'configurationApp'
       configuration:
-        defaultTag: 'main'
+        data:
+          SOURCE: 'yaml'
+          TYPE: 'configuration'
         branchName: 'main'
 `;
 
@@ -649,7 +651,9 @@ services:
             arguments: '-arg foobar'
         - name: 'configurationApp'
           configuration:
-            defaultTag: 'main'
+            data:
+              SOURCE: 'yaml'
+              TYPE: 'configuration'
             branchName: 'main'
       `;
 
@@ -716,7 +720,10 @@ services:
 
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'configurationApp');
 
-      expect(YamlService.getEnvironmentVariables(service)).toEqual(undefined);
+      expect(YamlService.getEnvironmentVariables(service)).toEqual({
+        SOURCE: 'yaml',
+        TYPE: 'configuration',
+      });
     });
   });
 
@@ -784,7 +791,9 @@ services:
             arguments: '-arg foobar'
         - name: 'configurationApp'
           configuration:
-            defaultTag: 'main'
+            data:
+              SOURCE: 'yaml'
+              TYPE: 'configuration'
             branchName: 'main'
     `;
 

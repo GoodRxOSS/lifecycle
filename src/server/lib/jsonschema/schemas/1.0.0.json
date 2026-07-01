@@ -1429,16 +1429,18 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "defaultTag": {
-                "type": "string"
-              },
               "branchName": {
                 "type": "string"
+              },
+              "data": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
               }
             },
             "required": [
-              "defaultTag",
-              "branchName"
+              "data"
             ]
           },
           "dev": {
