@@ -98,7 +98,18 @@ export default class TelemetryService extends Service {
     const knex = this.db.knex;
     const range: [string, string] = [from.toISOString(), to.toISOString()];
 
-    const [usageRows, eventRows, clientTotalRow, clientOverTimeRows, versionRows, platformRows] = await Promise.all([
+    type BucketCountRow = { bucket: Date | string; count: number };
+    type TopEventRow = {
+      event: string;
+      count: number;
+      errorCount: number;
+      p50DurationMs: number | string | null;
+      p95DurationMs: number | string | null;
+    };
+    type VersionRow = { clientVersion: string; count: number };
+    type PlatformRow = { platform: string | null; count: number };
+
+    const [usageRows, eventRows, clientTotalRow, clientOverTimeRows, versionRows, platformRows] = (await Promise.all([
       knex(TELEMETRY_EVENTS_TABLE)
         .select(knex.raw('date_trunc(?, "createdAt") as bucket', [interval]))
         .select(knex.raw('count(*)::int as count'))
@@ -143,7 +154,14 @@ export default class TelemetryService extends Service {
         .whereBetween('createdAt', range)
         .groupBy('platform')
         .orderBy('count', 'desc'),
-    ]);
+    ])) as unknown as [
+      BucketCountRow[],
+      TopEventRow[],
+      { count: number } | undefined,
+      BucketCountRow[],
+      VersionRow[],
+      PlatformRow[]
+    ];
 
     return {
       usageOverTime: usageRows.map((row) => ({
