@@ -38,7 +38,10 @@ export default class TelemetryEvent extends Model {
   arch?: string | null;
 
   static tableName = 'telemetry_events';
-  static timestamps = true;
+  // Timestamps come from the table's CURRENT_TIMESTAMP defaults: stats bucketing
+  // compares createdAt against now() in SQL, and the app-side getUtcTimestamp()
+  // writes naive UTC strings that Postgres misreads on non-UTC hosts.
+  static timestamps = false;
   static idColumn = 'id';
 
   static jsonSchema = {

@@ -86,10 +86,12 @@ function toDurationMs(value: unknown): number | null {
 
 export default class TelemetryService extends Service {
   async insertEvent(event: TelemetryEventInput): Promise<TelemetryEvent> {
-    return this.db.models.TelemetryEvent.query().insert({
-      ...event,
-      attributes: event.attributes ?? {},
-    });
+    return this.db.models.TelemetryEvent.query()
+      .insert({
+        ...event,
+        attributes: event.attributes ?? {},
+      })
+      .returning('*');
   }
 
   async getStats({ source, from, to, interval }: TelemetryStatsQuery): Promise<TelemetryStats> {
