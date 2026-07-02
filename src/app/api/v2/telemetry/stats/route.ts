@@ -111,7 +111,7 @@ function parseStatsQuery(searchParams: URLSearchParams): { query?: TelemetryStat
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/SuccessApiResponse'
+ *               $ref: '#/components/schemas/GetTelemetryStatsSuccessResponse'
  *       '400':
  *         description: Invalid query parameters.
  *         content:

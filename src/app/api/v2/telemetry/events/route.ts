@@ -249,7 +249,7 @@ function validateEventPayload(body: unknown): { event?: TelemetryEventInput; err
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/SuccessApiResponse'
+ *               $ref: '#/components/schemas/CreateTelemetryEventSuccessResponse'
  *       '400':
  *         description: Invalid payload.
  *         content:
