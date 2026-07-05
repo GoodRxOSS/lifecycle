@@ -68,3 +68,11 @@ keycloakPostgres:
   primary:
     persistence:
       enabled: false
+
+# MCP server realm setup: audience-bound `mcp` scope + anonymous DCR policies.
+# Primary audience = in-cluster web via Tilt port-forward; extra = host `pnpm dev`.
+mcp:
+  enabled: true
+  resourceUrl: http://localhost:5001/mcp
+  extraAudiences:
+    - http://localhost:3000/mcp
