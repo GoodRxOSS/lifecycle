@@ -211,15 +211,15 @@ export function createLifecycleMcpServer(identity: RequestUserIdentity): McpServ
       },
     },
     async ({ search, myEnvironmentsOnly, page, limit }) => {
-      const author = identity.githubUsername || identity.preferredUsername || '';
-      if (myEnvironmentsOnly && !author) {
-        // An empty author would silently disable the filter and return everything.
+      // The filter matches on the PR's GitHub login, so only githubUsername is valid here —
+      // a preferredUsername fallback could match a *different* person's GitHub login.
+      if (myEnvironmentsOnly && !identity.githubUsername) {
         return errorResult('Your account has no associated GitHub username, so "my environments" cannot be filtered.');
       }
 
       const { data, paginationMetadata } = await new BuildService().getAllBuilds(
         '',
-        myEnvironmentsOnly ? author : '',
+        myEnvironmentsOnly ? identity.githubUsername || '' : '',
         search,
         { page: page || 1, limit: Math.min(limit || 25, 100) }
       );

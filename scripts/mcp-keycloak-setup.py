@@ -88,8 +88,12 @@ def get_admin_token(base_url: str, user: str, password: str) -> str:
         {'grant_type': 'password', 'client_id': 'admin-cli', 'username': user, 'password': password}
     ).encode()
     req = urllib.request.Request(f'{base_url.rstrip("/")}/realms/master/protocol/openid-connect/token', data=body)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)['access_token']
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)['access_token']
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors='replace')[:200]
+        raise SystemExit(f'Admin authentication failed: HTTP {error.code} {detail}')
 
 
 def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_urls: list) -> None:

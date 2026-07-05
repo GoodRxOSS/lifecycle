@@ -78,6 +78,11 @@ Resource: `lifecycle://builds/{uuid}` — build detail as a JSON document.
 All v1 tools are read-only and run under your identity (e.g. `myEnvironmentsOnly` filters by your
 GitHub login). Deploy environment variables are never included in tool output.
 
+Note on visibility: like the REST API and UI, any authenticated user can read any build,
+service, log, or site — `myEnvironmentsOnly`/`mineOnly` are convenience filters, not access
+controls. This is intentional; if a preview environment's logs may contain sensitive data, treat
+them as visible to all authenticated Lifecycle users.
+
 ## Server configuration (operators)
 
 | Env var | Purpose |
@@ -112,7 +117,8 @@ The realm needs a `mcp` client scope whose audience mapper adds `MCP_RESOURCE_UR
    only the scope and mappers; `--mcp-resource-url` is repeatable when several MCP deployments
    share one realm.
 
-Anonymous dynamic client registration removes the realm's anonymous Trusted Hosts policy and is
-intended for deployments where Keycloak is **not** reachable from the public internet. If your
-Keycloak is public, leave anonymous registration off (omit `--enable-anonymous-dcr`, or set
-`mcp.dcr.enabled: false` in the chart) and pre-register a client instead.
+Anonymous dynamic client registration is **off by default in both the chart (`mcp.dcr.enabled`,
+default `false`) and the script (requires `--enable-anonymous-dcr`)**. Enabling it **deletes** the
+realm's anonymous Trusted Hosts policy — a one-way change that disabling the setting later does not
+undo. Only enable it when Keycloak is **not** reachable from the public internet; otherwise leave
+it off and pre-register a client instead. Back up the realm first if you may want to revert.

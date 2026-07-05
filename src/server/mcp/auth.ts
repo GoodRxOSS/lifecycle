@@ -95,6 +95,10 @@ export async function authenticateMcpRequest(req: IncomingMessage): Promise<McpA
     const { payload } = await jwtVerify(token, getJwks(jwksUrl), {
       issuer,
       audience: getMcpResourceUrl(),
+      // Keycloak realm keys are asymmetric; pin to prevent any HMAC/alg confusion.
+      algorithms: ['RS256'],
+      // Tolerate small clock drift across replicas near exp/nbf boundaries.
+      clockTolerance: 30,
     });
 
     const identity = getIdentityFromClaims(payload);

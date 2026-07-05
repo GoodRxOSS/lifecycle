@@ -76,3 +76,6 @@ mcp:
   resourceUrl: http://localhost:5001/mcp
   extraAudiences:
     - http://localhost:3000/mcp
+  dcr:
+    # Local Keycloak is not public; keep anonymous DCR on so clients self-register in dev.
+    enabled: true
