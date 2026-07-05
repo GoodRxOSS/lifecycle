@@ -36,7 +36,7 @@ jest.mock('server/services/build', () => {
   }));
 });
 
-import { handleMcpHttpRequest, __resetMcpSessions } from '../handler';
+import { handleMcpHttpRequest } from '../handler';
 
 let server: Server;
 let baseUrl: string;
@@ -61,7 +61,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  __resetMcpSessions();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -103,7 +102,7 @@ async function readRpcResponse(response: Response): Promise<any> {
   return text ? JSON.parse(text) : null;
 }
 
-describe('handleMcpHttpRequest routing', () => {
+describe('handleMcpHttpRequest routing (stateless)', () => {
   it('ignores unrelated paths', async () => {
     const response = await fetch(`${baseUrl}/api/v2/builds`);
     expect(response.status).toBe(404);
@@ -127,12 +126,6 @@ describe('handleMcpHttpRequest routing', () => {
     expect((await response.json()).resource).toBe('http://localhost:3000/mcp');
   });
 
-  it('rejects non-initialize requests without a session', async () => {
-    const response = await mcpPost({ jsonrpc: '2.0', id: 5, method: 'tools/list' });
-    expect(response.status).toBe(400);
-    expect(response.headers.get('www-authenticate')).toContain('resource_metadata=');
-  });
-
   it('rejects requests from disallowed origins', async () => {
     const response = await mcpPost(initializeRequestBody(), { Origin: 'https://evil.example.com' });
     expect(response.status).toBe(403);
@@ -143,47 +136,31 @@ describe('handleMcpHttpRequest routing', () => {
     expect(response.status).toBe(200);
   });
 
-  it('initializes a session and lists tools', async () => {
+  it('answers initialize without issuing a session id', async () => {
     const initResponse = await mcpPost(initializeRequestBody());
     expect(initResponse.status).toBe(200);
-
-    const sessionId = initResponse.headers.get('mcp-session-id');
-    expect(sessionId).toBeTruthy();
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull();
 
     const initRpc = await readRpcResponse(initResponse);
     expect(initRpc.result.serverInfo.name).toBe('lifecycle');
+  });
 
-    const notifyResponse = await mcpPost(
-      { jsonrpc: '2.0', method: 'notifications/initialized' },
-      { 'Mcp-Session-Id': sessionId! }
-    );
-    expect(notifyResponse.status).toBe(202);
-
-    const toolsResponse = await mcpPost(
-      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      { 'Mcp-Session-Id': sessionId! }
-    );
+  it('serves tools/list and tools/call as independent requests (no session required)', async () => {
+    const toolsResponse = await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     expect(toolsResponse.status).toBe(200);
-
     const toolsRpc = await readRpcResponse(toolsResponse);
     const toolNames = toolsRpc.result.tools.map((tool: { name: string }) => tool.name);
     expect(toolNames).toEqual(
       expect.arrayContaining(['list_builds', 'get_build', 'list_services', 'get_job_logs', 'list_sites', 'get_site'])
     );
-  });
 
-  it('executes list_builds under the session identity', async () => {
-    const initResponse = await mcpPost(initializeRequestBody());
-    const sessionId = initResponse.headers.get('mcp-session-id')!;
-    await readRpcResponse(initResponse);
-    await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized' }, { 'Mcp-Session-Id': sessionId });
-
-    const callResponse = await mcpPost(
-      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_builds', arguments: {} } },
-      { 'Mcp-Session-Id': sessionId }
-    );
+    const callResponse = await mcpPost({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'list_builds', arguments: {} },
+    });
     expect(callResponse.status).toBe(200);
-
     const callRpc = await readRpcResponse(callResponse);
     expect(callRpc.result.isError).toBeFalsy();
     const payload = JSON.parse(callRpc.result.content[0].text);
@@ -191,9 +168,16 @@ describe('handleMcpHttpRequest routing', () => {
     expect(payload.builds[0].serviceNames).toEqual(['web']);
   });
 
-  it('returns 404 for unknown session ids so clients re-initialize', async () => {
-    const response = await mcpPost({ jsonrpc: '2.0', id: 9, method: 'tools/list' }, { 'Mcp-Session-Id': 'nope' });
-    expect(response.status).toBe(404);
+  it('accepts notifications with 202', async () => {
+    const response = await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    expect(response.status).toBe(202);
+  });
+
+  it('rejects GET and DELETE (no standalone SSE stream or sessions in stateless mode)', async () => {
+    const getResponse = await fetch(`${baseUrl}/mcp`);
+    expect(getResponse.status).toBe(405);
+    const deleteResponse = await fetch(`${baseUrl}/mcp`, { method: 'DELETE' });
+    expect(deleteResponse.status).toBe(405);
   });
 
   it('does nothing when the feature flag is off', async () => {

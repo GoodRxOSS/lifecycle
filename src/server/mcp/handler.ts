@@ -14,12 +14,10 @@
  * limitations under the License.
  */
 
-import { nanoid } from 'nanoid';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { getLogger } from 'server/lib/logger';
-import { authenticateMcpRequest, buildWwwAuthenticate, type McpAuthFailure } from './auth';
+import { authenticateMcpRequest, type McpAuthFailure } from './auth';
 import {
   buildProtectedResourceMetadata,
   getMcpResourceUrl,
@@ -31,36 +29,6 @@ import {
 import { createLifecycleMcpServer } from './server';
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
-const MAX_SESSIONS = 200;
-const SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
-const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
-
-interface McpSession {
-  transport: StreamableHTTPServerTransport;
-  userSub: string;
-  lastActivityAt: number;
-}
-
-const sessions = new Map<string, McpSession>();
-let sweepTimer: NodeJS.Timeout | null = null;
-
-function ensureSweeper() {
-  if (sweepTimer) {
-    return;
-  }
-
-  sweepTimer = setInterval(() => {
-    const cutoff = Date.now() - SESSION_IDLE_TTL_MS;
-    for (const [sessionId, session] of sessions) {
-      if (session.lastActivityAt < cutoff) {
-        sessions.delete(sessionId);
-        session.transport.close().catch(() => undefined);
-        getLogger().info(`MCP: evicted idle session ${sessionId}`);
-      }
-    }
-  }, SESSION_SWEEP_INTERVAL_MS);
-  sweepTimer.unref();
-}
 
 function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
@@ -135,14 +103,20 @@ function serveProtectedResourceMetadata(req: IncomingMessage, res: ServerRespons
   });
 }
 
+/**
+ * Each POST is served by a fresh, stateless server/transport pair. The web deployment
+ * runs multiple replicas behind a load balancer without session affinity, so per-pod
+ * session state would 404 whenever consecutive requests land on different pods (and the
+ * 2026-07-28 MCP revision drops sessions from the core protocol anyway).
+ */
 async function handleMcpEndpoint(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': req.headers.origin || '*',
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Access-Control-Allow-Headers':
         'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID',
-      'Access-Control-Expose-Headers': 'Mcp-Session-Id, WWW-Authenticate',
+      'Access-Control-Expose-Headers': 'WWW-Authenticate',
       'Access-Control-Max-Age': '86400',
     });
     res.end();
@@ -162,64 +136,28 @@ async function handleMcpEndpoint(req: IncomingMessage, res: ServerResponse): Pro
     return;
   }
 
+  if (req.method !== 'POST') {
+    // Stateless mode: no server-initiated SSE stream (GET) and no session to delete (DELETE).
+    sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST, OPTIONS' });
+    return;
+  }
+
   let parsedBody: unknown;
-  if (req.method === 'POST') {
-    try {
-      const raw = await readBody(req);
-      parsedBody = raw ? JSON.parse(raw) : undefined;
-    } catch (error) {
-      sendJsonRpcError(res, 400, -32700, `Parse error: ${error instanceof Error ? error.message : 'invalid JSON'}`);
-      return;
-    }
-  }
-
-  const sessionIdHeader = req.headers['mcp-session-id'];
-  const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
-
-  if (sessionId) {
-    const session = sessions.get(sessionId);
-    // Unknown or foreign sessions both surface as 404 so the client transparently re-initializes.
-    if (!session || session.userSub !== auth.identity.userId) {
-      sendJsonRpcError(res, 404, -32001, 'Session not found');
-      return;
-    }
-
-    session.lastActivityAt = Date.now();
-    await session.transport.handleRequest(req, res, parsedBody);
+  try {
+    const raw = await readBody(req);
+    parsedBody = raw ? JSON.parse(raw) : undefined;
+  } catch (error) {
+    sendJsonRpcError(res, 400, -32700, `Parse error: ${error instanceof Error ? error.message : 'invalid JSON'}`);
     return;
   }
 
-  if (req.method !== 'POST' || !isInitializeRequest(parsedBody)) {
-    sendJsonRpcError(res, 400, -32000, 'Bad Request: no valid session ID provided', {
-      'WWW-Authenticate': buildWwwAuthenticate(),
-    });
-    return;
-  }
-
-  if (sessions.size >= MAX_SESSIONS) {
-    sendJsonRpcError(res, 503, -32000, 'Too many active MCP sessions; retry shortly');
-    return;
-  }
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => nanoid(32),
-    onsessioninitialized: (newSessionId) => {
-      sessions.set(newSessionId, { transport, userSub: auth.identity.userId, lastActivityAt: Date.now() });
-      getLogger().info(`MCP: session ${newSessionId} initialized user=${auth.identity.userId}`);
-    },
-    onsessionclosed: (closedSessionId) => {
-      sessions.delete(closedSessionId);
-      getLogger().info(`MCP: session ${closedSessionId} closed`);
-    },
-  });
-  transport.onclose = () => {
-    if (transport.sessionId) {
-      sessions.delete(transport.sessionId);
-    }
-  };
-
-  ensureSweeper();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = createLifecycleMcpServer(auth.identity);
+  res.on('close', () => {
+    transport.close().catch(() => undefined);
+    server.close().catch(() => undefined);
+  });
+
   await server.connect(transport);
   await transport.handleRequest(req, res, parsedBody);
 }
@@ -260,16 +198,4 @@ export async function handleMcpHttpRequest(
   }
 
   return true;
-}
-
-/** Test-only helper. */
-export function __resetMcpSessions(): void {
-  for (const session of sessions.values()) {
-    session.transport.close().catch(() => undefined);
-  }
-  sessions.clear();
-  if (sweepTimer) {
-    clearInterval(sweepTimer);
-    sweepTimer = null;
-  }
 }
