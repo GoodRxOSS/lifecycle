@@ -45,6 +45,8 @@ function sendJsonRpcError(
   sendJson(res, status, { jsonrpc: '2.0', error: { code, message }, id: null }, headers);
 }
 
+class BodyTooLargeError extends Error {}
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -52,8 +54,10 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('Request body too large'));
-        req.destroy();
+        // Stop consuming but keep the socket writable so the 413 can reach the client.
+        req.pause();
+        req.removeAllListeners('data');
+        reject(new BodyTooLargeError('Request body exceeds the 4MB limit'));
         return;
       }
       chunks.push(chunk);
@@ -110,21 +114,29 @@ function serveProtectedResourceMetadata(req: IncomingMessage, res: ServerRespons
  * 2026-07-28 MCP revision drops sessions from the core protocol anyway).
  */
 async function handleMcpEndpoint(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': req.headers.origin || '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers':
-        'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID',
-      'Access-Control-Expose-Headers': 'WWW-Authenticate',
-      'Access-Control-Max-Age': '86400',
-    });
-    res.end();
+  if (!isOriginAllowed(req)) {
+    sendJsonRpcError(res, 403, -32000, 'Origin not allowed');
     return;
   }
 
-  if (!isOriginAllowed(req)) {
-    sendJsonRpcError(res, 403, -32000, 'Origin not allowed');
+  // Only ever reflect an allowlisted origin, and do so on every response (not just
+  // the preflight) so browser-based clients can actually read the results.
+  const rawOrigin = req.headers.origin;
+  const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate');
+    res.setHeader('Vary', 'Origin');
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers':
+        'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID',
+      'Access-Control-Max-Age': '86400',
+    });
+    res.end();
     return;
   }
 
@@ -147,6 +159,11 @@ async function handleMcpEndpoint(req: IncomingMessage, res: ServerResponse): Pro
     const raw = await readBody(req);
     parsedBody = raw ? JSON.parse(raw) : undefined;
   } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      sendJsonRpcError(res, 413, -32000, error.message);
+      req.destroy();
+      return;
+    }
     sendJsonRpcError(res, 400, -32700, `Parse error: ${error instanceof Error ? error.message : 'invalid JSON'}`);
     return;
   }

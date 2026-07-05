@@ -78,7 +78,8 @@ export async function authenticateMcpRequest(req: IncomingMessage): Promise<McpA
   }
 
   const header = req.headers.authorization;
-  const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
+  // RFC 7235: auth scheme names are case-insensitive
+  const token = typeof header === 'string' && /^bearer /i.test(header) ? header.slice('bearer '.length) : null;
   if (!token) {
     return failure(401, 'Missing bearer token');
   }

@@ -17,14 +17,14 @@
 import { createServer, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import type { IncomingMessage } from 'http';
-import { exportJWK, generateKeyPair, SignJWT, type KeyLike } from 'jose';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { authenticateMcpRequest, buildWwwAuthenticate, type McpAuthFailure, type McpAuthSuccess } from '../auth';
 
 const RESOURCE_URL = 'http://localhost:3000/mcp';
 const ISSUER = 'http://localhost/realms/lifecycle-test';
 
 let jwksServer: Server;
-let privateKey: KeyLike;
+let privateKey: Awaited<ReturnType<typeof generateKeyPair>>['privateKey'];
 let originalEnv: NodeJS.ProcessEnv;
 
 function fakeRequest(authorization?: string): IncomingMessage {

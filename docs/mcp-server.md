@@ -104,12 +104,15 @@ The realm needs a `mcp` client scope whose audience mapper adds `MCP_RESOURCE_UR
      --keycloak-url https://auth.lifecycle.example.com \
      --realm lifecycle \
      --admin-user admin \
-     --mcp-resource-url https://app.lifecycle.example.com/mcp
+     --mcp-resource-url https://app.lifecycle.example.com/mcp \
+     --enable-anonymous-dcr
    ```
 
-   `--dry-run` prints the changes without applying; `--skip-dcr` limits it to the scope/mapper;
-   `--mcp-resource-url` is repeatable when several MCP deployments share one realm.
+   `--dry-run` prints the changes without applying; omit `--enable-anonymous-dcr` to configure
+   only the scope and mappers; `--mcp-resource-url` is repeatable when several MCP deployments
+   share one realm.
 
 Anonymous dynamic client registration removes the realm's anonymous Trusted Hosts policy and is
 intended for deployments where Keycloak is **not** reachable from the public internet. If your
-Keycloak is public, skip DCR (`--skip-dcr`) and pre-register a client instead.
+Keycloak is public, leave anonymous registration off (omit `--enable-anonymous-dcr`, or set
+`mcp.dcr.enabled: false` in the chart) and pre-register a client instead.

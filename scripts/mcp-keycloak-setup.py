@@ -19,7 +19,7 @@ Applies, idempotently, via the admin REST API (no reinstall / realm re-import):
      canonical MCP resource URL (Keycloak's documented substitute for RFC 8707).
   2. Registers `mcp` as a realm *optional* client scope so dynamically registered
      clients can request it.
-  3. Anonymous Dynamic Client Registration policies:
+  3. Optionally (--enable-anonymous-dcr) anonymous Dynamic Client Registration policies:
        - Trusted Hosts: relaxed so MCP clients on arbitrary (VPN) hosts can register
        - Allowed Client Scopes: extended with `mcp`
        - Max Clients: raised
@@ -33,7 +33,7 @@ Usage:
       --realm lifecycle \
       --admin-user admin --admin-password admin \
       --mcp-resource-url http://localhost:3000/mcp \
-      [--max-clients 1000] [--skip-dcr] [--dry-run]
+      [--enable-anonymous-dcr] [--max-clients 1000] [--dry-run]
 
 Admin password may also be provided via KEYCLOAK_ADMIN_PASSWORD.
 """
@@ -68,7 +68,7 @@ class KeycloakAdmin:
         if data is not None:
             req.add_header('Content-Type', 'application/json')
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as error:
@@ -88,7 +88,7 @@ def get_admin_token(base_url: str, user: str, password: str) -> str:
         {'grant_type': 'password', 'client_id': 'admin-cli', 'username': user, 'password': password}
     ).encode()
     req = urllib.request.Request(f'{base_url.rstrip("/")}/realms/master/protocol/openid-connect/token', data=body)
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)['access_token']
 
 
@@ -306,7 +306,12 @@ def main() -> None:
         help='Canonical MCP URL used as token audience (repeatable for multiple deployments of one realm)',
     )
     parser.add_argument('--max-clients', type=int, default=1000)
-    parser.add_argument('--skip-dcr', action='store_true', help='Only set up the scope/mapper; skip DCR policies')
+    parser.add_argument(
+        '--enable-anonymous-dcr',
+        action='store_true',
+        help='Configure anonymous Dynamic Client Registration policies (removes the anonymous '
+        'Trusted Hosts policy — one-way; only for Keycloak instances not reachable from the public internet)',
+    )
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
 
@@ -318,10 +323,16 @@ def main() -> None:
 
     ensure_mcp_client_scope(admin, [u.rstrip('/') for u in args.mcp_resource_url])
     ensure_realm_optional_scope(admin)
-    if args.skip_dcr:
-        print('[3/3] skipped DCR policies (--skip-dcr)')
-    else:
+    if args.enable_anonymous_dcr:
+        print(
+            'WARNING: enabling anonymous Dynamic Client Registration. This removes the anonymous\n'
+            'Trusted Hosts policy (one-way) and lets anyone who can reach this Keycloak register\n'
+            'OAuth clients. Only proceed if Keycloak is not reachable from the public internet.',
+            file=sys.stderr,
+        )
         ensure_dcr_policies(admin, args.max_clients)
+    else:
+        print('[3/3] anonymous DCR policies not configured (pass --enable-anonymous-dcr to opt in)')
 
     print('\nSummary:')
     for change in admin.changes:

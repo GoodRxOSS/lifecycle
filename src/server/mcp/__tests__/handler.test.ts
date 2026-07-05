@@ -40,8 +40,15 @@ import { handleMcpHttpRequest } from '../handler';
 
 let server: Server;
 let baseUrl: string;
+let savedEnv: Record<string, string | undefined>;
 
 beforeAll(async () => {
+  savedEnv = {
+    MCP_SERVER_ENABLED: process.env.MCP_SERVER_ENABLED,
+    ENABLE_AUTH: process.env.ENABLE_AUTH,
+    MCP_RESOURCE_URL: process.env.MCP_RESOURCE_URL,
+    KEYCLOAK_ISSUER: process.env.KEYCLOAK_ISSUER,
+  };
   process.env.MCP_SERVER_ENABLED = 'true';
   process.env.ENABLE_AUTH = 'false';
   process.env.MCP_RESOURCE_URL = 'http://localhost:3000/mcp';
@@ -61,6 +68,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -178,6 +189,82 @@ describe('handleMcpHttpRequest routing (stateless)', () => {
     expect(getResponse.status).toBe(405);
     const deleteResponse = await fetch(`${baseUrl}/mcp`, { method: 'DELETE' });
     expect(deleteResponse.status).toBe(405);
+  });
+
+  it('never includes deploy env vars in tool output (secret redaction)', async () => {
+    const BuildService = jest.requireMock('server/services/build');
+    BuildService.mockImplementation(() => ({
+      getAllBuilds: jest.fn().mockResolvedValue({
+        data: [
+          {
+            uuid: 'secret-build',
+            status: 'deployed',
+            deploys: [
+              {
+                deployable: { name: 'web' },
+                env: { SECRET_TOKEN: 'super-secret' },
+                initEnv: { INIT_SECRET: 'also-secret' },
+                buildLogs: 'log dump',
+                publicUrl: 'web.example.com',
+              },
+            ],
+          },
+        ],
+        paginationMetadata: {},
+      }),
+      getBuildByUUID: jest.fn().mockResolvedValue({
+        uuid: 'secret-build',
+        status: 'deployed',
+        deploys: [
+          {
+            deployable: { name: 'web' },
+            env: { SECRET_TOKEN: 'super-secret' },
+            initEnv: { INIT_SECRET: 'also-secret' },
+            buildLogs: 'log dump',
+            publicUrl: 'web.example.com',
+          },
+        ],
+      }),
+    }));
+
+    const listResponse = await mcpPost({
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'tools/call',
+      params: { name: 'list_builds', arguments: {} },
+    });
+    const listText = (await readRpcResponse(listResponse)).result.content[0].text;
+    expect(listText).not.toContain('super-secret');
+    expect(listText).not.toContain('also-secret');
+    expect(listText).not.toContain('log dump');
+    expect(listText).toContain('secret-build');
+
+    const detailResponse = await mcpPost({
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'tools/call',
+      params: { name: 'get_build', arguments: { uuid: 'secret-build' } },
+    });
+    const detailText = (await readRpcResponse(detailResponse)).result.content[0].text;
+    expect(detailText).not.toContain('super-secret');
+    expect(detailText).not.toContain('also-secret');
+    expect(detailText).not.toContain('log dump');
+    expect(detailText).toContain('web.example.com');
+  });
+
+  it('returns 401 with an RFC 9728 challenge over HTTP when auth is enabled', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    process.env.KEYCLOAK_JWKS_URL = 'http://127.0.0.1:1/certs';
+    try {
+      const response = await mcpPost({ jsonrpc: '2.0', id: 30, method: 'tools/list' });
+      expect(response.status).toBe(401);
+      const challenge = response.headers.get('www-authenticate') || '';
+      expect(challenge).toContain('resource_metadata="http://localhost:3000/.well-known/oauth-protected-resource/mcp"');
+      expect(challenge).toContain('scope="mcp offline_access"');
+    } finally {
+      process.env.ENABLE_AUTH = 'false';
+      delete process.env.KEYCLOAK_JWKS_URL;
+    }
   });
 
   it('does nothing when the feature flag is off', async () => {

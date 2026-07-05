@@ -211,9 +211,15 @@ export function createLifecycleMcpServer(identity: RequestUserIdentity): McpServ
       },
     },
     async ({ search, myEnvironmentsOnly, page, limit }) => {
+      const author = identity.githubUsername || identity.preferredUsername || '';
+      if (myEnvironmentsOnly && !author) {
+        // An empty author would silently disable the filter and return everything.
+        return errorResult('Your account has no associated GitHub username, so "my environments" cannot be filtered.');
+      }
+
       const { data, paginationMetadata } = await new BuildService().getAllBuilds(
         '',
-        myEnvironmentsOnly ? identity.githubUsername || identity.preferredUsername || '' : '',
+        myEnvironmentsOnly ? author : '',
         search,
         { page: page || 1, limit: Math.min(limit || 25, 100) }
       );
@@ -309,9 +315,14 @@ export function createLifecycleMcpServer(identity: RequestUserIdentity): McpServ
       },
     },
     async ({ mineOnly, page, limit }) => {
+      if (mineOnly && !identity.email) {
+        // Sites record the creator's real email; a synthesized fallback would never match.
+        return errorResult('Your account has no email claim, so "mine only" cannot be filtered.');
+      }
+
       try {
         const result = await new SitesService().listSites({
-          user: mineOnly ? identity.email || identity.gitUserEmail : undefined,
+          user: mineOnly ? identity.email : undefined,
           page,
           limit,
         });
