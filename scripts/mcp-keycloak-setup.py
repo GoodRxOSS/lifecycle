@@ -89,8 +89,8 @@ def get_admin_token(base_url: str, user: str, password: str) -> str:
         return json.load(resp)['access_token']
 
 
-def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_url: str) -> None:
-    print('[1/3] client scope `mcp` + audience mapper')
+def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_urls: list) -> None:
+    print('[1/3] client scope `mcp` + audience mapper(s)')
     scopes = admin.get('/client-scopes') or []
     scope = next((s for s in scopes if s.get('name') == 'mcp'), None)
 
@@ -123,32 +123,35 @@ def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_url: str) -> None:
 
     scope_id = scope['id']
     mappers = admin.get(f'/client-scopes/{scope_id}/protocol-mappers/models') or []
-    mapper = next((m for m in mappers if m.get('name') == 'mcp-audience'), None)
-    mapper_config = {
-        'included.custom.audience': resource_url,
-        'access.token.claim': 'true',
-        'id.token.claim': 'false',
-        'introspection.token.claim': 'true',
-    }
+    # One audience mapper per resource URL: 'mcp-audience' for the first, '-<n>' suffixed extras.
+    for index, resource_url in enumerate(resource_urls):
+        name = 'mcp-audience' if index == 0 else f'mcp-audience-{index + 1}'
+        mapper = next((m for m in mappers if m.get('name') == name), None)
+        mapper_config = {
+            'included.custom.audience': resource_url,
+            'access.token.claim': 'true',
+            'id.token.claim': 'false',
+            'introspection.token.claim': 'true',
+        }
 
-    if not mapper:
-        admin.request(
-            'POST',
-            f'/client-scopes/{scope_id}/protocol-mappers/models',
-            {
-                'name': 'mcp-audience',
-                'protocol': 'openid-connect',
-                'protocolMapper': 'oidc-audience-mapper',
-                'config': mapper_config,
-            },
-        )
-        admin.record(f'created audience mapper -> {resource_url}')
-    elif mapper.get('config', {}).get('included.custom.audience') != resource_url:
-        mapper['config'].update(mapper_config)
-        admin.request('PUT', f'/client-scopes/{scope_id}/protocol-mappers/models/{mapper["id"]}', mapper)
-        admin.record(f'updated audience mapper -> {resource_url}')
-    else:
-        admin.record('audience mapper already correct')
+        if not mapper:
+            admin.request(
+                'POST',
+                f'/client-scopes/{scope_id}/protocol-mappers/models',
+                {
+                    'name': name,
+                    'protocol': 'openid-connect',
+                    'protocolMapper': 'oidc-audience-mapper',
+                    'config': mapper_config,
+                },
+            )
+            admin.record(f'created audience mapper {name} -> {resource_url}')
+        elif mapper.get('config', {}).get('included.custom.audience') != resource_url:
+            mapper['config'].update(mapper_config)
+            admin.request('PUT', f'/client-scopes/{scope_id}/protocol-mappers/models/{mapper["id"]}', mapper)
+            admin.record(f'updated audience mapper {name} -> {resource_url}')
+        else:
+            admin.record(f'audience mapper {name} already correct')
 
 
 def ensure_realm_optional_scope(admin: KeycloakAdmin) -> None:
@@ -226,7 +229,12 @@ def main() -> None:
     parser.add_argument('--realm', default='lifecycle')
     parser.add_argument('--admin-user', default='admin')
     parser.add_argument('--admin-password', default=os.environ.get('KEYCLOAK_ADMIN_PASSWORD', ''))
-    parser.add_argument('--mcp-resource-url', required=True, help='Canonical MCP URL used as token audience')
+    parser.add_argument(
+        '--mcp-resource-url',
+        required=True,
+        action='append',
+        help='Canonical MCP URL used as token audience (repeatable for multiple deployments of one realm)',
+    )
     parser.add_argument('--max-clients', type=int, default=1000)
     parser.add_argument('--skip-dcr', action='store_true', help='Only set up the scope/mapper; skip DCR policies')
     parser.add_argument('--dry-run', action='store_true')
@@ -238,7 +246,7 @@ def main() -> None:
     token = get_admin_token(args.keycloak_url, args.admin_user, args.admin_password)
     admin = KeycloakAdmin(args.keycloak_url, args.realm, token, args.dry_run)
 
-    ensure_mcp_client_scope(admin, args.mcp_resource_url.rstrip('/'))
+    ensure_mcp_client_scope(admin, [u.rstrip('/') for u in args.mcp_resource_url])
     ensure_realm_optional_scope(admin)
     if args.skip_dcr:
         print('[3/3] skipped DCR policies (--skip-dcr)')

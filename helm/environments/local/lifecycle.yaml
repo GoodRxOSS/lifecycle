@@ -98,6 +98,10 @@ components:
           value: '80'
         - name: DD_TRACE_ENABLED
           value: 'false'
+        - name: MCP_SERVER_ENABLED
+          value: 'true'
+        - name: MCP_RESOURCE_URL
+          value: http://localhost:5001/mcp
       ports:
         - name: http
           containerPort: 80
