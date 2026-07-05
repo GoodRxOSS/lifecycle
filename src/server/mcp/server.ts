@@ -24,7 +24,6 @@ import SitesService, { SitesServiceError } from 'server/services/sites';
 import { getNativeBuildJobs } from 'server/lib/kubernetes/getNativeBuildJobs';
 import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
 import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
-import { loadKubeConfig } from 'server/lib/kubernetes/getDeploymentPods';
 import { getLogArchivalService } from 'server/services/logArchival';
 import GlobalConfigService from 'server/services/globalConfig';
 
@@ -150,9 +149,14 @@ async function readJobLogs(
 
   const podInfo = await getK8sJobStatusAndPod(job.jobName, namespace).catch(() => null);
   if (podInfo?.podName) {
-    const kc = loadKubeConfig();
+    // Same config loading as the job helpers above: the default chain works both
+    // in-cluster and against a local kubeconfig, unlike loadFromCluster-first helpers.
+    const kc = new k8s.KubeConfig();
+    kc.loadFromDefault();
     const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
-    const container = podInfo.containers?.[0]?.name;
+    // Container names prefixed with "[init] " are init containers, not addressable by that label.
+    const containers = (podInfo.containers || []).map((c) => c.name).filter(Boolean);
+    const container = containers.find((name) => !name.startsWith('[init]')) || containers[0]?.replace(/^\[init\] /, '');
     const logResponse = await coreV1.readNamespacedPodLog(
       podInfo.podName,
       namespace,
@@ -278,8 +282,18 @@ export function createLifecycleMcpServer(identity: RequestUserIdentity): McpServ
         return errorResult(`Build ${uuid} not found`);
       }
 
-      const result = await readJobLogs(uuid, service, jobType, jobName, tailLines || DEFAULT_LOG_TAIL_LINES);
-      return textResult(result);
+      try {
+        const result = await readJobLogs(uuid, service, jobType, jobName, tailLines || DEFAULT_LOG_TAIL_LINES);
+        return textResult(result);
+      } catch (error) {
+        const httpError = error as { statusCode?: number; body?: { message?: string }; message?: string };
+        getLogger().warn({ error }, `MCP: get_job_logs failed uuid=${uuid} service=${service}`);
+        return errorResult(
+          `Failed to fetch ${jobType} job logs: ` +
+            (httpError.body?.message || httpError.message || 'unknown error') +
+            (httpError.statusCode ? ` (kubernetes status ${httpError.statusCode})` : '')
+        );
+      }
     }
   );
 
