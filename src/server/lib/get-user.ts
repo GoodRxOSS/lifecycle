@@ -114,6 +114,23 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
   };
 }
 
+/**
+ * Build a request identity directly from verified JWT claims (no NextRequest),
+ * falling back to the local-dev identity when auth is disabled.
+ */
+export function getIdentityFromClaims(payload: JWTPayload | null): RequestUserIdentity | null {
+  const sub = normalizeClaim(payload?.sub);
+  if (sub) {
+    return buildUserIdentity(payload, sub);
+  }
+
+  if (process.env.ENABLE_AUTH === 'true') {
+    return null;
+  }
+
+  return buildUserIdentity(null, getLocalDevUserId());
+}
+
 export function getRequestUserSub(req: NextRequest): string | null {
   const sub = normalizeClaim(getUser(req)?.sub);
   if (sub) {

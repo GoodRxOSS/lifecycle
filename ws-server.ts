@@ -34,6 +34,7 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { LIFECYCLE_MODE } from './src/shared/config';
+import { handleMcpHttpRequest } from './src/server/mcp/handler';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import {
@@ -720,6 +721,9 @@ app.prepare().then(() => {
     try {
       const parsedUrl = parse(req.url!, true);
       if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res, parsedUrl.pathname))) {
+        return;
+      }
+      if (await handleMcpHttpRequest(req, res, parsedUrl.pathname)) {
         return;
       }
       if (

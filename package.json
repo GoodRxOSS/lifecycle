@@ -35,7 +35,7 @@
     "@aws-sdk/client-s3": "^3.1000.0",
     "@heroui/react": "^2.8.5",
     "@kubernetes/client-node": "^0.22.3",
-    "@modelcontextprotocol/sdk": "^1.25.3",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/auth-app": "^6.0.2",
     "@octokit/core": "^5.0.2",
     "@octokit/webhooks": "^12.0.1",
@@ -155,6 +155,10 @@
     "transform": {
       "^.+\\.(js|ts)$": "@swc/jest"
     },
+    "transformIgnorePatterns": [
+      "node_modules/\\.pnpm/(?!jose@)",
+      "node_modules/(?!\\.pnpm/)(?!jose/)"
+    ],
     "setupFilesAfterEnv": [
       "<rootDir>/jestSetup.ts"
     ],
