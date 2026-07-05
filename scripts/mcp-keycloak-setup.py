@@ -123,6 +123,59 @@ def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_urls: list) -> None:
 
     scope_id = scope['id']
     mappers = admin.get(f'/client-scopes/{scope_id}/protocol-mappers/models') or []
+
+    # Identity mappers live on the `mcp` scope itself: DCR'd clients are assigned only this
+    # scope (plus offline_access), never profile/email, so the claims the Lifecycle MCP server
+    # uses for identity must come from here.
+    identity_mappers = [
+        {
+            'name': 'mcp-username',
+            'protocolMapper': 'oidc-usermodel-attribute-mapper',
+            'config': {
+                'user.attribute': 'username',
+                'claim.name': 'preferred_username',
+                'jsonType.label': 'String',
+                'access.token.claim': 'true',
+                'id.token.claim': 'false',
+                'introspection.token.claim': 'true',
+            },
+        },
+        {
+            'name': 'mcp-email',
+            'protocolMapper': 'oidc-usermodel-attribute-mapper',
+            'config': {
+                'user.attribute': 'email',
+                'claim.name': 'email',
+                'jsonType.label': 'String',
+                'access.token.claim': 'true',
+                'id.token.claim': 'false',
+                'introspection.token.claim': 'true',
+            },
+        },
+        {
+            'name': 'mcp-github-username',
+            'protocolMapper': 'oidc-usermodel-attribute-mapper',
+            'config': {
+                'user.attribute': 'githubUsername',
+                'claim.name': 'github_username',
+                'jsonType.label': 'String',
+                'access.token.claim': 'true',
+                'id.token.claim': 'false',
+                'introspection.token.claim': 'true',
+            },
+        },
+    ]
+    for identity_mapper in identity_mappers:
+        if any(m.get('name') == identity_mapper['name'] for m in mappers):
+            admin.record(f"identity mapper {identity_mapper['name']} already present")
+            continue
+        admin.request(
+            'POST',
+            f'/client-scopes/{scope_id}/protocol-mappers/models',
+            {**identity_mapper, 'protocol': 'openid-connect'},
+        )
+        admin.record(f"created identity mapper {identity_mapper['name']}")
+
     # One audience mapper per resource URL: 'mcp-audience' for the first, '-<n>' suffixed extras.
     for index, resource_url in enumerate(resource_urls):
         name = 'mcp-audience' if index == 0 else f'mcp-audience-{index + 1}'

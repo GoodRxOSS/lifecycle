@@ -24,7 +24,11 @@ export const MCP_PROTECTED_RESOURCE_METADATA_ROOT_PATH = '/.well-known/oauth-pro
 // Keycloak has no RFC 8707 resource-indicator support; audience binding is provided by a client
 // scope ("mcp") carrying an audience mapper whose value must equal the canonical resource URL.
 export const MCP_SCOPE = 'mcp';
-export const MCP_SCOPES_SUPPORTED = ['openid', 'profile', 'email', 'offline_access', MCP_SCOPE];
+// Clients register (DCR) and authorize with exactly this set, so every entry must be an
+// assignable realm client scope: Keycloak's registration policy rejects unknown names (incl.
+// "openid"), and authorization fails for scopes not assigned to the client. Identity claims
+// (username/email/github_username) come from mappers on the `mcp` scope itself, not profile/email.
+export const MCP_SCOPES_SUPPORTED = [MCP_SCOPE, 'offline_access'];
 
 export function isMcpServerEnabled(): boolean {
   if (process.env.MCP_SERVER_ENABLED !== 'true') {

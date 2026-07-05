@@ -117,7 +117,7 @@ describe('handleMcpHttpRequest routing', () => {
     const metadata = await response.json();
     expect(metadata.resource).toBe('http://localhost:3000/mcp');
     expect(metadata.authorization_servers).toEqual(['http://localhost/realms/lifecycle-test']);
-    expect(metadata.scopes_supported).toContain('mcp');
+    expect(metadata.scopes_supported).toEqual(['mcp', 'offline_access']);
     expect(metadata.bearer_methods_supported).toEqual(['header']);
   });
 

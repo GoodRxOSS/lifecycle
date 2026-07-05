@@ -18,7 +18,7 @@ import type { IncomingMessage } from 'http';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { getLogger } from 'server/lib/logger';
 import { getIdentityFromClaims, type RequestUserIdentity } from 'server/lib/get-user';
-import { getMcpResourceMetadataUrl, getMcpResourceUrl, isAuthEnabled, MCP_SCOPE } from './config';
+import { getMcpResourceMetadataUrl, getMcpResourceUrl, isAuthEnabled, MCP_SCOPES_SUPPORTED } from './config';
 
 export interface McpAuthSuccess {
   ok: true;
@@ -47,7 +47,9 @@ function getJwks(jwksUrl: string): ReturnType<typeof createRemoteJWKSet> {
 
 /** RFC 9728 §5.1 challenge pointing clients at the protected-resource metadata. */
 export function buildWwwAuthenticate(errorCode?: string, description?: string): string {
-  const parts = [`resource_metadata="${getMcpResourceMetadataUrl()}"`, `scope="${MCP_SCOPE}"`];
+  // Clients derive both their DCR registration scope and authorization-request scope from
+  // this challenge, so it must match what Keycloak will actually assign (see MCP_SCOPES_SUPPORTED).
+  const parts = [`resource_metadata="${getMcpResourceMetadataUrl()}"`, `scope="${MCP_SCOPES_SUPPORTED.join(' ')}"`];
   if (errorCode) {
     parts.unshift(`error="${errorCode}"`);
   }

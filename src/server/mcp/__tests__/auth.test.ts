@@ -74,7 +74,7 @@ describe('authenticateMcpRequest', () => {
     expect(result.status).toBe(401);
     expect(result.wwwAuthenticate).toContain('resource_metadata=');
     expect(result.wwwAuthenticate).toContain('/.well-known/oauth-protected-resource/mcp');
-    expect(result.wwwAuthenticate).toContain('scope="mcp"');
+    expect(result.wwwAuthenticate).toContain('scope="mcp offline_access"');
   });
 
   it('accepts a token audience-bound to the MCP resource URL and maps identity claims', async () => {
