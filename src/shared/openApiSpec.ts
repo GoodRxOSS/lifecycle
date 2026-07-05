@@ -3982,6 +3982,151 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
+         * @description One time bucket of telemetry activity.
+         */
+        TelemetryBucketCount: {
+          type: 'object',
+          properties: {
+            bucket: { type: 'string', format: 'date-time' },
+            count: { type: 'integer' },
+          },
+          required: ['bucket', 'count'],
+        },
+
+        /**
+         * @description Aggregated stats for one telemetry event name.
+         */
+        TelemetryEventStats: {
+          type: 'object',
+          properties: {
+            event: { type: 'string' },
+            count: { type: 'integer' },
+            errorCount: { type: 'integer' },
+            errorRate: { type: 'number' },
+            p50DurationMs: { type: 'number', nullable: true },
+            p95DurationMs: { type: 'number', nullable: true },
+          },
+          required: ['event', 'count', 'errorCount', 'errorRate', 'p50DurationMs', 'p95DurationMs'],
+        },
+
+        /**
+         * @description Aggregated telemetry statistic blocks for one source over a time range.
+         */
+        TelemetryStats: {
+          type: 'object',
+          properties: {
+            usageOverTime: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/TelemetryBucketCount' },
+            },
+            topEvents: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/TelemetryEventStats' },
+            },
+            activeClients: {
+              type: 'object',
+              properties: {
+                total: { type: 'integer' },
+                overTime: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/TelemetryBucketCount' },
+                },
+              },
+              required: ['total', 'overTime'],
+            },
+            versions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  clientVersion: { type: 'string' },
+                  count: { type: 'integer' },
+                },
+                required: ['clientVersion', 'count'],
+              },
+            },
+            platforms: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  platform: { type: 'string', nullable: true },
+                  count: { type: 'integer' },
+                },
+                required: ['platform', 'count'],
+              },
+            },
+          },
+          required: ['usageOverTime', 'topEvents', 'activeClients', 'versions', 'platforms'],
+        },
+
+        /**
+         * @description The resolved query range echoed back by GET /telemetry/stats.
+         */
+        TelemetryStatsRange: {
+          type: 'object',
+          properties: {
+            source: { type: 'string', enum: ['cli', 'ui'] },
+            from: { type: 'string', format: 'date-time' },
+            to: { type: 'string', format: 'date-time' },
+            interval: { type: 'string', enum: ['day', 'week'] },
+          },
+          required: ['source', 'from', 'to', 'interval'],
+        },
+
+        /**
+         * @description The specific success response for the GET /telemetry/stats endpoint.
+         */
+        GetTelemetryStatsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    range: { $ref: '#/components/schemas/TelemetryStatsRange' },
+                    stats: { $ref: '#/components/schemas/TelemetryStats' },
+                  },
+                  required: ['range', 'stats'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
+         * @description The specific success response for the POST /telemetry/events endpoint.
+         */
+        CreateTelemetryEventSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    event: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'integer' },
+                        createdAt: { type: 'string', format: 'date-time' },
+                      },
+                      required: ['id', 'createdAt'],
+                    },
+                  },
+                  required: ['event'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        /**
          * @description The specific success response for the GET /builds/{uuid} endpoint.
          */
         GetBuildByUUIDSuccessResponse: {

@@ -32,6 +32,7 @@ import LabelService from 'server/services/label';
 import TTLCleanupService from 'server/services/ttlCleanup';
 import DeployCleanupService from 'server/services/deployCleanup';
 import SitesService from 'server/services/sites';
+import TelemetryService from 'server/services/telemetry';
 
 export interface IServices {
   BuildService: BuildService;
@@ -52,6 +53,7 @@ export interface IServices {
   TTLCleanupService: TTLCleanupService;
   DeployCleanupService: DeployCleanupService;
   SitesService: SitesService;
+  TelemetryService: TelemetryService;
 }
 
 export * from 'server/services/types/github';
