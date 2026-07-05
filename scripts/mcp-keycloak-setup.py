@@ -24,9 +24,11 @@ Applies, idempotently, via the admin REST API (no reinstall / realm re-import):
        - Allowed Client Scopes: extended with `mcp`
        - Max Clients: raised
      Consent Required and Allowed Protocol Mappers policies are left in place.
+     NOTE: removing the Trusted Hosts policy is one-way — re-running with --skip-dcr
+     (or disabling later) does not recreate it; restore from a realm backup if needed.
 
 Usage:
-  ./scripts/mcp-keycloak-setup.py \
+  mcp-keycloak-setup.py \
       --keycloak-url http://localhost:8081 \
       --realm lifecycle \
       --admin-user admin --admin-password admin \
@@ -40,6 +42,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -206,6 +209,15 @@ def ensure_mcp_client_scope(admin: KeycloakAdmin, resource_urls: list) -> None:
         else:
             admin.record(f'audience mapper {name} already correct')
 
+    # Prune stale positional mappers left behind when the audience list shrinks,
+    # so tokens stop carrying audiences of decommissioned MCP endpoints.
+    expected = {'mcp-audience'} | {f'mcp-audience-{i + 1}' for i in range(1, len(resource_urls))}
+    for mapper in mappers:
+        name = mapper.get('name') or ''
+        if name.startswith('mcp-audience') and name not in expected:
+            admin.request('DELETE', f'/client-scopes/{scope_id}/protocol-mappers/models/{mapper["id"]}')
+            admin.record(f'removed stale audience mapper {name}')
+
 
 def ensure_realm_optional_scope(admin: KeycloakAdmin) -> None:
     print('[2/3] realm optional client scope registration')
@@ -217,6 +229,8 @@ def ensure_realm_optional_scope(admin: KeycloakAdmin) -> None:
     scopes = admin.get('/client-scopes') or []
     scope = next((s for s in scopes if s.get('name') == 'mcp'), None)
     if not scope:
+        if not admin.dry_run:
+            raise SystemExit('client scope `mcp` not found; cannot register as realm optional scope')
         admin.record('would register `mcp` as realm optional scope (scope pending creation)')
         return
 
@@ -262,7 +276,10 @@ def ensure_dcr_policies(admin: KeycloakAdmin, max_clients: int) -> None:
     max_clients_component = find('max-clients')
     if max_clients_component:
         config = max_clients_component.setdefault('config', {})
-        current = int((config.get('max-clients') or ['200'])[0])
+        try:
+            current = int((config.get('max-clients') or ['200'])[0])
+        except (TypeError, ValueError):
+            current = 0
         if current < max_clients:
             config['max-clients'] = [str(max_clients)]
             admin.request('PUT', f'/components/{max_clients_component["id"]}', max_clients_component)
