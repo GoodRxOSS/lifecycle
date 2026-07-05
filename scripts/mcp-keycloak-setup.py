@@ -176,34 +176,32 @@ def ensure_dcr_policies(admin: KeycloakAdmin, max_clients: int) -> None:
     def find(provider_id):
         return next((c for c in anonymous if c.get('providerId') == provider_id), None)
 
+    # Keycloak rejects a Trusted Hosts policy with both host and client-URI checks
+    # disabled, and MCP clients register from arbitrary VPN hosts with localhost or
+    # vendor-scheme redirect URIs that can never match a host allowlist. Removing the
+    # anonymous policy component is the supported way to lift the restriction; consent,
+    # allowed-scopes/mappers and max-clients policies continue to govern registration.
     trusted = find('trusted-hosts')
     if trusted:
-        config = trusted.setdefault('config', {})
-        desired = {'host-sending-registration-request-must-match': ['false'], 'client-uris-must-match': ['false']}
-        if config.get('host-sending-registration-request-must-match') != desired[
-            'host-sending-registration-request-must-match'
-        ] or config.get('client-uris-must-match') != desired['client-uris-must-match']:
-            config.update(desired)
-            admin.request('PUT', f'/components/{trusted["id"]}', trusted)
-            admin.record('relaxed Trusted Hosts policy (host/client-uri matching off) — VPN-only deployment assumption')
-        else:
-            admin.record('Trusted Hosts policy already relaxed')
+        admin.request('DELETE', f'/components/{trusted["id"]}')
+        admin.record('removed anonymous Trusted Hosts policy — VPN-only deployment assumption')
     else:
-        admin.record('no anonymous Trusted Hosts policy found (nothing to relax)')
+        admin.record('anonymous Trusted Hosts policy already absent')
 
-    scope_components = [c for c in anonymous if c.get('providerId') == 'allowed-client-scopes']
-    for component in scope_components:
-        config = component.setdefault('config', {})
-        current = config.get('allowed-client-scopes', [])
-        if 'mcp' not in current:
-            config['allowed-client-scopes'] = current + ['mcp']
-            config.setdefault('allow-default-scopes', ['true'])
-            admin.request('PUT', f'/components/{component["id"]}', component)
-            admin.record('added `mcp` to Allowed Client Scopes policy')
+    # providerId `allowed-client-templates` is the client-scopes policy (legacy name).
+    # allow-default-scopes=true permits realm default + optional scopes, which now
+    # includes `mcp` (registered as a realm optional scope above).
+    scopes_policy = find('allowed-client-templates')
+    if scopes_policy:
+        config = scopes_policy.setdefault('config', {})
+        if config.get('allow-default-scopes') != ['true']:
+            config['allow-default-scopes'] = ['true']
+            admin.request('PUT', f'/components/{scopes_policy["id"]}', scopes_policy)
+            admin.record('enabled allow-default-scopes on Allowed Client Scopes policy')
         else:
-            admin.record('Allowed Client Scopes policy already includes `mcp`')
-    if not scope_components:
-        admin.record('no anonymous Allowed Client Scopes policy found')
+            admin.record('Allowed Client Scopes policy already permits realm default/optional scopes (incl. mcp)')
+    else:
+        admin.record('WARNING: no anonymous Allowed Client Scopes policy found')
 
     max_clients_component = find('max-clients')
     if max_clients_component:
