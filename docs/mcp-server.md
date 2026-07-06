@@ -97,28 +97,12 @@ The MCP endpoint is served by the web process only (`LIFECYCLE_MODE` `web`/`all`
 ### Keycloak realm setup
 
 The realm needs a `mcp` client scope whose audience mapper adds `MCP_RESOURCE_URL` to tokens, plus
-(optionally) anonymous dynamic client registration policies. Two equivalent ways to apply it:
+(optionally) anonymous dynamic client registration policies. Enable `mcp.enabled` + `mcp.resourceUrl`
+on the `lifecycle-keycloak` chart — a post-install/post-upgrade Job configures the realm idempotently,
+on both fresh installs and existing realms.
 
-1. **Helm** (fresh installs and upgrades): enable `mcp.enabled` + `mcp.resourceUrl` on the
-   `lifecycle-keycloak` chart — a post-install/post-upgrade Job configures the realm idempotently.
-2. **Script** (existing deployments): `scripts/mcp-keycloak-setup.py` applies the same changes via
-   the admin API:
-
-   ```bash
-   ./scripts/mcp-keycloak-setup.py \
-     --keycloak-url https://auth.lifecycle.example.com \
-     --realm lifecycle \
-     --admin-user admin \
-     --mcp-resource-url https://app.lifecycle.example.com/mcp \
-     --enable-anonymous-dcr
-   ```
-
-   `--dry-run` prints the changes without applying; omit `--enable-anonymous-dcr` to configure
-   only the scope and mappers; `--mcp-resource-url` is repeatable when several MCP deployments
-   share one realm.
-
-Anonymous dynamic client registration is **off by default in both the chart (`mcp.dcr.enabled`,
-default `false`) and the script (requires `--enable-anonymous-dcr`)**. Enabling it **deletes** the
-realm's anonymous Trusted Hosts policy — a one-way change that disabling the setting later does not
-undo. Only enable it when Keycloak is **not** reachable from the public internet; otherwise leave
-it off and pre-register a client instead. Back up the realm first if you may want to revert.
+Anonymous dynamic client registration is **off by default (`mcp.dcr.enabled`, default `false`)**.
+Enabling it **deletes** the realm's anonymous Trusted Hosts policy — a one-way change that disabling
+the setting later does not undo. Only enable it when Keycloak is **not** reachable from the public
+internet; otherwise leave it off and pre-register a client instead. Back up the realm first if you
+may want to revert.
