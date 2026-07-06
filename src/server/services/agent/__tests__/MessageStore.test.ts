@@ -309,6 +309,65 @@ describe('AgentMessageStore', () => {
     });
   });
 
+  describe('createRuntimeControlsUpdateEvent', () => {
+    it('inserts a runtime_controls_update system event describing the tool diff', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createRuntimeControlsUpdateEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user', label: 'Sample User' },
+        enabled: [{ id: 'rtc_a', label: 'GitHub' }],
+        disabled: [
+          { id: 'rtc_b', label: 'Workspace files' },
+          { id: 'rtc_c', label: 'Sample MCP' },
+        ],
+        occurredAt: '2026-07-04T00:00:00.000Z',
+      });
+
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 17,
+          runId: null,
+          role: 'system',
+          parts: [
+            {
+              type: 'text',
+              text: 'Sample User changed the available tools: enabled GitHub; disabled Workspace files, Sample MCP. Applies to future runs.',
+            },
+          ],
+          metadata: expect.objectContaining({
+            kind: 'runtime_controls_update',
+            actor: { userId: 'sample-user', label: 'Sample User' },
+            enabled: [{ id: 'rtc_a', label: 'GitHub' }],
+            disabled: [
+              { id: 'rtc_b', label: 'Workspace files' },
+              { id: 'rtc_c', label: 'Sample MCP' },
+            ],
+            appliesTo: 'future_runs',
+            occurredAt: '2026-07-04T00:00:00.000Z',
+          }),
+        })
+      );
+    });
+
+    it('phrases an enable-only change without a dangling separator', async () => {
+      const insertAndFetch = jest.fn().mockResolvedValue({ uuid: 'message-1' });
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      await AgentMessageStore.createRuntimeControlsUpdateEvent({
+        thread: { id: 17 },
+        actor: { userId: 'sample-user' },
+        enabled: [{ id: 'rtc_a', label: 'Slack' }],
+        disabled: [],
+      });
+
+      expect(insertAndFetch.mock.calls[0][0].parts).toEqual([
+        { type: 'text', text: 'You changed the available tools: enabled Slack. Applies to future runs.' },
+      ]);
+    });
+  });
+
   describe('listMessages', () => {
     it('omits stored messages with no canonical parts', async () => {
       const orderBy = jest.fn().mockResolvedValue([
@@ -470,7 +529,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-call-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
             } as any,
           ],
@@ -601,6 +660,40 @@ describe('AgentMessageStore', () => {
         })
       );
     });
+
+    it('never rewrites a durable system event row, even from a projected user-role duplicate', async () => {
+      const systemRow = {
+        id: 21,
+        uuid: '44444444-4444-4444-8444-444444444444',
+        threadId: 17,
+        runId: null,
+        role: 'system',
+        parts: [{ type: 'text', text: 'Environment state — as of now (run start)' }],
+        clientMessageId: null,
+        metadata: { kind: 'environment_state' },
+      };
+      const existingWhere = jest.fn().mockResolvedValue([systemRow]);
+      const patchAndFetchById = jest.fn();
+      const insert = jest.fn();
+
+      mockMessageQuery.mockReturnValueOnce({ where: existingWhere }).mockReturnValue({ patchAndFetchById, insert });
+
+      await AgentMessageStore.upsertCanonicalUiMessagesForThread(
+        { id: 17 },
+        [
+          {
+            id: '44444444-4444-4444-8444-444444444444',
+            role: 'user',
+            metadata: { kind: 'environment_state' },
+            parts: [{ type: 'text', text: '[Conversation event] Environment state — as of now (run start)' }],
+          } as any,
+        ],
+        { runId: 300 }
+      );
+
+      expect(patchAndFetchById).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+    });
   });
 
   describe('syncCanonicalMessagesFromUiMessages', () => {
@@ -635,7 +728,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_edit_file',
+              toolName: 'edit_file',
               state: 'output-available',
               output: { ok: true },
             },
@@ -646,20 +739,52 @@ describe('AgentMessageStore', () => {
       expect(insert).toHaveBeenCalledWith(
         expect.objectContaining({
           role: 'assistant',
-          parts: [{ type: 'text', text: 'Done' }],
+          parts: [
+            { type: 'text', text: 'Done' },
+            expect.objectContaining({
+              type: 'tool_call',
+              toolName: 'edit_file',
+              toolCallId: 'tool-1',
+              state: 'completed',
+              output: '{"ok":true}',
+            }),
+          ],
           uiMessage: null,
           metadata: { runId: 'run-1' },
         })
       );
     });
 
-    it('does not persist assistant messages that only contain tool UI parts', async () => {
+    it('persists tool-only assistant messages as bounded tool_call parts', async () => {
+      const insertedRow = {
+        id: 12,
+        uuid: '33333333-3333-4333-8333-333333333333',
+        threadId: 17,
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_call',
+            toolName: 'write_file',
+            toolCallId: 'tool-1',
+            state: 'completed',
+            input: null,
+            output: '{"ok":true}',
+            approval: null,
+          },
+        ],
+        uiMessage: null,
+        metadata: { runId: 'run-1' },
+      };
+      const insert = jest.fn().mockResolvedValue(insertedRow);
       const existingWhere = jest.fn().mockResolvedValue([]);
-      const orderBy = jest.fn().mockResolvedValue([]);
+      const orderBy = jest.fn().mockResolvedValue([insertedRow]);
       const reloadedWhere = jest.fn().mockReturnValue({ orderBy });
 
       mockGetOwnedThread.mockResolvedValue({ id: 17, uuid: 'thread-uuid' });
-      mockMessageQuery.mockReturnValueOnce({ where: existingWhere }).mockReturnValueOnce({ where: reloadedWhere });
+      mockMessageQuery
+        .mockReturnValueOnce({ where: existingWhere })
+        .mockReturnValueOnce({ insert })
+        .mockReturnValueOnce({ where: reloadedWhere });
 
       const result = await AgentMessageStore.syncCanonicalMessagesFromUiMessages('thread-uuid', 'sample-user', [
         {
@@ -670,7 +795,7 @@ describe('AgentMessageStore', () => {
             {
               type: 'dynamic-tool',
               toolCallId: 'tool-1',
-              toolName: 'workspace_write_file',
+              toolName: 'write_file',
               state: 'output-available',
               output: { ok: true },
             },
@@ -678,8 +803,22 @@ describe('AgentMessageStore', () => {
         } as any,
       ]);
 
-      expect(mockMessageQuery).toHaveBeenCalledTimes(2);
-      expect(result).toEqual([]);
+      expect(insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'assistant',
+          parts: [
+            expect.objectContaining({
+              type: 'tool_call',
+              toolName: 'write_file',
+              state: 'completed',
+            }),
+          ],
+        })
+      );
+      // The reloaded transcript serves the replayed tool part back as a renderable dynamic-tool part.
+      expect(result[0]?.parts?.[0]).toEqual(
+        expect.objectContaining({ type: 'dynamic-tool', toolName: 'write_file', state: 'output-available' })
+      );
     });
   });
 });

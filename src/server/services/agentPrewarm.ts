@@ -332,8 +332,8 @@ export default class AgentPrewarmService extends BaseService {
     await this.prewarmQueue.add(
       'prewarm',
       {
-        buildUuid: plan.buildUuid,
         ...extractContextForQueue(),
+        buildUuid: plan.buildUuid,
       },
       {
         jobId: `agent-prewarm:${plan.buildUuid}:${plan.revision || 'head'}:${plan.configuredServiceNames.join(

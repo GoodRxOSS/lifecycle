@@ -14,14 +14,7 @@
  * limitations under the License.
  */
 
-import {
-  createAgentUIStream,
-  createUIMessageStream,
-  readUIMessageStream,
-  safeValidateUIMessages,
-  type ToolSet,
-  type UIMessageChunk,
-} from 'ai';
+import { type ToolSet, type UIMessageChunk } from 'ai';
 import type AgentRunEvent from 'server/models/AgentRunEvent';
 import type AgentRun from 'server/models/AgentRun';
 import AgentSession from 'server/models/AgentSession';
@@ -29,6 +22,8 @@ import AgentThread from 'server/models/AgentThread';
 import { getLogger } from 'server/lib/logger';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import AgentMessageStore from './MessageStore';
+import EnvironmentStateService from './EnvironmentStateService';
+import { pruneStaleToolOutputsForModelInput, resolveModelContextWindowTokens } from './contextPruning';
 import {
   applyConfiguredModelCostEstimate,
   buildMessageObservabilityMetadataPatch,
@@ -37,16 +32,33 @@ import {
 import ApprovalService from './ApprovalService';
 import AgentRunExecutor from './RunExecutor';
 import AgentRunService from './RunService';
-import AgentRunEventService from './RunEventService';
+import AgentRunEventService, { RUN_ATTEMPT_RESTARTED_EVENT_TYPE } from './RunEventService';
 import type { AgentFileChangeData, AgentUIDataParts, AgentUIMessage, AgentUIMessageMetadata } from './types';
 import { applyApprovalResponsesToFileChangeParts } from './fileChanges';
 import { AgentRunTerminalFailure } from './errors';
 import type { Transaction } from 'objection';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
+import { loadAiSdk } from './aiSdkRuntime';
+import {
+  isToolMessagePart,
+  normalizeUnavailableToolPartsForAgentInput,
+  projectSystemEventMessagesForAgentInput,
+} from './agentInputNormalization';
+export { normalizeUnavailableToolPartsForAgentInput };
+import { describeAgentStreamError } from './agentStreamErrorText';
+import { collapseExactSelfRepeat } from './repeatedTextCollapse';
+import type { AgentRuntimeContext } from './runtimeContext';
+import type { AgentRequestGitHubAuth } from './githubAuth';
+import type { AgentRunExecuteJob } from './RunQueueService';
 
 type AgentUiMessageChunk = UIMessageChunk<AgentUIMessageMetadata, AgentUIDataParts>;
+type ApprovalRequestDraft = {
+  toolName?: string;
+  input?: unknown;
+  fileChangesById: Map<string, AgentFileChangeData>;
+};
 const CONTINUATION_EVENT_PAGE_LIMIT = 500;
-const CONTINUATION_EVENT_MAX_PAGES = 20;
+const CONTINUATION_EVENT_MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
 
 type ApprovalResponse = {
   approved: boolean;
@@ -94,15 +106,6 @@ function extractApprovalResponses(events: AgentRunEvent[]): Map<string, Approval
   return responses;
 }
 
-function isToolMessagePart(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-
-  const type = (value as { type?: unknown }).type;
-  return type === 'dynamic-tool' || (typeof type === 'string' && type.startsWith('tool-'));
-}
-
 function readApprovalId(part: Record<string, unknown>): string | null {
   const approval =
     part.approval && typeof part.approval === 'object' ? (part.approval as Record<string, unknown>) : null;
@@ -110,6 +113,11 @@ function readApprovalId(part: Record<string, unknown>): string | null {
 
   return approvalId;
 }
+
+// Reason-less denials reach the model as a bare "Tool call execution denied.", which it confabulates causes for.
+const DEFAULT_DENIAL_REASON =
+  'The user declined this action in the approval prompt without giving a reason. Do not retry it or ' +
+  'guess at technical causes; ask the user how they would like to proceed.';
 
 function buildResolvedApproval(
   approvalId: string,
@@ -120,7 +128,7 @@ function buildResolvedApproval(
     ...existingApproval,
     id: approvalId,
     approved: response.approved,
-    ...(response.reason ? { reason: response.reason } : {}),
+    ...(response.reason ? { reason: response.reason } : response.approved ? {} : { reason: DEFAULT_DENIAL_REASON }),
   };
 }
 
@@ -176,68 +184,46 @@ export function applyApprovalResponsesToToolParts(
   };
 }
 
-export function normalizeUnavailableToolPartsForAgentInput(
+type SafeValidateUIMessages = Awaited<ReturnType<typeof loadAiSdk>>['safeValidateUIMessages'];
+
+/** Drops only validator-fatal parts so one poisoned part degrades the run instead of bricking the thread. */
+export async function quarantineInvalidMessagesForAgentInput(
   messages: AgentUIMessage[],
-  tools: ToolSet
-): AgentUIMessage[] {
-  const availableToolNames = new Set(Object.keys(tools));
-  let messagesChanged = false;
+  tools: ToolSet,
+  safeValidateUIMessages: SafeValidateUIMessages
+): Promise<AgentUIMessage[] | null> {
+  const isValid = async (message: AgentUIMessage): Promise<boolean> =>
+    (await safeValidateUIMessages({ messages: [message], tools: tools as never })).success;
 
-  const normalizedMessages = messages.map((message) => {
-    let messageChanged = false;
-    const parts = message.parts.map((rawPart) => {
-      if (!isToolMessagePart(rawPart)) {
-        return rawPart;
-      }
+  const kept: AgentUIMessage[] = [];
+  let quarantined = false;
 
-      const part = rawPart as Record<string, unknown>;
-      const partType = typeof part.type === 'string' ? part.type : '';
-      const staticToolName = partType.startsWith('tool-') ? partType.slice('tool-'.length) : null;
-      let nextPart = part;
-      let partChanged = false;
-
-      if (staticToolName && !availableToolNames.has(staticToolName)) {
-        nextPart = {
-          ...nextPart,
-          type: 'dynamic-tool',
-          toolName: staticToolName,
-        };
-        partChanged = true;
-      }
-
-      if (
-        (nextPart.state === 'output-available' ||
-          nextPart.state === 'output-error' ||
-          nextPart.state === 'output-denied') &&
-        !Object.prototype.hasOwnProperty.call(nextPart, 'input')
-      ) {
-        nextPart = {
-          ...nextPart,
-          input: nextPart.rawInput,
-        };
-        partChanged = true;
-      }
-
-      if (!partChanged) {
-        return rawPart;
-      }
-
-      messageChanged = true;
-      return nextPart as AgentUIMessage['parts'][number];
-    });
-
-    if (!messageChanged) {
-      return message;
+  for (const message of messages) {
+    if (await isValid(message)) {
+      kept.push(message);
+      continue;
     }
 
-    messagesChanged = true;
-    return {
-      ...message,
-      parts,
-    };
-  });
+    let parts = message.parts;
+    while (parts.length > 0 && !(await isValid({ ...message, parts }))) {
+      let culpritIndex = -1;
+      for (let index = 0; index < parts.length; index += 1) {
+        const trial = parts.filter((_, other) => other !== index);
+        if (await isValid({ ...message, parts: trial })) {
+          culpritIndex = index;
+          break;
+        }
+      }
+      parts = parts.filter((_, index) => index !== (culpritIndex === -1 ? parts.length - 1 : culpritIndex));
+    }
 
-  return messagesChanged ? normalizedMessages : messages;
+    quarantined = true;
+    if (parts.length > 0) {
+      kept.push({ ...message, parts });
+    }
+  }
+
+  return quarantined ? kept : null;
 }
 
 async function validateMessagesForAgentInput({
@@ -250,17 +236,35 @@ async function validateMessagesForAgentInput({
   tools: ToolSet;
 }): Promise<AgentUIMessage[]> {
   const normalizedMessages = normalizeUnavailableToolPartsForAgentInput(messages, tools);
+  const { safeValidateUIMessages } = await loadAiSdk();
   const validation = await safeValidateUIMessages({
     messages: normalizedMessages,
-    tools,
+    tools: tools as never,
   });
 
   if (validation.success) {
     return validation.data as AgentUIMessage[];
   }
 
+  const quarantined = await quarantineInvalidMessagesForAgentInput(normalizedMessages, tools, safeValidateUIMessages);
+  if (quarantined) {
+    const revalidation = await safeValidateUIMessages({ messages: quarantined, tools: tools as never });
+    if (revalidation.success) {
+      getLogger().warn(
+        {
+          error: (validation as { error?: unknown }).error,
+          runId: runUuid,
+          keptMessages: quarantined.length,
+          ofMessages: normalizedMessages.length,
+        },
+        `AgentExec: quarantined invalid saved message parts runId=${runUuid}`
+      );
+      return revalidation.data as AgentUIMessage[];
+    }
+  }
+
   getLogger().warn(
-    { error: validation.error, runId: runUuid },
+    { error: (validation as { error?: unknown }).error, runId: runUuid },
     `AgentExec: saved message validation failed runId=${runUuid}`
   );
 
@@ -297,8 +301,10 @@ function sanitizeAgentStreamError(runUuid: string, error: unknown): never {
 async function listRunEventsForContinuation(runUuid: string): Promise<AgentRunEvent[]> {
   const events: AgentRunEvent[] = [];
   let afterSequence = 0;
+  let payloadBytes = 0;
 
-  for (let pageIndex = 0; pageIndex < CONTINUATION_EVENT_MAX_PAGES; pageIndex += 1) {
+  // Paged to completion (every token delta is one row); the byte ceiling only guards worker memory.
+  for (;;) {
     const page = await AgentRunEventService.listRunEventsPage(runUuid, {
       afterSequence,
       limit: CONTINUATION_EVENT_PAGE_LIMIT,
@@ -307,25 +313,41 @@ async function listRunEventsForContinuation(runUuid: string): Promise<AgentRunEv
       return [];
     }
 
+    for (const event of page.events) {
+      payloadBytes += event.payload ? JSON.stringify(event.payload).length : 0;
+    }
+    if (payloadBytes > CONTINUATION_EVENT_MAX_PAYLOAD_BYTES) {
+      throw new AgentRunTerminalFailure({
+        code: 'run_event_history_exhausted',
+        message: 'This response grew too large to resume. Send a new message to continue the conversation.',
+        details: { payloadBytes, eventCount: events.length + page.events.length },
+      });
+    }
+
     events.push(...page.events);
-    afterSequence = page.nextSequence;
-    if (!page.hasMore) {
+    if (page.events.length === 0 || !page.hasMore) {
       return events;
     }
+    afterSequence = page.nextSequence;
   }
-
-  throw new Error('Agent run event history is too large to rebuild approval continuation.');
 }
 
-async function rebuildAssistantMessageFromEvents(runUuid: string): Promise<AgentUIMessage | null> {
-  const events = await listRunEventsForContinuation(runUuid);
+export async function rebuildAssistantMessageFromEvents(
+  runUuid: string,
+  options: { requireApprovalResponses?: boolean } = {}
+): Promise<AgentUIMessage | null> {
+  const allEvents = await listRunEventsForContinuation(runUuid);
+  // Folding across a restart boundary would merge both attempts into one duplicated message.
+  const lastRestartIndex = allEvents.map((event) => event.eventType).lastIndexOf(RUN_ATTEMPT_RESTARTED_EVENT_TYPE);
+  const events = lastRestartIndex >= 0 ? allEvents.slice(lastRestartIndex + 1) : allEvents;
   const approvalResponses = extractApprovalResponses(events);
-  if (approvalResponses.size === 0) {
+  if (options.requireApprovalResponses && approvalResponses.size === 0) {
     return null;
   }
 
   const chunks = AgentRunEventService.projectUiChunksFromEvents(events) as AgentUiMessageChunk[];
   let latestMessage: AgentUIMessage | null = null;
+  const { readUIMessageStream } = await loadAiSdk();
 
   for await (const message of readUIMessageStream<AgentUIMessage>({
     stream: createChunkReplayStream(chunks),
@@ -339,7 +361,70 @@ async function rebuildAssistantMessageFromEvents(runUuid: string): Promise<Agent
     }
   }
 
-  return latestMessage ? applyApprovalResponsesToToolParts(latestMessage, approvalResponses) : null;
+  return latestMessage
+    ? applyApprovalResponsesToToolParts(collapseSelfRepeatedTextParts(latestMessage), approvalResponses)
+    : null;
+}
+
+// Replayed events can carry a self-repeated answer; keep it out of the model input.
+function collapseSelfRepeatedTextParts(message: AgentUIMessage): AgentUIMessage {
+  let changed = false;
+  const parts = message.parts.map((part) => {
+    if (part.type !== 'text' || typeof part.text !== 'string') {
+      return part;
+    }
+
+    const collapsed = collapseExactSelfRepeat(part.text);
+    if (collapsed === part.text) {
+      return part;
+    }
+
+    changed = true;
+    return { ...part, text: collapsed };
+  });
+
+  return changed ? { ...message, parts } : message;
+}
+
+/**
+ * Provider-load-bearing reasoning must reach the model on replay: Anthropic rejects a resumed
+ * tool_use turn without its signed thinking block, and OpenAI reasoning models require their
+ * reasoning items (itemId reference or encrypted content) alongside replayed function calls.
+ * Gemini is safe to drop — thought signatures ride on tool-call/text parts, not reasoning parts.
+ */
+function isProviderLoadBearingReasoningPart(part: AgentUIMessage['parts'][number]): boolean {
+  if (part.type !== 'reasoning') {
+    return false;
+  }
+
+  const metadata = part.providerMetadata as
+    | {
+        anthropic?: { signature?: unknown; redactedData?: unknown };
+        openai?: { itemId?: unknown; reasoningEncryptedContent?: unknown };
+      }
+    | undefined;
+  return (
+    typeof metadata?.anthropic?.signature === 'string' ||
+    typeof metadata?.anthropic?.redactedData === 'string' ||
+    typeof metadata?.openai?.itemId === 'string' ||
+    typeof metadata?.openai?.reasoningEncryptedContent === 'string'
+  );
+}
+
+/** Non-load-bearing prior-turn chain-of-thought is dead weight for the model — keep it for the UI, drop it from model input. */
+function dropReasoningParts(messages: AgentUIMessage[]): AgentUIMessage[] {
+  return messages.flatMap((message) => {
+    if (message.role !== 'assistant') {
+      return [message];
+    }
+
+    const parts = message.parts.filter((part) => part.type !== 'reasoning' || isProviderLoadBearingReasoningPart(part));
+    if (parts.length === message.parts.length) {
+      return [message];
+    }
+
+    return parts.length > 0 ? [{ ...message, parts }] : [];
+  });
 }
 
 async function loadMessagesForRun(
@@ -348,8 +433,14 @@ async function loadMessagesForRun(
   session: AgentSession
 ): Promise<AgentUIMessage[]> {
   const storedMessages = await AgentMessageStore.listMessages(thread.uuid, session.userId);
-  const continuationMessage = run.startedAt ? await rebuildAssistantMessageFromEvents(run.uuid) : null;
+  const continuationMessage = run.startedAt
+    ? await rebuildAssistantMessageFromEvents(run.uuid, { requireApprovalResponses: true })
+    : null;
   if (!continuationMessage) {
+    if (run.startedAt) {
+      // Mark the attempt boundary so replays fold only the newest attempt.
+      await AgentRunEventService.appendStatusEvent(run.uuid, RUN_ATTEMPT_RESTARTED_EVENT_TYPE, {});
+    }
     return applyApprovalResponsesToFileChangeParts(storedMessages);
   }
 
@@ -373,6 +464,7 @@ function getSessionUserIdentity(session: AgentSession): RequestUserIdentity {
     displayName,
     gitUserName: displayName,
     gitUserEmail: githubUsername ? `${githubUsername}@users.noreply.github.com` : `${session.userId}@local.lifecycle`,
+    roles: [],
   };
 }
 
@@ -445,29 +537,24 @@ function createEagerApprovalRequestSync({
   run,
   approvalPolicy,
   toolRules,
+  toolMetadata,
 }: {
   thread: AgentThread;
   run: AgentRun;
   approvalPolicy: Awaited<ReturnType<typeof AgentRunExecutor.execute>>['approvalPolicy'];
   toolRules: Awaited<ReturnType<typeof AgentRunExecutor.execute>>['toolRules'];
+  toolMetadata: Awaited<ReturnType<typeof AgentRunExecutor.execute>>['toolMetadata'];
 }) {
-  const draftsByToolCallId = new Map<
-    string,
-    {
-      toolName?: string;
-      input?: unknown;
-      fileChangesById: Map<string, AgentFileChangeData>;
-    }
-  >();
+  const draftsByToolCallId = new Map<string, ApprovalRequestDraft>();
   const handledApprovals = new Set<string>();
 
-  const getDraft = (toolCallId: string) => {
+  const getDraft = (toolCallId: string): ApprovalRequestDraft => {
     const existing = draftsByToolCallId.get(toolCallId);
     if (existing) {
       return existing;
     }
 
-    const draft = {
+    const draft: ApprovalRequestDraft = {
       fileChangesById: new Map<string, AgentFileChangeData>(),
     };
     draftsByToolCallId.set(toolCallId, draft);
@@ -480,13 +567,14 @@ function createEagerApprovalRequestSync({
         continue;
       }
 
-      const type = readStringField(chunk, 'type');
+      const chunkRecord = chunk as Record<string, unknown>;
+      const type = readStringField(chunkRecord, 'type');
       if (!type) {
         continue;
       }
 
       if (type === 'data-file-change') {
-        const fileChange = readFileChangeData(chunk.data);
+        const fileChange = readFileChangeData(chunkRecord.data);
         if (fileChange) {
           getDraft(fileChange.toolCallId).fileChangesById.set(fileChange.id, fileChange);
         }
@@ -500,18 +588,24 @@ function createEagerApprovalRequestSync({
 
       if (type === 'tool-input-start' || type === 'tool-input-available' || type === 'tool-input-error') {
         const draft = getDraft(toolCallId);
-        const toolName = readStringField(chunk, 'toolName');
+        const toolName = readStringField(chunkRecord, 'toolName');
         if (toolName) {
           draft.toolName = toolName;
         }
 
-        if (type === 'tool-input-available' && Object.prototype.hasOwnProperty.call(chunk, 'input')) {
-          draft.input = chunk.input;
+        if (type === 'tool-input-available' && Object.prototype.hasOwnProperty.call(chunkRecord, 'input')) {
+          draft.input = chunkRecord.input;
         }
         continue;
       }
 
       if (type !== 'tool-approval-request') {
+        continue;
+      }
+
+      // Auto-approved calls (session allowlist) stream a request+response pair for the
+      // transcript; persisting a pending action would strand the run in waiting_for_approval.
+      if (chunkRecord.isAutomatic === true) {
         continue;
       }
 
@@ -538,10 +632,11 @@ function createEagerApprovalRequestSync({
           fileChanges: [...draft.fileChangesById.values()],
           approvalPolicy,
           toolRules,
+          toolMetadata,
           trx: options.trx,
         });
         if (action) {
-          chunk.actionId = action.uuid;
+          chunkRecord.actionId = action.uuid;
         }
       } catch (error) {
         getLogger().warn(
@@ -557,7 +652,6 @@ function createEagerApprovalRequestSync({
 // Coalesce chunk flushes to avoid a per-token insert+notify storm.
 const STREAM_FLUSH_BATCH_SIZE = 10;
 const STREAM_FLUSH_INTERVAL_MS = 50;
-
 async function consumeStream(
   runUuid: string,
   executionOwner: string,
@@ -574,19 +668,44 @@ async function consumeStream(
     }
     const chunks = batch.splice(0, batch.length);
     await AgentRunService.appendStreamChunksForExecutionOwner(runUuid, executionOwner, chunks, {
-      beforeAppendChunks: ({ trx, run }) => beforeAppendChunks?.(chunks, { trx, run }),
+      beforeAppendChunks: async ({ trx, run }) => {
+        if (beforeAppendChunks) {
+          await beforeAppendChunks(chunks, { trx, run });
+        }
+      },
     });
     lastFlushAt = Date.now();
   };
 
   try {
-    let streamDone = false;
-    while (!streamDone) {
-      const { value, done } = await reader.read();
-      if (done) {
-        streamDone = true;
+    let pendingRead: Promise<ReadableStreamReadResult<AgentUiMessageChunk>> | null = reader.read();
+    while (pendingRead) {
+      // Idle-flush: a burst ending in a tool call would otherwise sit unpersisted for the whole execution.
+      let idleTimer: NodeJS.Timeout | null = null;
+      const raced =
+        batch.length > 0
+          ? await Promise.race([
+              pendingRead.then((result) => ({ kind: 'read' as const, result })),
+              new Promise<{ kind: 'idle' }>((resolve) => {
+                idleTimer = setTimeout(() => resolve({ kind: 'idle' }), STREAM_FLUSH_INTERVAL_MS);
+              }),
+            ])
+          : { kind: 'read' as const, result: await pendingRead };
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+
+      if (raced.kind === 'idle') {
+        await flushBatch();
         continue;
       }
+
+      const { value, done } = raced.result;
+      if (done) {
+        pendingRead = null;
+        continue;
+      }
+      pendingRead = reader.read();
 
       if (!value) {
         continue;
@@ -609,9 +728,12 @@ export default class LifecycleAiSdkHarness {
     run: AgentRun,
     options: {
       requestGitHubToken?: string | null;
+      requestGitHubAuth?: AgentRequestGitHubAuth | null;
       dispatchAttemptId?: string;
+      dispatchReason?: AgentRunExecuteJob['reason'];
     } = {}
   ): Promise<void> {
+    const bootstrapStartedAt = Date.now();
     const thread = await AgentThread.query().findById(run.threadId);
     const session = await AgentSession.query().findById(run.sessionId);
     if (!thread || !session) {
@@ -619,18 +741,28 @@ export default class LifecycleAiSdkHarness {
     }
 
     const userIdentity = getSessionUserIdentity(session);
+    // Freshest possible moment before the model reads the thread; idempotent per run, skipped on approval resume.
+    await EnvironmentStateService.ensureRunStartStateEvent({
+      session,
+      thread,
+      runUuid: run.uuid,
+      runId: run.id,
+      dispatchReason: options.dispatchReason,
+    });
     const normalizedMessages = await loadMessagesForRun(run, thread, session);
+    const loadMessagesMs = Date.now() - bootstrapStartedAt;
     const fileChangeStream = createChunkStream();
     const execution = await AgentRunExecutor.execute({
       session,
       thread,
       userIdentity,
-      messages: normalizedMessages,
       requestedProvider: run.resolvedProvider || run.requestedProvider || undefined,
       requestedModelId: run.resolvedModel || run.requestedModel || undefined,
       requestGitHubToken: options.requestGitHubToken,
+      requestGitHubAuth: options.requestGitHubAuth,
       existingRun: run,
       dispatchAttemptId: options.dispatchAttemptId,
+      dispatchReason: options.dispatchReason,
       onFileChange: async (change) => {
         fileChangeStream.write({
           type: 'data-file-change',
@@ -644,6 +776,7 @@ export default class LifecycleAiSdkHarness {
       run: execution.run,
       approvalPolicy: execution.approvalPolicy,
       toolRules: execution.toolRules,
+      toolMetadata: execution.toolMetadata,
     });
     const executionOwner = execution.run.executionOwner;
     if (!executionOwner) {
@@ -665,19 +798,46 @@ export default class LifecycleAiSdkHarness {
       tools: execution.agent.tools,
     });
 
+    // Model input only — the outer stream persists agentInputMessages unchanged, so the UI keeps
+    // the reasoning, full tool outputs, and system event rows (projection here must never persist).
+    const modelInputMessages = pruneStaleToolOutputsForModelInput(
+      dropReasoningParts(projectSystemEventMessagesForAgentInput(agentInputMessages)),
+      {
+        contextWindowTokens: resolveModelContextWindowTokens(execution.selection.modelId),
+      }
+    );
+
+    // The UI stream's default onError masks failures as "An error occurred." and replaces the SDK's
+    // own console logging; log the full error here (so worker logs keep the detail) and hand the user
+    // an actionable message instead of a blank turn.
+    const onStreamError = (error: unknown): string => {
+      getLogger().error(
+        { error, runId: run.uuid, provider: execution.selection.provider, model: execution.selection.modelId },
+        `AgentExec: model stream error runId=${run.uuid}`
+      );
+      return describeAgentStreamError(error, {
+        provider: execution.selection.provider,
+        model: execution.selection.modelId,
+      });
+    };
+
     let agentUiMessageStream: ReadableStream<AgentUiMessageChunk>;
     try {
+      const { createAgentUIStream } = await loadAiSdk();
       agentUiMessageStream = (await createAgentUIStream<
         never,
         typeof execution.agent.tools,
+        AgentRuntimeContext,
         never,
         AgentUIMessageMetadata
       >({
         agent: execution.agent,
-        uiMessages: agentInputMessages,
+        uiMessages: modelInputMessages as never,
+        originalMessages: modelInputMessages as never,
         generateMessageId: () => crypto.randomUUID(),
         abortSignal: execution.abortSignal,
-        onFinish: async ({ finishReason, isAborted }) => {
+        onError: onStreamError,
+        onEnd: async ({ finishReason, isAborted }) => {
           finishContext = {
             finishReason,
             isAborted,
@@ -698,9 +858,24 @@ export default class LifecycleAiSdkHarness {
           }
 
           if (eventType === 'finish') {
-            const totalUsage =
+            const usage =
               (
                 part as {
+                  usage?: {
+                    inputTokens?: number;
+                    outputTokens?: number;
+                    totalTokens?: number;
+                    inputTokenDetails?: {
+                      cacheReadTokens?: number;
+                      cacheWriteTokens?: number;
+                      noCacheTokens?: number;
+                    };
+                    outputTokenDetails?: {
+                      reasoningTokens?: number;
+                      textTokens?: number;
+                    };
+                    raw?: unknown;
+                  };
                   totalUsage?: {
                     inputTokens?: number;
                     outputTokens?: number;
@@ -721,11 +896,33 @@ export default class LifecycleAiSdkHarness {
                   finishReason?: string;
                   rawFinishReason?: string;
                 }
-              ).totalUsage ?? undefined;
-            const usageSummary = totalUsage
+              ).usage ??
+              (
+                part as {
+                  totalUsage?: {
+                    inputTokens?: number;
+                    outputTokens?: number;
+                    totalTokens?: number;
+                    reasoningTokens?: number;
+                    cachedInputTokens?: number;
+                    inputTokenDetails?: {
+                      cacheReadTokens?: number;
+                      cacheWriteTokens?: number;
+                      noCacheTokens?: number;
+                    };
+                    outputTokenDetails?: {
+                      reasoningTokens?: number;
+                      textTokens?: number;
+                    };
+                    raw?: unknown;
+                  };
+                }
+              ).totalUsage ??
+              undefined;
+            const usageSummary = usage
               ? applyConfiguredModelCostEstimate(
                   normalizeSdkUsageSummary({
-                    usage: totalUsage,
+                    usage,
                     finishReason:
                       typeof (part as { finishReason?: unknown }).finishReason === 'string'
                         ? (part as { finishReason: string }).finishReason
@@ -756,15 +953,22 @@ export default class LifecycleAiSdkHarness {
     } catch (error) {
       sanitizeAgentStreamError(run.uuid, error);
     }
+    getLogger().info(
+      `AgentExec: run bootstrap runId=${run.uuid} reason=${
+        options.dispatchReason || 'submit'
+      } loadMessagesMs=${loadMessagesMs} totalMs=${Date.now() - bootstrapStartedAt}`
+    );
 
+    const { createUIMessageStream } = await loadAiSdk();
     const uiMessageStream = createUIMessageStream<AgentUIMessage>({
       originalMessages: agentInputMessages,
       generateId: () => crypto.randomUUID(),
+      onError: onStreamError,
       execute: ({ writer }) => {
         writer.merge(agentUiMessageStream as ReadableStream<AgentUiMessageChunk>);
         writer.merge(fileChangeStream.stream);
       },
-      onFinish: async ({ messages }) => {
+      onEnd: async ({ messages }) => {
         streamFinishPayload = {
           messages,
           finishReason: finishContext.finishReason,

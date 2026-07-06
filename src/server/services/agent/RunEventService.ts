@@ -17,13 +17,21 @@
 import AgentRun from 'server/models/AgentRun';
 import AgentRunEvent from 'server/models/AgentRunEvent';
 import { getLogger } from 'server/lib/logger';
-import { sanitizeAgentRunStreamChunks, type AgentUiMessageChunk } from './streamChunks';
+import {
+  sanitizeAgentRunStreamChunks,
+  scrubSecretsFromAgentRunStreamChunks,
+  type AgentUiMessageChunk,
+} from './streamChunks';
 import { limitDurablePayloadRecord } from './payloadLimits';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
 import { readString } from './runEventUtils';
+import { PgNotificationListener, type PgListenKnexClient } from 'server/lib/pgNotificationListener';
 import { toChunkEvents, chunkFromEvent, type ChunkEvent } from './runEventChunkCodec';
 import type { Transaction } from 'objection';
+
+// Replayed verbatim as tool input on approval-resume; truncation would execute the tool against a stub.
+const RESUME_CRITICAL_EVENT_TYPES = new Set<string>(['tool.call.started']);
 
 type RunEventAppendTarget = Pick<AgentRun, 'id'> & Partial<Pick<AgentRun, 'uuid'>>;
 
@@ -37,11 +45,15 @@ export const DEFAULT_RUN_EVENT_PAGE_LIMIT = 100;
 export const MAX_RUN_EVENT_PAGE_LIMIT = 500;
 export const RUN_EVENT_STREAM_PAGE_LIMIT = 100;
 // Polling fallback when LISTEN/notify is unavailable; tight so short reasoning bursts still stream live.
+// Marks a turn restarted from scratch; replay folds only events after the newest marker.
+export const RUN_ATTEMPT_RESTARTED_EVENT_TYPE = 'attempt.restarted';
 export const RUN_EVENT_STREAM_POLL_INTERVAL_MS = 250;
+// Keepalive/status-recheck cadence, not event latency (LISTEN wakes the loop); under proxy idle-kill windows.
+export const RUN_EVENT_STREAM_NOTIFY_WAIT_MS = 15_000;
 const AGENT_RUN_EVENT_VERSION = 1;
 const RUN_EVENT_NOTIFY_CHANNEL = 'agent_run_events';
-const RUN_EVENT_TERMINAL_STATUSES = new Set<AgentRun['status']>(['completed', 'failed', 'cancelled']);
-const RUN_EVENT_TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.failed', 'run.cancelled']);
+const RUN_EVENT_TERMINAL_STATUSES = new Set<AgentRun['status']>(['transitioned', 'completed', 'failed', 'cancelled']);
+const RUN_EVENT_TERMINAL_EVENT_TYPES = new Set(['run.transitioned', 'run.completed', 'run.failed', 'run.cancelled']);
 const textEncoder = new TextEncoder();
 
 type RunEventPageOptions = {
@@ -84,20 +96,12 @@ type SerializedRunEvent = {
   updatedAt: string | null;
 };
 
-type PgListenConnection = {
-  on(event: 'notification', listener: (notification: { channel?: string; payload?: string }) => void): void;
-  on(event: 'error', listener: (error: unknown) => void): void;
-  query(sql: string): Promise<unknown>;
-};
-
 type RunEventNotificationSubscriber = (notification: RunEventNotification) => void;
 
-// Pinned to globalThis so LISTEN state survives Next.js dev module re-eval.
+// Pinned to globalThis so subscriber state survives Next.js dev module re-eval.
 type RunEventNotifyGlobal = typeof globalThis & {
   __lifecycleRunEventNotify?: {
     subscribers: Map<string, Set<RunEventNotificationSubscriber>>;
-    connection: PgListenConnection | null;
-    listenPromise: Promise<void> | null;
   };
 };
 
@@ -106,12 +110,22 @@ function runEventNotifyState() {
   if (!globalScope.__lifecycleRunEventNotify) {
     globalScope.__lifecycleRunEventNotify = {
       subscribers: new Map(),
-      connection: null,
-      listenPromise: null,
     };
   }
   return globalScope.__lifecycleRunEventNotify;
 }
+
+const runEventNotificationListener = new PgNotificationListener({
+  channel: RUN_EVENT_NOTIFY_CHANNEL,
+  getKnex: () => AgentRunEvent.knex() as unknown as PgListenKnexClient,
+  onNotification: (payload) => {
+    const parsed = parseRunEventNotification(payload);
+    if (parsed) {
+      notifySubscribers(parsed);
+    }
+  },
+  logLabel: 'AgentExec run-events',
+});
 
 function isRunEventStreamOpen(run: Pick<AgentRun, 'status'>): boolean {
   return !RUN_EVENT_TERMINAL_STATUSES.has(run.status);
@@ -164,28 +178,6 @@ function notifySubscribers(notification: RunEventNotification): void {
   }
 }
 
-function clearNotificationConnection(): void {
-  const state = runEventNotifyState();
-  state.connection = null;
-  state.listenPromise = null;
-}
-
-function handleNotification(notification: { channel?: string; payload?: string }): void {
-  if (notification.channel !== RUN_EVENT_NOTIFY_CHANNEL) {
-    return;
-  }
-
-  const parsed = parseRunEventNotification(notification.payload);
-  if (parsed) {
-    notifySubscribers(parsed);
-  }
-}
-
-function handleNotificationError(error: unknown): void {
-  getLogger().warn({ error }, 'AgentExec: run-event notification listener failed');
-  clearNotificationConnection();
-}
-
 export function normalizeRunEventPageLimit(limit?: number | null): number {
   if (!Number.isFinite(limit)) {
     return DEFAULT_RUN_EVENT_PAGE_LIMIT;
@@ -204,44 +196,7 @@ function normalizeRunEventAfterSequence(afterSequence?: number | null): number {
 
 export default class AgentRunEventService {
   private static async ensureNotificationListener(): Promise<void> {
-    const state = runEventNotifyState();
-    if (state.connection) {
-      return;
-    }
-
-    if (state.listenPromise) {
-      return state.listenPromise;
-    }
-
-    state.listenPromise = (async () => {
-      const knex = AgentRunEvent.knex() as unknown as {
-        client: {
-          acquireConnection(): Promise<PgListenConnection>;
-          releaseConnection(connection: PgListenConnection): Promise<void>;
-        };
-      };
-      const connection = await knex.client.acquireConnection();
-
-      try {
-        connection.on('notification', handleNotification);
-        connection.on('error', handleNotificationError);
-        await connection.query(`LISTEN ${RUN_EVENT_NOTIFY_CHANNEL}`);
-        state.connection = connection;
-      } catch (error) {
-        await knex.client.releaseConnection(connection);
-        throw error;
-      }
-    })()
-      .catch((error) => {
-        clearNotificationConnection();
-        getLogger().warn({ error }, 'AgentExec: run-event notification listener unavailable');
-        throw error;
-      })
-      .finally(() => {
-        state.listenPromise = null;
-      });
-
-    return state.listenPromise;
+    return runEventNotificationListener.ensureListening();
   }
 
   static async waitForRunEventNotification(
@@ -257,7 +212,8 @@ export default class AgentRunEventService {
     try {
       await this.ensureNotificationListener();
     } catch {
-      await sleep(timeoutMs);
+      // LISTEN unavailable: short poll keeps event latency low.
+      await sleep(Math.min(timeoutMs, RUN_EVENT_STREAM_POLL_INTERVAL_MS));
       return false;
     }
 
@@ -367,7 +323,7 @@ export default class AgentRunEventService {
     } = {}
   ): ReadableStream<Uint8Array> {
     const pageLimit = normalizeRunEventPageLimit(options.pageLimit ?? RUN_EVENT_STREAM_PAGE_LIMIT);
-    const pollIntervalMs = options.pollIntervalMs ?? RUN_EVENT_STREAM_POLL_INTERVAL_MS;
+    const pollIntervalMs = options.pollIntervalMs ?? RUN_EVENT_STREAM_NOTIFY_WAIT_MS;
 
     // `stopped` exits the loop on disconnect; the controller interrupts the notification wait.
     let stopped = false;
@@ -503,6 +459,7 @@ export default class AgentRunEventService {
           status: run.status,
           error: runWithError.error || null,
           usageSummary: runWithError.usageSummary || {},
+          transition: run.transition || null,
           repaired: true,
         },
         trx
@@ -562,7 +519,9 @@ export default class AgentRunEventService {
           runId: run.id,
           sequence,
           eventType: event.eventType,
-          payload: limitDurablePayloadRecord(event.payload, durability),
+          payload: RESUME_CRITICAL_EVENT_TYPES.has(event.eventType)
+            ? event.payload
+            : limitDurablePayloadRecord(event.payload, durability),
         } as Partial<AgentRunEvent>;
       });
 
@@ -633,7 +592,8 @@ export default class AgentRunEventService {
 
     const events: ChunkEvent[] = [];
 
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }
@@ -661,7 +621,8 @@ export default class AgentRunEventService {
 
     const events: ChunkEvent[] = [];
 
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }
@@ -683,7 +644,8 @@ export default class AgentRunEventService {
     }
 
     const events: ChunkEvent[] = [];
-    for (const chunk of chunks) {
+    // SECURITY: redact credentials from reasoning before it hits the events table / live stream.
+    for (const chunk of scrubSecretsFromAgentRunStreamChunks(chunks)) {
       for (const event of toChunkEvents(chunk)) {
         events.push(event);
       }

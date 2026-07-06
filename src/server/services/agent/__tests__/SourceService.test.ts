@@ -48,10 +48,10 @@ describe('AgentSourceService', () => {
         workspaceRepos: [{ repo: 'example-org/example-repo', mountPath: '/workspace/example-repo', primary: true }],
         selectedServices: [],
         updatedAt: '2026-04-24T12:00:00.000Z',
-        endedAt: null,
+        archivedAt: null,
         defaultModel: 'sample-model',
         model: 'sample-model',
-      } as Parameters<typeof AgentSourceService.createSessionSource>[0],
+      } as unknown as Parameters<typeof AgentSourceService.createSessionSource>[0],
       {
         defaultProvider: 'sample-provider',
       }
@@ -79,17 +79,41 @@ describe('AgentSourceService', () => {
     );
   });
 
-  it('records source cleanup when sessions end', async () => {
+  it('keeps the source ready when sessions are archived', async () => {
     const existingSource = {
       id: 7,
       status: 'ready',
       cleanedUpAt: null,
       error: null,
     };
-    const patchAndFetchById = jest.fn().mockResolvedValue({
-      ...existingSource,
+
+    mockSourceQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue(existingSource),
+    });
+
+    const result = await AgentSourceService.recordSessionState({
+      id: 3,
+      status: 'archived',
+      workspaceStatus: 'none',
+      archivedAt: '2026-04-24T12:00:00.000Z',
+      updatedAt: '2026-04-24T12:00:00.000Z',
+    } as Parameters<typeof AgentSourceService.recordSessionState>[0]);
+
+    // No patch: the source is an input spec and archiving must not touch it.
+    expect(result).toBe(existingSource);
+  });
+
+  it('clears the stale cleanup stamp left by legacy ended sessions', async () => {
+    const existingSource = {
+      id: 7,
       status: 'cleaned_up',
       cleanedUpAt: '2026-04-24T12:00:00.000Z',
+      error: null,
+    };
+    const patchAndFetchById = jest.fn().mockResolvedValue({
+      ...existingSource,
+      status: 'ready',
+      cleanedUpAt: null,
     });
 
     mockSourceQuery
@@ -102,15 +126,15 @@ describe('AgentSourceService', () => {
 
     await AgentSourceService.recordSessionState({
       id: 3,
-      status: 'ended',
-      workspaceStatus: 'ended',
-      endedAt: '2026-04-24T12:00:00.000Z',
-      updatedAt: '2026-04-24T12:00:00.000Z',
+      status: 'active',
+      workspaceStatus: 'none',
+      archivedAt: null,
+      updatedAt: '2026-04-24T12:05:00.000Z',
     } as Parameters<typeof AgentSourceService.recordSessionState>[0]);
 
     expect(patchAndFetchById).toHaveBeenCalledWith(7, {
-      status: 'cleaned_up',
-      cleanedUpAt: '2026-04-24T12:00:00.000Z',
+      status: 'ready',
+      cleanedUpAt: null,
     });
   });
 
@@ -139,7 +163,7 @@ describe('AgentSourceService', () => {
       id: 4,
       status: 'error',
       workspaceStatus: 'failed',
-      endedAt: null,
+      archivedAt: null,
       updatedAt: '2026-04-24T12:00:00.000Z',
     } as Parameters<typeof AgentSourceService.recordSessionState>[0]);
 

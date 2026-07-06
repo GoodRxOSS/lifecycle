@@ -743,6 +743,7 @@ services:
       branchName: ''
       # @param services.configuration.data (required)
       data:
+
     # @param services.dev
     dev:
       # @param services.dev.image (required)

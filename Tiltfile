@@ -323,7 +323,7 @@ helm_resource(
 
 local_resource(
     'lifecycle-keycloak-github-idp-sync',
-    cmd='sh sysops/tilt/scripts/sync_keycloak_github_idp.sh {namespace} {secret}'.format(
+    cmd='KEYCLOAK_GITHUB_DEFAULT_SCOPE="repo user:email" sh sysops/tilt/scripts/sync_keycloak_github_idp.sh {namespace} {secret}'.format(
         namespace=app_namespace,
         secret=github_idp_secret_name,
     ),
@@ -359,7 +359,7 @@ if lifecycle_prod:
     docker_build(
         lifecycle_app,
         ".",
-        dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
+        dockerfile="sysops/dockerfiles/tilt.app.Dockerfile",
         build_args=dict(lifecycle_app_build_args, LIFECYCLE_BUILD="prod"),
     )
 else:
@@ -367,7 +367,7 @@ else:
         lifecycle_app,
         ".",
         entrypoint=["/app_setup_entrypoint.sh"],
-        dockerfile="sysops/dockerfiles/tilt.app.dockerfile",
+        dockerfile="sysops/dockerfiles/tilt.app.Dockerfile",
         build_args=lifecycle_app_build_args,
         live_update=[
             sync("./src", "/app/src"),
@@ -495,13 +495,14 @@ k8s_resource(
 )
 
 # Ngrok for Keycloak
-k8s_yaml('sysops/tilt/ngrok-keycloak.yaml')
-k8s_resource(
-    'ngrok-keycloak',
-    port_forwards=['4041:4040'],  # Different local port for Keycloak ngrok admin
-    labels=["infra"],
-    resource_deps=['lifecycle-keycloak']
-)
+if ngrok_keycloak_domain:
+    k8s_yaml('sysops/tilt/ngrok-keycloak.yaml')
+    k8s_resource(
+        'ngrok-keycloak',
+        port_forwards=['4041:4040'],  # Different local port for Keycloak ngrok admin
+        labels=["infra"],
+        resource_deps=['lifecycle-keycloak']
+    )
 
 ##################################
 # Keycloak (deployed via helm-charts lifecycle-keycloak)

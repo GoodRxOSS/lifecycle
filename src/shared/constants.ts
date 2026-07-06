@@ -86,7 +86,6 @@ export enum AgentSessionKind {
 
 export enum AgentChatStatus {
   READY = 'ready',
-  ENDED = 'ended',
   ERROR = 'error',
 }
 
@@ -96,7 +95,6 @@ export enum AgentWorkspaceStatus {
   READY = 'ready',
   HIBERNATED = 'hibernated',
   FAILED = 'failed',
-  ENDED = 'ended',
 }
 
 export enum PullRequestStatus {

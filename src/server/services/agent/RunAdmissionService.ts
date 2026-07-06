@@ -23,7 +23,11 @@ import type { AgentApprovalPolicy } from './types';
 import type { AgentRunRuntimeOptions, CanonicalAgentRunMessageInput } from './canonicalMessages';
 import AgentMessageStore from './MessageStore';
 import AgentRunEventService from './RunEventService';
-import { ActiveAgentRunError, InvalidAgentRunDefaultsError, TERMINAL_RUN_STATUSES } from './RunService';
+import AgentRunService, {
+  ActiveAgentRunError,
+  InvalidAgentRunDefaultsError,
+  TERMINAL_RUN_STATUSES,
+} from './RunService';
 import { isAgentRunPlanSnapshotV1, type AgentRunPlanSnapshotV1 } from './runPlanTypes';
 
 function buildPolicySnapshot(
@@ -85,6 +89,9 @@ export default class AgentRunAdmissionService {
     if (!resolvedModel?.trim()) {
       throw new InvalidAgentRunDefaultsError('Agent run model is required.');
     }
+
+    // A waiting_for_input run has no in-product resume; a new message supersedes it instead of 409ing forever.
+    await AgentRunService.supersedeRecoveryPausedRunForSession(session.id, session.userId);
 
     const now = new Date().toISOString();
 

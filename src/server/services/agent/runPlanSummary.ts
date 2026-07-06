@@ -18,6 +18,7 @@ import type { AgentDebugRunIntent, AgentRunPlanPublicSummary, AgentRunPlanSource
 import { isAgentDebugRunIntent, isAgentRunPlanSnapshotV1 } from './runPlanTypes';
 import { isAgentCapabilityAvailability, isAgentCapabilityCatalogId } from './capabilityCatalog';
 import type { AgentApprovalMode } from './types';
+import { resolveAgentHarnessV2ProfileCapabilities, toRunPlanProfileSnapshot } from './profileCapabilityResolver';
 
 function readRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -33,6 +34,32 @@ function readSourceKind(value: unknown): AgentRunPlanSourceKind | null {
   }
 
   return null;
+}
+
+function readProfile(value: unknown): AgentRunPlanPublicSummary['profile'] | null {
+  const profile = readRecord(value);
+
+  if (!profile) {
+    return null;
+  }
+
+  const kind = readNullableString(profile.kind);
+  const intent = readNullableString(profile.intent);
+  const workspaceCore = readNullableString(profile.workspaceCore);
+
+  if (
+    (kind !== 'answer' && kind !== 'debug' && kind !== 'change' && kind !== 'legacy') ||
+    (intent !== 'chat' &&
+      intent !== 'diagnose' &&
+      intent !== 'repair' &&
+      intent !== 'workspace' &&
+      intent !== 'legacy') ||
+    (workspaceCore !== 'absent' && workspaceCore !== 'requested')
+  ) {
+    return null;
+  }
+
+  return { kind, intent, workspaceCore };
 }
 
 function readNullableString(value: unknown): string | null {
@@ -159,6 +186,13 @@ export function serializeRunPlanSummary(snapshot: unknown): AgentRunPlanPublicSu
   const effectiveCapabilities = readCapabilitySummaries(capabilities.resolvedCapabilityAccess);
   const selectedCapabilityIds = readCapabilityIds(capabilities.selectedRuntimeCapabilityIds);
   const debugIntent = debug ? readDebugRunIntent(debug.resolvedIntent) : null;
+  const profile =
+    readProfile(snapshot.profile) ||
+    toRunPlanProfileSnapshot(
+      resolveAgentHarnessV2ProfileCapabilities({
+        runPlanSnapshot: snapshot,
+      })
+    );
 
   if (
     !agentId ||
@@ -213,6 +247,7 @@ export function serializeRunPlanSummary(snapshot: unknown): AgentRunPlanPublicSu
           },
         }
       : {}),
+    profile,
     warnings: readWarningSummary(snapshot.warnings),
   };
 }

@@ -1257,6 +1257,11 @@ export default class DeployService extends BaseService {
 
           const result = await buildWithNative(deploy, nativeOptions);
 
+          // Persist build logs so failures stay diagnosable after the build job pod is gone.
+          if (result.logs) {
+            await deploy.$query().patch({ buildOutput: result.logs.slice(-65536) });
+          }
+
           if (result.success) {
             await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
             if (buildOptions?.afterBuildPipelineId) {

@@ -25,10 +25,12 @@ const mockHasActiveRun = jest.fn();
 const mockEnsureSeeded = jest.fn();
 const mockGetSystemAgentDefinition = jest.fn();
 const mockInferDefaultAgentDefinitionId = jest.fn();
+const mockInferDefaultAgentSourceKind = jest.fn();
 const mockListUserDefinitions = jest.fn();
 const mockGetUserDefinition = jest.fn();
 const mockListEnabledConnectionsForUser = jest.fn();
 const mockGetEffectiveConfig = jest.fn();
+const mockCreateRuntimeControlsUpdateEvent = jest.fn();
 
 jest.mock('../ThreadService', () => ({
   __esModule: true,
@@ -46,6 +48,13 @@ jest.mock('../SourceService', () => ({
   __esModule: true,
   default: {
     getSessionSource: (...args: unknown[]) => mockGetSessionSource(...args),
+  },
+}));
+
+jest.mock('../MessageStore', () => ({
+  __esModule: true,
+  default: {
+    createRuntimeControlsUpdateEvent: (...args: unknown[]) => mockCreateRuntimeControlsUpdateEvent(...args),
   },
 }));
 
@@ -71,11 +80,20 @@ jest.mock('../AgentDefinitionRegistry', () => {
     ensureSystemAgentDefinitionsSeeded: (...args: unknown[]) => mockEnsureSeeded(...args),
     getSystemAgentDefinition: (...args: unknown[]) => mockGetSystemAgentDefinition(...args),
     inferDefaultSystemAgentDefinitionId: (...args: unknown[]) => mockInferDefaultAgentDefinitionId(...args),
+    inferDefaultAgentSourceKind: (...args: unknown[]) => mockInferDefaultAgentSourceKind(...args),
   };
 });
 
 jest.mock('../CustomAgentDefinitionService', () => ({
   __esModule: true,
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE:
+    'This custom agent needs conversion before it can run in the one-agent harness.',
+  customAgentDefinitionNeedsOneAgentConversion: (definition: any) =>
+    definition.owner.kind === 'user' &&
+    (definition.resourcePolicy.workspaceRequired ||
+      definition.resourcePolicy.sandboxRequired ||
+      (definition.resourcePolicy.sourceKinds.includes('workspace_session') &&
+        !definition.resourcePolicy.sourceKinds.includes('freeform_chat'))),
   customAgentDefinitionService: {
     listUserDefinitions: (...args: unknown[]) => mockListUserDefinitions(...args),
     getUserDefinition: (...args: unknown[]) => mockGetUserDefinition(...args),
@@ -167,7 +185,8 @@ function mockBaseContext() {
   });
   mockHasActiveRun.mockResolvedValue(false);
   mockEnsureSeeded.mockResolvedValue([]);
-  mockInferDefaultAgentDefinitionId.mockReturnValue('system.develop');
+  mockInferDefaultAgentDefinitionId.mockReturnValue('system.agent');
+  mockInferDefaultAgentSourceKind.mockReturnValue('workspace_session');
   mockGetEffectiveConfig.mockResolvedValue({
     approvalPolicy: { defaultMode: 'allow', rules: {} },
     capabilityPolicy: undefined,
@@ -203,6 +222,7 @@ describe('AgentThreadRuntimeControlsService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockBaseContext();
+    mockCreateRuntimeControlsUpdateEvent.mockResolvedValue({});
   });
 
   it('returns sanitized opaque tool and MCP state for an existing thread', async () => {
@@ -376,6 +396,67 @@ describe('AgentThreadRuntimeControlsService', () => {
         available: true,
       }),
     ]);
+    expect(updatedState.tools.selectedChoiceIds).toEqual([updatedState.tools.required[0].id]);
+  });
+
+  it('records a runtime-controls update system event with the human-readable diff', async () => {
+    mockPatchRuntimeControlChoices.mockResolvedValue({
+      ...thread,
+      metadata: {},
+    });
+
+    await AgentThreadRuntimeControlsService.patchChoices({
+      threadId: 'thread-1',
+      userIdentity,
+      toolChoiceIds: [],
+      mcpChoiceIds: [],
+    });
+
+    expect(mockCreateRuntimeControlsUpdateEvent).toHaveBeenCalledWith({
+      thread: { id: 23 },
+      actor: { userId: 'sample-user', label: 'Sample User' },
+      enabled: [],
+      disabled: expect.arrayContaining([
+        expect.objectContaining({ label: 'Workspace files' }),
+        expect.objectContaining({ label: 'Sample MCP' }),
+      ]),
+    });
+  });
+
+  it('records no event when the patch does not change the selection', async () => {
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+    mockPatchRuntimeControlChoices.mockResolvedValue({
+      ...thread,
+      metadata: {},
+    });
+
+    await AgentThreadRuntimeControlsService.patchChoices({
+      threadId: 'thread-1',
+      userIdentity,
+      toolChoiceIds: [getOptionalChoiceId(state)],
+      mcpChoiceIds: [state.mcp.connections[0].id],
+    });
+
+    expect(mockCreateRuntimeControlsUpdateEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the patch when the event append fails', async () => {
+    mockPatchRuntimeControlChoices.mockResolvedValue({
+      ...thread,
+      metadata: {},
+    });
+    mockCreateRuntimeControlsUpdateEvent.mockRejectedValueOnce(new Error('insert failed'));
+
+    const updatedState = await AgentThreadRuntimeControlsService.patchChoices({
+      threadId: 'thread-1',
+      userIdentity,
+      toolChoiceIds: [],
+      mcpChoiceIds: [],
+    });
+
     expect(updatedState.tools.selectedChoiceIds).toEqual([updatedState.tools.required[0].id]);
   });
 

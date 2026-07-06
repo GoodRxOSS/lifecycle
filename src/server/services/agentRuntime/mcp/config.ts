@@ -17,11 +17,11 @@
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import McpServerConfig from 'server/models/McpServerConfig';
-import { APP_HOST } from 'shared/config';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
+  buildMcpOAuthCallbackUrl,
   compileFieldConnectionConfig,
   mergeCompiledConnectionConfig,
   normalizeAuthConfig,
@@ -63,6 +63,13 @@ const SLUG_REGEX = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const MAX_SLUG_LENGTH = 100;
 const VALIDATION_TIMEOUT_MS = 5000;
 
+// A slug whose sanitized form matches a built-in namespace would shadow built-in tool keys and their approvals.
+const RESERVED_SANITIZED_SLUGS = new Set<string>(['lifecycle', 'workspace_core', 'sandbox', 'workspace']);
+
+function sanitizeSlugForToolKey(slug: string): string {
+  return slug.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
 function buildConnectionKey(scope: string, slug: string): string {
   return `${scope}:${slug}`;
 }
@@ -89,12 +96,6 @@ function buildDefinitionFingerprintMap(
       }),
     ])
   );
-}
-
-function buildOAuthCallbackUrl(slug: string, scope: string): string {
-  const url = new URL(`${APP_HOST}/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`);
-  url.searchParams.set('scope', scope);
-  return url.toString();
 }
 
 export class McpConfigService {
@@ -342,10 +343,11 @@ export class McpConfigService {
               slug: config.slug,
               definitionFingerprint: definitionFingerprints.get(buildConnectionKey(config.scope, config.slug)) || '',
               authConfig,
-              redirectUrl: buildOAuthCallbackUrl(config.slug, config.scope),
+              redirectUrl: buildMcpOAuthCallbackUrl(config.slug),
               initialState: connectionState.state,
               discoveredTools: connectionState.discoveredTools,
               validatedAt: connectionState.validatedAt,
+              validationError: connectionState.validationError,
               interactive: false,
             }),
           }
@@ -460,6 +462,12 @@ export class McpConfigService {
     if (!slug || slug.length > MAX_SLUG_LENGTH || !SLUG_REGEX.test(slug)) {
       throw new Error(
         `Invalid slug '${slug}': must be 1-${MAX_SLUG_LENGTH} lowercase alphanumeric characters or hyphens, no leading/trailing hyphens`
+      );
+    }
+
+    if (RESERVED_SANITIZED_SLUGS.has(sanitizeSlugForToolKey(slug))) {
+      throw new Error(
+        `Invalid slug '${slug}': this name is reserved for built-in tools and would shadow their tool keys.`
       );
     }
   }

@@ -68,7 +68,7 @@ jest.mock('../WorkspaceRuntimeStateService', () => ({
 }));
 
 import AgentThreadService from 'server/services/agent/ThreadService';
-import { TERMINAL_RUN_STATUSES } from 'server/services/agent/RunService';
+import AgentRunService, { TERMINAL_RUN_STATUSES } from 'server/services/agent/RunService';
 
 const trx = { trx: true };
 
@@ -200,8 +200,11 @@ function mockPendingRows(rows: unknown[]) {
 }
 
 describe('AgentThreadService', () => {
+  let supersedeSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    supersedeSpy = jest.spyOn(AgentRunService, 'supersedeRecoveryPausedRunForSessionUuid').mockResolvedValue(undefined);
     mockAgentSessionTransaction.mockImplementation(async (callback) => callback(trx));
     mockAssertNoActiveWorkspaceAction.mockResolvedValue(undefined);
   });
@@ -485,7 +488,7 @@ describe('AgentThreadService', () => {
     ]);
   });
 
-  it.each(['ended', 'error'])('blocks new threads for %s sessions', async (status) => {
+  it.each(['archived', 'error'])('blocks new threads for %s sessions', async (status) => {
     mockOwnedSessionLock(buildSession({ status }));
 
     await expect(AgentThreadService.createThread('sample-session', 'sample-user', 'New chat')).rejects.toThrow(
@@ -520,6 +523,7 @@ describe('AgentThreadService', () => {
     await expect(AgentThreadService.createThread('sample-session', 'sample-user', 'New chat')).resolves.toBe(
       createdThread
     );
+    expect(supersedeSpy).toHaveBeenCalledWith('sample-session', 'sample-user');
     expect(activeRunQuery.whereNotIn).toHaveBeenCalledWith('status', TERMINAL_RUN_STATUSES);
     expect(pendingActionQuery.joinRelated).toHaveBeenCalledWith('thread');
     expect(pendingActionQuery.where).toHaveBeenCalledWith('thread.sessionId', 17);

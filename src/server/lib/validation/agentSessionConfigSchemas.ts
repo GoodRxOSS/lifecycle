@@ -54,6 +54,83 @@ const resourceRequirementsSchema = {
   additionalProperties: false,
 };
 
+const openSandboxBackendSchema = {
+  type: 'object',
+  properties: {
+    domain: { type: 'string', minLength: 1, maxLength: 2048 },
+    protocol: { type: 'string', enum: ['http', 'https'] },
+    apiKey: { type: 'string', minLength: 1, maxLength: 4096 },
+    // Read-side presence flag echoed back by clients; ignored on write.
+    apiKeyConfigured: { type: 'boolean' },
+    image: { type: 'string', minLength: 1, maxLength: 2048 },
+    poolRef: { type: 'string', minLength: 1, maxLength: 253 },
+    timeoutSeconds: {
+      anyOf: [positiveIntegerSchema, { type: 'null' }],
+    },
+    useServerProxy: { type: 'boolean' },
+    secureAccess: { type: 'boolean' },
+    resourceLimits: stringRecordSchema,
+    execdPort: positiveIntegerSchema,
+    gatewayPort: positiveIntegerSchema,
+    editorPort: positiveIntegerSchema,
+  },
+  additionalProperties: false,
+};
+
+const e2bBackendSchema = {
+  type: 'object',
+  properties: {
+    apiKey: { type: 'string', minLength: 1, maxLength: 4096 },
+    // Read-side presence flag echoed back by clients; ignored on write.
+    apiKeyConfigured: { type: 'boolean' },
+    templateId: { type: 'string', minLength: 1, maxLength: 253 },
+    domain: { type: 'string', minLength: 1, maxLength: 2048 },
+    timeoutSeconds: {
+      anyOf: [positiveIntegerSchema, { type: 'null' }],
+    },
+    autoPause: { type: 'boolean' },
+  },
+  additionalProperties: false,
+};
+
+const daytonaBackendSchema = {
+  type: 'object',
+  properties: {
+    apiKey: { type: 'string', minLength: 1, maxLength: 4096 },
+    // Read-side presence flag echoed back by clients; ignored on write.
+    apiKeyConfigured: { type: 'boolean' },
+    snapshot: { type: 'string', minLength: 1, maxLength: 253 },
+    apiUrl: { type: 'string', minLength: 1, maxLength: 2048 },
+    target: { type: 'string', minLength: 1, maxLength: 253 },
+    autoArchiveInterval: nonNegativeIntegerSchema,
+  },
+  additionalProperties: false,
+};
+
+const modalBackendSchema = {
+  type: 'object',
+  properties: {
+    tokenId: { type: 'string', minLength: 1, maxLength: 4096 },
+    // Read-side presence flags echoed back by clients; ignored on write.
+    tokenIdConfigured: { type: 'boolean' },
+    tokenSecret: { type: 'string', minLength: 1, maxLength: 4096 },
+    tokenSecretConfigured: { type: 'boolean' },
+    environment: { type: 'string', minLength: 1, maxLength: 253 },
+    appName: { type: 'string', minLength: 1, maxLength: 253 },
+    image: { type: 'string', minLength: 1, maxLength: 2048 },
+    imageRegistrySecret: { type: 'string', minLength: 1, maxLength: 253 },
+    timeoutSeconds: { type: 'integer', minimum: 1, maximum: 86400 },
+    cpu: { type: 'number', exclusiveMinimum: 0 },
+    memoryMiB: { type: 'integer', minimum: 1 },
+    inboundCidrAllowlist: {
+      type: 'array',
+      items: { type: 'string', minLength: 1, maxLength: 64 },
+      uniqueItems: true,
+    },
+  },
+  additionalProperties: false,
+};
+
 const workspaceStorageSizeSchema = {
   type: 'string',
   minLength: 1,
@@ -66,8 +143,10 @@ export const agentSessionControlPlaneConfigSchema = {
     systemPrompt: { type: 'string', maxLength: 50000 },
     appendSystemPrompt: { type: 'string', maxLength: 50000 },
     maxIterations: positiveIntegerSchema,
+    maxRunInputTokens: positiveIntegerSchema,
     workspaceToolDiscoveryTimeoutMs: positiveIntegerSchema,
     workspaceToolExecutionTimeoutMs: positiveIntegerSchema,
+    autoProvisionWorkspace: { type: 'boolean' },
     toolRules: {
       type: 'array',
       items: toolRuleSchema,
@@ -121,12 +200,25 @@ export const agentSessionRuntimeSettingsSchema = {
       },
       additionalProperties: false,
     },
+    workspaceBackend: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', enum: ['lifecycle_kubernetes', 'opensandbox', 'e2b', 'daytona', 'modal'] },
+        // null is the explicit remove-stored-block sentinel; omitted blocks are preserved.
+        opensandbox: { anyOf: [openSandboxBackendSchema, { type: 'null' }] },
+        e2b: { anyOf: [e2bBackendSchema, { type: 'null' }] },
+        daytona: { anyOf: [daytonaBackendSchema, { type: 'null' }] },
+        modal: { anyOf: [modalBackendSchema, { type: 'null' }] },
+      },
+      additionalProperties: false,
+    },
     cleanup: {
       type: 'object',
       properties: {
         activeIdleSuspendMs: positiveIntegerSchema,
         startingTimeoutMs: positiveIntegerSchema,
         hibernatedRetentionMs: positiveIntegerSchema,
+        idleArchiveMs: positiveIntegerSchema,
         intervalMs: positiveIntegerSchema,
         redisTtlSeconds: positiveIntegerSchema,
       },

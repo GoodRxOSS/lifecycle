@@ -15,11 +15,18 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel, ConfirmationDetails } from '../types';
-import { GitHubClient } from '../shared/githubClient';
+import { ToolExecutionContext, ToolResult } from '../types';
+import { GitHubClient, GitHubUserAuthRequiredError, isGitHubUserAuthorizationError } from '../shared/githubClient';
+import { GITHUB_USER_AUTH_REQUIRED_CODE } from 'server/services/agent/githubAuth';
+import { FallbackLabels } from 'shared/constants';
 
 type LabelAction = 'add' | 'remove' | 'set';
 const VALID_ACTIONS: LabelAction[] = ['add', 'remove', 'set'];
+
+// Removing a deploy label tears the whole environment down — never allow it from the agent.
+const PROTECTED_LABELS = new Set<string>(
+  [FallbackLabels.DEPLOY, FallbackLabels.DEPLOY_STG, FallbackLabels.KEEP].map((label) => label.toLowerCase())
+);
 
 function isLabelAction(value: unknown): value is LabelAction {
   return typeof value === 'string' && (VALID_ACTIONS as string[]).includes(value);
@@ -88,30 +95,20 @@ export class UpdatePrLabelsTool extends BaseTool {
           },
         },
         required: ['repository_owner', 'repository_name', 'pull_request_number', 'action', 'labels'],
-      },
-      ToolSafetyLevel.DANGEROUS,
-      'github'
+      }
     );
   }
 
-  async shouldConfirmExecution(args: Record<string, unknown>): Promise<ConfirmationDetails | false> {
-    const repo = `${args.repository_owner as string}/${args.repository_name as string}`;
-    const prNumber = args.pull_request_number as number;
-    const action = isLabelAction(args.action) ? args.action : 'add';
-    const labels = normalizeLabelList(args.labels).join(', ');
-    return {
-      title: 'Update PR labels',
-      description: `PR #${prNumber} in ${repo}: ${action} labels [${labels}]`,
-      impact: 'This will modify pull request labels in GitHub.',
-      confirmButtonText: 'Update labels',
-    };
-  }
-
-  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
+    let auth: ToolResult['auth'];
     try {
       const owner = args.repository_owner as string;
       const repo = args.repository_name as string;
@@ -119,27 +116,61 @@ export class UpdatePrLabelsTool extends BaseTool {
       const action = args.action;
       const labels = normalizeLabelList(args.labels);
 
+      if (!this.githubClient.isRepoAllowed(owner, repo)) {
+        return this.createErrorResult(
+          `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be modified.`,
+          'REPO_NOT_ALLOWED'
+        );
+      }
+
+      // SECURITY: lock label mutations to this build's own pull request.
+      const allowedPrNumber = this.githubClient.getAllowedPullRequestNumber();
+      if (allowedPrNumber !== null && prNumber !== allowedPrNumber) {
+        return this.createErrorResult(
+          `Pull request #${prNumber} is outside this environment's pull request #${allowedPrNumber} and cannot be modified.`,
+          'PR_NOT_ALLOWED'
+        );
+      }
+
       if (!isLabelAction(action)) {
-        return this.createErrorResult('Invalid action. Expected one of: add, remove, set', 'INVALID_ACTION', false);
+        return this.createErrorResult('Invalid action. Expected one of: add, remove, set', 'INVALID_ACTION');
       }
 
       if (labels.length === 0) {
-        return this.createErrorResult('At least one non-empty label is required', 'INVALID_LABELS', false);
+        return this.createErrorResult('At least one non-empty label is required', 'INVALID_LABELS');
       }
 
-      const octokit = await this.githubClient.getOctokit('agent-runtime-update-pr-labels');
+      const octokitWithAuth = await this.githubClient.getOctokitWithAuth('agent-runtime-update-pr-labels', {
+        requireUserAuth: true,
+        toolCallId: context?.toolCallId,
+      });
+      const octokit = octokitWithAuth.octokit;
+      auth = octokitWithAuth.auth;
 
-      let currentLabels: string[] = [];
-      if (action !== 'set') {
-        const current = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
-          owner,
-          repo,
-          issue_number: prNumber,
-        });
-        currentLabels = (current.data.labels || []).map((label: any) => label.name).filter(Boolean);
-      }
+      const current = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
+        owner,
+        repo,
+        issue_number: prNumber,
+      });
+      const currentLabels: string[] = (current.data.labels || []).map((label: any) => label.name).filter(Boolean);
 
       const updatedLabels = applyLabelAction(currentLabels, labels, action);
+
+      const updatedSet = new Set(updatedLabels.map((label) => label.toLowerCase()));
+      const droppedProtected = currentLabels.filter(
+        (label) => PROTECTED_LABELS.has(label.toLowerCase()) && !updatedSet.has(label.toLowerCase())
+      );
+      if (droppedProtected.length > 0) {
+        return {
+          ...this.createErrorResult(
+            `Refusing to remove protected label(s) [${droppedProtected.join(
+              ', '
+            )}]: removing a deploy label tears down this environment. Use trigger_redeploy to redeploy instead.`,
+            'PROTECTED_LABEL'
+          ),
+          auth,
+        };
+      }
 
       await octokit.request('PUT /repos/{owner}/{repo}/issues/{issue_number}/labels', {
         owner,
@@ -155,9 +186,24 @@ export class UpdatePrLabelsTool extends BaseTool {
         labelsAfter: updatedLabels,
       };
       const displayContent = `Updated PR #${prNumber} labels (${updatedLabels.length} total)`;
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return { ...this.createSuccessResult(JSON.stringify(result), displayContent), auth };
     } catch (error: any) {
-      return this.createErrorResult(error.message || 'Failed to update pull request labels', 'EXECUTION_ERROR');
+      if (error instanceof GitHubUserAuthRequiredError) {
+        return { ...this.createErrorResult(error.message, GITHUB_USER_AUTH_REQUIRED_CODE), auth: error.auth };
+      }
+      if (isGitHubUserAuthorizationError(error)) {
+        return {
+          ...this.createErrorResult(
+            'GitHub authorization is required to apply this repair. Reconnect GitHub and approve again.',
+            GITHUB_USER_AUTH_REQUIRED_CODE
+          ),
+          auth,
+        };
+      }
+      return {
+        ...this.createErrorResult(error.message || 'Failed to update pull request labels', 'EXECUTION_ERROR'),
+        auth,
+      };
     }
   }
 }

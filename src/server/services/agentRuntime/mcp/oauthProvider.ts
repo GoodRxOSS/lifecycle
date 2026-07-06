@@ -21,10 +21,11 @@ import type { McpDiscoveredTool, McpOauthAuthConfig, McpStoredUserConnectionStat
 
 type PersistedOAuthState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
 
+export const OAUTH_RECONNECT_REQUIRED_MESSAGE =
+  'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.';
+
 export class OAuthAuthorizationRequiredError extends Error {
-  constructor(
-    message = 'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.'
-  ) {
+  constructor(message = OAUTH_RECONNECT_REQUIRED_MESSAGE) {
     super(message);
     this.name = 'OAuthAuthorizationRequiredError';
   }
@@ -42,6 +43,7 @@ type PersistentOAuthClientProviderOptions = {
   initialState?: PersistedOAuthState | null;
   discoveredTools?: McpDiscoveredTool[];
   validatedAt?: string | null;
+  validationError?: string | null;
   interactive?: boolean;
 };
 
@@ -49,12 +51,14 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
   private stateValue: PersistedOAuthState;
   private discoveredTools: McpDiscoveredTool[];
   private validatedAtValue: string | null;
+  private validationErrorValue: string | null;
   private authorizationUrlValue: URL | null = null;
 
   constructor(private readonly options: PersistentOAuthClientProviderOptions) {
     this.stateValue = options.initialState || { type: 'oauth' };
     this.discoveredTools = options.discoveredTools || [];
     this.validatedAtValue = options.validatedAt || null;
+    this.validationErrorValue = options.validationError || null;
   }
 
   get redirectUrl(): string {
@@ -99,8 +103,10 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
       state: this.stateValue,
       definitionFingerprint: this.options.definitionFingerprint,
       discoveredTools: this.discoveredTools,
-      validationError: null,
+      validationError: this.validationErrorValue,
       validatedAt: this.validatedAtValue,
+      // Non-interactive runs are read-only for pending-flow state; a concurrent Connect popup owns it.
+      preservePendingFlowState: !this.options.interactive,
     });
   }
 
@@ -113,6 +119,7 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
       ...this.stateValue,
       tokens,
     };
+    this.validationErrorValue = null;
     await this.persist();
   }
 
@@ -128,11 +135,22 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
       ...this.stateValue,
       codeVerifier,
     };
-    await this.persist();
+    // Non-interactive flows can never complete a redirect; persisting their pending
+    // verifier/state would clobber a concurrently pending interactive flow.
+    if (this.options.interactive) {
+      await this.persist();
+    }
   }
 
   async codeVerifier(): Promise<string> {
-    return this.stateValue.codeVerifier || '';
+    if (!this.stateValue.codeVerifier) {
+      // Never exchange with an empty PKCE verifier; force a fresh interactive flow instead.
+      throw new OAuthAuthorizationRequiredError(
+        'Missing PKCE code verifier for this MCP connection. Restart the connection.'
+      );
+    }
+
+    return this.stateValue.codeVerifier;
   }
 
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
@@ -161,7 +179,9 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
       ...this.stateValue,
       oauthState: state,
     };
-    await this.persist();
+    if (this.options.interactive) {
+      await this.persist();
+    }
   }
 
   async storedState(): Promise<string | undefined> {
@@ -203,6 +223,11 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
           oauthState: undefined,
         };
         break;
+    }
+
+    if (scope !== 'verifier') {
+      // Credentials were rejected by the authorization server; record why instead of wiping errors.
+      this.validationErrorValue = OAUTH_RECONNECT_REQUIRED_MESSAGE;
     }
 
     await this.persist();

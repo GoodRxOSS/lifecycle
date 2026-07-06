@@ -36,6 +36,8 @@ type DecryptedUserMcpConnection = {
 };
 
 const STALE_CONNECTION_MESSAGE = 'Connection needs to be refreshed because the shared MCP changed.';
+const UNREADABLE_CONNECTION_MESSAGE =
+  'Stored connection could not be read (the encryption key may have changed). Reconnect this MCP.';
 
 function isRecordObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -67,8 +69,45 @@ function normalizeStoredState(input: unknown): McpStoredUserConnectionState | nu
 }
 
 function parseEncryptedState(ciphertext: string): McpStoredUserConnectionState | null {
-  const parsed = JSON.parse(decrypt(ciphertext)) as unknown;
-  return normalizeStoredState(parsed);
+  try {
+    return normalizeStoredState(JSON.parse(decrypt(ciphertext)) as unknown);
+  } catch {
+    // Key rotation or corruption must not break listing; surface as unconfigured + reconnect.
+    return null;
+  }
+}
+
+function stateValidationError(
+  record: Pick<UserMcpConnection, 'validationError'>,
+  state: McpStoredUserConnectionState | null,
+  stale: boolean
+): string | null {
+  if (stale) {
+    return record.validationError || STALE_CONNECTION_MESSAGE;
+  }
+
+  return state ? record.validationError : UNREADABLE_CONNECTION_MESSAGE;
+}
+
+/** Non-interactive writers must not clobber a pending interactive flow's PKCE/state or its registered client. */
+function mergePendingFlowState(
+  incoming: McpStoredUserConnectionState,
+  existingCiphertext: string
+): McpStoredUserConnectionState {
+  const existing = parseEncryptedState(existingCiphertext);
+  if (incoming.type !== 'oauth' || existing?.type !== 'oauth') {
+    return incoming;
+  }
+
+  return {
+    ...incoming,
+    // Shield the registered client only while a flow is pending; otherwise re-registration must heal a rejected client.
+    clientInformation: existing.oauthState
+      ? existing.clientInformation ?? incoming.clientInformation
+      : incoming.clientInformation,
+    codeVerifier: existing.codeVerifier,
+    oauthState: existing.oauthState,
+  };
 }
 
 function buildScopedKey(scope: string, slug: string): string {
@@ -150,7 +189,7 @@ function toMaskedState(
     stale,
     configuredFieldKeys: stale ? [] : configuredFieldKeys(state),
     validatedAt: normalizeDateTime(record.validatedAt),
-    validationError: stale ? record.validationError || STALE_CONNECTION_MESSAGE : record.validationError,
+    validationError: stateValidationError(record, state, stale),
     discoveredTools: stale ? [] : record.discoveredTools || [],
     updatedAt: normalizeDateTime(record.updatedAt),
   };
@@ -168,7 +207,7 @@ function toDecryptedConnection(
     definitionFingerprint: record.definitionFingerprint,
     stale,
     discoveredTools: stale ? [] : record.discoveredTools || [],
-    validationError: stale ? record.validationError || STALE_CONNECTION_MESSAGE : record.validationError,
+    validationError: stateValidationError(record, state, stale),
     validatedAt: normalizeDateTime(record.validatedAt),
     updatedAt: normalizeDateTime(record.updatedAt),
   };
@@ -236,6 +275,7 @@ export default class UserMcpConnectionService {
     discoveredTools,
     validationError = null,
     validatedAt,
+    preservePendingFlowState = false,
   }: {
     userId: string;
     ownerGithubUsername?: string | null;
@@ -246,10 +286,13 @@ export default class UserMcpConnectionService {
     discoveredTools: McpDiscoveredTool[];
     validationError?: string | null;
     validatedAt: string | null;
+    preservePendingFlowState?: boolean;
   }): Promise<void> {
-    const encryptedState = encrypt(JSON.stringify(state));
     const canonicalOwner = this.getOwnerKey(userId, ownerGithubUsername);
     const existing = await this.findRecord(userId, scope, slug, ownerGithubUsername);
+    const effectiveState =
+      preservePendingFlowState && existing ? mergePendingFlowState(state, existing.encryptedState) : state;
+    const encryptedState = encrypt(JSON.stringify(effectiveState));
 
     const patch = {
       userId,
@@ -410,7 +453,7 @@ export default class UserMcpConnectionService {
         stale,
         configuredFieldKeys: stale ? [] : configuredFieldKeys(state),
         discoveredToolCount: stale ? 0 : (record.discoveredTools || []).length,
-        validationError: stale ? record.validationError || STALE_CONNECTION_MESSAGE : record.validationError,
+        validationError: stateValidationError(record, state, stale),
         validatedAt: normalizeDateTime(record.validatedAt),
         updatedAt: normalizeDateTime(record.updatedAt),
       };

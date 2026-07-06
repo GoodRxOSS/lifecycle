@@ -90,14 +90,14 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
       description: 'A workspace edit requires approval.',
       requestedAt: '2026-04-11T00:00:00.000Z',
       expiresAt: null,
-      toolName: 'mcp__sandbox__workspace_edit_file',
+      toolName: 'mcp__workspace_core__edit_file',
       argumentsSummary: [{ name: 'path', value: 'sample-file.txt' }],
       commandPreview: null,
       fileChangePreview: [
         {
           id: 'tool-call-1:sample-file.txt',
           toolCallId: 'tool-call-1',
-          sourceTool: 'workspace_edit_file',
+          sourceTool: 'edit_file',
           path: 'sample-file.txt',
           displayPath: 'sample-file.txt',
           kind: 'edited',
@@ -135,14 +135,14 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
         description: 'A workspace edit requires approval.',
         requestedAt: '2026-04-11T00:00:00.000Z',
         expiresAt: null,
-        toolName: 'mcp__sandbox__workspace_edit_file',
+        toolName: 'mcp__workspace_core__edit_file',
         argumentsSummary: [{ name: 'path', value: 'sample-file.txt' }],
         commandPreview: null,
         fileChangePreview: [
           {
             id: 'tool-call-1:sample-file.txt',
             toolCallId: 'tool-call-1',
-            sourceTool: 'workspace_edit_file',
+            sourceTool: 'edit_file',
             path: 'sample-file.txt',
             displayPath: 'sample-file.txt',
             kind: 'edited',

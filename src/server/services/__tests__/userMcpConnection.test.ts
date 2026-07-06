@@ -22,7 +22,7 @@ jest.mock('server/lib/encryption', () => ({
 
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 import UserMcpConnection from 'server/models/UserMcpConnection';
-import { encrypt } from 'server/lib/encryption';
+import { decrypt, encrypt } from 'server/lib/encryption';
 
 const mockQuery: any = {
   where: jest.fn(),
@@ -78,6 +78,141 @@ describe('UserMcpConnectionService', () => {
         definitionFingerprint: 'fingerprint-1',
       })
     );
+  });
+
+  it('preserves a pending interactive flow when a non-interactive writer invalidates credentials', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 7,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState:
+        'enc:{"type":"oauth","tokens":{"access_token":"old-access"},"clientInformation":{"client_id":"interactive-client"},"codeVerifier":"interactive-verifier","oauthState":"interactive-state"}',
+      definitionFingerprint: 'fingerprint-oauth',
+    });
+
+    // Simulates invalidateCredentials('tokens') from an agent-run provider: tokens cleared in memory.
+    await UserMcpConnectionService.upsertConnection({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      state: { type: 'oauth', clientInformation: { client_id: 'interactive-client' } },
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: 'reconnect required',
+      validatedAt: null,
+      preservePendingFlowState: true,
+    });
+
+    expect(JSON.parse((encrypt as jest.Mock).mock.calls[0][0])).toEqual({
+      type: 'oauth',
+      clientInformation: { client_id: 'interactive-client' },
+      codeVerifier: 'interactive-verifier',
+      oauthState: 'interactive-state',
+    });
+    expect(mockQuery.patch).toHaveBeenCalledWith(expect.objectContaining({ validationError: 'reconnect required' }));
+  });
+
+  it('preserves the interactive client and pending state over a non-interactive dynamic registration', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 7,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState:
+        'enc:{"type":"oauth","clientInformation":{"client_id":"interactive-client"},"codeVerifier":"interactive-verifier","oauthState":"interactive-state"}',
+      definitionFingerprint: 'fingerprint-oauth',
+    });
+
+    // Simulates the SDK's saveClientInformation fallback during a non-interactive auth() attempt.
+    await UserMcpConnectionService.upsertConnection({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      state: {
+        type: 'oauth',
+        clientInformation: { client_id: 'runtime-client' },
+        codeVerifier: 'runtime-verifier',
+        oauthState: 'runtime-state',
+      },
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      preservePendingFlowState: true,
+    });
+
+    expect(JSON.parse((encrypt as jest.Mock).mock.calls[0][0])).toEqual({
+      type: 'oauth',
+      clientInformation: { client_id: 'interactive-client' },
+      codeVerifier: 'interactive-verifier',
+      oauthState: 'interactive-state',
+    });
+  });
+
+  it('lets a non-interactive writer replace the client when no flow is pending', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 7,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState:
+        'enc:{"type":"oauth","tokens":{"access_token":"old-access"},"clientInformation":{"client_id":"rejected-client"}}',
+      definitionFingerprint: 'fingerprint-oauth',
+    });
+
+    // Simulates the SDK healing an invalid_client: invalidate('all') then fresh dynamic registration.
+    await UserMcpConnectionService.upsertConnection({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      state: { type: 'oauth', clientInformation: { client_id: 'fresh-client' } },
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      preservePendingFlowState: true,
+    });
+
+    expect(JSON.parse((encrypt as jest.Mock).mock.calls[0][0])).toEqual({
+      type: 'oauth',
+      clientInformation: { client_id: 'fresh-client' },
+    });
+  });
+
+  it('replaces the stored state wholesale when preservePendingFlowState is not set', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 7,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState: 'enc:{"type":"oauth","codeVerifier":"interactive-verifier","oauthState":"interactive-state"}',
+      definitionFingerprint: 'fingerprint-oauth',
+    });
+
+    await UserMcpConnectionService.upsertConnection({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      state: { type: 'oauth', tokens: { access_token: 'fresh-access', token_type: 'bearer' } },
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+    });
+
+    expect(JSON.parse((encrypt as jest.Mock).mock.calls[0][0])).toEqual({
+      type: 'oauth',
+      tokens: { access_token: 'fresh-access', token_type: 'bearer' },
+    });
   });
 
   it('returns masked connection state including discovered tools and stale=false when the fingerprint matches', async () => {
@@ -153,6 +288,71 @@ describe('UserMcpConnectionService', () => {
       discoveredTools: [],
       updatedAt: '2026-04-06T18:01:00.000Z',
     });
+  });
+
+  it('treats an undecryptable record as unconfigured with a reconnect message instead of throwing', async () => {
+    (decrypt as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('Unsupported state or unable to authenticate data');
+    });
+    mockQuery.first.mockResolvedValue({
+      id: 1,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-connector',
+      encryptedState: 'enc-with-rotated-key',
+      definitionFingerprint: 'fingerprint-1',
+      discoveredTools: [{ name: 'inspectItem', inputSchema: {} }],
+      validationError: null,
+      validatedAt: '2026-04-06T18:00:00.000Z',
+      updatedAt: '2026-04-06T18:01:00.000Z',
+    });
+
+    const result = await UserMcpConnectionService.getMaskedState(
+      'sample-user',
+      'global',
+      'sample-connector',
+      'sample-user',
+      'fingerprint-1'
+    );
+
+    expect(result.configured).toBe(false);
+    expect(result.configuredFieldKeys).toEqual([]);
+    expect(result.validationError).toBe(
+      'Stored connection could not be read (the encryption key may have changed). Reconnect this MCP.'
+    );
+  });
+
+  it('returns a null decrypted state for an undecryptable record so runtime resolution drops it', async () => {
+    (decrypt as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('Unsupported state or unable to authenticate data');
+    });
+    mockQuery.first.mockResolvedValue({
+      id: 1,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState: 'enc-with-rotated-key',
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [{ name: 'inspectItem', inputSchema: {} }],
+      validationError: null,
+      validatedAt: '2026-04-06T18:00:00.000Z',
+      updatedAt: '2026-04-06T18:01:00.000Z',
+    });
+
+    const result = await UserMcpConnectionService.getDecryptedConnection(
+      'sample-user',
+      'global',
+      'sample-oauth',
+      'sample-user',
+      'fingerprint-oauth'
+    );
+
+    expect(result?.state).toBeNull();
+    expect(result?.validationError).toBe(
+      'Stored connection could not be read (the encryption key may have changed). Reconnect this MCP.'
+    );
   });
 
   it('preserves oauth client information and tokens when reading a stored connection', async () => {
