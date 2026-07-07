@@ -15,7 +15,9 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertNamedRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
 import RepositoryService from 'server/services/repository';
 
@@ -30,6 +32,9 @@ interface RouteContext {
  * /api/v2/repositories/{owner}/{repo}:
  *   delete:
  *     summary: Remove an onboarded repository
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Soft-removes a repository from Lifecycle onboarding while preserving historical data.
  *     tags:
  *       - Repositories
@@ -69,7 +74,7 @@ interface RouteContext {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
+const deleteHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   const segments = routeParams.fullName || [];
   if (segments.length < 2) {
@@ -82,8 +87,11 @@ const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
     return errorResponse(new Error('installationId must be a number'), { status: 400 }, req);
   }
 
+  const fullName = segments.join('/');
+  await assertNamedRepositoryAllowed(principal, fullName);
+
   try {
-    const repository = await new RepositoryService().removeRepository(segments.join('/'), installationId);
+    const repository = await new RepositoryService().removeRepository(fullName, installationId);
     return successResponse({ repository }, { status: 200 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -97,4 +105,4 @@ const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const DELETE = createApiHandler(deleteHandler);
+export const DELETE = createPrincipalApiHandler({ scope: 'repos:write' }, deleteHandler);

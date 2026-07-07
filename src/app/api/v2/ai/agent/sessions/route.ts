@@ -29,6 +29,7 @@ import {
 } from 'server/services/agent/SessionReadService';
 import { type AgentThreadRuntimeControlChoiceInput } from 'server/services/agent/ThreadRuntimeControlsService';
 import { AgentSessionKind, BuildKind } from 'shared/constants';
+import type { AgentSessionCandidateBuildSource } from 'server/services/agentSessionCandidates';
 
 interface RequestedAgentSessionServiceRef {
   name: string;
@@ -156,18 +157,18 @@ function parseRuntimeControlChoices(value: unknown): AgentThreadRuntimeControlCh
 }
 
 async function resolveLifecycleConfigForSession({
-  buildContext,
+  buildSource,
   repoUrl,
   branch,
 }: {
-  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null;
+  buildSource: AgentSessionCandidateBuildSource | null;
   repoUrl?: string | null;
   branch?: string | null;
 }): Promise<LifecycleConfig | null> {
   const { fetchLifecycleConfig } = await import('server/models/yaml');
 
-  if (buildContext?.pullRequest?.fullName && buildContext.pullRequest.branchName) {
-    return fetchLifecycleConfig(buildContext.pullRequest.fullName, buildContext.pullRequest.branchName);
+  if (buildSource) {
+    return fetchLifecycleConfig(buildSource.repo, buildSource.configRef);
   }
 
   const repositoryName = repoNameFromRepoUrl(repoUrl);
@@ -195,13 +196,17 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
 
 async function resolveBuildContext(buildUuid: string) {
   const { default: Build } = await import('server/models/Build');
-  return Build.query().findOne({ uuid: buildUuid }).withGraphFetched('[pullRequest, deploys.[deployable, repository]]');
+  return Build.query()
+    .findOne({ uuid: buildUuid })
+    .whereNull('deletedAt')
+    .withGraphFetched('[pullRequest.[repository], deploys.[deployable, repository]]');
 }
 
 async function resolveRequestedServices(
   buildUuid: string | undefined,
   requestedServices: unknown[] | undefined,
-  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null
+  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null,
+  buildSource: AgentSessionCandidateBuildSource | null
 ): Promise<ResolvedSessionService[]> {
   if (!Array.isArray(requestedServices) || requestedServices.length === 0) {
     return [];
@@ -228,7 +233,7 @@ async function resolveRequestedServices(
   });
 
   return resolveRequestedAgentSessionServices(
-    await resolveAgentSessionServiceCandidatesForBuild(buildContext),
+    await resolveAgentSessionServiceCandidatesForBuild(buildContext, buildSource),
     requestedRefs
   ).map(({ name, deployId, devConfig, baseDeploy, repo, branch, revision }) => ({
     name,
@@ -529,11 +534,18 @@ const postHandler = async (req: NextRequest) => {
       : undefined;
   let buildKind = BuildKind.ENVIRONMENT;
   let buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null = null;
+  let buildSource: AgentSessionCandidateBuildSource | null = null;
   let lifecycleConfig: LifecycleConfig | null = null;
 
   if (buildUuid) {
     buildContext = await resolveBuildContext(buildUuid);
-    if (!buildContext?.pullRequest) {
+    if (!buildContext) {
+      return errorResponse(new Error('Build not found'), { status: 404 }, req);
+    }
+
+    const { resolveAgentSessionCandidateBuildSource } = await import('server/services/agentSessionCandidates');
+    buildSource = await resolveAgentSessionCandidateBuildSource(buildContext);
+    if (!buildSource) {
       return errorResponse(new Error('Build not found'), { status: 404 }, req);
     }
 
@@ -546,15 +558,15 @@ const postHandler = async (req: NextRequest) => {
       );
     }
 
-    repoUrl = repoUrl || `https://github.com/${buildContext.pullRequest.fullName}.git`;
-    branch = branch || buildContext.pullRequest.branchName;
-    prNumber = prNumber ?? buildContext.pullRequest.pullRequestNumber;
-    namespace = namespace || buildContext.namespace;
+    repoUrl = `https://github.com/${buildSource.repo}.git`;
+    branch = buildSource.branch;
+    prNumber = buildContext.pullRequest?.pullRequestNumber ?? undefined;
+    namespace = buildContext.namespace;
   }
 
   try {
     lifecycleConfig = await resolveLifecycleConfigForSession({
-      buildContext,
+      buildSource,
       repoUrl,
       branch,
     });
@@ -564,7 +576,7 @@ const postHandler = async (req: NextRequest) => {
 
   let resolvedServices: ResolvedSessionService[];
   try {
-    resolvedServices = await resolveRequestedServices(buildUuid, services, buildContext);
+    resolvedServices = await resolveRequestedServices(buildUuid, services, buildContext, buildSource);
   } catch (err) {
     return errorResponse(err, { status: 400 }, req);
   }
@@ -637,5 +649,5 @@ const postHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const POST = createApiHandler(postHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const POST = createApiHandler(postHandler, { auth: 'session' });

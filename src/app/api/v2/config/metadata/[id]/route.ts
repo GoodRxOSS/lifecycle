@@ -141,5 +141,5 @@ const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const PATCH = createApiHandler(patchHandler, { roles: ['admin'] });
-export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });
+export const PATCH = createApiHandler(patchHandler, { auth: 'session', roles: ['admin'] });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session', roles: ['admin'] });

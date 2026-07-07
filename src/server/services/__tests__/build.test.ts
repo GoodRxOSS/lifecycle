@@ -157,8 +157,9 @@ jest.mock('server/lib/fastly', () =>
   }))
 );
 
-import BuildService from '../build';
+import BuildService, { computeIdempotencyRequestDigest, assertIdempotentReplayAllowed } from '../build';
 import { BuildKind, BuildStatus, DeployTypes } from 'shared/constants';
+import * as github from 'server/lib/github';
 
 function createThenableQuery(result: any[] = []) {
   const query: any = {
@@ -222,6 +223,102 @@ describe('BuildService build response queries', () => {
     expect(query.select.mock.calls[0]).toEqual(expect.arrayContaining(['commentRuntimeEnv', 'commentInitEnv']));
   });
 
+  function createAllowlistHarness() {
+    const recorder: any = {
+      orWhereIn: jest.fn().mockReturnThis(),
+      orWhereExists: jest.fn().mockReturnThis(),
+    };
+    const query: any = {
+      select: jest.fn(() => query),
+      where: jest.fn((arg: any) => {
+        if (typeof arg === 'function') arg(recorder);
+        return query;
+      }),
+      whereNotIn: jest.fn(() => query),
+      modify: jest.fn((callback: (builder: any) => void) => {
+        callback(query);
+        return query;
+      }),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn(() => query),
+      orderBy: jest.fn(() => query),
+      page: jest.fn().mockResolvedValue({ results: [], total: 0 }),
+    };
+    const pullRequestChain: any = {
+      joinRelated: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+    };
+    const repositoryChain: any = {
+      whereColumn: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+    };
+    const models = {
+      Build: {
+        query: jest.fn(() => query),
+        relatedQuery: jest.fn(() => pullRequestChain),
+      },
+      Repository: {
+        query: jest.fn(() => repositoryChain),
+      },
+    };
+    const buildService = new BuildService({ models } as any, {} as any, {} as any, createQueueManager() as any);
+    return { buildService, recorder, models, pullRequestChain, repositoryChain };
+  }
+
+  test('scopes the listing to an id-bound repository allowlist', async () => {
+    const { buildService, recorder, models, pullRequestChain } = createAllowlistHarness();
+
+    await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 }, ['org/repo'], [42]);
+
+    expect(recorder.orWhereIn).toHaveBeenCalledWith('builds.githubRepositoryId', [42]);
+    expect(models.Build.relatedQuery).toHaveBeenCalledWith('pullRequest');
+    expect(pullRequestChain.joinRelated).toHaveBeenCalledWith('repository');
+    expect(pullRequestChain.whereIn).toHaveBeenCalledWith('repository.githubRepositoryId', [42]);
+    expect(models.Repository.query).not.toHaveBeenCalled();
+  });
+
+  test('scopes the listing to a legacy name-only allowlist via lowercased EXISTS predicates', async () => {
+    const { buildService, recorder, pullRequestChain, repositoryChain } = createAllowlistHarness();
+
+    await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 }, ['Org/Repo'], null);
+
+    expect(recorder.orWhereExists).toHaveBeenCalledTimes(2);
+    expect(repositoryChain.whereColumn).toHaveBeenCalledWith(
+      'repositories.githubRepositoryId',
+      'builds.githubRepositoryId'
+    );
+    expect(repositoryChain.whereRaw).toHaveBeenCalledWith('LOWER("fullName") = ANY(?)', [['org/repo']]);
+    expect(pullRequestChain.whereRaw).toHaveBeenCalledWith('LOWER("fullName") = ANY(?)', [['org/repo']]);
+  });
+
+  test('an explicit empty id-allowlist matches nothing instead of listing everything', async () => {
+    const { buildService, recorder } = createAllowlistHarness();
+
+    await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 }, null, []);
+
+    expect(recorder.orWhereIn).toHaveBeenCalledWith('builds.githubRepositoryId', []);
+  });
+
+  test('an explicit empty name-allowlist matches nothing instead of listing everything', async () => {
+    const { buildService, repositoryChain } = createAllowlistHarness();
+
+    await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 }, [], null);
+
+    expect(repositoryChain.whereRaw).toHaveBeenCalledWith('LOWER("fullName") = ANY(?)', [[]]);
+  });
+
+  test('applies no repository filter for unrestricted principals', async () => {
+    const { buildService, recorder, models } = createAllowlistHarness();
+
+    await buildService.getAllBuilds('', undefined, '', { page: 1, limit: 25 }, null, null);
+
+    expect(recorder.orWhereIn).not.toHaveBeenCalled();
+    expect(recorder.orWhereExists).not.toHaveBeenCalled();
+    expect(models.Repository.query).not.toHaveBeenCalled();
+  });
+
   test('selects comment env columns when loading a build by UUID', async () => {
     const build = {
       uuid: 'sample-build',
@@ -230,6 +327,7 @@ describe('BuildService build response queries', () => {
     };
     const query: any = {
       findOne: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
       select: jest.fn(() => query),
       withGraphFetched: jest.fn(() => query),
       modifyGraph: jest.fn(() => query),
@@ -277,6 +375,7 @@ describe('BuildService build response queries', () => {
     };
     const query: any = {
       findOne: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
       select: jest.fn(() => query),
       withGraphFetched: jest.fn(() => query),
       modifyGraph: jest.fn(() => query),
@@ -382,6 +481,48 @@ describe('BuildService status updates', () => {
       statusMessage: '',
     });
   });
+
+  test('does not abort teardown status progress when webhook notification enqueue fails', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const webhookAdd = jest.fn().mockRejectedValue(new Error('redis unavailable'));
+    const buildService = new BuildService(
+      {
+        services: {
+          Webhook: { webhookQueue: { add: webhookAdd } },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({
+          add: mockQueueAdd,
+          process: jest.fn(),
+          on: jest.fn(),
+        })),
+      } as any
+    );
+    const build = {
+      id: 1,
+      uuid: 'sample-build',
+      runUUID: 'run-1',
+      kind: BuildKind.ENVIRONMENT,
+      deploys: [],
+      pullRequest: null,
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      $query: jest.fn(() => ({ patch })),
+    };
+
+    await expect(
+      buildService.updateStatusAndComment(build as any, BuildStatus.TEARING_DOWN, 'run-1', true, true)
+    ).resolves.toBeUndefined();
+
+    expect(patch).toHaveBeenCalledWith({
+      status: BuildStatus.TEARING_DOWN,
+      statusMessage: '',
+    });
+    expect(webhookAdd).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('BuildService destroyBuildEnvironment', () => {
@@ -406,9 +547,8 @@ describe('BuildService destroyBuildEnvironment', () => {
       isStatic: false,
       status: BuildStatus.DEPLOYED,
     };
-    const buildQuery = {
-      findOne: jest.fn().mockResolvedValue(build),
-    };
+    const whereNull = jest.fn().mockResolvedValue(build);
+    const buildQuery = { findOne: jest.fn(() => ({ whereNull })) };
     const buildService = new BuildService(
       {
         models: {
@@ -427,10 +567,20 @@ describe('BuildService destroyBuildEnvironment', () => {
 
     expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
     expect(deleteBuild).not.toHaveBeenCalled();
-    expect(mockQueueAdd).toHaveBeenCalledWith('delete', {
-      buildId: 42,
-      buildUuid: 'sample-build',
-    });
+    expect(mockQueueAdd).toHaveBeenCalledWith(
+      'delete',
+      expect.objectContaining({
+        buildId: 42,
+        buildUuid: 'sample-build',
+        reason: 'manual_destroy',
+        teardownRunUUID: expect.any(String),
+      }),
+      {
+        jobId: 'build-delete-42-authoritative',
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 10000 },
+      }
+    );
     expect(result).toEqual({
       status: 'success',
       message: 'Build sample-build teardown has been queued',
@@ -439,7 +589,7 @@ describe('BuildService destroyBuildEnvironment', () => {
 
   test('does not clean up missing builds', async () => {
     const buildQuery = {
-      findOne: jest.fn().mockResolvedValue(null),
+      findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(null) })),
     };
     const deployQuery = {
       where: jest.fn(),
@@ -478,7 +628,7 @@ describe('BuildService destroyBuildEnvironment', () => {
       status: BuildStatus.DEPLOYED,
     };
     const buildQuery = {
-      findOne: jest.fn().mockResolvedValue(build),
+      findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(build) })),
     };
     const deployQuery = {
       where: jest.fn(),
@@ -667,6 +817,47 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [4] });
   });
 
+  test('branch-filtered reconciliation leaves same-repository deployables on other branches untouched', async () => {
+    const staleMainDeploy = { id: 81, uuid: 'main-old-build-1', deployableId: 6 };
+    createService(
+      [
+        { id: 6, name: 'main-old', resolvedFromRepositoryId: targetRepoId, branchName: 'main' },
+        { id: 7, name: 'stable-old', resolvedFromRepositoryId: targetRepoId, branchName: 'stable' },
+      ],
+      [staleMainDeploy]
+    );
+
+    await (buildService as any).reconcileDeletedDeployables(
+      createBuild(),
+      {
+        canReconcile: true,
+        deployables: [],
+        reconcileEligibleDeployables: [
+          {
+            name: 'main-new',
+            source: 'yaml',
+            reconcileEligible: true,
+            resolvedFromRepositoryId: targetRepoId,
+            branchName: 'main',
+          },
+          {
+            name: 'stable-old',
+            source: 'yaml',
+            reconcileEligible: true,
+            resolvedFromRepositoryId: targetRepoId,
+            branchName: 'stable',
+          },
+        ],
+      },
+      targetRepoId,
+      'main'
+    );
+
+    expect(mockCleanupDeploy).toHaveBeenCalledTimes(1);
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleMainDeploy, { mode: 'service' });
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [6] });
+  });
+
   test('full reconciliation can delete YAML-owned deployables with null repository ownership', async () => {
     const staleDeploy = { id: 80, uuid: 'external-cache-build-1', deployableId: 5 };
     createService([{ id: 5, name: 'external-cache', resolvedFromRepositoryId: null }], [staleDeploy]);
@@ -733,9 +924,39 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(deployableQuery.whereNot).toHaveBeenCalledWith('type', DeployTypes.CONFIGURATION);
   });
 
-  test('cleanup errors are logged but database rows are still deleted', async () => {
+  test('cleanup failures retain database rows for a retry without failing the run', async () => {
     createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
     mockCleanupDeploy.mockRejectedValue(new Error('targeted cleanup failed'));
+    const build = createBuild();
+
+    await expect(
+      (buildService as any).reconcileDeletedDeployables(build as any, {
+        canReconcile: true,
+        deployables: [],
+        reconcileEligibleDeployables: [],
+      })
+    ).resolves.toBeUndefined();
+
+    expect(mockCleanupDeploy).toHaveBeenCalledTimes(1);
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+  });
+
+  test('a partial cleanup failure deletes only the successfully cleaned rows', async () => {
+    createService(
+      [
+        { id: 1, name: 'old-api' },
+        { id: 2, name: 'old-worker' },
+      ],
+      [
+        { id: 77, uuid: 'old-api-build-1', deployableId: 1 },
+        { id: 78, uuid: 'old-worker-build-1', deployableId: 2 },
+      ]
+    );
+    mockCleanupDeploy.mockImplementation(async (deploy: any) => {
+      if (deploy.deployableId === 1) throw new Error('targeted cleanup failed');
+      return true;
+    });
     const build = createBuild();
 
     await (buildService as any).reconcileDeletedDeployables(build as any, {
@@ -744,9 +965,8 @@ describe('BuildService stale deploy reconciliation', () => {
       reconcileEligibleDeployables: [],
     });
 
-    expect(mockCleanupDeploy).toHaveBeenCalledTimes(1);
-    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [1] });
-    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+    expect(mockCleanupDeploy).toHaveBeenCalledTimes(2);
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [2] });
   });
 
   test('service redeploy YAML import skips stale reconciliation', async () => {
@@ -784,9 +1004,18 @@ describe('BuildService stale deploy reconciliation', () => {
       skipDeletedServiceReconciliation: true,
     });
 
-    expect(upsertDeployables).toHaveBeenCalledWith(10, 'build-1', build.pullRequest, environment, build, targetRepoId);
+    expect(upsertDeployables).toHaveBeenCalledWith(
+      10,
+      'build-1',
+      build.pullRequest,
+      environment,
+      build,
+      targetRepoId,
+      undefined,
+      undefined
+    );
     expect(reconcileDeletedDeployables).not.toHaveBeenCalled();
-    expect(upsertWebhooksWithYaml).toHaveBeenCalledWith(build, build.pullRequest);
+    expect(upsertWebhooksWithYaml).toHaveBeenCalledWith(build, build.pullRequest, null);
   });
 });
 
@@ -802,7 +1031,7 @@ describe('BuildService queue fingerprinting', () => {
       id: 1,
       commentRuntimeEnv: { FEATURE_FLAG: 'on' },
       commentInitEnv: {},
-      pullRequest: { latestCommit: 'abcdef123456' },
+      pullRequest: { latestCommit: 'abcdef123456', status: 'open', deployOnUpdate: true },
       deploys: [
         {
           id: 11,
@@ -814,7 +1043,6 @@ describe('BuildService queue fingerprinting', () => {
           env: { API_URL: 'https://api.test' },
           initEnv: { INIT_MODE: 'warm' },
           deployable: { name: 'api', commentBranchName: null },
-          service: { name: 'api' },
         },
         {
           id: 22,
@@ -826,7 +1054,6 @@ describe('BuildService queue fingerprinting', () => {
           env: { QUEUE: 'jobs' },
           initEnv: {},
           deployable: { name: 'worker', commentBranchName: 'worker-override' },
-          service: { name: 'worker' },
         },
       ],
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
@@ -842,6 +1069,7 @@ describe('BuildService queue fingerprinting', () => {
 
     mockBuildQuery = {
       findOne: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
       withGraphFetched: jest.fn(),
     };
 
@@ -985,6 +1213,31 @@ describe('BuildService queue fingerprinting', () => {
     expect(mockResolveQueueAdd.mock.calls[0][1]).toEqual(expect.objectContaining({ triggerRef: 'commit-a' }));
   });
 
+  test('keeps the exact source repository, branch, and ref in the resolve queue payload', async () => {
+    const build = createMockBuild();
+    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+
+    await buildService.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'Feature/X',
+      sourceRef: 'commit-a',
+      triggerRef: 'commit-a',
+    });
+
+    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
+      'resolve-deploy',
+      expect.objectContaining({
+        githubRepositoryId: 100,
+        sourceGithubRepositoryId: 100,
+        sourceBranch: 'Feature/X',
+        sourceRef: 'commit-a',
+      }),
+      expect.any(Object)
+    );
+  });
+
   test('keeps the dedupe key commit-agnostic when no triggerRef is provided', async () => {
     const build = createMockBuild();
     mockBuildQuery.withGraphFetched.mockResolvedValue(build);
@@ -1065,6 +1318,7 @@ describe('BuildService queue fingerprinting', () => {
       uuid: 'good-dev-0',
       pullRequest: {
         latestCommit: 'abcdef123456',
+        status: 'open',
         deployOnUpdate: true,
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
       },
@@ -1090,12 +1344,13 @@ describe('BuildService queue fingerprinting', () => {
     );
   });
 
-  test('forwards triggerRef from the resolve job to the build job so both layers share dedupe identity', async () => {
+  test('forwards queue identity and immutable source refs from resolve to build', async () => {
     const build = createMockBuild({
       id: 1449,
       uuid: 'good-dev-0',
       pullRequest: {
         latestCommit: 'abcdef123456',
+        status: 'open',
         deployOnUpdate: true,
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
       },
@@ -1105,13 +1360,226 @@ describe('BuildService queue fingerprinting', () => {
     const enqueueBuildJob = jest.spyOn(buildService, 'enqueueBuildJob').mockResolvedValue(undefined as any);
 
     await buildService.processResolveAndDeployBuildQueue({
+      id: '42',
       data: {
         buildId: 1449,
         githubRepositoryId: 425935548,
         triggerRef: 'head-commit-sha',
+        sourceRef: 'head-commit-sha',
+        sourceGithubRepositoryId: 425935548,
+        sourceBranch: 'Main',
       },
     });
 
-    expect(enqueueBuildJob).toHaveBeenCalledWith(expect.objectContaining({ triggerRef: 'head-commit-sha' }));
+    expect(enqueueBuildJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        triggerRef: 'head-commit-sha',
+        sourceRef: 'head-commit-sha',
+        sourceGithubRepositoryId: 425935548,
+        sourceBranch: 'Main',
+        triggerSequence: '42',
+      })
+    );
+  });
+
+  test('rethrows build enqueue failures so the resolve job retry budget is used', async () => {
+    const build = createMockBuild({ id: 1449, uuid: 'good-dev-0' });
+    mockBuildQuery.findOne.mockResolvedValue(build);
+    jest.spyOn(buildService, 'enqueueBuildJob').mockRejectedValue(new Error('redis unavailable'));
+
+    await expect(
+      buildService.processResolveAndDeployBuildQueue({ id: '43', data: { buildId: 1449, triggerRef: 'sha' } })
+    ).rejects.toThrow('redis unavailable');
+  });
+
+  test('rejects an out-of-order trigger after a newer sequence claimed the same build/source scope', async () => {
+    const values = new Map<string, string>();
+    (buildService as any).redis = {
+      get: jest.fn(async (key: string) => values.get(key) ?? null),
+      set: jest.fn(async (key: string, value: string) => {
+        values.set(key, value);
+        return 'OK';
+      }),
+    };
+
+    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '102')).resolves.toBe(true);
+    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '101')).resolves.toBe(false);
+    await expect((buildService as any).claimTriggerSequence(7, 100, 'stable', '101')).resolves.toBe(true);
+    await expect((buildService as any).claimTriggerSequence(7, 200, 'main', '101')).resolves.toBe(true);
+    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '102')).resolves.toBe(true);
+
+    expect(values).toEqual(
+      new Map([
+        ['build-deployment-sequence.resolve_and_deploy_test.7.100.main', '102'],
+        ['build-deployment-sequence.resolve_and_deploy_test.7.100.stable', '101'],
+        ['build-deployment-sequence.resolve_and_deploy_test.7.200.main', '101'],
+      ])
+    );
+    for (const call of ((buildService as any).redis.set as jest.Mock).mock.calls) {
+      expect(call.slice(2)).toEqual(['EX', 7 * 24 * 60 * 60]);
+    }
+  });
+
+  test('keeps the delivered ref when it is still the live branch head', async () => {
+    const whereNull = jest.fn().mockResolvedValue({ githubRepositoryId: 100, fullName: 'org/repo' });
+    const findOne = jest.fn(() => ({ whereNull }));
+    (buildService as any).db.models.Repository = { query: jest.fn(() => ({ findOne })) };
+    (github.getSHAForBranch as jest.Mock).mockResolvedValue('newest-sha');
+
+    await expect((buildService as any).resolveEffectiveSourceRef(100, 'Feature/X', 'newest-sha')).resolves.toBe(
+      'newest-sha'
+    );
+
+    expect(findOne).toHaveBeenCalledWith({ githubRepositoryId: 100 });
+    expect(whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(github.getSHAForBranch).toHaveBeenCalledWith('Feature/X', 'org', 'repo');
+  });
+
+  test('converges a stale delivered ref to the live branch head instead of dropping the push', async () => {
+    const whereNull = jest.fn().mockResolvedValue({ githubRepositoryId: 100, fullName: 'org/repo' });
+    (buildService as any).db.models.Repository = {
+      query: jest.fn(() => ({ findOne: jest.fn(() => ({ whereNull })) })),
+    };
+    (github.getSHAForBranch as jest.Mock).mockResolvedValue('newest-sha');
+
+    await expect((buildService as any).resolveEffectiveSourceRef(100, 'Feature/X', 'older-sha')).resolves.toBe(
+      'newest-sha'
+    );
+  });
+
+  test('fails open to the delivered ref on head-check, repository, or lookup failures', async () => {
+    const whereNull = jest
+      .fn()
+      .mockResolvedValueOnce({ githubRepositoryId: 100, fullName: 'org/repo' })
+      .mockResolvedValueOnce(undefined);
+    (buildService as any).db.models.Repository = {
+      query: jest.fn(() => ({ findOne: jest.fn(() => ({ whereNull })) })),
+    };
+    (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('GitHub unavailable'));
+
+    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
+    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
+    await expect((buildService as any).resolveEffectiveSourceRef(100, undefined, 'sha')).resolves.toBe('sha');
+
+    const databaseError = new Error('database unavailable');
+    (buildService as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockRejectedValue(databaseError) })),
+      })),
+    };
+    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
+  });
+});
+
+describe('idempotency digest + replay authorization (D12)', () => {
+  const caught = (fn: () => void): any => {
+    try {
+      fn();
+    } catch (error) {
+      return error;
+    }
+    return null;
+  };
+
+  const baseInput = () => ({
+    repositoryFullName: 'Org/Repo',
+    branch: 'main',
+    services: [
+      { name: 'web', active: true },
+      { name: 'api', active: false, branchOrExternalUrl: 'feature/x' },
+    ],
+    env: { B: '2', A: '1' },
+  });
+
+  it('is stable across service order and env key order', () => {
+    const a = computeIdempotencyRequestDigest(baseInput() as any);
+    const reordered = {
+      repositoryFullName: 'Org/Repo',
+      branch: 'main',
+      services: [
+        { name: 'api', active: false, branchOrExternalUrl: 'feature/x' },
+        { name: 'web', active: true },
+      ],
+      env: { A: '1', B: '2' },
+    };
+    expect(computeIdempotencyRequestDigest(reordered as any)).toBe(a);
+  });
+
+  it('normalizes the repository full name (case-insensitive)', () => {
+    const a = computeIdempotencyRequestDigest(baseInput() as any);
+    expect(computeIdempotencyRequestDigest({ ...baseInput(), repositoryFullName: 'org/repo' } as any)).toBe(a);
+  });
+
+  it('changes when a semantic field changes', () => {
+    const a = computeIdempotencyRequestDigest(baseInput() as any);
+    expect(computeIdempotencyRequestDigest({ ...baseInput(), branch: 'develop' } as any)).not.toBe(a);
+    expect(computeIdempotencyRequestDigest({ ...baseInput(), sha: 'deadbeef' } as any)).not.toBe(a);
+  });
+
+  it('normalizes omitted initEnv to the env values persisted by create', () => {
+    const a = computeIdempotencyRequestDigest(baseInput() as any);
+    expect(computeIdempotencyRequestDigest({ ...baseInput(), initEnv: baseInput().env } as any)).toBe(a);
+    expect(computeIdempotencyRequestDigest({ ...baseInput(), initEnv: { A: 'different' } } as any)).not.toBe(a);
+  });
+
+  it('ignores auth/attribution fields and the idempotency key itself', () => {
+    const a = computeIdempotencyRequestDigest(baseInput() as any);
+    const withAttribution = {
+      ...baseInput(),
+      idempotencyKey: 'req-123',
+      createdByUserId: 'user-9',
+      createdByTokenId: 42,
+      createdBy: 'someone',
+      createdByGithubLogin: 'octo',
+    };
+    expect(computeIdempotencyRequestDigest(withAttribution as any)).toBe(a);
+  });
+
+  const digest = 'a'.repeat(64);
+
+  it('409s when the same key is replayed with a different request body', () => {
+    const error = caught(() =>
+      assertIdempotentReplayAllowed({ idempotencyRequestDigest: digest, githubRepositoryId: 1 }, 'b'.repeat(64), null)
+    );
+    expect(error).toMatchObject({ httpStatus: 409, code: 'idempotency_conflict' });
+  });
+
+  it('returns the stored build (does not throw) when the digest matches', () => {
+    expect(
+      caught(() =>
+        assertIdempotentReplayAllowed({ idempotencyRequestDigest: digest, githubRepositoryId: 1 }, digest, null)
+      )
+    ).toBeNull();
+  });
+
+  it('403s a repo-constrained principal whose allowlist excludes the stored build', () => {
+    const error = caught(() =>
+      assertIdempotentReplayAllowed({ idempotencyRequestDigest: digest, githubRepositoryId: 7 }, digest, [1, 2])
+    );
+    expect(error).toMatchObject({ httpStatus: 403, code: 'forbidden_repository' });
+  });
+
+  it('allows a repo-constrained principal whose allowlist includes the stored build', () => {
+    expect(
+      caught(() =>
+        assertIdempotentReplayAllowed({ idempotencyRequestDigest: digest, githubRepositoryId: 7 }, digest, [7, 9])
+      )
+    ).toBeNull();
+  });
+
+  it('allows an unconstrained session (null authorizedRepoIds)', () => {
+    expect(
+      caught(() =>
+        assertIdempotentReplayAllowed({ idempotencyRequestDigest: digest, githubRepositoryId: 7 }, digest, null)
+      )
+    ).toBeNull();
+  });
+
+  it('skips the conflict check when the stored digest is null (pre-feature build)', () => {
+    expect(
+      caught(() =>
+        assertIdempotentReplayAllowed({ idempotencyRequestDigest: null, githubRepositoryId: 7 }, digest, null)
+      )
+    ).toBeNull();
   });
 });

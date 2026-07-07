@@ -147,6 +147,7 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -248,6 +249,7 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
       userIdentity: {
         userId: 'sample-user',
         githubUsername: 'sample-user',
+        roles: ['user'],
       },
       model: 'gpt-5.4',
     });

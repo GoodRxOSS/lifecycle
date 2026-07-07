@@ -105,6 +105,6 @@ const putHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
 // Org-wide control-plane mutation — admin only (matches admin/agent/* twins).
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });

@@ -81,7 +81,6 @@ jest.mock('server/models', () => ({
     query: () => mockDeployQuery(),
   },
 }));
-
 import { codefreshDeploy, codefreshDestroy, deleteBuild } from '../cli';
 
 const secretProviders = {
@@ -111,14 +110,6 @@ function createDeploy(overrides: any = {}) {
       namespace: 'env-build-uuid',
       commentRuntimeEnv: {},
     },
-    service: {
-      name: 'service-name',
-      deployPipelineId: 'service/deploy',
-      deployTrigger: 'deploy-trigger',
-      destroyPipelineId: 'service/destroy',
-      destroyTrigger: 'destroy-trigger',
-      branchName: 'service-branch',
-    },
     deployable: {
       name: 'example-service',
       deployPipelineId: 'deployable/deploy',
@@ -135,6 +126,7 @@ function createDeploy(overrides: any = {}) {
 describe('codefresh cli external secret resolution', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockDeployQuery.mockReset();
     mockShellPromise.mockResolvedValue('codefresh-run-id\n');
     mockGetAllConfigs.mockResolvedValue({ secretProviders });
     mockProcessSecretRefs.mockImplementation(({ secretRefs }) => ({
@@ -191,6 +183,17 @@ describe('codefresh cli external secret resolution', () => {
     expect(command).toContain("-v 'API_TOKEN'='resolved'\\''token $(echo bad)'");
     expect(command).not.toContain("resolved'token $(echo bad)");
     expect(options.redactCommand).toContain("-v 'API_TOKEN'='[REDACTED]'");
+  });
+
+  test('uses an immutable source ref for Codefresh while preserving the branch default', async () => {
+    const deploy = createDeploy({ env: { API_URL: 'https://example.invalid' } });
+
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable, 'immutable-sha');
+    expect(mockShellPromise.mock.calls[0][0]).toContain("-b 'immutable-sha'");
+
+    mockShellPromise.mockClear();
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable);
+    expect(mockShellPromise.mock.calls[0][0]).toContain("-b 'feature-branch'");
   });
 
   test('resolves destroy env secret refs before invoking Codefresh and cleans up synced resources', async () => {
@@ -282,11 +285,21 @@ describe('codefresh cli external secret resolution', () => {
 
     expect(mockShellPromise).not.toHaveBeenCalled();
   });
+
+  test('propagates CLI teardown failures so the owning delete worker can retry', async () => {
+    mockDeployQuery.mockImplementation(() => {
+      throw new Error('deploy query failed');
+    });
+
+    await expect(deleteBuild({ id: 7, uuid: 'build-uuid' } as any)).rejects.toThrow('deploy query failed');
+    expect(mockLoggerError).toHaveBeenCalled();
+  });
 });
 
 describe('CLI build cleanup', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockDeployQuery.mockReset();
   });
 
   test('does not eager-load the removed Deploy.service relation', async () => {

@@ -40,4 +40,4 @@ const getHandler = async (req: NextRequest) => {
   return successResponse(listMcpPresets(), { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

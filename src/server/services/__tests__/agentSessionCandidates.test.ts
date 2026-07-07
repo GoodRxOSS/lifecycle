@@ -14,12 +14,43 @@
  * limitations under the License.
  */
 
+const mockBuildQuery = jest.fn();
+const mockFetchLifecycleConfig = jest.fn();
+const mockResolveBuildSourceRepository = jest.fn();
+
+jest.mock('server/models/Build', () => ({
+  __esModule: true,
+  default: {
+    query: (...args: unknown[]) => mockBuildQuery(...args),
+  },
+}));
+
+jest.mock('server/models/yaml', () => ({
+  ...jest.requireActual('server/models/yaml'),
+  fetchLifecycleConfig: (...args: unknown[]) => mockFetchLifecycleConfig(...args),
+}));
+
+jest.mock('server/lib/buildSource', () => ({
+  ...jest.requireActual('server/lib/buildSource'),
+  resolveBuildSourceRepository: (...args: unknown[]) => mockResolveBuildSourceRepository(...args),
+}));
+
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import type { Deploy } from 'server/models';
-import { resolveAgentSessionServiceCandidates, resolveRequestedAgentSessionServices } from '../agentSessionCandidates';
+import type Build from 'server/models/Build';
+import {
+  loadAgentSessionServiceCandidates,
+  resolveAgentSessionServiceCandidates,
+  resolveAgentSessionServiceCandidatesForBuild,
+  resolveRequestedAgentSessionServices,
+} from '../agentSessionCandidates';
 import { DeployStatus, DeployTypes } from 'shared/constants';
 
 describe('agentSessionCandidates', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   test('includes only repo-local dev services backed by lifecycle-managed image builds', () => {
     const parser = new YamlConfigParser();
     const lifecycleConfig = parser.parseYamlConfigFromString(`---
@@ -152,5 +183,216 @@ services:
     expect(resolveRequestedAgentSessionServices(candidates, [{ name: 'web', repo: 'example-org/ui' }])).toEqual([
       candidates[0],
     ]);
+  });
+
+  test('loads only live PR builds with the deployable-only candidate graph', async () => {
+    const build = {
+      uuid: 'pr-build',
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        branchName: 'feature/sample',
+      },
+      deploys: [],
+    } as unknown as Build;
+    const withGraphFetched = jest.fn().mockResolvedValue(build);
+    const whereNull = jest.fn(() => ({ withGraphFetched }));
+    const findOne = jest.fn(() => ({ whereNull }));
+    mockBuildQuery.mockReturnValueOnce({ findOne });
+    mockResolveBuildSourceRepository.mockResolvedValueOnce({
+      fullName: 'example-org/example-repo',
+      githubRepositoryId: 42,
+    });
+
+    await expect(loadAgentSessionServiceCandidates('pr-build')).resolves.toEqual([]);
+
+    expect(findOne).toHaveBeenCalledWith({ uuid: 'pr-build' });
+    expect(whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(withGraphFetched).toHaveBeenCalledWith('[pullRequest.[repository], deploys.[deployable, repository]]');
+  });
+
+  test('preserves PR repository and branch candidate resolution', async () => {
+    const lifecycleConfig = new YamlConfigParser().parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'app'
+    dev:
+      image: 'repo/app:dev'
+      command: 'pnpm dev'
+    github:
+      repository: 'example-org/example-repo'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'Dockerfile'
+`);
+    const build = {
+      uuid: 'pr-build',
+      pullRequest: {
+        fullName: 'example-org/example-repo',
+        branchName: 'feature/sample',
+      },
+      deploys: [
+        {
+          id: 11,
+          uuid: 'app-pr-build',
+          active: true,
+          status: DeployStatus.READY,
+          branchName: 'feature/sample',
+          sha: 'pr-revision',
+          githubRepositoryId: 42,
+          repository: { fullName: 'example-org/example-repo', githubRepositoryId: 42 },
+          deployable: { name: 'app', type: DeployTypes.GITHUB },
+        },
+      ],
+    } as unknown as Build;
+    mockResolveBuildSourceRepository.mockResolvedValueOnce({
+      fullName: 'example-org/example-repo',
+      githubRepositoryId: 42,
+    });
+    mockFetchLifecycleConfig.mockResolvedValueOnce(lifecycleConfig);
+
+    await expect(resolveAgentSessionServiceCandidatesForBuild(build)).resolves.toEqual([
+      expect.objectContaining({
+        name: 'app',
+        repo: 'example-org/example-repo',
+        branch: 'feature/sample',
+        revision: 'pr-revision',
+      }),
+    ]);
+    expect(mockFetchLifecycleConfig).toHaveBeenCalledWith('example-org/example-repo', 'feature/sample');
+  });
+
+  test('resolves API build candidates through repository identity while keeping the checkout branch', async () => {
+    const configSha = '0123456789abcdef0123456789abcdef01234567';
+    const lifecycleConfig = new YamlConfigParser().parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'app'
+    dev:
+      image: 'repo/app:dev'
+      command: 'pnpm dev'
+    github:
+      repository: 'example-org/api-repo'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'Dockerfile'
+`);
+    const build = {
+      uuid: 'api-build',
+      pullRequest: null,
+      triggerType: 'api',
+      githubRepositoryId: 84,
+      branchName: 'main',
+      configSha,
+      deploys: [
+        {
+          id: 12,
+          uuid: 'app-api-build',
+          active: true,
+          status: DeployStatus.READY,
+          branchName: configSha,
+          sha: configSha,
+          githubRepositoryId: 84,
+          repository: { fullName: 'example-org/api-repo', githubRepositoryId: 84 },
+          deployable: { name: 'app', type: DeployTypes.GITHUB },
+        },
+      ],
+    } as unknown as Build;
+    mockResolveBuildSourceRepository.mockResolvedValueOnce({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+    });
+    mockFetchLifecycleConfig.mockResolvedValueOnce(lifecycleConfig);
+
+    await expect(resolveAgentSessionServiceCandidatesForBuild(build)).resolves.toEqual([
+      expect.objectContaining({
+        name: 'app',
+        repo: 'example-org/api-repo',
+        branch: 'main',
+        revision: configSha,
+      }),
+    ]);
+    expect(mockResolveBuildSourceRepository).toHaveBeenCalledWith(build);
+    expect(mockFetchLifecycleConfig).toHaveBeenCalledWith('example-org/api-repo', configSha);
+  });
+
+  test('keeps a same-repository service branch override while reading config from the pinned ref', async () => {
+    const configSha = 'fedcba9876543210fedcba9876543210fedcba98';
+    const lifecycleConfig = new YamlConfigParser().parseYamlConfigFromString(`---
+version: '1.0.0'
+services:
+  - name: 'app'
+    dev:
+      image: 'repo/app:dev'
+      command: 'pnpm dev'
+    github:
+      repository: 'example-org/api-repo'
+      branchName: 'main'
+      docker:
+        defaultTag: 'main'
+        app:
+          dockerfilePath: 'Dockerfile'
+`);
+    const build = {
+      uuid: 'api-build-with-override',
+      pullRequest: null,
+      triggerType: 'api',
+      githubRepositoryId: 84,
+      branchName: 'main',
+      configSha,
+      deploys: [
+        {
+          id: 14,
+          uuid: 'app-api-build-with-override',
+          active: true,
+          status: DeployStatus.READY,
+          branchName: 'feature/service-override',
+          sha: 'override-revision',
+          githubRepositoryId: 84,
+          repository: { fullName: 'example-org/api-repo', githubRepositoryId: 84 },
+          deployable: { name: 'app', type: DeployTypes.GITHUB },
+        },
+      ],
+    } as unknown as Build;
+    mockResolveBuildSourceRepository.mockResolvedValueOnce({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+    });
+    mockFetchLifecycleConfig.mockResolvedValueOnce(lifecycleConfig);
+
+    await expect(resolveAgentSessionServiceCandidatesForBuild(build)).resolves.toEqual([
+      expect.objectContaining({
+        name: 'app',
+        branch: 'feature/service-override',
+        revision: 'override-revision',
+      }),
+    ]);
+    expect(mockFetchLifecycleConfig).toHaveBeenCalledWith('example-org/api-repo', configSha);
+  });
+
+  test('fails closed when an API build repository identity no longer resolves', async () => {
+    const build = {
+      uuid: 'orphaned-api-build',
+      pullRequest: null,
+      triggerType: 'api',
+      githubRepositoryId: 84,
+      branchName: 'main',
+      deploys: [
+        {
+          id: 13,
+          active: true,
+          branchName: 'main',
+          repository: { fullName: 'renamed-or-reused/repo', githubRepositoryId: 99 },
+          deployable: { name: 'app', type: DeployTypes.GITHUB },
+        },
+      ],
+    } as unknown as Build;
+    mockResolveBuildSourceRepository.mockResolvedValueOnce(null);
+
+    await expect(resolveAgentSessionServiceCandidatesForBuild(build)).rejects.toThrow('Build source not found');
+    expect(mockFetchLifecycleConfig).not.toHaveBeenCalled();
   });
 });

@@ -229,7 +229,7 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
 // Org-wide control-plane mutations — admin only.
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
-export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session', roles: ['admin'] });

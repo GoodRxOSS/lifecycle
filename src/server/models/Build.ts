@@ -20,6 +20,11 @@ import Model from './_Model';
 
 export default class Build extends Model {
   uuid!: string;
+  /**
+   * queued → pending → building → built → deploying → deployed
+   * (API creates start at queued; webhook builds enter at pending;
+   *  error/config_error from any stage; tearing_down → torn_down terminal.)
+   */
   status!: string;
   statusMessage!: string;
   manifest!: string;
@@ -33,8 +38,24 @@ export default class Build extends Model {
   baseBuild?: Build;
   deploys?: Deploy[];
   services?: Service[];
-  pullRequest: PullRequest;
+  pullRequest?: PullRequest | null;
+  pullRequestId?: number | null;
   deployables?: Deployable[];
+
+  /* Trigger context for PR-less (API-created) builds; NULL/'github_pr' for webhook builds. */
+  triggerType?: 'github_pr' | 'api';
+  githubRepositoryId?: number | null;
+  branchName?: string | null;
+  configSha?: string | null;
+  deployEnabled?: boolean | null;
+  expiresAt?: string | null;
+  idempotencyKey?: string | null;
+  idempotencyRequestDigest?: string | null;
+  createdByTokenId?: number | null;
+  /* Human attribution for API-created envs (from the owner of a user token or a JWT user); null for org tokens. */
+  createdByUserId?: string | null;
+  createdByGithubLogin?: string | null;
+  autoTrack?: boolean;
 
   commentRuntimeEnv: Record<string, any>;
   commentInitEnv: Record<string, any>;

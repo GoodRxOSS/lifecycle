@@ -75,6 +75,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -174,6 +175,7 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
     for (const testCase of cases) {
       jest.clearAllMocks();
       mockGetRequestUserIdentity.mockReturnValue({
+        roles: ['user'],
         userId: 'sample-user',
         githubUsername: 'sample-user',
       });

@@ -91,7 +91,10 @@ function parseAfterSequence(req: NextRequest): number {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runId: string }> }): Promise<Response> => {
+const getHandler = async (
+  req: NextRequest,
+  { params }: { params: Promise<{ runId: string }> }
+): Promise<NextResponse> => {
   const routeParams = await params;
   const userIdentity = getRequestUserIdentity(req);
   if (!userIdentity) {
@@ -127,4 +130,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runI
   });
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

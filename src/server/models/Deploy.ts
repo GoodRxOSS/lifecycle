@@ -27,6 +27,8 @@ export default class Deploy extends Model {
   initEnv: Record<string, any>;
   ipAddress!: string;
   publicUrl: string;
+  // Runtime-only, computed from publicUrl (attachPublicHrefsToDeploys); deploys has no such column.
+  publicHref?: string | null;
   env: Record<string, any>;
   port: number;
   buildLogs: string;
@@ -117,5 +119,10 @@ export default class Deploy extends Model {
 
   static get jsonAttributes() {
     return ['env', 'initEnv'];
+  }
+
+  $formatDatabaseJson(json: Record<string, unknown>) {
+    delete json.publicHref;
+    return super.$formatDatabaseJson(json);
   }
 }

@@ -67,6 +67,7 @@ describe('/api/v2/ai/agent/preview-grants', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });

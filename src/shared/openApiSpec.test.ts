@@ -16,6 +16,174 @@ function getOperation(path: string, method: string) {
   return swaggerSpec.paths[path]?.[method];
 }
 
+describe('OpenAPI v2 API key contract', () => {
+  it('supports explicit broad and non-expiring Personal and Service keys', () => {
+    expect(schemas.PersonalApiTokenCreateRequest.properties.repositoryAccess).toEqual({
+      $ref: '#/components/schemas/ApiTokenRepositoryAccess',
+    });
+    expect(schemas.PersonalApiTokenCreateRequest.properties.ttlHours).toEqual(
+      expect.objectContaining({ type: 'integer', minimum: 1, maximum: 720 })
+    );
+    expect(schemas.PersonalApiTokenCreateRequest.oneOf).toBeUndefined();
+    expect(schemas.PersonalApiTokenCreateRequest.properties.expiresAt.nullable).toBe(true);
+    expect(schemas.PersonalApiTokenPolicy.required).toEqual(
+      expect.arrayContaining([
+        'enabled',
+        'issuanceEnabled',
+        'authenticationEnabled',
+        'maxTtlHours',
+        'repositoryAllowlistRequired',
+      ])
+    );
+    expect(schemas.PersonalApiTokenPolicy.properties.enabled).toEqual(
+      expect.objectContaining({ type: 'boolean', deprecated: true })
+    );
+    expect(schemas.PersonalApiTokenPolicy.properties.allowedScopes.items).toEqual({
+      $ref: '#/components/schemas/ApiTokenGrantableScope',
+    });
+    expect(schemas.ServiceApiTokenCreateRequest.properties.repositoryAccess).toEqual({
+      $ref: '#/components/schemas/ApiTokenRepositoryAccess',
+    });
+    expect(schemas.ServiceApiTokenCreateRequest.properties.expiresAt.nullable).toBe(true);
+    expect(getOperation('/api/v2/tokens', 'post').description).toContain('api_keys.issuanceEnabled');
+    expect(getOperation('/api/v2/tokens', 'post').description).not.toContain('api_environments');
+  });
+
+  it('rejects unknown fields on both key-creation request bodies', () => {
+    expect(schemas.PersonalApiTokenCreateRequest.additionalProperties).toBe(false);
+    expect(schemas.ServiceApiTokenCreateRequest.additionalProperties).toBe(false);
+  });
+});
+
+describe('OpenAPI v2 environment contract', () => {
+  const successSchema = (path: string, method: string, status: string) =>
+    getOperation(path, method)?.responses?.[status]?.content?.['application/json']?.schema;
+
+  it('documents a concrete success schema for every environment operation', () => {
+    expect(successSchema('/api/v2/environments', 'get', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentListSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments', 'post', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentCreateSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments', 'post', '202')).toEqual({
+      $ref: '#/components/schemas/EnvironmentCreateSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/{uuid}', 'get', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentDetailSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/{uuid}', 'patch', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentDetailSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/{uuid}', 'delete', '202')).toEqual({
+      $ref: '#/components/schemas/EnvironmentQueuedOperationSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/{uuid}/deploy', 'post', '202')).toEqual({
+      $ref: '#/components/schemas/EnvironmentQueuedOperationSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/{uuid}/extend', 'post', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentLeaseExtensionSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/branches', 'get', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentBranchesSuccessResponse',
+    });
+    expect(successSchema('/api/v2/environments/config-preview', 'get', '200')).toEqual({
+      $ref: '#/components/schemas/EnvironmentConfigPreviewSuccessResponse',
+    });
+  });
+
+  it('models PR metadata as present-but-null for API-created builds and environments', () => {
+    expect(schemas.Build.required).toContain('pullRequest');
+    expect(schemas.Build.properties.pullRequest).toEqual(
+      expect.objectContaining({
+        nullable: true,
+        allOf: [{ $ref: '#/components/schemas/PullRequest' }],
+      })
+    );
+    expect(schemas.EnvironmentSummary.required).toContain('pullRequest');
+    expect(schemas.EnvironmentSummary.properties.pullRequest).toEqual({
+      nullable: true,
+      allOf: [{ $ref: '#/components/schemas/EnvironmentPullRequestSummary' }],
+    });
+  });
+
+  it('exposes the optional source repository for branch-selectable preview services', () => {
+    expect(schemas.EnvironmentConfigPreviewService.properties.branchRepository).toEqual({
+      type: 'string',
+      nullable: true,
+      description:
+        'Source repository whose branch is overridden for GitHub or Helm service execution. When branchConfigurationRepository differs, the selected branch must also resolve there.',
+    });
+    expect(schemas.EnvironmentConfigPreviewService.properties.branchConfigurationRepository).toEqual({
+      type: 'string',
+      nullable: true,
+      description:
+        'Repository whose lifecycle.yaml is loaded at the override branch because the environment entry explicitly names a repository; null for an implicit root-local entry, whose root config ref is unchanged by this service override.',
+    });
+    expect(schemas.EnvironmentConfigPreviewService.properties.effectiveBranch).toEqual({
+      type: 'string',
+      nullable: true,
+      description:
+        'Source branch assigned to a GitHub or Helm service when no per-service branch override is supplied.',
+    });
+    expect(schemas.EnvironmentConfigPreviewService.required).not.toContain('branchRepository');
+    expect(schemas.EnvironmentConfigPreviewService.required).not.toContain('branchConfigurationRepository');
+    expect(schemas.EnvironmentConfigPreviewService.required).not.toContain('effectiveBranch');
+  });
+
+  it('exposes additive scheme-aware service hrefs while preserving hostname fields', () => {
+    expect(schemas.EnvironmentService.required).toContain('publicHref');
+    expect(schemas.EnvironmentService.properties.publicUrl).toEqual(
+      expect.objectContaining({ type: 'string', nullable: true, example: 'myapp.example.com' })
+    );
+    expect(schemas.EnvironmentService.properties.publicHref).toEqual(
+      expect.objectContaining({ type: 'string', format: 'uri', nullable: true })
+    );
+    expect(schemas.Deploy.properties.publicUrl).toEqual(
+      expect.objectContaining({ type: 'string', example: 'myapp.example.com' })
+    );
+    expect(schemas.Deploy.properties.publicHref).toEqual(
+      expect.objectContaining({ type: 'string', format: 'uri', nullable: true })
+    );
+  });
+
+  it('requires the batched active-service summary on list and detail responses', () => {
+    expect(schemas.EnvironmentSummary.required).toEqual(
+      expect.arrayContaining(['activeServiceCount', 'hasReadyActiveService'])
+    );
+    expect(schemas.EnvironmentSummary.properties.activeServiceCount).toEqual(
+      expect.objectContaining({ type: 'integer', minimum: 0 })
+    );
+    expect(schemas.EnvironmentSummary.properties.hasReadyActiveService).toEqual(
+      expect.objectContaining({ type: 'boolean' })
+    );
+  });
+
+  it('documents deleted environment history in list summaries', () => {
+    expect(schemas.EnvironmentSummary.required).toContain('deletedAt');
+    expect(schemas.EnvironmentSummary.properties.deletedAt).toEqual({
+      type: 'string',
+      format: 'date-time',
+      nullable: true,
+      description:
+        'When the environment was deleted, otherwise null. Deleted summaries are list-only history; UUID resource routes resolve only a live environment and may resolve a newer environment after UUID reuse.',
+    });
+    expect(
+      getOperation('/api/v2/environments', 'get').parameters.find((parameter: any) => parameter.name === 'exclude')
+        .description
+    ).toContain('Allowing torn_down by omitting it from this list also returns list-only deleted environment history.');
+    expect(getOperation('/api/v2/environments', 'get').description).toContain(
+      'UUID resource routes resolve only a live environment'
+    );
+  });
+
+  it('documents the actual teardown completion signal', () => {
+    expect(getOperation('/api/v2/environments/{uuid}', 'delete')?.description).toContain(
+      'a 404 means teardown completed'
+    );
+  });
+});
+
 describe('OpenAPI v2 sites contract', () => {
   it('documents sites list filters and pagination', () => {
     expect(getOperation('/api/v2/sites', 'get')?.parameters).toEqual([

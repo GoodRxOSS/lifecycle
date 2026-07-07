@@ -127,5 +127,5 @@ const patchHandler = async (req: NextRequest, context: RouteContext) => {
   return successResponse({ pool }, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
-export const PATCH = createApiHandler(patchHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });
+export const PATCH = createApiHandler(patchHandler, { auth: 'session', roles: ['admin'] });

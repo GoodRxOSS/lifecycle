@@ -50,7 +50,7 @@ import { createOrUpdateNamespace, deleteNamespace, probeWorkspacePodPresence } f
 import { buildAgentNetworkPolicy } from 'server/lib/kubernetes/networkPolicyFactory';
 import { DevConfig } from 'server/models/yaml/YamlService';
 import RedisClient from 'server/lib/redisClient';
-import { extractContextForQueue, getLogger } from 'server/lib/logger';
+import { getLogger } from 'server/lib/logger';
 import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus, BuildKind, FeatureFlags } from 'shared/constants';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import {
@@ -2989,18 +2989,13 @@ export default class AgentSessionService {
           const buildService = new BuildService();
 
           try {
-            await buildService.deleteQueue.add('delete', {
-              ...extractContextForQueue(),
-              buildId: build.id,
-              buildUuid: build.uuid,
-              sender: 'agent-session',
-            });
+            await buildService.enqueueBuildDeletion(build, 'agent_session_archive');
           } catch (error) {
             logger().warn(
               { error, buildUuid: build.uuid, sessionId },
               `Sandbox: cleanup enqueue failed action=sync_fallback sessionId=${sessionId} buildUuid=${build.uuid}`
             );
-            await buildService.deleteBuild(build);
+            await buildService.deleteBuild(build, { rethrow: true });
           }
         }
 
@@ -3053,18 +3048,13 @@ export default class AgentSessionService {
         const buildService = new BuildService();
 
         try {
-          await buildService.deleteQueue.add('delete', {
-            ...extractContextForQueue(),
-            buildId: build.id,
-            buildUuid: build.uuid,
-            sender: 'agent-session',
-          });
+          await buildService.enqueueBuildDeletion(build, 'agent_session_archive');
         } catch (error) {
           logger().warn(
             { error, buildUuid: build.uuid, sessionId },
             `Sandbox: cleanup enqueue failed action=sync_fallback sessionId=${sessionId} buildUuid=${build.uuid}`
           );
-          await buildService.deleteBuild(build);
+          await buildService.deleteBuild(build, { rethrow: true });
         }
 
         await finalizeTeardown(cleanupSession);

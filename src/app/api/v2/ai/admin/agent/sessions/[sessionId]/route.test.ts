@@ -62,6 +62,7 @@ describe('GET /api/v2/ai/admin/agent/sessions/[sessionId]', () => {
       },
     });
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });

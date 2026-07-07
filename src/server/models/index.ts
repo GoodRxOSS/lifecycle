@@ -43,6 +43,7 @@ import UserMcpConnection from './UserMcpConnection';
 import Site from './Site';
 import SiteVersion from './SiteVersion';
 import TelemetryEvent from './TelemetryEvent';
+import ApiToken from './ApiToken';
 
 export interface IModels {
   Build: typeof Build;
@@ -74,6 +75,7 @@ export interface IModels {
   Site: typeof Site;
   SiteVersion: typeof SiteVersion;
   TelemetryEvent: typeof TelemetryEvent;
+  ApiToken: typeof ApiToken;
 }
 
 export {
@@ -106,4 +108,5 @@ export {
   Site,
   SiteVersion,
   TelemetryEvent,
+  ApiToken,
 };

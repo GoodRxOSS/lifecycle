@@ -16,7 +16,9 @@
 
 import { nanoid } from 'nanoid';
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
 import OverrideService, {
   ServiceOverrideNotEditableError,
@@ -73,6 +75,9 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
  * /api/v2/builds/{uuid}/services:
  *   patch:
  *     summary: Update service overrides in a batch
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Updates selected state and/or branch or external URL overrides for one or more services in a build.
  *     tags:
  *       - Builds
@@ -116,7 +121,11 @@ function validateServiceOverride(value: unknown, index: number): ServiceOverride
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const patchHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const body = (await req.json().catch(() => null)) as UpdateServiceOverridesRequest | null;
   const serviceOverridesBody = body?.serviceOverrides;
@@ -126,11 +135,20 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   }
 
   const serviceOverrides: ServiceOverridePatchInput[] = [];
+  const serviceNames = new Set<string>();
   for (const [index, serviceOverrideBody] of serviceOverridesBody.entries()) {
     const serviceOverride = validateServiceOverride(serviceOverrideBody, index);
     if (serviceOverride instanceof Error) {
       return errorResponse(serviceOverride, { status: 400 }, req);
     }
+    if (serviceNames.has(serviceOverride.name)) {
+      return errorResponse(
+        new Error(`serviceOverrides must not contain duplicate name "${serviceOverride.name}"`),
+        { status: 400 },
+        req
+      );
+    }
+    serviceNames.add(serviceOverride.name);
 
     serviceOverrides.push(serviceOverride);
   }
@@ -138,11 +156,13 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   const override = new OverrideService();
   const build = await override.db.models.Build.query()
     .findOne({ uuid: routeParams.uuid })
+    .whereNull('deletedAt')
     .withGraphFetched('[pullRequest, environment, deploys.[deployable]]');
 
   if (!build) {
     return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
+  await assertBuildRepositoryAllowed(principal, build);
 
   try {
     const result = await override.applyServiceOverrides({
@@ -153,7 +173,8 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
       runUuid: nanoid(),
     });
     const updatedBuild = await override.db.models.Build.query()
-      .findOne({ uuid: routeParams.uuid })
+      .findOne({ uuid: routeParams.uuid, id: build.id })
+      .whereNull('deletedAt')
       .withGraphFetched('[environment, deploys.[deployable]]');
 
     if (!updatedBuild) {
@@ -176,4 +197,4 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   }
 };
 
-export const PATCH = createApiHandler(patchHandler);
+export const PATCH = createPrincipalApiHandler({ scope: 'env:write' }, patchHandler);

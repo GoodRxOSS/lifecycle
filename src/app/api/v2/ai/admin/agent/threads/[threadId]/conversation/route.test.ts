@@ -62,6 +62,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
       },
     });
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });
@@ -83,7 +84,7 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({
-      error: { message: 'Unauthorized' },
+      error: { message: 'Authentication is required.' },
     });
     expect(mockGetThreadConversation).not.toHaveBeenCalled();
   });

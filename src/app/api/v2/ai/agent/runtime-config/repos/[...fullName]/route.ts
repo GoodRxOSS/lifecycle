@@ -370,6 +370,6 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ f
   return successResponse({ repoFullName: parsed.fullName, deleted: true }, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler);
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
-export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session', roles: ['admin'] });

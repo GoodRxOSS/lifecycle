@@ -16,6 +16,7 @@
 
 import Build from 'server/models/Build';
 import type { Deploy } from 'server/models';
+import { getBuildSource, resolveBuildSourceRepository } from 'server/lib/buildSource';
 import { fetchLifecycleConfig, getDeployingServicesByName, type LifecycleConfig } from 'server/models/yaml';
 import {
   getDeployType,
@@ -43,13 +44,12 @@ export interface RequestedAgentSessionServiceRef {
   branch?: string | null;
 }
 
-type AgentSessionCandidateBuildContext = {
-  pullRequest?: {
-    fullName?: string | null;
-    branchName?: string | null;
-  } | null;
-  deploys?: Deploy[] | null;
-};
+export interface AgentSessionCandidateBuildSource {
+  repo: string;
+  branch: string;
+  configRef: string;
+  githubRepositoryId: number | null;
+}
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -81,18 +81,33 @@ async function fetchCachedLifecycleConfig(
 
 async function resolveCandidateForDeploy(
   deploy: Deploy,
-  buildSource: { repo?: string; branch?: string },
+  buildSource: AgentSessionCandidateBuildSource,
   lifecycleConfigCache: Map<string, Promise<LifecycleConfig | null>>
 ): Promise<AgentSessionServiceCandidate | null> {
   const serviceName = normalizeOptionalString(deploy.deployable?.name) || normalizeOptionalString(deploy.uuid);
-  const repo = normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo;
-  const branch = normalizeOptionalString(deploy.branchName) || buildSource.branch;
+  const deployRepositoryFullName = normalizeOptionalString(deploy.repository?.fullName);
+  const deployRepositoryId = deploy.repository?.githubRepositoryId ?? deploy.githubRepositoryId;
+  const isBuildSourceRepository =
+    buildSource.githubRepositoryId != null && deployRepositoryId != null
+      ? Number(buildSource.githubRepositoryId) === Number(deployRepositoryId)
+      : deployRepositoryFullName != null &&
+        normalizeRepoKey(deployRepositoryFullName) === normalizeRepoKey(buildSource.repo);
+  const repo = deployRepositoryFullName || (isBuildSourceRepository ? buildSource.repo : undefined);
+  const deployBranch = normalizeOptionalString(deploy.branchName);
+  // A pinned API build currently stores the immutable config SHA in deploy.branchName. That SHA is
+  // the config lookup ref, not the user-facing checkout branch. A genuine same-repository service
+  // override, however, must remain the checkout branch selected for that deploy.
+  const branch =
+    isBuildSourceRepository && deployBranch === buildSource.configRef
+      ? buildSource.branch
+      : deployBranch || buildSource.branch;
+  const configRef = isBuildSourceRepository ? buildSource.configRef : deployBranch || branch;
 
-  if (!deploy.active || !deploy.id || !serviceName || !repo || !branch) {
+  if (!deploy.active || !deploy.id || !serviceName || !repo || !branch || !configRef) {
     return null;
   }
 
-  const lifecycleConfig = await fetchCachedLifecycleConfig(repo, branch, lifecycleConfigCache);
+  const lifecycleConfig = await fetchCachedLifecycleConfig(repo, configRef, lifecycleConfigCache);
   if (!lifecycleConfig) {
     return null;
   }
@@ -118,12 +133,38 @@ async function resolveCandidateForDeploy(
 export async function loadAgentSessionServiceCandidates(buildUuid: string): Promise<AgentSessionServiceCandidate[]> {
   const build = await Build.query()
     .findOne({ uuid: buildUuid })
-    .withGraphFetched('[pullRequest, deploys.[deployable, repository]]');
-  if (!build?.pullRequest) {
+    .whereNull('deletedAt')
+    .withGraphFetched('[pullRequest.[repository], deploys.[deployable, repository]]');
+  if (!build) {
     throw new Error('Build not found');
   }
 
   return resolveAgentSessionServiceCandidatesForBuild(build);
+}
+
+export async function resolveAgentSessionCandidateBuildSource(
+  build: Build
+): Promise<AgentSessionCandidateBuildSource | null> {
+  const source = getBuildSource(build);
+  const repository = await resolveBuildSourceRepository(build);
+  const repo = normalizeOptionalString(source.pullRequest ? source.fullName : repository?.fullName);
+  const branch = normalizeOptionalString(source.branchName);
+
+  if (!repo || !branch) {
+    return null;
+  }
+
+  return {
+    repo,
+    branch,
+    configRef: normalizeOptionalString(source.configSha) || branch,
+    githubRepositoryId:
+      repository?.githubRepositoryId != null
+        ? Number(repository.githubRepositoryId)
+        : source.githubRepositoryId != null
+        ? Number(source.githubRepositoryId)
+        : null,
+  };
 }
 
 export function resolveRequestedAgentSessionServices(
@@ -188,15 +229,17 @@ export function resolveRequestedAgentSessionServices(
 }
 
 export async function resolveAgentSessionServiceCandidatesForBuild(
-  build: AgentSessionCandidateBuildContext
+  build: Build,
+  buildSource?: AgentSessionCandidateBuildSource | null
 ): Promise<AgentSessionServiceCandidate[]> {
-  const buildSource = {
-    repo: normalizeOptionalString(build.pullRequest?.fullName),
-    branch: normalizeOptionalString(build.pullRequest?.branchName),
-  };
+  const resolvedBuildSource = buildSource ?? (await resolveAgentSessionCandidateBuildSource(build));
+  if (!resolvedBuildSource) {
+    throw new Error('Build source not found');
+  }
+
   const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
   const candidates = await Promise.all(
-    (build.deploys || []).map((deploy) => resolveCandidateForDeploy(deploy, buildSource, lifecycleConfigCache))
+    (build.deploys || []).map((deploy) => resolveCandidateForDeploy(deploy, resolvedBuildSource, lifecycleConfigCache))
   );
 
   return candidates

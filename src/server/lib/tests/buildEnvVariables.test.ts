@@ -57,6 +57,40 @@ describe('EnvironmentVariables', () => {
 
   db.services = { GlobalConfig: globalConfigService, BuildService: buildService } as unknown as IServices;
   db.models = models;
+  describe('targeted source resolution', () => {
+    test('patches only deploys on the exact repository and branch', async () => {
+      const mainPatch = jest.fn().mockResolvedValue(undefined);
+      const stablePatch = jest.fn().mockResolvedValue(undefined);
+      const build: any = {
+        namespace: 'env-test',
+        enabledFeatures: [],
+        deploys: [
+          {
+            githubRepositoryId: 42,
+            branchName: 'main',
+            deployable: { type: DeployTypes.GITHUB, env: {} },
+            $query: jest.fn(() => ({ patch: mainPatch })),
+          },
+          {
+            githubRepositoryId: 42,
+            branchName: 'stable',
+            deployable: { type: DeployTypes.GITHUB, env: {} },
+            $query: jest.fn(() => ({ patch: stablePatch })),
+          },
+        ],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const envVariables = new BuildEnvironmentVariables(db);
+      jest.spyOn(envVariables, 'availableEnvironmentVariablesForBuild').mockResolvedValue({});
+      jest.spyOn(envVariables, 'compileEnv').mockResolvedValue('{}');
+
+      await envVariables.resolve(build, 42, 'main');
+
+      expect(mainPatch).toHaveBeenCalledTimes(1);
+      expect(stablePatch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('buildEnvironmentVariableDictionary', () => {
     const envVariables = new BuildEnvironmentVariables(db);
 

@@ -15,7 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { errorResponse, successResponse } from 'server/lib/response';
 import RepositoryService from 'server/services/repository';
 
@@ -24,6 +25,9 @@ import RepositoryService from 'server/services/repository';
  * /api/v2/repositories:
  *   get:
  *     summary: List repositories
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: >
  *       Lists Lifecycle-onboarded repositories by default. Pass view=all to list
  *       repositories accessible to the configured GitHub App installation with
@@ -82,6 +86,9 @@ import RepositoryService from 'server/services/repository';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
  *     summary: Onboard a repository
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: >
  *       Adds a GitHub repository to Lifecycle's repository allowlist. The repository
  *       must be accessible to the configured GitHub App installation. If the row
@@ -122,8 +129,10 @@ import RepositoryService from 'server/services/repository';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest) => {
+const getHandler = async (req: NextRequest, principal: Principal) => {
   const service = new RepositoryService();
+  const allowedGithubRepositoryIds = principal.repositoryAllowlistRepoIds ?? null;
+  const allowedRepositoryFullNames = principal.repositoryAllowlist ?? null;
   const view = req.nextUrl.searchParams.get('view') || 'onboarded';
   const query = req.nextUrl.searchParams.get('q') || '';
   const page = Number.parseInt(req.nextUrl.searchParams.get('page') || '1', 10);
@@ -151,6 +160,8 @@ const getHandler = async (req: NextRequest) => {
       installationId,
       onboarded,
       refresh,
+      allowedGithubRepositoryIds,
+      allowedRepositoryFullNames,
     });
 
     return successResponse(
@@ -169,6 +180,8 @@ const getHandler = async (req: NextRequest) => {
     page,
     limit,
     installationId,
+    allowedGithubRepositoryIds,
+    allowedRepositoryFullNames,
   });
 
   return successResponse(
@@ -178,7 +191,7 @@ const getHandler = async (req: NextRequest) => {
   );
 };
 
-const postHandler = async (req: NextRequest) => {
+const postHandler = async (req: NextRequest, principal: Principal) => {
   let body: { fullName?: unknown; repository?: unknown; installationId?: unknown; githubInstallationId?: unknown };
   try {
     body = await req.json();
@@ -200,7 +213,12 @@ const postHandler = async (req: NextRequest) => {
   }
 
   try {
-    const result = await new RepositoryService().onboardRepository(fullName, installationId);
+    const result = await new RepositoryService().onboardRepository(
+      fullName,
+      installationId,
+      principal.repositoryAllowlistRepoIds ?? null,
+      principal.repositoryAllowlist ?? null
+    );
     return successResponse(result, { status: result.created ? 201 : 200 }, req);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -214,5 +232,5 @@ const postHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const POST = createApiHandler(postHandler);
+export const GET = createPrincipalApiHandler({ scope: 'repos:read' }, getHandler);
+export const POST = createPrincipalApiHandler({ scope: 'repos:write' }, postHandler);

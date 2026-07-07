@@ -57,6 +57,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
 
   it('returns 400 when scope is missing', async () => {
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });
@@ -77,6 +78,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
 
   it('returns masked per-user connection coverage rows', async () => {
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });
@@ -121,6 +123,7 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
 
   it('returns 404 when the shared connector definition does not exist', async () => {
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });

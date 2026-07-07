@@ -100,4 +100,4 @@ const postHandler = async (req: NextRequest, context: RouteContext) => {
 };
 
 // Admin only: spends provider build minutes with stored credentials.
-export const POST = createApiHandler(postHandler, { roles: ['admin'] });
+export const POST = createApiHandler(postHandler, { auth: 'session', roles: ['admin'] });

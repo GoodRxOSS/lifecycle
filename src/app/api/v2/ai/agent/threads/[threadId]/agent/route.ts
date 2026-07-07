@@ -140,5 +140,5 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ th
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const PATCH = createApiHandler(patchHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const PATCH = createApiHandler(patchHandler, { auth: 'session' });

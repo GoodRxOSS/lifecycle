@@ -15,8 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
-import { getUser } from 'server/lib/get-user';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { getPaginationParamsFromURL } from 'server/lib/paginate';
 import { successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
@@ -26,7 +26,10 @@ import BuildService from 'server/services/build';
  * /api/v2/builds:
  *   get:
  *     summary: Get a list of builds
- *     description: Returns a paginated list of builds, optionally excluding certain statuses.
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
+ *     description: Returns a paginated list of builds, optionally excluding certain statuses. Repository-scoped API keys only see builds from repositories on their allowlist.
  *     tags:
  *       - Builds
  *     operationId: getBuilds
@@ -74,16 +77,18 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest) => {
+const getHandler = async (req: NextRequest, principal: Principal) => {
   const { searchParams } = req.nextUrl;
-  const user = getUser(req);
   const buildService = new BuildService();
+  const githubUsername = principal.identity?.githubUsername ?? '';
 
   const { data, paginationMetadata } = await buildService.getAllBuilds(
-    searchParams.get('exclude'),
-    searchParams.get('my_envs') === 'true' ? (user.github_username as string) || '' : '',
-    searchParams.get('search'),
-    getPaginationParamsFromURL(searchParams)
+    searchParams.get('exclude') ?? '',
+    searchParams.get('my_envs') === 'true' ? githubUsername : '',
+    searchParams.get('search') ?? undefined,
+    getPaginationParamsFromURL(searchParams),
+    principal.repositoryAllowlist,
+    principal.repositoryAllowlistRepoIds
   );
 
   return successResponse(
@@ -96,4 +101,4 @@ const getHandler = async (req: NextRequest) => {
   );
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);

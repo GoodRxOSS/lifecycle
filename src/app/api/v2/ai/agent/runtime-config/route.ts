@@ -233,6 +233,6 @@ const patchHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
-export const PATCH = createApiHandler(patchHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });
+export const PATCH = createApiHandler(patchHandler, { auth: 'session', roles: ['admin'] });

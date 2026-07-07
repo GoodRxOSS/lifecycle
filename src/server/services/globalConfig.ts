@@ -16,6 +16,7 @@
 
 import { createAppAuth } from '@octokit/auth-app';
 import { Octokit } from '@octokit/core';
+import type { Transaction } from 'objection';
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import { GlobalConfig, LabelsConfig } from './types/globalConfig';
@@ -44,6 +45,11 @@ export default class GlobalConfigService extends BaseService {
   clearMemoryCache(): void {
     this.memoryCache = null;
     this.memoryCacheExpiry = 0;
+  }
+
+  async invalidateCache(): Promise<void> {
+    this.clearMemoryCache();
+    await this.redis.del(REDIS_CACHE_KEY);
   }
 
   protected cacheRefreshQueue = this.queueManager.registerQueue(QUEUE_NAMES.GLOBAL_CONFIG_CACHE_REFRESH, {
@@ -271,16 +277,18 @@ export default class GlobalConfigService extends BaseService {
    * If the key already exists, it will be updated.
    * @param key The config key to set.
    * @param value The value to set for the key.
+   * @param trx Optional transaction so callers can commit the write atomically with related rows.
    * @throws Error if an unexpected database error occurs.
    */
-  async setConfig(key: string, value: any): Promise<void> {
+  async setConfig(key: string, value: any, trx?: Transaction): Promise<void> {
     try {
-      await this.db.knex('global_config').insert({ key, config: value }).onConflict('key').merge();
-      this.clearMemoryCache();
-      try {
-        await this.redis.del(REDIS_CACHE_KEY);
-      } catch (cacheError) {
-        getLogger().warn({ error: cacheError }, `Config: cache clear failed key=${key}`);
+      await (trx ?? this.db.knex)('global_config').insert({ key, config: value }).onConflict('key').merge();
+      if (!trx) {
+        try {
+          await this.invalidateCache();
+        } catch (cacheError) {
+          getLogger().warn({ error: cacheError }, `Config: cache clear failed key=${key}`);
+        }
       }
       getLogger().info(`Config: set key=${key}`);
     } catch (err: any) {

@@ -49,6 +49,7 @@ import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
 import { ChartType, determineChartType } from 'server/lib/nativeHelm';
 import BuildMetadataService from './buildMetadata';
+import { toPublicHref } from 'server/lib/publicHref';
 
 const createDeployMessage = async () => {
   const deployLabel = await getDeployLabel();
@@ -825,6 +826,12 @@ export default class ActivityStream extends BaseService {
     message += '|---|---|---|\n';
 
     await build?.$fetchGraph('[deploys.[deployable.repository]]');
+    let domainDefaults: Parameters<typeof toPublicHref>[1];
+    try {
+      domainDefaults = (await GlobalConfigService.getInstance().getAllConfigs())?.domainDefaults;
+    } catch (error) {
+      getLogger().warn({ error }, 'PR environment links: config lookup failed using=https');
+    }
 
     let { deploys } = build;
     if (deploys.length > 1) {
@@ -853,10 +860,12 @@ export default class ActivityStream extends BaseService {
       ) {
         if (serviceHostPortMapping && Object.keys(serviceHostPortMapping).length > 0) {
           Object.keys(serviceHostPortMapping).forEach((key) => {
-            message += `| ${key}-${serviceNameWithUrl} | ${deploy.branchName} | https://${key}-${deploy.publicUrl}|\n`;
+            const publicHref = deploy.publicUrl ? toPublicHref(`${key}-${deploy.publicUrl}`, domainDefaults) : null;
+            message += `| ${key}-${serviceNameWithUrl} | ${deploy.branchName} | ${publicHref ?? ''}|\n`;
           });
         } else {
-          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | https://${deploy.publicUrl}|\n`;
+          const publicHref = toPublicHref(deploy.publicUrl, domainDefaults);
+          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | ${publicHref ?? ''}|\n`;
         }
       }
     }

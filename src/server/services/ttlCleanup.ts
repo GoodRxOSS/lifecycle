@@ -18,7 +18,7 @@ import Service from './_service';
 import { Queue, Job } from 'bullmq';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
-import { withLogContext, updateLogContext, getLogger, LogStage, extractContextForQueue } from 'server/lib/logger';
+import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
 import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel, parsePullRequestLabels } from 'server/lib/utils';
@@ -213,7 +213,13 @@ export default class TTLCleanupService extends Service {
         const pullRequest = build.pullRequest;
 
         if (!pullRequest) {
-          getLogger().warn('TTL: pull request not found');
+          // API-environment expiry belongs to the expiresAt sweep; the scanner
+          // only repairs drift — a labeled, expired namespace whose PR-less build never got a lease.
+          if (build.triggerType === 'api' && !build.expiresAt) {
+            await this.db.services.BuildService.enqueueBuildDeletion(build, 'ttl_namespace_drift');
+          } else {
+            getLogger().warn('TTL: pull request not found');
+          }
           continue;
         }
 
@@ -321,11 +327,7 @@ export default class TTLCleanupService extends Service {
       `TTL: enqueueing closed PR cleanup namespace=${namespace} pr=${pullRequest.pullRequestNumber} status=${pullRequest.status}`
     );
 
-    await this.db.services.BuildService.deleteQueue.add('delete', {
-      ...extractContextForQueue(),
-      buildId,
-      buildUuid: build.uuid,
-    });
+    await this.db.services.BuildService.enqueueBuildDeletion(build, 'ttl_closed_pull_request');
   }
 
   /**

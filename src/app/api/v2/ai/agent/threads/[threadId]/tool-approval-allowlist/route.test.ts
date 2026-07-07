@@ -57,7 +57,7 @@ function makePutRequest(body: unknown): NextRequest {
 describe('PUT /api/v2/ai/agent/threads/[threadId]/tool-approval-allowlist', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetRequestUserIdentity.mockReturnValue({ userId: 'sample-user' });
+    mockGetRequestUserIdentity.mockReturnValue({ roles: ['user'], userId: 'sample-user' });
     mockGetOwnedThreadWithSession.mockResolvedValue({
       thread: { id: 7, metadata: { toolApprovalAllowlist: [] } },
       session: { id: 17 },

@@ -27,6 +27,11 @@ import { processAgentRunExecute } from './agentRunExecute';
 import { processAgentRunDispatchRecovery } from './agentRunDispatchRecovery';
 import { processAgentEnvironmentWatch } from './agentEnvironmentWatch';
 import { processWorkspaceTemplateBuild } from './workspaceTemplateBuild';
+import {
+  API_TOKEN_OWNER_SWEEP_INTERVAL_MS,
+  processApiTokenOwnerSweep,
+  warnIfApiTokenOwnerSweepUnconfigured,
+} from './apiTokenOwnerSweep';
 import { loadAiSdk } from 'server/services/agent/aiSdkRuntime';
 import { AGENT_ENV_WATCH_QUEUE_NAME } from 'server/services/agent/EnvironmentWatchService';
 import {
@@ -68,6 +73,53 @@ export default function bootstrapJobs(services: IServices) {
   /* Setup TTL cleanup job */
   services.TTLCleanupService.setupTTLCleanupJob();
   services.SitesService.setupSitesCleanupJob();
+  services.BuildService.setupApiEnvironmentExpiryJob().catch((error) =>
+    getLogger().error({ error }, 'Jobs: api environment expiry setup failed')
+  );
+
+  const apiEnvCreateWorker = queueManager.registerWorker(
+    QUEUE_NAMES.API_ENV_CREATE,
+    services.BuildService.processApiEnvironmentCreateQueue,
+    {
+      connection: redisClient.getConnection(),
+      concurrency: 5,
+    }
+  );
+  apiEnvCreateWorker.on('failed', services.BuildService.handleApiEnvironmentCreateFailure);
+
+  queueManager.registerWorker(QUEUE_NAMES.API_ENV_EXPIRY, services.BuildService.processApiEnvironmentExpiryQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  warnIfApiTokenOwnerSweepUnconfigured();
+
+  queueManager.registerWorker(QUEUE_NAMES.API_TOKEN_OWNER_SWEEP, processApiTokenOwnerSweep, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  const apiTokenOwnerSweepQueue = queueManager.registerQueue(QUEUE_NAMES.API_TOKEN_OWNER_SWEEP, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  });
+
+  void apiTokenOwnerSweepQueue
+    .add(
+      'api-token-owner-sweep',
+      {},
+      {
+        jobId: 'api-token-owner-sweep',
+        repeat: {
+          every: API_TOKEN_OWNER_SWEEP_INTERVAL_MS,
+        },
+      }
+    )
+    .catch((error) => getLogger().warn({ error }, 'Jobs: api token owner sweep schedule failed'));
 
   queueManager.registerWorker(QUEUE_NAMES.TTL_CLEANUP, services.TTLCleanupService.processTTLCleanupQueue, {
     connection: redisClient.getConnection(),

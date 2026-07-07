@@ -15,8 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { successResponse } from 'server/lib/response';
 import { readSitesListFilters, readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
@@ -28,6 +28,9 @@ export const runtime = 'nodejs';
  * /api/v2/sites:
  *   get:
  *     summary: List hosted static sites
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Returns all non-deleted hosted static sites.
  *     tags:
  *       - Sites
@@ -72,6 +75,9 @@ export const runtime = 'nodejs';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   post:
  *     summary: Create a hosted static site
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Uploads a static file or ZIP archive and publishes it as a hosted static site.
  *     tags:
  *       - Sites
@@ -112,13 +118,13 @@ const getHandler = async (req: NextRequest) => {
   }
 };
 
-const postHandler = async (req: NextRequest) => {
+const postHandler = async (req: NextRequest, principal: Principal) => {
   try {
     const upload = await readUploadFile(req);
     const service = new SitesService();
     const site = await service.createSite({
       ...upload,
-      user: getRequestUserIdentity(req),
+      user: principal.identity,
     });
     return successResponse({ site }, { status: 201 }, req);
   } catch (error) {
@@ -126,5 +132,5 @@ const postHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const POST = createApiHandler(postHandler);
+export const GET = createPrincipalApiHandler({ scope: 'sites:read' }, getHandler);
+export const POST = createPrincipalApiHandler({ scope: 'sites:write' }, postHandler);

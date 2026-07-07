@@ -362,6 +362,7 @@ describe('DeployCleanupService', () => {
     };
     const buildQuery = {
       findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
       withGraphFetched: jest.fn().mockResolvedValue(build),
     };
     const queueAdd = jest.fn().mockResolvedValue(undefined);
@@ -414,6 +415,7 @@ describe('DeployCleanupService', () => {
     };
     const buildQuery = {
       findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
       withGraphFetched: jest.fn().mockResolvedValue(build),
     };
     const service = createService({
@@ -450,6 +452,7 @@ describe('DeployCleanupService', () => {
     };
     const buildQuery = {
       findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
       withGraphFetched: jest.fn().mockResolvedValue(build),
     };
     const queueAdd = jest.fn().mockResolvedValue(undefined);
@@ -484,6 +487,7 @@ describe('DeployCleanupService', () => {
   test('destroyServiceDeployment returns not_found when the build is missing', async () => {
     const buildQuery = {
       findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
       withGraphFetched: jest.fn().mockResolvedValue(null),
     };
     const service = createService({
@@ -519,6 +523,7 @@ describe('DeployCleanupService', () => {
     };
     const buildQuery = {
       findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
       withGraphFetched: jest.fn().mockResolvedValue(build),
     };
     const service = createService({

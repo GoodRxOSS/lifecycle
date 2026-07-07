@@ -63,10 +63,7 @@ describe('GET /api/v2/ai/agent/github-token', () => {
         roles: ['admin'],
       },
     });
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'user-123',
-      githubUsername: 'sample-user',
-    });
+    mockGetRequestUserIdentity.mockReturnValue({ roles: ['user'], userId: 'user-123', githubUsername: 'sample-user' });
   });
 
   afterEach(() => {

@@ -60,4 +60,4 @@ const getHandler = async (req: NextRequest) => {
   return successResponse({ pools }, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });

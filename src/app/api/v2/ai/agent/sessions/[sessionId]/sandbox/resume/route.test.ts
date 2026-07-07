@@ -74,6 +74,7 @@ import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRunt
 const userIdentity = {
   userId: 'sample-user',
   githubUsername: 'sample-user',
+  roles: ['user'],
 };
 
 function makeRequest(): NextRequest {

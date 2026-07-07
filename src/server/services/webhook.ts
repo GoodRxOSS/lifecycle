@@ -16,7 +16,8 @@
 
 import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import BaseService from './_service';
-import { Build, PullRequest } from 'server/models';
+import { Build, PullRequest, Repository } from 'server/models';
+import { resolveBuildSourceRepository } from 'server/lib/buildSource';
 import * as YamlService from 'server/models/yaml';
 import { BuildStatus } from 'shared/constants';
 import { merge } from 'lodash';
@@ -40,7 +41,11 @@ export default class WebhookService extends BaseService {
    * @param pullRequest The pull request associates with the branch contains the YAML config file
    * @returns Lifecycle webhooks. Empty array if none can be found in the yaml
    */
-  public async upsertWebhooksWithYaml(build: Build, pullRequest: PullRequest): Promise<YamlService.Webhook[]> {
+  public async upsertWebhooksWithYaml(
+    build: Build,
+    pullRequest: PullRequest | null | undefined,
+    sourceRef?: string | null
+  ): Promise<YamlService.Webhook[]> {
     let webhooks: YamlService.Webhook[] = [];
 
     // if both pullRequest and build are null, we should not proceed and something is wrong
@@ -52,12 +57,23 @@ export default class WebhookService extends BaseService {
       updateLogContext({ buildUuid: build.uuid });
     }
 
-    await pullRequest.$fetchGraph('repository');
+    let sourceRepository: Repository | null;
+    let sourceBranchName: string | null;
+    if (pullRequest != null) {
+      await pullRequest.$fetchGraph('repository');
+      sourceRepository = pullRequest.repository;
+      sourceBranchName = pullRequest.branchName;
+    } else {
+      sourceRepository = await resolveBuildSourceRepository(build);
+      sourceBranchName = build.branchName ?? null;
+    }
 
-    if (pullRequest.repository != null && pullRequest.branchName != null) {
+    if (sourceRepository != null && sourceBranchName != null) {
+      const sourceConfigRef =
+        build.triggerType === 'api' ? sourceRef ?? build.configSha ?? sourceBranchName : sourceBranchName;
       const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
-        pullRequest.repository,
-        pullRequest.branchName
+        sourceRepository,
+        sourceConfigRef
       );
 
       if (yamlConfig?.environment?.webhooks != null) {

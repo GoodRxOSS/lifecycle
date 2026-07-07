@@ -62,6 +62,15 @@ function buildJwksUrl(input: string): RemoteJwksUrl {
   return new urlCtor(input) as RemoteJwksUrl;
 }
 
+let remoteJwks: { url: string; jwks: ReturnType<typeof createRemoteJWKSet> } | null = null;
+
+function getRemoteJwks(jwksUrl: string): ReturnType<typeof createRemoteJWKSet> {
+  if (remoteJwks?.url !== jwksUrl) {
+    remoteJwks = { url: jwksUrl, jwks: createRemoteJWKSet(buildJwksUrl(jwksUrl)) };
+  }
+  return remoteJwks.jwks;
+}
+
 function summarizeJwtVerificationError(error: unknown): JwtVerificationErrorSummary {
   const maybeError = error as Partial<JwtVerificationErrorSummary> | null | undefined;
   const summary: JwtVerificationErrorSummary = {
@@ -103,9 +112,7 @@ export async function verifyBearerToken(token: string | null | undefined): Promi
   }
 
   try {
-    const JWKS = createRemoteJWKSet(buildJwksUrl(jwksUrl));
-
-    const { payload } = await jwtVerify(token, JWKS, {
+    const { payload } = await jwtVerify(token, getRemoteJwks(jwksUrl), {
       issuer,
       audience,
     });
@@ -132,6 +139,7 @@ export async function verifyAuth(request: RequestWithHeaders): Promise<AuthResul
     };
   }
 
-  const token = authHeader.split(' ')[1];
-  return verifyBearerToken(token);
+  // RFC 6750: exactly one bearer token; trailing junk or a foreign scheme is rejected, not truncated.
+  const match = /^Bearer\s+(\S+)$/i.exec(authHeader);
+  return verifyBearerToken(match ? match[1] : null);
 }

@@ -18,8 +18,11 @@ import { NextRequest } from 'next/server';
 import { getLogger } from 'server/lib/logger';
 import { LogStreamingService } from 'server/services/logStreaming';
 import { HttpError } from '@kubernetes/client-node';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
+import BuildService from 'server/services/build';
 
 interface RouteParams {
   uuid: string;
@@ -31,6 +34,9 @@ interface RouteParams {
  * /api/v2/builds/{uuid}/services/{name}/build-jobs/{jobName}:
  *   get:
  *     summary: Get log streaming info for a build job
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Returns log streaming information for a specific build job within a service.
  *     tags:
@@ -88,7 +94,7 @@ interface RouteParams {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<RouteParams> }) => {
+const getHandler = async (req: NextRequest, principal: Principal, { params }: { params: Promise<RouteParams> }) => {
   const routeParams = await params;
   const { uuid, name: serviceName, jobName } = routeParams;
 
@@ -97,10 +103,16 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<RouteP
     return errorResponse('Missing or invalid parameters', { status: 400 }, req);
   }
 
+  const build = await new BuildService().getBuildByUUID(uuid);
+  if (!build) {
+    return errorResponse('Build not found', { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
+
   try {
     const logService = new LogStreamingService();
 
-    const response = await logService.getLogStreamInfo(uuid, jobName, serviceName, 'build');
+    const response = await logService.getLogStreamInfo(uuid, jobName, serviceName, 'build', build.id);
 
     return successResponse(response, { status: 200 }, req);
   } catch (error: any) {
@@ -118,4 +130,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<RouteP
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);

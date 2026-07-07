@@ -28,6 +28,7 @@ import {
 } from 'shared/constants';
 
 import { getLogger } from 'server/lib/logger';
+import { getBuildSource, resolveBuildSourceRepository } from 'server/lib/buildSource';
 import { LifecycleError } from './errors';
 import GlobalConfigService from 'server/services/globalConfig';
 import { preserveSecretRefsInTemplate } from 'server/lib/secretRefs';
@@ -171,16 +172,17 @@ export abstract class EnvironmentVariables {
       );
     }
 
+    const source = getBuildSource(build);
     availableEnv = await this.buildEnvironmentVariableDictionary(
       deploys,
       build,
       {
         buildUUID: build.uuid,
         buildSHA: build.sha,
-        pullRequestNumber: build.pullRequest?.pullRequestNumber,
+        pullRequestNumber: source.pullRequest?.pullRequestNumber,
         namespace: build.namespace,
-        branchName: build.pullRequest?.branchName,
-        repoName: build.pullRequest?.fullName,
+        branchName: source.branchName,
+        repoName: source.fullName ?? (await resolveBuildSourceRepository(build))?.fullName,
       },
       options
     );

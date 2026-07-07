@@ -27,6 +27,7 @@ import type { Deploy } from 'server/models';
 import GlobalConfigService from 'server/services/globalConfig';
 
 const mockDeployQuery = jest.fn();
+const mockShellPromise = jest.fn();
 
 jest.mock('server/lib/envVariables', () => ({
   EnvironmentVariables: class {},
@@ -38,6 +39,9 @@ jest.mock('server/models/Deploy', () => ({
   default: {
     query: () => mockDeployQuery(),
   },
+}));
+jest.mock('server/lib/shell', () => ({
+  shellPromise: (...args: unknown[]) => mockShellPromise(...args),
 }));
 jest.mock('server/lib/helm/utils', () => {
   const originalModule = jest.requireActual('server/lib/helm/utils');
@@ -57,6 +61,41 @@ describe('Helm tests', () => {
 
     expect(withGraphFetched).toHaveBeenCalledWith({ build: true, deployable: true });
     expect(withGraphFetched.mock.calls[0][0]).not.toHaveProperty('service');
+  });
+
+  test('treats an already-absent Helm release as successful idempotent cleanup', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const deploy = {
+      uuid: 'app-build-uuid',
+      active: true,
+      status: 'deployed',
+      deployable: { helm: { chart: { name: 'app' } } },
+      $query: jest.fn(() => ({ patch })),
+    };
+    const withGraphFetched = jest.fn().mockResolvedValue([deploy]);
+    mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
+    mockShellPromise.mockRejectedValueOnce(new Error('uninstall: Release not loaded: release: not found'));
+
+    await expect(uninstallHelmReleases({ id: 42, namespace: 'env-build-uuid' } as any)).resolves.toBeUndefined();
+    expect(patch).toHaveBeenCalledWith({ statusMessage: 'Helm release not found, skipping uninstall.' });
+  });
+
+  test('propagates real Helm failures so teardown can retry', async () => {
+    const failure = new Error('cluster unavailable');
+    const patch = jest.fn().mockResolvedValue(undefined);
+    const deploy = {
+      uuid: 'app-build-uuid',
+      active: true,
+      status: 'deployed',
+      deployable: { helm: { chart: { name: 'app' } } },
+      $query: jest.fn(() => ({ patch })),
+    };
+    const withGraphFetched = jest.fn().mockResolvedValue([deploy]);
+    mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
+    mockShellPromise.mockRejectedValueOnce(failure);
+
+    await expect(uninstallHelmReleases({ id: 42, namespace: 'env-build-uuid' } as any)).rejects.toBe(failure);
+    expect(patch).toHaveBeenCalledWith({ statusMessage: 'Failed to uninstall via Helm\ncluster unavailable' });
   });
 
   test('constructHelmDeploysBuildMetaData should return the correct metadata', async () => {

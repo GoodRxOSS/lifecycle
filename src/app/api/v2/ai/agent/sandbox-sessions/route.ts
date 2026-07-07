@@ -490,5 +490,5 @@ const postHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const POST = createApiHandler(postHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const POST = createApiHandler(postHandler, { auth: 'session' });

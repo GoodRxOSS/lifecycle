@@ -199,4 +199,4 @@ const postHandler = async (req: NextRequest) => {
   return successResponse(state, { status: 200 }, req);
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createApiHandler(postHandler, { auth: 'session' });

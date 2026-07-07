@@ -15,8 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
-import { getRequestUserIdentity } from 'server/lib/get-user';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { successResponse } from 'server/lib/response';
 import { readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
@@ -34,6 +34,9 @@ type RouteContext = {
  * /api/v2/sites/{siteId}/content:
  *   put:
  *     summary: Replace hosted static site content
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Uploads a new static file or ZIP archive and makes it the active content for the site.
  *     tags:
  *       - Sites
@@ -70,14 +73,14 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const putHandler = async (req: NextRequest, { params }: RouteContext) => {
+const putHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const upload = await readUploadFile(req);
     const service = new SitesService();
     const site = await service.replaceSiteContent(routeParams.siteId, {
       ...upload,
-      user: getRequestUserIdentity(req),
+      user: principal.identity,
     });
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
@@ -85,4 +88,4 @@ const putHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const PUT = createApiHandler(putHandler);
+export const PUT = createPrincipalApiHandler({ scope: 'sites:write' }, putHandler);

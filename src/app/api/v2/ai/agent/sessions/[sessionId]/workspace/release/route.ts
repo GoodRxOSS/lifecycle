@@ -79,4 +79,4 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ses
   return successResponse(await AgentSessionReadService.serializeSessionRecord(released!), { status: 200 }, req);
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createApiHandler(postHandler, { auth: 'session' });

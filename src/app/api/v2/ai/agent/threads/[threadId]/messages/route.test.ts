@@ -56,6 +56,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });

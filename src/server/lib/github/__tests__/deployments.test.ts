@@ -27,6 +27,9 @@ import {
   deleteGithubEnvironment,
   updateDeploymentStatus,
 } from 'server/lib/github/deployments';
+import type { Deploy } from 'server/models';
+
+const mockGetAllConfigs = jest.fn();
 
 jest.mock('server/services/globalConfig', () => {
   const RedisMock = {
@@ -37,6 +40,7 @@ jest.mock('server/services/globalConfig', () => {
   return {
     getInstance: jest.fn(() => ({
       redis: RedisMock,
+      getAllConfigs: (...args: unknown[]) => mockGetAllConfigs(...args),
     })),
   };
 });
@@ -64,6 +68,7 @@ describe('GitHub Deployment Functions', () => {
       },
       statusMessage: 'Build successful',
     },
+    publicUrl: 'app.example.com',
   };
 
   const mockOctokit = {
@@ -73,13 +78,16 @@ describe('GitHub Deployment Functions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     client.createOctokitClient.mockResolvedValue(mockOctokit);
+    mockGetAllConfigs.mockResolvedValue({
+      domainDefaults: { http: 'services.example.com', grpc: 'grpc.example.com' },
+    });
   });
 
   test('createOrUpdateGithubDeployment - create new deployment', async () => {
     mockDeploy.githubDeploymentId = null;
     mockOctokit.request.mockResolvedValue({ data: { id: 'deployment-id' } });
 
-    await createOrUpdateGithubDeployment(mockDeploy);
+    await createOrUpdateGithubDeployment(mockDeploy as unknown as Deploy);
 
     expect(mockDeploy.$fetchGraph).toHaveBeenCalledWith('build.pullRequest.repository');
     expect(mockOctokit.request).toHaveBeenCalled();
@@ -89,7 +97,7 @@ describe('GitHub Deployment Functions', () => {
     mockDeploy.githubDeploymentId = 'existing-id';
     mockOctokit.request.mockResolvedValue({});
 
-    await createOrUpdateGithubDeployment(mockDeploy);
+    await createOrUpdateGithubDeployment(mockDeploy as unknown as Deploy);
 
     expect(mockDeploy.$fetchGraph).toHaveBeenCalledWith('build.pullRequest.repository');
     expect(mockOctokit.request).toHaveBeenCalled();
@@ -98,7 +106,7 @@ describe('GitHub Deployment Functions', () => {
   test('deleteGithubDeploymentAndEnvironment - with deployment ID', async () => {
     mockDeploy.githubDeploymentId = 'existing-id';
     mockOctokit.request.mockResolvedValue({});
-    await deleteGithubDeploymentAndEnvironment(mockDeploy);
+    await deleteGithubDeploymentAndEnvironment(mockDeploy as unknown as Deploy);
 
     expect(mockDeploy.$fetchGraph).toHaveBeenCalledWith('build.pullRequest.repository');
     expect(mockOctokit.request).toHaveBeenCalledTimes(3); // markInactive + deleteDeployment + deleteEnvironment
@@ -118,7 +126,7 @@ describe('GitHub Deployment Functions', () => {
   test('deleteGithubEnvironment - successful deletion', async () => {
     mockOctokit.request.mockResolvedValue({});
 
-    await deleteGithubEnvironment(mockDeploy);
+    await deleteGithubEnvironment(mockDeploy as unknown as Deploy);
 
     expect(mockOctokit.request).toHaveBeenCalledWith(
       `DELETE /repos/${mockDeploy.build.pullRequest.repository.fullName}/environments/${mockDeploy.uuid}`
@@ -128,7 +136,7 @@ describe('GitHub Deployment Functions', () => {
   test('deleteGithubDeployment - successful deletion', async () => {
     mockOctokit.request.mockResolvedValue({});
 
-    const resp = await deleteGithubDeployment(mockDeploy);
+    const resp = await deleteGithubDeployment(mockDeploy as unknown as Deploy);
 
     expect(mockOctokit.request).toHaveBeenCalledWith(
       `DELETE /repos/${mockDeploy.build.pullRequest.repository.fullName}/deployments/${mockDeploy.githubDeploymentId}`
@@ -142,7 +150,7 @@ describe('GitHub Deployment Functions', () => {
     const error = new Error('Network error');
     mockOctokit.request.mockRejectedValue(error);
 
-    await expect(deleteGithubDeployment(mockDeploy)).rejects.toThrow('GitHub API request failed');
+    await expect(deleteGithubDeployment(mockDeploy as unknown as Deploy)).rejects.toThrow('GitHub API request failed');
     expect(mockOctokit.request).toHaveBeenCalledWith(
       `DELETE /repos/${mockDeploy.build.pullRequest.repository.fullName}/deployments/${mockDeploy.githubDeploymentId}`
     );
@@ -197,7 +205,7 @@ describe('GitHub Deployment Functions', () => {
     const deploymentId = '123456';
     mockOctokit.request.mockResolvedValue({ data: { id: deploymentId } });
 
-    await createGithubDeployment(mockDeploy, 'abc123');
+    await createGithubDeployment(mockDeploy as unknown as Deploy, 'abc123');
 
     expect(mockOctokit.request).toHaveBeenCalledWith(
       expect.any(String),
@@ -217,7 +225,7 @@ describe('GitHub Deployment Functions', () => {
         ...mockDeploy.build,
         status: 'deployed',
       },
-    };
+    } as unknown as Deploy;
     mockOctokit.request.mockResolvedValue({ data: {} });
 
     await updateDeploymentStatus(mockDeployWithStatus, 12345);
@@ -227,6 +235,60 @@ describe('GitHub Deployment Functions', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           state: 'success',
+          environment_url: 'https://app.example.com',
+        }),
+      })
+    );
+  });
+
+  test('updateDeploymentStatus - uses HTTP for the documented local domain', async () => {
+    const mockDeployWithStatus = {
+      ...mockDeploy,
+      status: 'deployed',
+      publicUrl: 'app-calm-waterfall-156345.127.0.0.1.nip.io',
+      build: {
+        ...mockDeploy.build,
+        status: 'deployed',
+      },
+    } as unknown as Deploy;
+    mockGetAllConfigs.mockResolvedValue({
+      domainDefaults: { http: '127.0.0.1.nip.io', grpc: '127.0.0.1.nip.io' },
+    });
+    mockOctokit.request.mockResolvedValue({ data: {} });
+
+    await updateDeploymentStatus(mockDeployWithStatus, 12345);
+
+    expect(mockOctokit.request).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: 'success',
+          environment_url: 'http://app-calm-waterfall-156345.127.0.0.1.nip.io',
+        }),
+      })
+    );
+  });
+
+  test('updateDeploymentStatus - still posts a successful PR deployment when config lookup fails', async () => {
+    const mockDeployWithStatus = {
+      ...mockDeploy,
+      status: 'deployed',
+      build: {
+        ...mockDeploy.build,
+        status: 'deployed',
+      },
+    } as unknown as Deploy;
+    mockGetAllConfigs.mockRejectedValueOnce(new Error('config unavailable'));
+    mockOctokit.request.mockResolvedValue({ data: {} });
+
+    await updateDeploymentStatus(mockDeployWithStatus, 12345);
+
+    expect(mockOctokit.request).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: 'success',
+          environment_url: 'https://app.example.com',
         }),
       })
     );
@@ -240,7 +302,7 @@ describe('GitHub Deployment Functions', () => {
         ...mockDeploy.build,
         status: 'building',
       },
-    };
+    } as unknown as Deploy;
     mockOctokit.request.mockResolvedValue({ data: {} });
 
     await updateDeploymentStatus(mockDeployBuilding, 12345);
@@ -263,7 +325,7 @@ describe('GitHub Deployment Functions', () => {
         ...mockDeploy.build,
         status: 'active',
       },
-    };
+    } as unknown as Deploy;
     mockOctokit.request.mockResolvedValue({ data: {} });
 
     await updateDeploymentStatus(mockDeployFailed, 12345);
@@ -286,7 +348,7 @@ describe('GitHub Deployment Functions', () => {
         ...mockDeploy.build,
         status: 'active',
       },
-    };
+    } as unknown as Deploy;
     mockOctokit.request.mockResolvedValue({ data: {} });
 
     await updateDeploymentStatus(mockDeployTornDown, 12345);

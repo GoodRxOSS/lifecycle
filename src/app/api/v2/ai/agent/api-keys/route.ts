@@ -342,6 +342,6 @@ const deleteHandler = async (req: NextRequest) => {
   return successResponse({ deleted: true, provider }, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler);
-export const POST = createApiHandler(postHandler);
-export const DELETE = createApiHandler(deleteHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const POST = createApiHandler(postHandler, { auth: 'session' });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session' });

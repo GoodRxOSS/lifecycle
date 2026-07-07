@@ -103,6 +103,10 @@ export const QUEUE_NAMES = {
   INGRESS_CLEANUP: `ingress_cleanup_${JOB_VERSION}`,
   DELETE_QUEUE: `delete_queue_${JOB_VERSION}`,
   WEBHOOK_QUEUE: `webhook_queue_${JOB_VERSION}`,
+  API_ENV_CREATE: `api_env_create_${JOB_VERSION}`,
+  // NOTE: No version suffix - singleton repeat job shared across app instances
+  API_ENV_EXPIRY: 'api_env_expiry',
+  API_TOKEN_OWNER_SWEEP: 'api_token_owner_sweep',
   RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,

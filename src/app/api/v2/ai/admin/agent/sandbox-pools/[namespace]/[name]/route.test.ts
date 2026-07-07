@@ -23,6 +23,15 @@ const mockUpdateCapacity = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
+  getRequestUserIdentity: (...args: unknown[]) => {
+    const user = mockGetUser(...args);
+    return user ? { userId: user.sub, githubUsername: null, roles: user.realm_access?.roles ?? [] } : null;
+  },
+  requireRequestUserIdentity: (...args: unknown[]) => {
+    const user = mockGetUser(...args);
+    if (!user) throw new (jest.requireActual('server/lib/appError').UnauthorizedError)();
+    return { userId: user.sub, githubUsername: null, roles: user.realm_access?.roles ?? [] };
+  },
 }));
 
 // Keep the real parseOpenSandboxPoolCapacityPatch; only stub the k8s-backed service class.

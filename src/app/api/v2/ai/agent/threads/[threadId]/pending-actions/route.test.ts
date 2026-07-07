@@ -71,6 +71,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
 
   it('returns canonical pending action display payloads for the owned thread', async () => {
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -168,6 +169,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
 
   it('returns 404 when the thread is not owned by the requester', async () => {
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });

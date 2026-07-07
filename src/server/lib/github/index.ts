@@ -421,3 +421,18 @@ export class ConfigFileNotFound extends LifecycleError {
     super(uuid, service, msg);
   }
 }
+
+export async function listBranchesForRepo(
+  fullName: string
+): Promise<{ branches: string[]; defaultBranch: string | null }> {
+  const [repoResp, branchesResp] = await Promise.all([
+    cacheRequest(`GET /repos/${fullName}`),
+    cacheRequest(`GET /repos/${fullName}/branches?per_page=100`),
+  ]);
+  const defaultBranch = typeof repoResp?.data?.default_branch === 'string' ? repoResp.data.default_branch : null;
+  const rawBranches = Array.isArray(branchesResp?.data) ? branchesResp.data : [];
+  const branches = rawBranches
+    .map((branch: { name?: unknown }) => branch?.name)
+    .filter((name: unknown): name is string => typeof name === 'string' && name.length > 0);
+  return { branches, defaultBranch };
+}

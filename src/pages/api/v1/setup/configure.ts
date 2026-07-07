@@ -51,6 +51,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ...domainDefaults,
       http: appDomain,
       grpc: appDomain,
+      publicScheme: 'https',
     });
 
     await globalConfigService.getAllConfigs(true);

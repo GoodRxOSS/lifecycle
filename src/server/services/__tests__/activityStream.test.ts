@@ -22,6 +22,7 @@ const mockLogger = {
 };
 const mockApplyBuildOverrides = jest.fn();
 const mockRegisterQueue = jest.fn();
+const mockGetAllConfigs = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -88,6 +89,16 @@ jest.mock('server/lib/kubernetes', () => ({
   deleteNamespace: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: jest.fn(() => ({
+      getAllConfigs: (...args: unknown[]) => mockGetAllConfigs(...args),
+      getOrgChartName: jest.fn(),
+    })),
+  },
+}));
+
 jest.mock('server/services/deploy', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
@@ -136,6 +147,9 @@ function createActivityStream() {
 describe('ActivityStream comment overrides', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockGetAllConfigs.mockResolvedValue({
+      domainDefaults: { http: 'services.example.com', grpc: 'grpc.example.com' },
+    });
   });
 
   it('parses comment overrides and delegates structured updates to OverrideService', async () => {
@@ -209,5 +223,87 @@ describe('ActivityStream comment overrides', () => {
 
     expect(mockApplyBuildOverrides).not.toHaveBeenCalled();
     expect(mockLogger.error).toHaveBeenCalledWith('Build: missing for comment edit overrides');
+  });
+
+  it('uses the configured local public scheme in the PR environment table', async () => {
+    const service = createActivityStream();
+    const build = {
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      deploys: [
+        {
+          id: 1,
+          active: true,
+          branchName: 'main',
+          publicUrl: 'app-calm-waterfall-156345.127.0.0.1.nip.io',
+          deployable: {
+            name: 'app',
+            type: 'github',
+            public: true,
+            hostPortMapping: null,
+          },
+        },
+      ],
+    };
+    mockGetAllConfigs.mockResolvedValue({
+      domainDefaults: { http: '127.0.0.1.nip.io', grpc: '127.0.0.1.nip.io' },
+    });
+
+    const block = await (service as any).environmentBlock(build);
+
+    expect(block).toContain('| app | main | http://app-calm-waterfall-156345.127.0.0.1.nip.io|');
+    expect(block).not.toContain('https://app-calm-waterfall-156345.127.0.0.1.nip.io');
+  });
+
+  it('still renders the PR environment table when config lookup fails', async () => {
+    const service = createActivityStream();
+    const build = {
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      deploys: [
+        {
+          id: 1,
+          active: true,
+          branchName: 'main',
+          publicUrl: 'app.example.com',
+          deployable: {
+            name: 'app',
+            type: 'github',
+            public: true,
+            hostPortMapping: null,
+          },
+        },
+      ],
+    };
+    mockGetAllConfigs.mockRejectedValueOnce(new Error('config unavailable'));
+
+    const block = await (service as any).environmentBlock(build);
+
+    expect(block).toContain('| app | main | https://app.example.com|');
+  });
+
+  it('keeps PR environment rows readable when a public host is not available yet', async () => {
+    const service = createActivityStream();
+    const build = {
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      deploys: [
+        {
+          id: 1,
+          active: true,
+          branchName: 'main',
+          publicUrl: null,
+          deployable: {
+            name: 'app',
+            type: 'github',
+            public: true,
+            hostPortMapping: { admin: 3000 },
+          },
+        },
+      ],
+    };
+
+    const block = await (service as any).environmentBlock(build);
+
+    expect(block).toContain('| admin-app | main | |');
+    expect(block).not.toContain('null');
+    expect(block).not.toContain('undefined');
   });
 });

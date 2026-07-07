@@ -251,6 +251,7 @@ describe('Github Service - handlePullRequestHook', () => {
         },
         BuildService: {
           createBuildAndDeploys: jest.fn().mockResolvedValue(undefined),
+          enqueueBuildDeletion: jest.fn().mockResolvedValue(undefined),
           enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
             add: mockResolveQueueAdd,
@@ -348,6 +349,25 @@ describe('Github Service - handlePullRequestHook', () => {
         action: 'enable',
         waitForComment: true,
         labels: [],
+      })
+    );
+  });
+
+  test('queues retryable teardown when a pull request closes', async () => {
+    const mockPullRequest = createMockPullRequest();
+    const build = { id: 10, uuid: 'build-uuid' };
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+    mockDb.models.Build.findOne.mockResolvedValue(build);
+
+    await githubService.handlePullRequestHook(createMockPullRequestEvent({ action: 'closed' }));
+
+    expect(mockDb.services.BuildService.enqueueBuildDeletion).toHaveBeenCalledWith(build, 'pull_request_closed');
+    expect(mockDb.services.LabelService.labelQueue.add).toHaveBeenCalledWith(
+      'label',
+      expect.objectContaining({
+        pullRequestId: mockPullRequest.id,
+        action: 'disable',
+        waitForComment: false,
       })
     );
   });
@@ -1221,7 +1241,7 @@ describe('Github Service - handleLabelWebhook', () => {
       },
       services: {
         BuildService: {
-          deleteBuild: jest.fn().mockResolvedValue(undefined),
+          enqueueBuildDeletion: jest.fn().mockResolvedValue(undefined),
           enqueueResolveAndDeployBuild: mockEnqueueResolveAndDeployBuild,
           resolveAndDeployBuildQueue: {
             add: mockResolveQueueAdd,
@@ -1257,7 +1277,7 @@ describe('Github Service - handleLabelWebhook', () => {
     expect(mockIsLifecycleLabel).toHaveBeenCalledWith('ready-for-review');
     expect(mockDb.models.PullRequest.findOne).not.toHaveBeenCalled();
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
-    expect(mockDb.services.BuildService.deleteBuild).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.enqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   test('should skip processing for donotmerge label', async () => {
@@ -1315,7 +1335,7 @@ describe('Github Service - handleLabelWebhook', () => {
     await githubService.handleLabelWebhook(body);
 
     expect(mockIsLifecycleLabel).toHaveBeenCalledWith('lifecycle-deploy!');
-    expect(mockDb.services.BuildService.deleteBuild).toHaveBeenCalledWith(mockPr.build);
+    expect(mockDb.services.BuildService.enqueueBuildDeletion).toHaveBeenCalledWith(mockPr.build, 'deploy_disabled');
   });
 
   test('should delete build when disabled label is added', async () => {
@@ -1335,7 +1355,7 @@ describe('Github Service - handleLabelWebhook', () => {
     await githubService.handleLabelWebhook(body);
 
     expect(mockIsLifecycleLabel).toHaveBeenCalledWith('lifecycle-disabled!');
-    expect(mockDb.services.BuildService.deleteBuild).toHaveBeenCalledWith(mockPr.build);
+    expect(mockDb.services.BuildService.enqueueBuildDeletion).toHaveBeenCalledWith(mockPr.build, 'deploy_disabled');
   });
 
   test('should return early when PR is not found in database', async () => {
@@ -1350,7 +1370,7 @@ describe('Github Service - handleLabelWebhook', () => {
     await githubService.handleLabelWebhook(body);
 
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).not.toHaveBeenCalled();
-    expect(mockDb.services.BuildService.deleteBuild).not.toHaveBeenCalled();
+    expect(mockDb.services.BuildService.enqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   test('should handle case-insensitive label names', async () => {

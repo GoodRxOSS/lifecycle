@@ -117,4 +117,4 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ses
   }
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createApiHandler(postHandler, { auth: 'session' });

@@ -21,6 +21,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { TMP_PATH } from 'shared/config';
 import { DeployStatus } from 'shared/constants';
 import { getLogger } from 'server/lib/logger';
+import { getBuildSource, resolveBuildSourceRepository } from 'server/lib/buildSource';
 import { shellPromise } from 'server/lib/shell';
 import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';
@@ -424,12 +425,13 @@ export async function uninstallHelmReleases(build: Build) {
         await shellPromise(`helm uninstall ${deploy.uuid} --namespace ${build.namespace}`);
         await deploy.$query().patch({ statusMessage: 'Uninstalled via Helm' });
       } catch (error) {
-        if (error.includes('release: not found')) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('release: not found')) {
           getLogger().debug(`Helm: release not found, skipping uninstall`);
           await deploy.$query().patch({ statusMessage: 'Helm release not found, skipping uninstall.' });
         } else {
           getLogger({ error }).error(`Helm: uninstall failed`);
-          await deploy.$query().patch({ statusMessage: `Failed to uninstall via Helm\n${error}` });
+          await deploy.$query().patch({ statusMessage: `Failed to uninstall via Helm\n${message}` });
           throw error;
         }
       }
@@ -438,6 +440,7 @@ export async function uninstallHelmReleases(build: Build) {
     getLogger().debug(`Helm: releases uninstalled`);
   } catch (error) {
     getLogger().error({ error }, `Helm: uninstall releases failed`);
+    throw error;
   }
 }
 
@@ -498,14 +501,17 @@ export const constructHelmDeploysBuildMetaData = async (deploys: Deploy[]) => {
       await deploy?.$fetchGraph('build.pullRequest');
     }
     build = deploy?.build;
-    const pullRequest = build?.pullRequest;
-    if (!build || !pullRequest) {
+    if (!build) {
+      throw new Error('no_related_build_found');
+    }
+    const source = getBuildSource(build);
+    if (source.pullRequest == null && source.branchName == null) {
       throw new Error('no_related_build_found');
     }
     const uuid = build?.uuid;
-    const branchName = pullRequest?.branchName;
-    const fullName = pullRequest?.fullName;
-    const sha = pullRequest?.latestCommit;
+    const branchName = source.branchName as string;
+    const fullName = (source.fullName ?? (await resolveBuildSourceRepository(build))?.fullName) as string;
+    const sha = (source.pullRequest ? source.pullRequest.latestCommit : source.configSha) as string;
     return {
       uuid,
       branchName,

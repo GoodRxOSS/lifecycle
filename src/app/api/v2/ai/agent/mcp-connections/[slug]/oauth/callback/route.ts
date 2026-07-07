@@ -16,7 +16,7 @@
 
 import { auth } from '@ai-sdk/mcp';
 import { NextRequest, NextResponse } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPublicApiHandler } from 'server/lib/createApiHandler';
 import {
   applyCompiledConnectionConfigToTransport,
   buildMcpDefinitionFingerprint,
@@ -152,6 +152,7 @@ function renderCallbackPage(options: {
  * /api/v2/ai/agent/mcp-connections/{slug}/oauth/callback:
  *   get:
  *     summary: Complete an OAuth flow for a per-user MCP connection
+ *     security: []
  *     tags:
  *       - Agent Sessions
  *     operationId: completeAgentMcpConnectionOAuth
@@ -499,4 +500,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPublicApiHandler(getHandler);

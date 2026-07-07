@@ -120,4 +120,4 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ act
   }
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createApiHandler(postHandler, { auth: 'session' });

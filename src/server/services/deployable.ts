@@ -15,6 +15,7 @@
  */
 
 import { getLogger } from 'server/lib/logger';
+import { resolveBuildSourceRepository } from 'server/lib/buildSource';
 import BaseService from './_service';
 import { Environment, Repository, PullRequest, Build, Deploy } from 'server/models';
 import Deployable from 'server/models/Deployable';
@@ -31,6 +32,7 @@ export interface DeployableReconciliationEntry {
   source: DeployableConfigSource;
   reconcileEligible: boolean;
   resolvedFromRepositoryId?: number | null;
+  branchName?: string | null;
 }
 
 export interface DeployableReconciliationResult {
@@ -189,7 +191,7 @@ export default class DeployableService extends BaseService {
               const svcName = service?.name;
               const svcFeature = `hack-force-pull-request-service-${svcName}`;
               const hasFeature = enabledFeatures.includes(svcFeature);
-              if (hasFeature) branchName = pullRequest?.branchName;
+              if (hasFeature) branchName = pullRequest?.branchName ?? branchName;
             }
           }
         }
@@ -417,30 +419,60 @@ export default class DeployableService extends BaseService {
     deployableServices: Map<string, DeployableAttributes>,
     buildId: number,
     buildUUID: string,
-    pullRequest: PullRequest,
+    pullRequest: PullRequest | null | undefined,
     build?: Build,
-    filterGithubRepositoryId?: number
+    filterGithubRepositoryId?: number,
+    sourceRef?: string | null,
+    sourceBranch?: string | null
   ): Promise<boolean> {
     try {
       let allReferencedYamlConfigsResolved = true;
+      let sourceRepository: Repository | null = null;
+      let rootBranch: string | null = null;
+      let rootBaseConfigRef: string | null = null;
+      let sourceBuild: Build | null = null;
       let filterRepositoryFullName: string | null = null;
+      let targetAttributionResolved = filterGithubRepositoryId == null || sourceBranch == null;
+      let targetAttributionFailed = false;
       if (filterGithubRepositoryId) {
-        const filterRepo = await this.db.models.Repository.query().findOne({
-          githubRepositoryId: filterGithubRepositoryId,
-        });
+        const filterRepo = await this.db.models.Repository.query()
+          .findOne({ githubRepositoryId: filterGithubRepositoryId })
+          .whereNull('deletedAt')
+          .catch((error) => {
+            getLogger({ error, buildUUID, filterGithubRepositoryId }).warn(
+              'Deployable: targeted source repository lookup failed'
+            );
+            return null;
+          });
+        if (!filterRepo) {
+          getLogger({ buildUUID, filterGithubRepositoryId }).warn(
+            'Deployable: targeted source repository is not live; skipping reconciliation'
+          );
+          return false;
+        }
         filterRepositoryFullName = filterRepo?.fullName?.toLowerCase() ?? null;
       }
+
+      const targetsSource = (repository: Repository | null | undefined, branchName: string | null | undefined) =>
+        filterGithubRepositoryId == null ||
+        (repository?.githubRepositoryId != null &&
+          Number(repository.githubRepositoryId) === Number(filterGithubRepositoryId) &&
+          (sourceBranch == null || branchName === sourceBranch));
 
       const attribution = async (
         services: YamlService.DependencyService[],
         yamlConfig: YamlService.LifecycleConfig,
-        active: boolean
+        active: boolean,
+        rootRepository: Repository,
+        rootBranch: string,
+        rootBuild: Build | null
       ) => {
         if (services != null && services.length > 0) {
           await Promise.all(
             services.map(async (yamlEnvService) => {
               try {
                 if (yamlEnvService.serviceId != null) {
+                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
                   getLogger({ buildUUID, service: yamlEnvService.name, serviceId: yamlEnvService.serviceId }).warn(
                     'serviceId references in lifecycle.yaml are no longer supported; skipping service ' +
                       yamlEnvService.name
@@ -451,13 +483,13 @@ export default class DeployableService extends BaseService {
                 //
                 // Using YAML Config
                 //
-                // By default, repository is the same as the current pull request local repository
-                let repository: Repository = pullRequest.repository;
+                // By default, the service is defined in the source repository's YAML.
+                let repository: Repository = rootRepository;
 
                 // By default, Service defined in local repo. Using local YAML
                 let dependencyYamlConfig: YamlService.LifecycleConfig = yamlConfig;
 
-                let branchName: string = pullRequest.branchName;
+                let branchName: string = rootBranch;
                 let deploy: Deploy;
                 // Service defined in remote repo. Need to fetch remote YAML
                 if (yamlEnvService?.repository != null) {
@@ -477,42 +509,70 @@ export default class DeployableService extends BaseService {
                   branchName = yamlEnvService?.branch ?? 'main';
                   // Check if the deployable has a commentBranchName which is set in the lifecycle comment. If it does
                   // Use the commentBranchName to override whatever branchName has been set from the YAML.
-                  deploy = pullRequest.build.deploys.find((d) => d.deployable.name === yamlEnvService.name);
+                  deploy = rootBuild?.deploys?.find((d) => d.deployable.name === yamlEnvService.name);
                   branchName = deploy?.deployable.commentBranchName ?? branchName;
 
                   repository = await YamlService.resolveRepository(yamlEnvService.repository);
+                  if (!repository || repository.deletedAt != null) {
+                    if (yamlEnvService.repository.toLowerCase() === filterRepositoryFullName) {
+                      targetAttributionFailed = true;
+                    }
+                    allReferencedYamlConfigsResolved = false;
+                    getLogger({ buildUUID, service: yamlEnvService.name }).warn(
+                      'Deployable: referenced repository is not live; skipping service'
+                    );
+                    return;
+                  }
 
-                  // Fetch the lifecycle yaml from the dependency services repositories and parse them
-                  dependencyYamlConfig = await YamlService.fetchLifecycleConfig(yamlEnvService.repository, branchName);
+                  const sourceRefTargetsDependency =
+                    sourceBuild?.triggerType === 'api' &&
+                    sourceRef != null &&
+                    filterGithubRepositoryId != null &&
+                    sourceBranch != null &&
+                    targetsSource(repository, branchName);
+                  if (filterGithubRepositoryId != null && !targetsSource(repository, branchName)) {
+                    getLogger({ buildUUID, service: yamlEnvService.name, branchName }).debug(
+                      'Skipping remote YAML fetch outside filtered source branch'
+                    );
+                    return;
+                  }
+                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionResolved = true;
+
+                  const dependencyConfigRef = sourceRefTargetsDependency ? sourceRef : branchName;
+                  dependencyYamlConfig = await YamlService.fetchLifecycleConfigByRepository(
+                    repository,
+                    dependencyConfigRef
+                  );
+                } else {
+                  deploy = rootBuild?.deploys?.find((d) => d.deployable.name === yamlEnvService.name);
+                  branchName = deploy?.deployable.commentBranchName ?? branchName;
+                  if (filterGithubRepositoryId != null && !targetsSource(repository, branchName)) return;
+                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionResolved = true;
                 }
 
-                let yamlService: YamlService.Service;
                 if (dependencyYamlConfig != null) {
-                  yamlService = YamlService.getDeployingServicesByName(dependencyYamlConfig, yamlEnvService.name);
+                  const resolvedService = YamlService.resolveExactEnvironmentService(
+                    dependencyYamlConfig,
+                    yamlEnvService
+                  );
 
-                  if (yamlService != null) {
+                  if (resolvedService != null) {
+                    const yamlService = resolvedService.service;
                     if (yamlService.requires != null) {
                       // Just like Database config, we only handle 1 level deep inner dependency
                       await Promise.all(
-                        yamlService.requires.map(async (requireService) => {
-                          let innerService: YamlService.Service;
-                          innerService = YamlService.getDeployingServicesByName(
-                            dependencyYamlConfig,
-                            requireService.name
+                        resolvedService.requiredServices.map(async (innerService) => {
+                          await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
+                            deployableServices,
+                            buildId,
+                            buildUUID,
+                            innerService,
+                            repository.githubRepositoryId,
+                            branchName,
+                            active,
+                            yamlService.name,
+                            build
                           );
-                          if (innerService != null) {
-                            await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
-                              deployableServices,
-                              buildId,
-                              buildUUID,
-                              innerService,
-                              repository.githubRepositoryId,
-                              branchName,
-                              active,
-                              yamlService.name,
-                              build
-                            );
-                          }
                         })
                       );
                     }
@@ -529,12 +589,14 @@ export default class DeployableService extends BaseService {
                       build
                     );
                   } else {
+                    if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
                     getLogger({ buildUUID, service: yamlEnvService.name }).warn(
                       'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
                     );
                   }
                 } else {
                   allReferencedYamlConfigsResolved = false;
+                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
                   getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
                     `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
                   );
@@ -552,16 +614,43 @@ export default class DeployableService extends BaseService {
         }
       };
 
-      if (pullRequest == null) return false;
+      if (pullRequest == null && build == null) return false;
 
-      await pullRequest.$fetchGraph('[build.[deploys.[deployable], environment], repository]');
-      if (pullRequest.repository != null && pullRequest.branchName != null) {
+      if (pullRequest != null) {
+        await pullRequest.$fetchGraph('[build.[deploys.[deployable], environment], repository]');
+        sourceRepository = pullRequest.repository;
+        rootBranch = pullRequest.branchName;
+        rootBaseConfigRef = pullRequest.branchName;
+        sourceBuild = pullRequest.build;
+      } else if (build != null) {
+        await build.$fetchGraph('[deploys.[deployable], environment]');
+        sourceRepository = await resolveBuildSourceRepository(build);
+        rootBranch = build.branchName ?? null;
+        rootBaseConfigRef = build.configSha ?? build.branchName ?? null;
+        sourceBuild = build;
+      }
+
+      if (
+        sourceRepository != null &&
+        sourceRepository.deletedAt == null &&
+        rootBranch != null &&
+        rootBaseConfigRef != null
+      ) {
+        const sourceRefTargetsRoot =
+          filterGithubRepositoryId != null && sourceBranch != null && targetsSource(sourceRepository, rootBranch);
+        const rootConfigRef =
+          sourceBuild?.triggerType === 'api' && sourceRefTargetsRoot
+            ? sourceRef ?? rootBaseConfigRef
+            : rootBaseConfigRef;
         const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
-          pullRequest.repository,
-          pullRequest.branchName
+          sourceRepository,
+          rootConfigRef
         );
 
         if (yamlConfig != null) {
+          if (filterGithubRepositoryId != null && sourceBranch != null && sourceRefTargetsRoot) {
+            targetAttributionResolved = true;
+          }
           const yamlEnvServices: YamlService.DependencyService[] = [
             ...(yamlConfig.environment?.defaultServices ?? []),
             ...(yamlConfig.environment?.optionalServices ?? []),
@@ -569,12 +658,33 @@ export default class DeployableService extends BaseService {
 
           // New schema allow default/optional services defined w/o using database
           if (yamlEnvServices.length > 0) {
-            await attribution(yamlConfig.environment.optionalServices, yamlConfig, false);
-            await attribution(yamlConfig.environment.defaultServices, yamlConfig, true);
+            await attribution(
+              yamlConfig.environment.optionalServices,
+              yamlConfig,
+              false,
+              sourceRepository,
+              rootBranch,
+              sourceBuild
+            );
+            await attribution(
+              yamlConfig.environment.defaultServices,
+              yamlConfig,
+              true,
+              sourceRepository,
+              rootBranch,
+              sourceBuild
+            );
           } else {
             // For older version of lifecycle.yaml, there are no default or optional service defined in environment.
             // Take all the services defined in the yaml and merge with existing db config
+            const legacyRootMatchesTarget = targetsSource(sourceRepository, rootBranch);
+            if (filterGithubRepositoryId != null && !legacyRootMatchesTarget) {
+              return false;
+            }
+            if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionResolved = true;
             if (yamlConfig.services != null && yamlConfig.services.length > 0) {
+              const legacySourceRepository = sourceRepository;
+              const legacyRootBranch = rootBranch;
               await Promise.all(
                 yamlConfig.services.map(async (service) => {
                   // Handling older schema
@@ -587,8 +697,8 @@ export default class DeployableService extends BaseService {
                       await this.generateAttributesFromYamlConfig(
                         buildId,
                         buildUUID,
-                        pullRequest.repository.githubRepositoryId,
-                        pullRequest.branchName,
+                        legacySourceRepository.githubRepositoryId,
+                        legacyRootBranch,
                         service,
                         true,
                         null,
@@ -601,10 +711,10 @@ export default class DeployableService extends BaseService {
               );
             }
           }
-          return allReferencedYamlConfigsResolved;
+          return allReferencedYamlConfigsResolved && targetAttributionResolved && !targetAttributionFailed;
         }
       } else {
-        getLogger({ buildUUID }).warn('PR: branch name missing');
+        getLogger({ buildUUID }).warn('Build source repository or ref missing');
       }
       return false;
     } catch (error) {
@@ -624,20 +734,25 @@ export default class DeployableService extends BaseService {
   public async upsertDeployables(
     buildId: number,
     buildUUID: string,
-    pullRequest: PullRequest,
+    pullRequest: PullRequest | null | undefined,
     environment: Environment,
     build?: Build,
-    filterGithubRepositoryId?: number
+    filterGithubRepositoryId?: number,
+    sourceRef?: string | null,
+    sourceBranch?: string | null
   ): Promise<DeployableReconciliationResult> {
     // We are going to ingest all the database and yaml configuration and process in the memory before writes into the database
     let deployables: Deployable[] = [];
     let canReconcile = false;
 
+    // PR-less builds resolve lifecycle.yaml from their own repository and pinned SHA/branch columns.
+    const hasBuildSource = build?.githubRepositoryId != null && (build?.configSha != null || build?.branchName != null);
+
     // Temporary storage for all the deployable configurations in memory
     const deployableServices: Map<string, DeployableAttributes> = new Map<string, DeployableAttributes>();
     try {
-      if (pullRequest != null) {
-        if (pullRequest.branchName == null) {
+      if (pullRequest != null || hasBuildSource) {
+        if (pullRequest != null && pullRequest.branchName == null) {
           await this.db.services.PullRequest.updatePullRequestBranchName(pullRequest);
         }
 
@@ -648,7 +763,9 @@ export default class DeployableService extends BaseService {
           buildUUID,
           pullRequest,
           build,
-          filterGithubRepositoryId
+          filterGithubRepositoryId,
+          sourceRef,
+          sourceBranch
         );
 
         // Finally, Upsert the deployables into the database
@@ -658,7 +775,7 @@ export default class DeployableService extends BaseService {
           Array.from(deployableServices.values())
         );
       } else {
-        getLogger({ buildUUID }).fatal('Pull Request cannot be undefined');
+        getLogger({ buildUUID }).fatal('Build source cannot be undefined');
       }
     } catch (error) {
       getLogger({
@@ -680,6 +797,7 @@ export default class DeployableService extends BaseService {
           source: deployable.source ?? 'yaml',
           reconcileEligible: deployable.reconcileEligible ?? false,
           resolvedFromRepositoryId: deployable.resolvedFromRepositoryId ?? null,
+          branchName: deployable.commentBranchName ?? deployable.branchName ?? null,
         })),
     };
   }

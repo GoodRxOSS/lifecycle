@@ -16,8 +16,11 @@
 
 import { NextRequest } from 'next/server';
 import 'server/lib/dependencies';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
+import BuildService from 'server/services/build';
 import BuildMetadataService, { BuildMetadataError } from 'server/services/buildMetadata';
 
 interface RouteContext {
@@ -31,6 +34,9 @@ interface RouteContext {
  * /api/v2/builds/{uuid}/metadata:
  *   get:
  *     summary: Get rendered build metadata
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Returns build metadata with configured links rendered for the requested build.
  *     tags:
  *       - Builds
@@ -68,12 +74,23 @@ interface RouteContext {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: RouteContext) => {
+const getHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
+
+  const build = await new BuildService().getBuildByUUID(routeParams.uuid);
+  if (!build) {
+    return errorResponse(
+      new BuildMetadataError(`Build with UUID ${routeParams.uuid} not found.`, 'not_found'),
+      { status: 404 },
+      req
+    );
+  }
+  await assertBuildRepositoryAllowed(principal, build);
+
   const service = new BuildMetadataService();
 
   try {
-    const metadata = await service.renderMetadataForBuildUUID(routeParams.uuid);
+    const metadata = await service.renderMetadataForBuild(build);
     return successResponse(metadata, { status: 200 }, req);
   } catch (error) {
     if (error instanceof BuildMetadataError) {
@@ -84,4 +101,4 @@ const getHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);

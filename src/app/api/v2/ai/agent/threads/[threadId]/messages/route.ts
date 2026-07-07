@@ -129,4 +129,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ thre
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

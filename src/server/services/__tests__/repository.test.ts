@@ -50,14 +50,23 @@ class RepositoryQuery {
     return this;
   }
 
-  whereRaw(sql: string, values: string[]) {
+  whereRaw(sql: string, values: unknown[]) {
     const value = values[0];
-    if (sql.includes('like')) {
-      const query = value.replace(/%/g, '').toLowerCase();
+    if (sql.includes('ANY')) {
+      const allowed = new Set((Array.isArray(value) ? value : []).map((entry) => String(entry).toLowerCase()));
+      this.filters.push((row) => allowed.has(String(row.fullName).toLowerCase()));
+    } else if (sql.includes('like')) {
+      const query = String(value).replace(/%/g, '').toLowerCase();
       this.filters.push((row) => String(row.fullName).toLowerCase().includes(query));
     } else if (sql.includes('=')) {
-      this.filters.push((row) => String(row.fullName).toLowerCase() === value.toLowerCase());
+      this.filters.push((row) => String(row.fullName).toLowerCase() === String(value).toLowerCase());
     }
+    return this;
+  }
+
+  whereIn(field: string, values: unknown[]) {
+    const allowed = new Set(values.map(String));
+    this.filters.push((row) => allowed.has(String(row[field])));
     return this;
   }
 
@@ -210,6 +219,23 @@ describe('RepositoryService', () => {
         limit: 25,
       });
     });
+
+    test('applies a legacy name-only constraint before pagination and fails closed on an empty list', async () => {
+      repositories.push(
+        createRepository({ id: 1, fullName: 'example-org/api' }),
+        createRepository({ id: 2, githubRepositoryId: 13, fullName: 'example-org/web' })
+      );
+
+      const selected = await service.listOnboardedRepositories({
+        allowedRepositoryFullNames: ['Example-Org/API'],
+      });
+      const empty = await service.listOnboardedRepositories({ allowedRepositoryFullNames: [] });
+
+      expect(selected.repositories).toEqual([expect.objectContaining({ fullName: 'example-org/api' })]);
+      expect(selected.pagination.items).toBe(1);
+      expect(empty.repositories).toEqual([]);
+      expect(empty.pagination.items).toBe(0);
+    });
   });
 
   describe('listInstalledRepositories', () => {
@@ -304,6 +330,93 @@ describe('RepositoryService', () => {
           fullName: 'example-org/repo-101',
         })
       );
+    });
+
+    test('filters installed repositories by legacy name and gives stable ids precedence when both are present', async () => {
+      redis.store.set(
+        githubInstalledRepositoriesCacheKey(34),
+        JSON.stringify({
+          installationId: 34,
+          fetchedAt: '2026-01-01T00:00:00.000Z',
+          repositories: [
+            {
+              githubRepositoryId: 12,
+              name: 'api',
+              fullName: 'example-org/api',
+              ownerId: 56,
+              ownerLogin: 'example-org',
+            },
+            {
+              githubRepositoryId: 13,
+              name: 'web',
+              fullName: 'example-org/web',
+              ownerId: 56,
+              ownerLogin: 'example-org',
+            },
+          ],
+        })
+      );
+
+      const legacy = await service.listInstalledRepositories({
+        installationId: 34,
+        allowedRepositoryFullNames: ['Example-Org/API'],
+      });
+      const idBound = await service.listInstalledRepositories({
+        installationId: 34,
+        allowedGithubRepositoryIds: [13],
+        allowedRepositoryFullNames: ['example-org/api'],
+      });
+
+      expect(legacy.repositories.map((repository) => repository.fullName)).toEqual(['example-org/api']);
+      expect(idBound.repositories.map((repository) => repository.fullName)).toEqual(['example-org/web']);
+    });
+  });
+
+  describe('onboardRepository repository constraint', () => {
+    beforeEach(() => {
+      (github.getRepositoryByFullName as jest.Mock).mockResolvedValue({ data: createInstalledRepository() });
+    });
+
+    test('rejects a target outside the credential allowlist before any write', async () => {
+      await expect(service.onboardRepository('example-org/example-repo', 34, [999])).rejects.toMatchObject({
+        httpStatus: 403,
+        code: 'forbidden_repository',
+      });
+
+      expect(db.models.Environment.create).not.toHaveBeenCalled();
+      expect(db.models.Repository.create).not.toHaveBeenCalled();
+    });
+
+    test('onboards a target whose installation repository id is allowlisted', async () => {
+      await expect(service.onboardRepository('example-org/example-repo', 34, [12])).resolves.toMatchObject({
+        created: true,
+      });
+      expect(db.models.Repository.create).toHaveBeenCalled();
+    });
+
+    test('enforces a legacy name-only allowlist before any write', async () => {
+      await expect(
+        service.onboardRepository('example-org/example-repo', 34, null, ['example-org/other'])
+      ).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden_repository' });
+
+      expect(db.models.Environment.create).not.toHaveBeenCalled();
+      expect(db.models.Repository.create).not.toHaveBeenCalled();
+
+      await expect(
+        service.onboardRepository('example-org/example-repo', 34, null, ['Example-Org/Example-Repo'])
+      ).resolves.toMatchObject({ created: true });
+    });
+
+    test('uses the stable-id constraint when both legacy names and ids are present', async () => {
+      await expect(
+        service.onboardRepository('example-org/example-repo', 34, [12], ['example-org/other'])
+      ).resolves.toMatchObject({ created: true });
+    });
+
+    test('leaves an unrestricted credential unconstrained', async () => {
+      await expect(service.onboardRepository('example-org/example-repo', 34, null)).resolves.toMatchObject({
+        created: true,
+      });
     });
   });
 

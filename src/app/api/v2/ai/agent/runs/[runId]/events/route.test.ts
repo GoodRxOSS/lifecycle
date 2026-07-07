@@ -75,9 +75,7 @@ function makeRequest(url: string): NextRequest {
 describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-user',
-    });
+    mockGetRequestUserIdentity.mockReturnValue({ roles: ['user'], userId: 'sample-user' });
   });
 
   it('returns a cursor page of owned run events', async () => {
