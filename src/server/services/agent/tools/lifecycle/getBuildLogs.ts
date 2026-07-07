@@ -16,11 +16,13 @@
 
 import { BaseTool } from '../baseTool';
 import { ToolResult } from '../types';
+import { OutputLimiter } from '../outputLimiter';
+import { sanitizeLogText, searchLogLines } from '../shared/logView';
 
 const MAX_LOG_CHARS = 15000;
 
 const DESCRIPTION =
-  'Get the persisted build or deploy logs for a service of THIS environment. This is the decisive evidence for build_failed and deploy_failed — prefer it over query_database/get_lifecycle_logs.';
+  'Get the persisted build or deploy logs for a service of THIS environment. This is the decisive evidence for build_failed and deploy_failed — prefer it over query_database/get_lifecycle_logs. The full log stays server-side: use search to find failures the truncated view omits.';
 
 const PARAMETERS = {
   type: 'object',
@@ -34,17 +36,14 @@ const PARAMETERS = {
       enum: ['build', 'deploy'],
       description: 'Optional: which job logs to prefer when falling back to live job pods.',
     },
+    search: {
+      type: 'string',
+      description:
+        'Case-insensitive regex matched against each line of the ENTIRE log. Returns matching lines with context and absolute line numbers instead of the truncated view.',
+    },
   },
   required: ['service_name'],
 };
-
-function tailText(content: string, maxChars: number): string {
-  const trimmed = content.trim();
-  if (trimmed.length <= maxChars) {
-    return trimmed;
-  }
-  return `[... truncated, showing last ${maxChars} of ${trimmed.length} chars]\n${trimmed.slice(-maxChars)}`;
-}
 
 export class GetBuildLogsTool extends BaseTool {
   static readonly Name = 'get_build_logs';
@@ -76,6 +75,7 @@ export class GetBuildLogsTool extends BaseTool {
       return this.createErrorResult('service_name is required.', 'INVALID_ARGS');
     }
     const phase = args.phase === 'build' || args.phase === 'deploy' ? args.phase : undefined;
+    const search = typeof args.search === 'string' ? args.search.trim() : '';
 
     try {
       const { default: Deploy } = await import('server/models/Deploy');
@@ -92,20 +92,22 @@ export class GetBuildLogsTool extends BaseTool {
 
       const persisted = deploy.buildOutput?.trim();
       if (persisted) {
-        const text = [
-          `Persisted ${phase || 'build/deploy'} logs for ${serviceName} (status=${deploy.status}, tail of ${
-            persisted.length
-          } chars):`,
-          '```',
-          tailText(persisted, MAX_LOG_CHARS),
-          '```',
-        ].join('\n');
-        return this.createSuccessResult(text, `Build logs: ${serviceName} (persisted, ${persisted.length} chars)`);
+        return this.renderLogs(
+          sanitizeLogText(persisted),
+          `Persisted ${phase || 'build/deploy'} logs for ${serviceName} (status=${deploy.status})`,
+          `Build logs: ${serviceName} (persisted, ${persisted.length} chars)`,
+          search
+        );
       }
 
       const liveLogs = await this.readJobPodLogs(deploy.uuid, deploy.build?.namespace, phase);
       if (liveLogs) {
-        return this.createSuccessResult(liveLogs.text, liveLogs.display);
+        return this.renderLogs(
+          sanitizeLogText(liveLogs.logs),
+          `Live ${liveLogs.phase} job logs from pod ${liveLogs.podName} (buildOutput not yet persisted)`,
+          `Build logs: ${liveLogs.podName} (live job pod)`,
+          search
+        );
       }
 
       return this.createSuccessResult(
@@ -119,11 +121,44 @@ export class GetBuildLogsTool extends BaseTool {
     }
   }
 
+  private renderLogs(text: string, headerLabel: string, display: string, search: string): ToolResult {
+    const logLines = text.split('\n');
+
+    if (search) {
+      let view;
+      try {
+        view = searchLogLines(logLines, search, { maxChars: MAX_LOG_CHARS - 2000 });
+      } catch (error: any) {
+        return this.createErrorResult(`Invalid search pattern: ${error.message}`, 'INVALID_PARAMETERS');
+      }
+      if (view.totalMatches === 0) {
+        return this.createSuccessResult(
+          `${headerLabel}: no lines match /${search}/i (searched all ${logLines.length} lines). Try a broader pattern, or drop search for the truncated view.`,
+          `Build log search: 0 matches`
+        );
+      }
+      const capNote =
+        view.renderedMatches < view.totalMatches ? ` (showing first ${view.renderedMatches}; narrow the pattern)` : '';
+      const agentContent = [
+        `${headerLabel}: ${view.totalMatches} of ${logLines.length} lines match /${search}/i${capNote}. Format: "<line>:" match, "<line>-" context.`,
+        `\`\`\`\n${view.rendered}\n\`\`\``,
+      ].join('\n');
+      return this.createSuccessResult(agentContent, `Build log search: ${view.totalMatches} matches`);
+    }
+
+    const truncated = OutputLimiter.truncateLogOutput(text, MAX_LOG_CHARS, 25, 60);
+    const agentContent = [
+      `${headerLabel}: ${logLines.length} lines total. To inspect omitted regions, re-call with search="<regex>".`,
+      `\`\`\`\n${truncated}\n\`\`\``,
+    ].join('\n');
+    return this.createSuccessResult(agentContent, display);
+  }
+
   private async readJobPodLogs(
     deployUuid: string,
     namespace: string | undefined,
     phase?: 'build' | 'deploy'
-  ): Promise<{ text: string; display: string } | null> {
+  ): Promise<{ logs: string; podName: string; phase: string } | null> {
     if (!namespace) {
       return null;
     }
@@ -160,13 +195,7 @@ export class GetBuildLogsTool extends BaseTool {
       }
 
       const inferredPhase = phase || (pod.metadata.name.includes('-build-') ? 'build' : 'deploy');
-      const text = [
-        `Live ${inferredPhase} job logs from pod ${pod.metadata.name} (buildOutput not yet persisted, tail of ${logs.length} chars):`,
-        '```',
-        tailText(logs, MAX_LOG_CHARS),
-        '```',
-      ].join('\n');
-      return { text, display: `Build logs: ${pod.metadata.name} (live job pod)` };
+      return { logs, podName: pod.metadata.name, phase: inferredPhase };
     } catch {
       return null;
     }

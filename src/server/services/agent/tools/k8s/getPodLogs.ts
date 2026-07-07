@@ -18,37 +18,7 @@ import { BaseTool } from '../baseTool';
 import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 import { OutputLimiter } from '../outputLimiter';
-
-function stripAnsi(text: string): string {
-  return (
-    text
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\][^\x07]*\x07/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-  );
-}
-
-function deduplicateLines(lines: string[]): string[] {
-  const result: string[] = [];
-  let lastLine = '';
-  let count = 1;
-  for (const line of lines) {
-    if (line === lastLine) {
-      count++;
-    } else {
-      if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
-      else if (lastLine) result.push(lastLine);
-      lastLine = line;
-      count = 1;
-    }
-  }
-  if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
-  else if (lastLine) result.push(lastLine);
-  return result;
-}
+import { deduplicateConsecutiveLines, sanitizeLogText, searchLogLines } from '../shared/logView';
 
 export class GetPodLogsTool extends BaseTool {
   static readonly Name = 'get_pod_logs';
@@ -76,6 +46,11 @@ export class GetPodLogsTool extends BaseTool {
             type: 'number',
             description:
               'Number of lines from the start of logs (default: 50). Combined with tail_lines for head+tail truncation.',
+          },
+          search: {
+            type: 'string',
+            description:
+              'Case-insensitive regex matched against each fetched line. Returns matching lines with context and line numbers (relative to the fetched tail) instead of the head/tail view. Raise tail_lines to widen the searched window.',
           },
         },
         required: ['pod_name'],
@@ -116,9 +91,14 @@ export class GetPodLogsTool extends BaseTool {
         tailLines
       );
 
-      const rawLines = response.body.split('\n');
-      const cleanLines = rawLines.map(stripAnsi);
-      const dedupedLines = deduplicateLines(cleanLines);
+      const cleanLines = sanitizeLogText(response.body).split('\n');
+
+      const search = typeof args.search === 'string' ? args.search.trim() : '';
+      if (search) {
+        return this.renderSearchView(podName, previous, cleanLines, search);
+      }
+
+      const dedupedLines = deduplicateConsecutiveLines(cleanLines);
 
       let finalLines: string[];
       if (dedupedLines.length > headLines + tailLines) {
@@ -157,5 +137,30 @@ export class GetPodLogsTool extends BaseTool {
       }
       return this.createErrorResult(message, 'EXECUTION_ERROR');
     }
+  }
+
+  private renderSearchView(podName: string, previous: boolean, cleanLines: string[], search: string): ToolResult {
+    let view;
+    try {
+      view = searchLogLines(cleanLines, search);
+    } catch (error: any) {
+      return this.createErrorResult(`Invalid search pattern: ${error.message}`, 'INVALID_PARAMETERS');
+    }
+
+    const scope = `${cleanLines.length}-line fetched tail of pod ${podName}${previous ? ' (previous instance)' : ''}`;
+    if (view.totalMatches === 0) {
+      return this.createSuccessResult(
+        `No lines match /${search}/i in the ${scope}. Raise tail_lines to search further back, or drop search for the head/tail view.`,
+        `Pod log search: 0 matches`
+      );
+    }
+
+    const capNote =
+      view.renderedMatches < view.totalMatches ? ` (showing first ${view.renderedMatches}; narrow the pattern)` : '';
+    const agentContent = [
+      `${view.totalMatches} lines match /${search}/i in the ${scope}${capNote}. Line numbers are relative to the fetched tail ("<line>:" match, "<line>-" context).`,
+      `\`\`\`\n${view.rendered}\n\`\`\``,
+    ].join('\n');
+    return this.createSuccessResult(agentContent, `Pod log search: ${view.totalMatches} matches`);
   }
 }

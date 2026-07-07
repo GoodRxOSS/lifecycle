@@ -121,9 +121,17 @@ export interface AgentRunPlanResolvedInstructionSnapshot {
   renderedText: string;
 }
 
+export interface AgentRunPlanResolvedRuleSnapshot {
+  id: number;
+  agentRef: string;
+  repositoryFullName: string | null;
+  content: string;
+}
+
 export interface AgentRunPlanPromptSnapshot {
   instructionRefs: string[];
   resolvedInstructions?: AgentRunPlanResolvedInstructionSnapshot[];
+  resolvedRules?: AgentRunPlanResolvedRuleSnapshot[];
   instructionAddendum?: string | null;
   renderedSummary: string;
   renderedHash: string;

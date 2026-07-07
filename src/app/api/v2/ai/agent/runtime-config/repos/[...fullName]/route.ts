@@ -20,10 +20,7 @@ import { errorResponse, successResponse } from 'server/lib/response';
 import { getLogger } from 'server/lib/logger';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import JsonSchema from 'jsonschema';
-import {
-  agentRuntimeAdditiveRulesUpdateSchema,
-  agentRuntimeRepoOverrideSchema,
-} from 'server/lib/validation/agentRuntimeConfigSchemas';
+import { agentRuntimeRepoOverrideSchema } from 'server/lib/validation/agentRuntimeConfigSchemas';
 import { normalizeRepoFullName } from 'server/lib/normalizeRepoFullName';
 import { AgentRuntimeConfigValidationError } from 'server/lib/validation/agentRuntimeConfigValidator';
 
@@ -108,9 +105,9 @@ function parseFullNameParams(segments: string[]): { fullName: string; isEffectiv
  *     description: >
  *       Returns the fully merged configuration for a repository. The merge applies
  *       the repository override on top of the global config using these rules:
- *       scalar fields (enabled, maxMessagesPerSession, sessionTTL, systemPromptOverride)
- *       are replaced by the repo value when present; array fields (additiveRules,
- *       excludedTools, excludedFilePatterns) are merged additively (union of global
+ *       scalar fields (enabled, maxMessagesPerSession, sessionTTL)
+ *       are replaced by the repo value when present; array fields (excludedTools,
+ *       excludedFilePatterns) are merged additively (union of global
  *       and repo arrays). Provider settings and performance tuning parameters are
  *       always taken from the global config (not overridable per-repo).
  *       If no repo override exists, this returns the global config unchanged.
@@ -246,62 +243,6 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ full
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
- *   patch:
- *     summary: Update repository additive rules
- *     description: >
- *       Updates only the additiveRules field for a repository override while preserving
- *       any other repository-specific settings that already exist.
- *     tags:
- *       - Agent Runtime Config
- *     operationId: patchRepoAgentRuntimeAdditiveRules
- *     parameters:
- *       - in: path
- *         name: owner
- *         required: true
- *         schema:
- *           type: string
- *       - in: path
- *         name: repo
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/AgentRuntimeAdditiveRulesUpdateRequest'
- *     responses:
- *       '200':
- *         description: Updated repository agent runtime config override
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/GetRepoAgentRuntimeConfigSuccessResponse'
- *       '400':
- *         description: Validation error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '401':
- *         description: Unauthorized
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '403':
- *         description: Forbidden
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '500':
- *         description: Server error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const putHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
   const routeParams = await params;
@@ -349,55 +290,6 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ full
   const updated = await service.getRepoConfig(parsed.fullName);
   getLogger().info('AgentRuntimeConfig: repo config updated repo=' + parsed.fullName + ' via=api');
   return successResponse({ repoFullName: parsed.fullName, config: updated }, { status: 200 }, req);
-};
-
-const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ fullName: string[] }> }) => {
-  const routeParams = await params;
-  let parsed: { fullName: string; isEffective: boolean };
-  try {
-    parsed = parseFullNameParams(routeParams.fullName);
-  } catch {
-    return errorResponse(new Error('Invalid repository fullName. Expected format: owner/repo'), { status: 400 }, req);
-  }
-
-  if (parsed.isEffective) {
-    return errorResponse(
-      new Error('Cannot PATCH the effective config endpoint. Use the repo config endpoint instead.'),
-      { status: 400 },
-      req
-    );
-  }
-
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return errorResponse(new Error('Invalid JSON in request body'), { status: 400 }, req);
-  }
-
-  const validator = new JsonSchema.Validator();
-  const result = validator.validate(body, agentRuntimeAdditiveRulesUpdateSchema);
-
-  if (!result.valid) {
-    const messages = result.errors.map((e) => e.stack).join('; ');
-    return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
-  }
-
-  const service = AgentRuntimeConfigService.getInstance();
-
-  try {
-    const updated = await service.updateRepoAdditiveRules(
-      parsed.fullName,
-      (body as { additiveRules: string[] }).additiveRules
-    );
-    getLogger().info('AgentRuntimeConfig: repo additive rules updated repo=' + parsed.fullName + ' via=api');
-    return successResponse({ repoFullName: parsed.fullName, config: updated }, { status: 200 }, req);
-  } catch (error) {
-    if (error instanceof AgentRuntimeConfigValidationError) {
-      return errorResponse(error, { status: 400 }, req);
-    }
-    throw error;
-  }
 };
 
 /**
@@ -480,5 +372,4 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ f
 
 export const GET = createApiHandler(getHandler);
 export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
-export const PATCH = createApiHandler(patchHandler, { roles: ['admin'] });
 export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });

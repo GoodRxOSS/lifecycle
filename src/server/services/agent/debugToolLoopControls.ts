@@ -240,12 +240,6 @@ function isToolActiveForIntent(
     return false;
   }
 
-  // Debug's curated diagnostic surface stays small: external MCP tools inflate the definition
-  // payload and blur tool selection without serving the diagnose/repair workflow.
-  if (metadata.resourceDomain === 'mcp') {
-    return false;
-  }
-
   if (intent === 'diagnose') {
     return isReadOnlyRuntimeTool(metadata);
   }

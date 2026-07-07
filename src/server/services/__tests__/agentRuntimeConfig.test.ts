@@ -65,56 +65,6 @@ describe('AgentRuntimeConfigService', () => {
     jest.clearAllMocks();
   });
 
-  it('updates global additive rules without revalidating unrelated provider defaults', async () => {
-    const { service } = makeService();
-    const currentConfig: AgentRuntimeConfig = {
-      enabled: true,
-      providers: [
-        {
-          name: 'gemini',
-          enabled: true,
-          apiKeyEnvVar: 'GOOGLE_GENERATIVE_AI_API_KEY',
-          models: [
-            {
-              id: 'gemini-1',
-              displayName: 'Gemini 1',
-              enabled: true,
-              default: true,
-              maxTokens: 8192,
-            },
-            {
-              id: 'gemini-2',
-              displayName: 'Gemini 2',
-              enabled: true,
-              default: true,
-              maxTokens: 8192,
-            },
-          ],
-        },
-      ],
-      maxMessagesPerSession: 50,
-      sessionTTL: 3600,
-    };
-
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
-
-    const result = await service.updateGlobalAdditiveRules(['test']);
-
-    expect(setConfig).toHaveBeenCalledWith(
-      'agentRuntime',
-      expect.objectContaining({
-        providers: currentConfig.providers,
-        additiveRules: ['test'],
-      })
-    );
-    expect(result.additiveRules).toEqual(['test']);
-    expect(result.providers).toEqual(currentConfig.providers);
-  });
-
   it('replaces global approval policy without revalidating unrelated provider defaults', async () => {
     const { service } = makeService();
     const currentConfig: AgentRuntimeConfig = {
@@ -433,41 +383,6 @@ describe('AgentRuntimeConfigService', () => {
         workspace_shell: 'all_users',
         diagnostics_database: 'disabled',
       },
-    });
-  });
-
-  it('updates repo additive rules while preserving other repo overrides', async () => {
-    const { service, knex, repoUpsertQuery, redis } = makeService();
-
-    jest.spyOn(service, 'getRepoConfig').mockResolvedValue({
-      excludedTools: ['tool-a'],
-      approvalPolicy: {
-        defaultMode: 'require_approval',
-      },
-    });
-
-    const result = await service.updateRepoAdditiveRules('Example-Org/Example-Repo', ['test']);
-
-    expect(knex).toHaveBeenCalledWith('agent_runtime_repo_config');
-    expect(repoUpsertQuery.insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        repositoryFullName: 'example-org/example-repo',
-        config: JSON.stringify({
-          excludedTools: ['tool-a'],
-          approvalPolicy: {
-            defaultMode: 'require_approval',
-          },
-          additiveRules: ['test'],
-        }),
-      })
-    );
-    expect(redis.del).toHaveBeenCalledWith('agent_runtime_repo_config:example-org/example-repo');
-    expect(result).toEqual({
-      excludedTools: ['tool-a'],
-      approvalPolicy: {
-        defaultMode: 'require_approval',
-      },
-      additiveRules: ['test'],
     });
   });
 

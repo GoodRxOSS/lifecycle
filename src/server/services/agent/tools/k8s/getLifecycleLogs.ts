@@ -18,37 +18,7 @@ import { BaseTool } from '../baseTool';
 import { ToolResult } from '../types';
 import { K8sClient } from '../shared/k8sClient';
 import { OutputLimiter } from '../outputLimiter';
-
-function stripAnsi(text: string): string {
-  return (
-    text
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\][^\x07]*\x07/g, '')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-  );
-}
-
-function deduplicateLines(lines: string[]): string[] {
-  const result: string[] = [];
-  let lastLine = '';
-  let count = 1;
-  for (const line of lines) {
-    if (line === lastLine) {
-      count++;
-    } else {
-      if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
-      else if (lastLine) result.push(lastLine);
-      lastLine = line;
-      count = 1;
-    }
-  }
-  if (count > 1) result.push(`[repeated ${count}x] ${lastLine}`);
-  else if (lastLine) result.push(lastLine);
-  return result;
-}
+import { deduplicateConsecutiveLines, stripAnsiControl } from '../shared/logView';
 
 export class GetLifecycleLogsTool extends BaseTool {
   static readonly Name = 'get_lifecycle_logs';
@@ -200,7 +170,7 @@ export class GetLifecycleLogsTool extends BaseTool {
       const podsChecked = finalLogs.filter((l) => l.logs.length > 0).length;
       for (const logEntry of finalLogs) {
         const podPrefix = `[${logEntry.service}/${logEntry.pod}]`;
-        const cleanLines = deduplicateLines(logEntry.logs.map(stripAnsi));
+        const cleanLines = deduplicateConsecutiveLines(logEntry.logs.map(stripAnsiControl));
         for (const line of cleanLines) {
           combinedLogs += `${podPrefix} ${line}\n`;
         }

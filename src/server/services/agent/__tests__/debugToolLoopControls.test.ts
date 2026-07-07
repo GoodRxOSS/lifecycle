@@ -78,6 +78,7 @@ const metadata: AgentRuntimeToolMetadata[] = [
     catalogCapabilityId: 'external_mcp_read',
     capabilityKey: 'external_mcp_read',
     approvalMode: 'allow',
+    resourceDomain: 'mcp',
     exposure: 'read',
   },
   {
@@ -127,6 +128,7 @@ const metadata: AgentRuntimeToolMetadata[] = [
     catalogCapabilityId: 'external_mcp_write',
     capabilityKey: 'external_mcp_write',
     approvalMode: 'require_approval',
+    resourceDomain: 'mcp',
     exposure: 'repair',
   },
   {
@@ -134,6 +136,7 @@ const metadata: AgentRuntimeToolMetadata[] = [
     catalogCapabilityId: 'external_mcp_read',
     capabilityKey: 'external_mcp_read',
     approvalMode: 'allow',
+    resourceDomain: 'mcp',
     exposure: 'read',
   },
 ];
