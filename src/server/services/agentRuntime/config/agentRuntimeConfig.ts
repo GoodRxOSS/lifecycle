@@ -154,11 +154,7 @@ export class AgentRuntimeConfigService extends BaseService {
     }
     result.approvalPolicy = this.mergeApprovalPolicy(global.approvalPolicy, repoOverride.approvalPolicy);
     result.capabilityPolicy = this.mergeCapabilityPolicy(global.capabilityPolicy, repoOverride.capabilityPolicy);
-    if (repoOverride.systemPromptOverride !== undefined) {
-      result.systemPromptOverride = repoOverride.systemPromptOverride;
-    }
     const arrayFields: (keyof AgentRuntimeRepoOverride)[] = [
-      'additiveRules',
       'excludedTools',
       'excludedFilePatterns',
       'allowedWritePatterns',
@@ -195,22 +191,6 @@ export class AgentRuntimeConfigService extends BaseService {
     await GlobalConfigService.getInstance().setConfig('agentRuntime', config);
     this.invalidateCaches();
     getLogger().info('AgentRuntimeConfig: global config updated via=api');
-  }
-
-  async updateGlobalAdditiveRules(additiveRules: string[]): Promise<AgentRuntimeConfig> {
-    validateAgentRuntimeRepoOverride({ additiveRules });
-
-    const currentConfig = await this.getGlobalConfig();
-    const nextConfig: AgentRuntimeConfig = {
-      ...currentConfig,
-      additiveRules,
-    };
-
-    await GlobalConfigService.getInstance().setConfig('agentRuntime', nextConfig);
-    this.invalidateCaches();
-    getLogger().info(`AgentRuntimeConfig: global additive rules updated count=${additiveRules.length} via=api`);
-
-    return nextConfig;
   }
 
   async updateGlobalApprovalPolicy(approvalPolicy: ApprovalPolicyConfig): Promise<AgentRuntimeConfig> {
@@ -321,27 +301,6 @@ export class AgentRuntimeConfigService extends BaseService {
     const normalized = repoFullName.toLowerCase();
     validateAgentRuntimeRepoOverride(config);
     await this.upsertRepoConfig(normalized, config);
-  }
-
-  async updateRepoAdditiveRules(
-    repoFullName: string,
-    additiveRules: string[]
-  ): Promise<Partial<AgentRuntimeRepoOverride>> {
-    const normalized = repoFullName.toLowerCase();
-    validateAgentRuntimeRepoOverride({ additiveRules });
-
-    const currentConfig = (await this.getRepoConfig(normalized)) ?? {};
-    const nextConfig: Partial<AgentRuntimeRepoOverride> = {
-      ...currentConfig,
-      additiveRules,
-    };
-
-    await this.upsertRepoConfig(normalized, nextConfig);
-    getLogger().info(
-      `AgentRuntimeConfig: repo additive rules updated repo=${normalized} count=${additiveRules.length} via=api`
-    );
-
-    return nextConfig;
   }
 
   async updateRepoCapabilityPolicy(

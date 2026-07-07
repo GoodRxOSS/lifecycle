@@ -121,6 +121,13 @@ jest.mock('../InstructionTemplateService', () => {
   };
 });
 
+jest.mock('../InstructionRuleService', () => ({
+  __esModule: true,
+  default: {
+    resolveForRun: jest.fn(async () => []),
+  },
+}));
+
 jest.mock('../ProviderRegistry', () => ({
   __esModule: true,
   default: {

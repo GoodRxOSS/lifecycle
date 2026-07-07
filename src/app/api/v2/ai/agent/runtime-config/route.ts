@@ -21,7 +21,6 @@ import { getLogger } from 'server/lib/logger';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import JsonSchema from 'jsonschema';
 import {
-  agentRuntimeAdditiveRulesUpdateSchema,
   agentRuntimeApprovalPolicyUpdateSchema,
   agentRuntimeConfigPatchSchema,
   agentRuntimeConfigSchema,
@@ -216,19 +215,6 @@ const patchHandler = async (req: NextRequest) => {
   const service = AgentRuntimeConfigService.getInstance();
 
   try {
-    if ('additiveRules' in (body as Record<string, unknown>)) {
-      const additiveRulesResult = validator.validate(body, agentRuntimeAdditiveRulesUpdateSchema);
-      if (!additiveRulesResult.valid) {
-        const messages = additiveRulesResult.errors.map((e) => e.stack).join('; ');
-        return errorResponse(new Error('Validation failed: ' + messages), { status: 400 }, req);
-      }
-
-      const updatedConfig = await service.updateGlobalAdditiveRules(
-        (body as { additiveRules: string[] }).additiveRules
-      );
-      return successResponse(updatedConfig, { status: 200 }, req);
-    }
-
     const approvalPolicyResult = validator.validate(body, agentRuntimeApprovalPolicyUpdateSchema);
     if (!approvalPolicyResult.valid) {
       const messages = approvalPolicyResult.errors.map((e) => e.stack).join('; ');

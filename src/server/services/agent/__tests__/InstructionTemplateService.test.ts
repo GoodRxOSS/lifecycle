@@ -167,7 +167,7 @@ describe('InstructionTemplateService', () => {
 
     expect([...SYSTEM_INSTRUCTION_TEMPLATE_REFS].sort()).toEqual(builtInRefs);
     expect(SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS).toHaveLength(3);
-    expect(debugDefinition?.defaultVersion).toBe(10);
+    expect(debugDefinition?.defaultVersion).toBe(11);
     expect(developDefinition?.defaultVersion).toBe(1);
     expect(freeformDefinition?.defaultVersion).toBe(1);
 
@@ -187,16 +187,18 @@ describe('InstructionTemplateService', () => {
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Repair'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Investigate more'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('start one'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Tool economy:'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Evidence you already have:'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Response contract:'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('trigger_redeploy'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Apply fixes through the repair tools'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('plain commit URL'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Pick the tool by the fix'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('include the plain URL'));
     expect(debugDefinition?.defaultContent).toEqual(
-      expect.stringContaining('Do not run tests or arbitrary workspace commands in Debug repair')
+      expect.stringContaining('never runs tests or arbitrary workspace commands')
     );
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('previous issue was fixed'));
-    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('Do not say you will keep monitoring'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('never say you will keep monitoring'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('One successful mutation per repair run'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('publicUrl unreachable'));
 
     for (const definition of SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS) {
       expect(definition.defaultVersion).toBeGreaterThanOrEqual(1);

@@ -18,7 +18,6 @@ import { NextRequest } from 'next/server';
 
 const mockGetUser = jest.fn();
 const mockSetGlobalConfig = jest.fn();
-const mockUpdateGlobalAdditiveRules = jest.fn();
 const mockUpdateGlobalApprovalPolicy = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
@@ -30,7 +29,6 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   default: {
     getInstance: jest.fn(() => ({
       setGlobalConfig: (...args: unknown[]) => mockSetGlobalConfig(...args),
-      updateGlobalAdditiveRules: (...args: unknown[]) => mockUpdateGlobalAdditiveRules(...args),
       updateGlobalApprovalPolicy: (...args: unknown[]) => mockUpdateGlobalApprovalPolicy(...args),
     })),
   },
@@ -81,7 +79,7 @@ describe('/api/v2/ai/agent/runtime-config', () => {
   });
 
   it('rejects non-admin global config patches before parsing the body', async () => {
-    const request = makeRequest({ additiveRules: [] });
+    const request = makeRequest({ approvalPolicy: { defaultMode: 'require_approval' } });
 
     const response = await PATCH(request);
     const body = await response.json();
@@ -89,7 +87,6 @@ describe('/api/v2/ai/agent/runtime-config', () => {
     expect(response.status).toBe(403);
     expect(body.error.message).toBe('Forbidden: insufficient permissions');
     expect(request.json).not.toHaveBeenCalled();
-    expect(mockUpdateGlobalAdditiveRules).not.toHaveBeenCalled();
     expect(mockUpdateGlobalApprovalPolicy).not.toHaveBeenCalled();
   });
 });

@@ -65,6 +65,7 @@ import {
 import { loadAiSdk } from './aiSdkRuntime';
 import { buildAiToolApprovalConfig } from './capabilityToolHelpers';
 import { buildAgentRuntimeContext, type AgentRuntimeContext } from './runtimeContext';
+import { buildSystemPrompt, readResolvedInstructionTexts, readResolvedRulesBlock } from './promptAssembly';
 
 const DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT = [
   'You are closing out a Debug repair run after the tool loop reached its step budget without a confirmed fix.',
@@ -75,21 +76,6 @@ const DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT = [
 
 const DEBUG_REPAIR_SYNTHESIS_USER_PROMPT =
   'Write the final repair summary now: what was changed, what is still blocking, and the single next step. Do not call tools and do not claim an unverified fix.';
-
-function buildSystemPrompt(parts: Array<string | undefined>): string | undefined {
-  const normalized = parts.map((part) => part?.trim()).filter(Boolean) as string[];
-  if (normalized.length === 0) {
-    return undefined;
-  }
-
-  return normalized.join('\n\n');
-}
-
-function readResolvedInstructionTexts(runPlan?: AgentRunPlanSnapshotV1 | null): string[] {
-  return (runPlan?.prompt.resolvedInstructions || [])
-    .map((instruction) => instruction.renderedText)
-    .filter((text): text is string => typeof text === 'string' && Boolean(text.trim()));
-}
 
 function applyFinalObservabilityToMessages(
   messages: AgentUIMessage[],
@@ -713,6 +699,7 @@ export default class AgentRunExecutor {
         runPlanSnapshot: executionRunPlan,
       });
       const resolvedInstructionTexts = readResolvedInstructionTexts(executionRunPlan);
+      const resolvedRulesBlock = readResolvedRulesBlock(executionRunPlan);
       // Tools-off synthesis of a final summary after a repair loop burns its budget without pausing or committing.
       const synthesizeRepairSummaryAnswer = async (
         messages: AgentUIMessage[],
@@ -735,6 +722,7 @@ export default class AgentRunExecutor {
             instructions: buildSystemPrompt([
               runControlPlaneConfig.systemPrompt,
               ...resolvedInstructionTexts,
+              resolvedRulesBlock,
               executionRunPlan?.prompt.instructionAddendum || undefined,
               sessionPrompt,
               DEBUG_REPAIR_SYNTHESIS_SYSTEM_PROMPT,
@@ -790,6 +778,7 @@ export default class AgentRunExecutor {
           buildSystemPrompt([
             runControlPlaneConfig.systemPrompt,
             ...resolvedInstructionTexts,
+            resolvedRulesBlock,
             executionRunPlan?.prompt.instructionAddendum || undefined,
             sessionPrompt,
           ])

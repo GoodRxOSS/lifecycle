@@ -124,8 +124,6 @@ export const agentRuntimeConfigSchema = {
     },
     maxMessagesPerSession: { type: 'integer', minimum: 1 },
     sessionTTL: { type: 'integer', minimum: 1 },
-    additiveRules: { type: 'array', items: { type: 'string' } },
-    systemPromptOverride: { type: 'string', maxLength: 50000 },
     excludedTools: { type: 'array', items: { type: 'string' } },
     excludedFilePatterns: { type: 'array', items: { type: 'string' } },
     allowedWritePatterns: { type: 'array', items: { type: 'string' } },
@@ -151,21 +149,10 @@ export const agentRuntimeRepoOverrideSchema = {
     sessionTTL: { type: 'integer', minimum: 1 },
     approvalPolicy: approvalPolicySchema,
     capabilityPolicy: capabilityPolicySchema,
-    additiveRules: { type: 'array', items: { type: 'string' } },
-    systemPromptOverride: { type: 'string', maxLength: 50000 },
     excludedTools: { type: 'array', items: { type: 'string' } },
     excludedFilePatterns: { type: 'array', items: { type: 'string' } },
     allowedWritePatterns: { type: 'array', items: { type: 'string' } },
   },
-  additionalProperties: false,
-};
-
-export const agentRuntimeAdditiveRulesUpdateSchema = {
-  type: 'object',
-  properties: {
-    additiveRules: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['additiveRules'],
   additionalProperties: false,
 };
 
@@ -181,7 +168,6 @@ export const agentRuntimeApprovalPolicyUpdateSchema = {
 export const agentRuntimeConfigPatchSchema = {
   type: 'object',
   properties: {
-    additiveRules: { type: 'array', items: { type: 'string' } },
     approvalPolicy: approvalPolicySchema,
   },
   additionalProperties: false,

@@ -40,6 +40,7 @@ import { getAgentCapabilityCatalogEntry, type AgentCapabilityCatalogId } from '.
 import type {
   AgentDebugRunIntent,
   AgentRunPlanResolvedInstructionSnapshot,
+  AgentRunPlanResolvedRuleSnapshot,
   AgentRunPlanSnapshotV1,
   AgentRunPlanSourceKind,
   AgentRunPlanWarning,
@@ -54,6 +55,7 @@ import InstructionTemplateService, {
   InstructionTemplateServiceError,
   type ResolvedInstructionTemplate,
 } from './InstructionTemplateService';
+import InstructionRuleService from './InstructionRuleService';
 
 type FindPriorCompletedDebugIntentRun = (input: {
   threadId: number;
@@ -194,11 +196,19 @@ async function resolveInstructionSnapshots(
   }
 }
 
+async function resolveRuleSnapshots(
+  instructionRefs: readonly string[],
+  repoFullName?: string | null
+): Promise<AgentRunPlanResolvedRuleSnapshot[]> {
+  return InstructionRuleService.resolveForRun({ instructionRefs, repoFullName });
+}
+
 function hashPromptSnapshot(
   definitionId: string,
   instructionRefs: string[],
   version: number,
   resolvedInstructions: AgentRunPlanResolvedInstructionSnapshot[],
+  resolvedRules: AgentRunPlanResolvedRuleSnapshot[],
   instructionAddendum?: string | null
 ): string {
   return createHash('sha256')
@@ -208,6 +218,7 @@ function hashPromptSnapshot(
         instructionRefs,
         version,
         resolvedInstructions,
+        resolvedRules,
         instructionAddendum: instructionAddendum || null,
       })
     )
@@ -724,6 +735,7 @@ export default class AgentRunPlanResolver {
         provisionalCapabilityIds.includes(capabilityId)
       );
     const resolvedInstructions = await resolveInstructionSnapshots(effectiveDefinition.instructionRefs);
+    const resolvedRules = await resolveRuleSnapshots(effectiveDefinition.instructionRefs, repoFullName);
 
     const capturedAt = new Date().toISOString();
     const sourceSnapshot = compactSource({ session, source, sourceKind, repoFullName, capturedAt });
@@ -766,6 +778,7 @@ export default class AgentRunPlanResolver {
       prompt: {
         instructionRefs: effectiveDefinition.instructionRefs,
         resolvedInstructions,
+        resolvedRules,
         instructionAddendum: effectiveDefinition.instructionAddendum || definition.instructionAddendum || null,
         renderedSummary: effectiveDefinition.description || definition.description || definition.name,
         renderedHash: hashPromptSnapshot(
@@ -773,6 +786,7 @@ export default class AgentRunPlanResolver {
           effectiveDefinition.instructionRefs,
           effectiveDefinition.version,
           resolvedInstructions,
+          resolvedRules,
           effectiveDefinition.instructionAddendum || definition.instructionAddendum
         ),
       },

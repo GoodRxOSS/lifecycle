@@ -38,6 +38,14 @@ const mockGetUserDefinition = jest.fn();
 const mockResolveRunAdmissionChoices = jest.fn();
 const mockSeedSystemTemplates = jest.fn();
 const mockResolveInstructionRefs = jest.fn();
+const mockResolveRulesForRun = jest.fn();
+
+jest.mock('../InstructionRuleService', () => ({
+  __esModule: true,
+  default: {
+    resolveForRun: (...args: unknown[]) => mockResolveRulesForRun(...args),
+  },
+}));
 
 jest.mock('server/services/agent/ProviderRegistry', () => ({
   __esModule: true,
@@ -280,6 +288,7 @@ describe('AgentRunPlanResolver', () => {
         hash: `hash-${ref.replace(/[^a-z0-9]/gi, '-')}`,
       }))
     );
+    mockResolveRulesForRun.mockResolvedValue([]);
     mockResolveRunAdmissionChoices.mockResolvedValue({
       metadataPresent: false,
       selectedRuntimeToolChoiceIds: undefined,

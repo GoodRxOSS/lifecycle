@@ -4607,8 +4607,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
             maxMessagesPerSession: { type: 'integer' },
             sessionTTL: { type: 'integer' },
-            additiveRules: { type: 'array', items: { type: 'string' } },
-            systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
             allowedWritePatterns: { type: 'array', items: { type: 'string' } },
@@ -4645,21 +4643,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             sessionTTL: { type: 'integer' },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
             capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
-            additiveRules: { type: 'array', items: { type: 'string' } },
-            systemPromptOverride: { type: 'string', maxLength: 50000 },
             excludedTools: { type: 'array', items: { type: 'string' } },
             excludedFilePatterns: { type: 'array', items: { type: 'string' } },
             allowedWritePatterns: { type: 'array', items: { type: 'string' } },
           },
-        },
-
-        AgentRuntimeAdditiveRulesUpdateRequest: {
-          type: 'object',
-          properties: {
-            additiveRules: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['additiveRules'],
-          additionalProperties: false,
         },
 
         AgentRuntimeApprovalPolicyUpdateRequest: {
@@ -4674,13 +4661,12 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentRuntimeConfigPatchRequest: {
           type: 'object',
           properties: {
-            additiveRules: { type: 'array', items: { type: 'string' } },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
           },
           additionalProperties: false,
           minProperties: 1,
           maxProperties: 1,
-          description: 'Provide exactly one patch target: additiveRules or approvalPolicy.',
+          description: 'Provide exactly one patch target: approvalPolicy.',
         },
 
         AgentRuntimeRepoConfigEntry: {
@@ -5611,6 +5597,128 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                     template: { $ref: '#/components/schemas/AgentInstructionTemplateDetail' },
                   },
                   required: ['template'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AgentInstructionRule: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            agentRef: { type: 'string', description: "Instruction template ref, or 'all' for every agent." },
+            repositoryFullName: { type: 'string', nullable: true },
+            content: { type: 'string' },
+            position: { type: 'integer', minimum: 0 },
+            updatedBy: { type: 'string', nullable: true },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'agentRef', 'repositoryFullName', 'content', 'position', 'updatedBy', 'updatedAt'],
+          additionalProperties: false,
+        },
+
+        AgentInstructionRuleInput: {
+          type: 'object',
+          properties: {
+            agentRef: { type: 'string' },
+            content: { type: 'string', minLength: 1, maxLength: 2000 },
+          },
+          required: ['agentRef', 'content'],
+          additionalProperties: false,
+        },
+
+        ReplaceAdminAgentInstructionRulesRequest: {
+          type: 'object',
+          properties: {
+            repository: { type: 'string', nullable: true },
+            rules: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AgentInstructionRuleInput' },
+              maxItems: 50,
+            },
+          },
+          required: ['rules'],
+          additionalProperties: false,
+        },
+
+        ListAdminAgentInstructionRulesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    rules: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/AgentInstructionRule' },
+                    },
+                  },
+                  required: ['rules'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AdminAgentPromptPreviewPart: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', enum: ['base', 'instructions', 'rules', 'appended'] },
+            label: { type: 'string' },
+            source: { type: 'string' },
+            content: { type: 'string' },
+          },
+          required: ['key', 'label', 'source', 'content'],
+          additionalProperties: false,
+        },
+
+        AdminAgentPromptPreviewSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    agent: {
+                      type: 'object',
+                      properties: {
+                        ref: { type: 'string' },
+                        name: { type: 'string' },
+                      },
+                      required: ['ref', 'name'],
+                      additionalProperties: false,
+                    },
+                    repository: { type: 'string', nullable: true },
+                    parts: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/AdminAgentPromptPreviewPart' },
+                    },
+                    rules: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'integer' },
+                          agentRef: { type: 'string' },
+                          repositoryFullName: { type: 'string', nullable: true },
+                          content: { type: 'string' },
+                        },
+                        required: ['id', 'agentRef', 'repositoryFullName', 'content'],
+                        additionalProperties: false,
+                      },
+                    },
+                    assembled: { type: 'string' },
+                  },
+                  required: ['agent', 'repository', 'parts', 'rules', 'assembled'],
                   additionalProperties: false,
                 },
               },
