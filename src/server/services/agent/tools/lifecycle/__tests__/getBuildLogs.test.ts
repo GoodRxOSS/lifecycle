@@ -87,7 +87,7 @@ describe('GetBuildLogsTool', () => {
     expect(mockListNamespacedPod).not.toHaveBeenCalled();
   });
 
-  it('keeps the end of oversized persisted logs', async () => {
+  it('clamps giant lines and keeps the trailing error of oversized persisted logs', async () => {
     const buildOutput = `${'x'.repeat(20000)}\nERROR: at the very end`;
     mockDeployLookup({
       uuid: 'web-sample-build-1',
@@ -99,9 +99,41 @@ describe('GetBuildLogsTool', () => {
     const result = await tool.execute({ service_name: 'web' });
 
     expect(result.success).toBe(true);
-    expect(result.agentContent).toContain('[... truncated, showing last 15000 of');
+    expect(result.agentContent).toContain('[+19000 more chars]');
     expect(result.agentContent).toContain('ERROR: at the very end');
     expect((result.agentContent as string).length).toBeLessThan(16000);
+  });
+
+  it('searches the entire persisted log with absolute line numbers', async () => {
+    const middle = Array.from({ length: 3000 }, (_, i) => `step ${i}`);
+    middle[1500] = 'npm ERR! peer dependency conflict';
+    mockDeployLookup({
+      uuid: 'web-sample-build-1',
+      status: 'build_failed',
+      buildOutput: middle.join('\n'),
+      build: { namespace: 'env-sample-build-1' },
+    });
+
+    const result = await tool.execute({ service_name: 'web', search: 'peer dependency' });
+
+    expect(result.success).toBe(true);
+    expect(result.agentContent).toContain('1 of 3000 lines match /peer dependency/i');
+    expect(result.agentContent).toContain('1501: npm ERR! peer dependency conflict');
+    expect(result.agentContent).toContain('1500- step 1499');
+  });
+
+  it('rejects an invalid search pattern', async () => {
+    mockDeployLookup({
+      uuid: 'web-sample-build-1',
+      status: 'build_failed',
+      buildOutput: 'line',
+      build: { namespace: 'env-sample-build-1' },
+    });
+
+    const result = await tool.execute({ service_name: 'web', search: '([' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INVALID_PARAMETERS');
   });
 
   it('falls back to live job pod logs when buildOutput is empty', async () => {

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { spawn } from 'child_process';
 import { shellPromise } from 'server/lib/shell';
 import { getLogger } from 'server/lib/logger';
 import { generateCodefreshCmd, constructEcrTag, getCodefreshPipelineIdFromOutput } from 'server/lib/codefresh/utils';
@@ -136,17 +137,73 @@ export async function kubeContextStep({ context, cluster }: { context: string; c
 }
 
 // Typed result so callers can tell "fetched (maybe empty)" from "fetch failed".
-export type GetLogsResult = { ok: true; output: string } | { ok: false; reason: string };
+export type GetLogsResult = { ok: true; output: string; truncatedAtSource: boolean } | { ok: false; reason: string };
 
+const LOG_FETCH_KEEP_TAIL_BYTES = 24 * 1024 * 1024;
+const LOG_FETCH_TIMEOUT_MS = 180_000;
+
+// spawn with an arg array (no shell) and a bounded tail buffer: oversized logs
+// degrade to "kept the last 24MB" instead of failing at exec's maxBuffer.
 export const getLogsResult = async (id: string): Promise<GetLogsResult> => {
-  try {
-    const command = `codefresh logs ${id}`;
-    const output = await shellPromise(command);
-    return { ok: true, output: output ?? '' };
-  } catch (error) {
-    getLogger().error({ error }, `Codefresh: getLogs failed pipelineId=${id}`);
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
-  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result: GetLogsResult) => {
+      if (settled) return;
+      settled = true;
+      if (result.ok === false) {
+        getLogger().error({ reason: result.reason }, `Codefresh: getLogs failed pipelineId=${id}`);
+      }
+      resolve(result);
+    };
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn('codefresh', ['logs', id]);
+    } catch (error) {
+      settle({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let bufferedBytes = 0;
+    let droppedHead = false;
+    let stderrTail = '';
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, LOG_FETCH_TIMEOUT_MS);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      bufferedBytes += chunk.length;
+      while (chunks.length > 1 && bufferedBytes - chunks[0].length >= LOG_FETCH_KEEP_TAIL_BYTES) {
+        bufferedBytes -= chunks.shift()!.length;
+        droppedHead = true;
+      }
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString('utf8')).slice(-2000);
+    });
+
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      settle({ ok: false, reason: error.message });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        settle({ ok: false, reason: `codefresh logs timed out after ${LOG_FETCH_TIMEOUT_MS / 1000}s` });
+        return;
+      }
+      if (code !== 0) {
+        settle({ ok: false, reason: `codefresh logs exited with code ${code}${stderrTail ? `: ${stderrTail}` : ''}` });
+        return;
+      }
+      settle({ ok: true, output: Buffer.concat(chunks).toString('utf8'), truncatedAtSource: droppedHead });
+    });
+  });
 };
 
 // Back-compat string wrapper: failures collapse to '' (existing deploy.ts behavior).

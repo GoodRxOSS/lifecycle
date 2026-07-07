@@ -167,7 +167,7 @@ describe('InstructionTemplateService', () => {
 
     expect([...SYSTEM_INSTRUCTION_TEMPLATE_REFS].sort()).toEqual(builtInRefs);
     expect(SYSTEM_INSTRUCTION_TEMPLATE_DEFINITIONS).toHaveLength(3);
-    expect(debugDefinition?.defaultVersion).toBe(11);
+    expect(debugDefinition?.defaultVersion).toBe(12);
     expect(developDefinition?.defaultVersion).toBe(1);
     expect(freeformDefinition?.defaultVersion).toBe(1);
 
@@ -179,6 +179,7 @@ describe('InstructionTemplateService', () => {
       expect.stringContaining('Triage evidence (collected automatically)')
     );
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('get_build_logs'));
+    expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('search="<regex>"'));
     expect(debugDefinition?.defaultContent).toEqual(expect.stringContaining('previous:true'));
     expect(debugDefinition?.defaultContent).toEqual(
       expect.stringContaining("approving signed-in user's GitHub authorization")
