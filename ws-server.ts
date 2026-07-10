@@ -35,6 +35,7 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { LIFECYCLE_MODE } from './src/shared/config';
+import { isMcpServerEnabled, isAuthEnabled } from './src/server/mcp/config';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import {
@@ -82,6 +83,25 @@ const SESSION_WORKSPACE_EDITOR_PATH_PREFIX = '/api/agent-session/workspace-edito
 const SESSION_WORKSPACE_EDITOR_COOKIE_NAME = 'lfc_session_workspace_editor_auth';
 const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
 const logger = rootLogger.child({ filename: __filename });
+
+// jose (an MCP auth dependency) is ESM-only and loads via require(esm), which needs
+// Node >= 20.19. Loading the handler only when the feature is on keeps older Node 20
+// minors booting with MCP disabled.
+type McpHttpHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string | null | undefined
+) => Promise<boolean>;
+let handleMcpHttpRequest: McpHttpHandler | null = null;
+if (isMcpServerEnabled()) {
+  if (isAuthEnabled() && !process.env.MCP_RESOURCE_URL) {
+    logger.warn(
+      'MCP: MCP_SERVER_ENABLED is true with auth on but MCP_RESOURCE_URL is unset; ' +
+        'token audiences will be validated against a localhost default and all real tokens will be rejected'
+    );
+  }
+  handleMcpHttpRequest = require('./src/server/mcp/handler').handleMcpHttpRequest as McpHttpHandler;
+}
 let sitesGatewayService: SitesService | null = null;
 
 type SessionWorkspaceEditorPathMatch = { sessionId: string; forwardPath: string };
@@ -1292,6 +1312,9 @@ app.prepare().then(() => {
         return;
       }
       if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res, parsedUrl.pathname))) {
+        return;
+      }
+      if (handleMcpHttpRequest && (await handleMcpHttpRequest(req, res, parsedUrl.pathname))) {
         return;
       }
       if (
