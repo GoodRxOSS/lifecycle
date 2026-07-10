@@ -36,6 +36,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { LIFECYCLE_MODE } from './src/shared/config';
 import { isMcpServerEnabled, isAuthEnabled } from './src/server/mcp/config';
+import { handleMcpHttpRequest as mcpHttpRequestHandler } from './src/server/mcp/handler';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import {
@@ -84,14 +85,15 @@ const SESSION_WORKSPACE_EDITOR_COOKIE_NAME = 'lfc_session_workspace_editor_auth'
 const SESSION_WORKSPACE_EDITOR_PORT = parseInt(process.env.AGENT_SESSION_WORKSPACE_EDITOR_PORT || '13337', 10);
 const logger = rootLogger.child({ filename: __filename });
 
-// jose (an MCP auth dependency) is ESM-only and loads via require(esm), which needs
-// Node >= 20.19. Loading the handler only when the feature is on keeps older Node 20
-// minors booting with MCP disabled.
 type McpHttpHandler = (
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string | null | undefined
 ) => Promise<boolean>;
+// The MCP feature flag still gates whether the handler is *wired up*; the module
+// itself is imported statically. (It was previously loaded via a deferred require to
+// keep the ESM-only jose / MCP SDK off the boot path on Node < 20.19, but all deploys
+// now run Node 22 — where require(esm) is supported — so the workaround is unnecessary.)
 let handleMcpHttpRequest: McpHttpHandler | null = null;
 if (isMcpServerEnabled()) {
   if (isAuthEnabled() && !process.env.MCP_RESOURCE_URL) {
@@ -100,7 +102,7 @@ if (isMcpServerEnabled()) {
         'token audiences will be validated against a localhost default and all real tokens will be rejected'
     );
   }
-  handleMcpHttpRequest = require('./src/server/mcp/handler').handleMcpHttpRequest as McpHttpHandler;
+  handleMcpHttpRequest = mcpHttpRequestHandler;
 }
 let sitesGatewayService: SitesService | null = null;
 
