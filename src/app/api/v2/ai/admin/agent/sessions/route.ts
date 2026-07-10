@@ -49,7 +49,7 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *         name: status
  *         schema:
  *           type: string
- *           enum: [all, starting, active, ended, error]
+ *           enum: [all, starting, active, archived, error]
  *           default: all
  *       - in: query
  *         name: repo
@@ -98,7 +98,7 @@ const getHandler = async (req: NextRequest) => {
   const result = await AgentAdminService.listSessions({
     page,
     limit,
-    status: status as 'all' | 'starting' | 'active' | 'ended' | 'error',
+    status: status as 'all' | 'starting' | 'active' | 'archived' | 'error',
     repo,
     user,
     buildUuid,

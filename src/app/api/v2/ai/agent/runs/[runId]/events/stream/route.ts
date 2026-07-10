@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import 'server/lib/dependencies';
+import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse } from 'server/lib/response';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import AgentRunEventService from 'server/services/agent/RunEventService';
@@ -115,7 +116,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runI
     throw error;
   }
 
-  return new Response(AgentRunEventService.createCanonicalRunEventStream(run.uuid, afterSequence), {
+  return new NextResponse(AgentRunEventService.createCanonicalRunEventStream(run.uuid, afterSequence), {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -126,4 +127,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ runI
   });
 };
 
-export const GET = getHandler;
+export const GET = createApiHandler(getHandler);

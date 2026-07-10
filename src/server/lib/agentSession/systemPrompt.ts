@@ -20,6 +20,7 @@ import Deploy from 'server/models/Deploy';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
 import type { LifecycleConfig } from 'server/models/yaml';
 import GlobalConfigService from 'server/services/globalConfig';
+import { buildTriageDossier } from './triageDossier';
 
 export interface AgentSessionPromptServiceContext {
   name: string;
@@ -29,6 +30,7 @@ export interface AgentSessionPromptServiceContext {
   publicUrl?: string;
   repo?: string;
   branch?: string;
+  dependsOn?: string[];
   deployUuid?: string;
   serviceSha?: string;
   dockerfilePath?: string;
@@ -82,15 +84,17 @@ export interface AgentSessionPromptContext {
   lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   services: AgentSessionPromptServiceContext[];
   selectedDeploy?: AgentSessionPromptServiceContext;
+  userSelectedServices?: boolean;
   diagnosticServices?: AgentSessionPromptServiceContext[];
-  skillsAvailable?: boolean;
-  toolLines?: string[];
+  triage?: string;
 }
 
 type SessionPromptLookupContext = {
   sessionDbId: number;
   namespace?: string | null;
   buildUuid?: string | null;
+  // Triage does live k8s I/O; callers that only need DB state (fingerprint checks) opt out.
+  includeTriage?: boolean;
 };
 
 function normalizeOptionalString(value: unknown): string | undefined {
@@ -128,8 +132,14 @@ function formatDetails(details: Array<string | undefined>): string {
   return details.filter((value): value is string => Boolean(value)).join(', ');
 }
 
-function formatOptionalString(value: string | undefined): string {
-  return value || '<none>';
+const STATUS_MESSAGE_MAX_CHARS = 400;
+
+export function formatStatusMessage(value: string | undefined): string {
+  if (!value) {
+    return '<none>';
+  }
+
+  return value.length > STATUS_MESSAGE_MAX_CHARS ? `${value.slice(0, STATUS_MESSAGE_MAX_CHARS)}…` : value;
 }
 
 function formatOptionalStringArray(value: string[] | undefined): string {
@@ -144,148 +154,69 @@ function formatOptionalBoolean(value: boolean | undefined): string {
   return value === undefined ? '<unknown>' : String(value);
 }
 
-export function buildAgentSessionDynamicSystemPrompt(context: AgentSessionPromptContext): string {
-  const lines = ['Initial Lifecycle snapshot:'];
+export type EnvironmentServiceLineDetail = 'full' | 'roster';
 
-  // Surface namespace (top-level or from build) prominently for get_k8s_resources/get_pod_logs.
-  const namespace = context.namespace || context.build?.namespace;
-  if (namespace) {
-    lines.push(`- namespace: ${namespace}`);
-  }
+export function formatEnvironmentServiceLine(
+  service: AgentSessionPromptServiceContext,
+  detail: EnvironmentServiceLineDetail
+): string {
+  const full = detail === 'full';
+  // Edges surface only where they inform diagnosis; healthy roster lines stay lean.
+  const showDependsOn = Boolean(service.dependsOn?.length) && (full || service.status !== 'deployed');
+  const details = formatDetails([
+    service.deployUuid ? `deployUuid=${service.deployUuid}` : undefined,
+    service.active !== undefined ? `active=${service.active}` : undefined,
+    service.status ? `status=${service.status}` : undefined,
+    `statusMessage=${formatStatusMessage(service.statusMessage)}`,
+    showDependsOn ? `dependsOn=${service.dependsOn!.join('|')}` : undefined,
+    service.repo ? `repo=${service.repo}` : undefined,
+    service.branch ? `branch=${service.branch}` : undefined,
+    full && service.serviceSha ? `serviceSha=${service.serviceSha}` : undefined,
+    full && service.dockerfilePath ? `dockerfilePath=${service.dockerfilePath}` : undefined,
+    full && service.initDockerfilePath ? `initDockerfilePath=${service.initDockerfilePath}` : undefined,
+    full && service.deployableType ? `type=${service.deployableType}` : undefined,
+    full && service.source ? `source=${service.source}` : undefined,
+    full && service.chartName ? `chartName=${service.chartName}` : undefined,
+    full && service.chartRepoUrl ? `chartRepoUrl=${service.chartRepoUrl}` : undefined,
+    full && service.chartValueFiles?.length ? `chartValueFiles=${service.chartValueFiles.join('|')}` : undefined,
+    service.publicUrl ? `publicUrl=${service.publicUrl}` : undefined,
+    service.dockerImage ? `dockerImage=${service.dockerImage}` : undefined,
+    service.buildPipelineId ? `buildPipelineId=${service.buildPipelineId}` : undefined,
+    service.deployPipelineId ? `deployPipelineId=${service.deployPipelineId}` : undefined,
+    full && service.workspacePath ? `workspacePath=${service.workspacePath}` : undefined,
+    full && service.workDir ? `workDir=${service.workDir}` : undefined,
+  ]);
 
-  if (context.buildUuid) {
-    lines.push(`- buildUuid: ${context.buildUuid}`);
-  }
+  return `- ${service.name}${details ? `: ${details}` : ''}`;
+}
 
-  if (context.lifecycleConfig) {
-    const { status, path } = context.lifecycleConfig;
-    lines.push(`- lifecycleConfig: ${status} (${path})`);
-    if (context.lifecycleConfig.declaredServices?.length) {
-      lines.push(`- declaredServices: ${context.lifecycleConfig.declaredServices.join(', ')}`);
-    }
-  }
+export function formatEnvironmentBuildLine(build: AgentSessionPromptBuildContext): string {
+  const details = formatDetails([
+    build.status ? `status=${build.status}` : undefined,
+    `statusMessage=${formatStatusMessage(build.statusMessage)}`,
+    build.namespace ? `namespace=${build.namespace}` : undefined,
+    build.sha ? `sha=${build.sha}` : undefined,
+  ]);
 
-  if (context.gatheredAt) {
-    lines.push(`- observedAt: ${context.gatheredAt}`, '- source: lifecycle_db');
-  }
+  return `- build=${build.uuid}${details ? `: ${details}` : ''}`;
+}
 
-  if (context.build) {
-    const details = formatDetails([
-      context.build.status ? `buildStatusAtStart=${context.build.status}` : undefined,
-      `buildStatusMessageAtStart=${formatOptionalString(context.build.statusMessage)}`,
-      context.build.namespace ? `namespace=${context.build.namespace}` : undefined,
-      context.build.sha ? `sha=${context.build.sha}` : undefined,
-    ]);
-    lines.push(`- build=${context.build.uuid}${details ? `: ${details}` : ''}`);
-  }
+export function formatEnvironmentPullRequestLine(pr: AgentSessionPromptPullRequestContext): string | undefined {
+  const details = formatDetails([
+    pr.fullName ? `repo=${pr.fullName}` : undefined,
+    pr.branchName ? `branch=${pr.branchName}` : undefined,
+    pr.pullRequestNumber != null ? `number=${pr.pullRequestNumber}` : undefined,
+    pr.url ? `url=${pr.url}` : undefined,
+    pr.status ? `status=${pr.status}` : undefined,
+    `labels=${formatOptionalStringArray(pr.labels)}`,
+    `deployOnUpdate=${formatOptionalBoolean(pr.deployOnUpdate)}`,
+    `deployLabels=${formatOptionalStringArray(pr.deployLabels)}`,
+    `disabledLabels=${formatOptionalStringArray(pr.disabledLabels)}`,
+    pr.latestCommit ? `latestCommit=${pr.latestCommit}` : undefined,
+    pr.repositoryUrl ? `repositoryUrl=${pr.repositoryUrl}` : undefined,
+  ]);
 
-  if (context.pullRequest) {
-    const pr = context.pullRequest;
-    const details = formatDetails([
-      pr.fullName ? `repo=${pr.fullName}` : undefined,
-      pr.branchName ? `branch=${pr.branchName}` : undefined,
-      pr.pullRequestNumber != null ? `number=${pr.pullRequestNumber}` : undefined,
-      pr.url ? `url=${pr.url}` : undefined,
-      pr.status ? `statusAtStart=${pr.status}` : undefined,
-      `labelsAtStart=${formatOptionalStringArray(pr.labels)}`,
-      `deployOnUpdateAtStart=${formatOptionalBoolean(pr.deployOnUpdate)}`,
-      `deployLabels=${formatOptionalStringArray(pr.deployLabels)}`,
-      `disabledLabels=${formatOptionalStringArray(pr.disabledLabels)}`,
-      pr.latestCommit ? `latestCommit=${pr.latestCommit}` : undefined,
-      pr.repositoryUrl ? `repositoryUrl=${pr.repositoryUrl}` : undefined,
-    ]);
-
-    if (details) {
-      lines.push('Pull request:', `- ${details}`);
-    }
-  }
-
-  if (!context.selectedDeploy && context.services.length > 0) {
-    lines.push('Selected services:');
-
-    const services = [...context.services].sort((left, right) => left.name.localeCompare(right.name));
-    for (const service of services) {
-      const details = [
-        service.deployUuid ? `deployUuid=${service.deployUuid}` : null,
-        service.active !== undefined ? `activeAtStart=${service.active}` : null,
-        service.status ? `statusAtStart=${service.status}` : null,
-        service.statusMessage ? `statusMessageAtStart=${service.statusMessage}` : null,
-        service.repo ? `repo=${service.repo}` : null,
-        service.branch ? `branch=${service.branch}` : null,
-        service.serviceSha ? `serviceSha=${service.serviceSha}` : null,
-        service.dockerfilePath ? `dockerfilePath=${service.dockerfilePath}` : null,
-        service.initDockerfilePath ? `initDockerfilePath=${service.initDockerfilePath}` : null,
-        service.deployableType ? `type=${service.deployableType}` : null,
-        service.source ? `source=${service.source}` : null,
-        service.publicUrl ? `publicUrl=${service.publicUrl}` : null,
-        service.workspacePath ? `workspacePath=${service.workspacePath}` : null,
-        service.workDir ? `workDir=${service.workDir}` : null,
-      ].filter((value): value is string => Boolean(value));
-
-      lines.push(`- ${service.name}${details.length > 0 ? `: ${details.join(', ')}` : ''}`);
-    }
-  }
-
-  if (context.selectedDeploy) {
-    const service = context.selectedDeploy;
-    const details = formatDetails([
-      service.deployUuid ? `deployUuid=${service.deployUuid}` : undefined,
-      service.active !== undefined ? `activeAtStart=${service.active}` : undefined,
-      service.status ? `statusAtStart=${service.status}` : undefined,
-      `statusMessageAtStart=${formatOptionalString(service.statusMessage)}`,
-      service.repo ? `repo=${service.repo}` : undefined,
-      service.branch ? `branch=${service.branch}` : undefined,
-      service.serviceSha ? `serviceSha=${service.serviceSha}` : undefined,
-      service.dockerfilePath ? `dockerfilePath=${service.dockerfilePath}` : undefined,
-      service.initDockerfilePath ? `initDockerfilePath=${service.initDockerfilePath}` : undefined,
-      service.deployableType ? `type=${service.deployableType}` : undefined,
-      service.source ? `source=${service.source}` : undefined,
-      service.chartName ? `chartName=${service.chartName}` : undefined,
-      service.chartRepoUrl ? `chartRepoUrl=${service.chartRepoUrl}` : undefined,
-      service.chartValueFiles?.length ? `chartValueFiles=${service.chartValueFiles.join('|')}` : undefined,
-      service.publicUrl ? `publicUrl=${service.publicUrl}` : undefined,
-      service.dockerImage ? `dockerImage=${service.dockerImage}` : undefined,
-      service.buildPipelineId ? `buildPipelineId=${service.buildPipelineId}` : undefined,
-      service.deployPipelineId ? `deployPipelineId=${service.deployPipelineId}` : undefined,
-    ]);
-
-    lines.push('DEPLOYS — selected:', `- ${service.name}${details ? `: ${details}` : ''}`);
-  }
-
-  if (context.diagnosticServices?.length) {
-    lines.push('DEPLOYS — roster:');
-
-    const diagnosticServices = [...context.diagnosticServices].sort((left, right) =>
-      left.name.localeCompare(right.name)
-    );
-    for (const service of diagnosticServices) {
-      const details = formatDetails([
-        service.deployUuid ? `deployUuid=${service.deployUuid}` : undefined,
-        service.active !== undefined ? `activeAtStart=${service.active}` : undefined,
-        service.status ? `statusAtStart=${service.status}` : undefined,
-        `statusMessageAtStart=${formatOptionalString(service.statusMessage)}`,
-        service.repo ? `repo=${service.repo}` : undefined,
-        service.branch ? `branch=${service.branch}` : undefined,
-        service.publicUrl ? `publicUrl=${service.publicUrl}` : undefined,
-        service.dockerImage ? `dockerImage=${service.dockerImage}` : undefined,
-        service.buildPipelineId ? `buildPipelineId=${service.buildPipelineId}` : undefined,
-        service.deployPipelineId ? `deployPipelineId=${service.deployPipelineId}` : undefined,
-      ]);
-
-      lines.push(`- ${service.name}${details ? `: ${details}` : ''}`);
-    }
-  }
-
-  if (context.skillsAvailable) {
-    lines.push('- equipped skills: use skills.list to discover them and skills.learn to load a skill before using it');
-  }
-
-  if (context.toolLines?.length) {
-    lines.push('- equipped tools:');
-    lines.push(...context.toolLines.map((line) => `  ${line}`));
-  }
-
-  return lines.join('\n');
+  return details ? `- ${details}` : undefined;
 }
 
 export function combineAgentSessionAppendSystemPrompt(
@@ -302,6 +233,7 @@ export function combineAgentSessionAppendSystemPrompt(
 type BuildDiagnosticContext = {
   source: { repo?: string; branch?: string };
   build?: AgentSessionPromptBuildContext;
+  buildRow?: Build;
   pullRequest?: AgentSessionPromptPullRequestContext;
   lifecycleConfig?: AgentSessionPromptLifecycleConfigContext;
   deploys: Deploy[];
@@ -379,6 +311,12 @@ function buildPullRequestUrl(fullName?: string, pullRequestNumber?: number): str
   return `https://github.com/${fullName}/pull/${pullRequestNumber}`;
 }
 
+// Declared dependency edges, minus self-references the deployment manager also strips.
+function normalizeDependsOn(serviceName: string, value: unknown): string[] | undefined {
+  const dependsOn = normalizeStringArray(value)?.filter((dependency) => dependency !== serviceName);
+  return dependsOn?.length ? dependsOn : undefined;
+}
+
 function formatDeployDiagnosticService(
   deploy: Deploy,
   buildSource: { repo?: string; branch?: string }
@@ -392,6 +330,8 @@ function formatDeployDiagnosticService(
     return null;
   }
 
+  const dependsOn = normalizeDependsOn(name, deploy.deployable?.deploymentDependsOn);
+
   return {
     name,
     active: typeof deploy.active === 'boolean' ? deploy.active : undefined,
@@ -401,6 +341,7 @@ function formatDeployDiagnosticService(
     publicUrl: formatPublicUrl(deploy.publicUrl),
     repo: normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo,
     branch: normalizeOptionalString(deploy.branchName) || buildSource.branch,
+    ...(dependsOn ? { dependsOn } : {}),
     dockerImage: normalizeOptionalString(deploy.dockerImage),
     buildPipelineId: normalizeOptionalString(deploy.buildPipelineId),
     deployPipelineId: normalizeOptionalString(deploy.deployPipelineId),
@@ -433,6 +374,7 @@ async function resolveBuildDiagnosticContext(
   return {
     source,
     lifecycleConfig,
+    buildRow: build || undefined,
     build: build
       ? {
           uuid: build.uuid,
@@ -464,6 +406,27 @@ async function resolveBuildDiagnosticContext(
   };
 }
 
+// Triage-only resolution for callers that already have a DB-only context and later decide they need evidence.
+export async function resolveAgentSessionTriage(buildUuid: string | null | undefined): Promise<string | null> {
+  const normalizedBuildUuid = normalizeOptionalString(buildUuid);
+  if (!normalizedBuildUuid) {
+    return null;
+  }
+
+  const build = await Build.query()
+    .findOne({ uuid: normalizedBuildUuid })
+    .withGraphFetched('[deploys.[deployable, service]]');
+  if (!build) {
+    return null;
+  }
+
+  try {
+    return await buildTriageDossier(build, build.deploys || []);
+  } catch (error) {
+    return `- triage: unavailable (${(error as Error)?.message || 'unknown error'})`;
+  }
+}
+
 export async function resolveAgentSessionPromptContext(
   lookup: SessionPromptLookupContext
 ): Promise<AgentSessionPromptContext> {
@@ -483,6 +446,7 @@ export async function resolveAgentSessionPromptContext(
   if (session?.selectedServices?.length) {
     services = session.selectedServices.map((service) => {
       const deploy = deployById.get(service.deployId);
+      const dependsOn = normalizeDependsOn(service.name, deploy?.deployable?.deploymentDependsOn);
 
       return {
         name: service.name,
@@ -490,6 +454,7 @@ export async function resolveAgentSessionPromptContext(
         publicUrl: formatPublicUrl(deploy?.publicUrl),
         repo: normalizeOptionalString(service.repo),
         branch: normalizeOptionalString(service.branch),
+        ...(dependsOn ? { dependsOn } : {}),
         ...(normalizeOptionalString(service.deployUuid)
           ? { deployUuid: normalizeOptionalString(service.deployUuid) }
           : {}),
@@ -545,6 +510,8 @@ export async function resolveAgentSessionPromptContext(
             workDir = normalizeOptionalString(yamlService?.dev?.workDir);
           }
 
+          const dependsOn = normalizeDependsOn(serviceName, deploy.deployable?.deploymentDependsOn);
+
           return {
             name: serviceName,
             active: typeof deploy.active === 'boolean' ? deploy.active : undefined,
@@ -554,6 +521,7 @@ export async function resolveAgentSessionPromptContext(
             publicUrl: formatPublicUrl(deploy.publicUrl),
             repo: repositoryName,
             branch: branchName,
+            ...(dependsOn ? { dependsOn } : {}),
             dockerImage: normalizeOptionalString(deploy.dockerImage),
             buildPipelineId: normalizeOptionalString(deploy.buildPipelineId),
             deployPipelineId: normalizeOptionalString(deploy.deployPipelineId),
@@ -564,6 +532,20 @@ export async function resolveAgentSessionPromptContext(
     ).filter((service): service is AgentSessionPromptServiceContext => Boolean(service));
   }
 
+  // Only present a "selected" deploy when the session points at one (explicit selection or
+  // devMode-attached deploys) — the all-build-deploys fallback is DB-ordered and would bias
+  // the model toward an arbitrary service.
+  const hasUserSelection = Boolean(session?.selectedServices?.length) || deploys.length > 0;
+
+  let triage: string | undefined;
+  if (buildSource.buildRow && lookup.includeTriage !== false) {
+    try {
+      triage = (await buildTriageDossier(buildSource.buildRow, buildSource.deploys)) ?? undefined;
+    } catch (error) {
+      triage = `- triage: unavailable (${(error as Error)?.message || 'unknown error'})`;
+    }
+  }
+
   return {
     namespace: lookup.namespace,
     buildUuid: lookup.buildUuid,
@@ -572,8 +554,9 @@ export async function resolveAgentSessionPromptContext(
     pullRequest: buildSource.pullRequest,
     ...(buildSource.lifecycleConfig ? { lifecycleConfig: buildSource.lifecycleConfig } : {}),
     services,
-    ...(services[0]?.deployUuid ? { selectedDeploy: services[0] } : {}),
+    userSelectedServices: hasUserSelection,
+    ...(hasUserSelection && services[0]?.deployUuid ? { selectedDeploy: services[0] } : {}),
     diagnosticServices: buildSource.diagnosticServices,
-    skillsAvailable: Boolean(session?.skillPlan?.skills?.length),
+    ...(triage ? { triage } : {}),
   };
 }

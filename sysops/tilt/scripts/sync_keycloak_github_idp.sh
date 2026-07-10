@@ -20,6 +20,7 @@ github_idp_secret="${2:-lifecycle-keycloak-github-idp}"
 keycloak_url="${KEYCLOAK_URL:-http://localhost:8081}"
 
 github_client_id="$(kubectl -n "$namespace" get secret "$github_idp_secret" -o jsonpath='{.data.clientId}' | base64 --decode)"
+github_default_scope="${KEYCLOAK_GITHUB_DEFAULT_SCOPE:-repo user:email}"
 
 if [ -z "$github_client_id" ] || [ "$github_client_id" = "local-github-client-id" ]; then
   echo "Keycloak: GitHub IDP sync skipped reason=github_client_id_missing"
@@ -57,13 +58,14 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
 
     if [ "$status" = "200" ]; then
       current_client_id="$(jq -r '.config.clientId // ""' "$tmp_current")"
-      if [ "$current_client_id" = "$github_client_id" ]; then
+      current_default_scope="$(jq -r '.config.defaultScope // ""' "$tmp_current")"
+      if [ "$current_client_id" = "$github_client_id" ] && [ "$current_default_scope" = "$github_default_scope" ]; then
         echo "Keycloak: GitHub IDP already synced"
         exit 0
       fi
 
-      jq --arg client_id "$github_client_id" \
-        '.config.clientId = $client_id | .config.clientSecret = "${vault.github-client-secret}"' \
+      jq --arg client_id "$github_client_id" --arg default_scope "$github_default_scope" \
+        '.config.clientId = $client_id | .config.clientSecret = "${vault.github-client-secret}" | .config.defaultScope = $default_scope' \
         "$tmp_current" > "$tmp_updated"
 
       update_status="$(curl -sS --max-time 10 -o /tmp/keycloak-github-idp-sync.out -w '%{http_code}' -X PUT \

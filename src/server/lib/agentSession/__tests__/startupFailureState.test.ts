@@ -224,14 +224,14 @@ describe('startupFailureState', () => {
 
   it('lets an explicit code override the AppError code and stage default', () => {
     const failure = buildWorkspaceRuntimeFailure({
-      error: new Error('Workspace provisioning timed out'),
+      error: new Error('Workspace startup timed out'),
       stage: 'connect_runtime',
       origin: 'chat_runtime',
       retryable: true,
-      code: 'workspace_provisioning_timeout',
+      code: 'workspace_startup_timeout',
     });
 
-    expect(failure.code).toBe('workspace_provisioning_timeout');
+    expect(failure.code).toBe('workspace_startup_timeout');
     expect(failure.retryable).toBe(true);
   });
 

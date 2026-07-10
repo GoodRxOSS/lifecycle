@@ -26,9 +26,17 @@ import type { ResolvedMcpServer } from 'server/services/agentRuntime/mcp/types';
 import { buildProposedFileChanges, buildResultFileChanges, didToolResultFail } from './fileChanges';
 import { buildAgentToolKey } from './toolKeys';
 import type { AgentRuntimeToolMetadata } from './toolMetadata';
-import { recordToolMetadata, redactMcpDefaultArgs, toAiDynamicTool, toAiJsonSchema } from './capabilityToolHelpers';
-import type { ToolExecutionHooks } from './capabilityToolHelpers';
+import {
+  recordToolApproval,
+  recordToolMetadata,
+  redactMcpDefaultArgs,
+  toAiDynamicTool,
+  toAiJsonSchema,
+  toAiRuntimeToolContextSchema,
+} from './capabilityToolHelpers';
+import type { AgentRuntimeToolApprovalConfig, ToolExecutionHooks } from './capabilityToolHelpers';
 import { getFileChangePreviewChars } from './chatWorkspaceToolRegistration';
+import { buildAgentRuntimeToolContextFromMetadataInput, resolveAgentRuntimeToolContext } from './runtimeContext';
 
 export function registerGenericMcpTool({
   tools,
@@ -42,6 +50,7 @@ export function registerGenericMcpTool({
   catalogCapabilityId,
   hooks,
   toolMetadata,
+  toolApproval,
 }: {
   tools: ToolSet;
   session: AgentSession;
@@ -54,13 +63,23 @@ export function registerGenericMcpTool({
   catalogCapabilityId: AgentCapabilityCatalogId;
   hooks?: ToolExecutionHooks;
   toolMetadata?: AgentRuntimeToolMetadata[];
+  toolApproval?: AgentRuntimeToolApprovalConfig;
 }) {
   const toolKey = buildAgentToolKey(server.slug, exposedToolName);
+  const metadataInput = {
+    toolKey,
+    serverSlug: server.slug,
+    sourceToolName: exposedToolName,
+    catalogCapabilityId,
+    capabilityKey,
+    approvalMode: mode,
+  };
+  const fallbackToolContext = buildAgentRuntimeToolContextFromMetadataInput(metadataInput);
 
   tools[toolKey] = toAiDynamicTool({
     description,
     inputSchema: toAiJsonSchema(discoveredTool.inputSchema as Record<string, unknown>),
-    needsApproval: mode === 'require_approval',
+    contextSchema: toAiRuntimeToolContextSchema(),
     onInputAvailable: async ({ input, toolCallId }) => {
       if (!toolCallId) {
         return;
@@ -74,7 +93,7 @@ export function registerGenericMcpTool({
       const auditArgs = redactMcpDefaultArgs(runtimeArgs, server.defaultArgs);
       const changes = buildProposedFileChanges({
         toolCallId,
-        sourceTool: exposedToolName,
+        sourceTool: fallbackToolContext.sourceToolName,
         input: auditArgs,
         previewChars: await getFileChangePreviewChars(),
       });
@@ -84,6 +103,7 @@ export function registerGenericMcpTool({
       }
     },
     execute: async (input, context) => {
+      const runtimeToolContext = resolveAgentRuntimeToolContext(context?.context, fallbackToolContext);
       const toolCallId = context?.toolCallId;
       const runtimeArgs = applyMcpDefaultToolArgs(
         discoveredTool.inputSchema as Record<string, unknown>,
@@ -93,11 +113,11 @@ export function registerGenericMcpTool({
       const auditArgs = redactMcpDefaultArgs(runtimeArgs, server.defaultArgs);
       const audit: AgentToolAuditRecord = {
         source: 'mcp',
-        serverSlug: server.slug,
-        toolName: exposedToolName,
+        serverSlug: runtimeToolContext.serverSlug,
+        toolName: runtimeToolContext.sourceToolName,
         toolCallId,
         args: auditArgs,
-        capabilityKey,
+        capabilityKey: runtimeToolContext.capabilityKey,
       };
 
       await hooks?.onToolStarted?.(audit);
@@ -120,7 +140,7 @@ export function registerGenericMcpTool({
         if (toolCallId) {
           const changes = buildResultFileChanges({
             toolCallId,
-            sourceTool: exposedToolName,
+            sourceTool: runtimeToolContext.sourceToolName,
             input: auditArgs,
             result,
             failed,
@@ -146,7 +166,7 @@ export function registerGenericMcpTool({
         if (toolCallId) {
           const changes = buildResultFileChanges({
             toolCallId,
-            sourceTool: exposedToolName,
+            sourceTool: runtimeToolContext.sourceToolName,
             input: auditArgs,
             result: {
               error: errorMessage,
@@ -172,10 +192,6 @@ export function registerGenericMcpTool({
       }
     },
   });
-  recordToolMetadata(toolMetadata, {
-    toolKey,
-    catalogCapabilityId,
-    capabilityKey,
-    approvalMode: mode,
-  });
+  recordToolMetadata(toolMetadata, metadataInput);
+  recordToolApproval(toolApproval, { toolKey, mode });
 }

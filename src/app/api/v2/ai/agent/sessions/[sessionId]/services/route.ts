@@ -102,7 +102,7 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                     - lastActivity
  *                     - createdAt
  *                     - updatedAt
- *                     - endedAt
+ *                     - archivedAt
  *                     - startupFailure
  *                   properties:
  *                     id:
@@ -128,7 +128,7 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                       type: string
  *                     status:
  *                       type: string
- *                       enum: [starting, active, ended, error]
+ *                       enum: [starting, active, archived, error]
  *                     repo:
  *                       type: string
  *                       nullable: true
@@ -200,7 +200,7 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
  *                     updatedAt:
  *                       type: string
  *                       format: date-time
- *                     endedAt:
+ *                     archivedAt:
  *                       type: string
  *                       nullable: true
  *                       format: date-time

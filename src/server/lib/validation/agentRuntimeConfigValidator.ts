@@ -35,13 +35,9 @@ export class AgentRuntimeConfigValidationError extends Error {}
 function validateSharedConfigFields(
   config: Pick<
     AgentRuntimeConfig,
-    'systemPromptOverride' | 'excludedTools' | 'excludedFilePatterns' | 'capabilityPolicy' | 'customAgentCreationPolicy'
+    'excludedTools' | 'excludedFilePatterns' | 'capabilityPolicy' | 'customAgentCreationPolicy'
   >
 ): void {
-  if (config.systemPromptOverride !== undefined && config.systemPromptOverride.length > 50000) {
-    throw new AgentRuntimeConfigValidationError('systemPromptOverride exceeds maximum length of 50000 characters');
-  }
-
   if (config.excludedTools && config.excludedTools.length > 0) {
     for (const tool of config.excludedTools) {
       if (CORE_TOOLS.includes(tool)) {

@@ -39,6 +39,60 @@ function readBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function readPositiveInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function readIterationLimit(error: Record<string, unknown>, usageSummary?: Record<string, unknown>): number | null {
+  const maxIterations = readPositiveInteger(asRecord(error.details).maxIterations);
+  if (!maxIterations) {
+    return null;
+  }
+
+  const observedSteps = readPositiveInteger(usageSummary?.steps);
+  if (observedSteps !== null && observedSteps < maxIterations) {
+    return null;
+  }
+
+  return maxIterations;
+}
+
+function resolveTerminalErrorMessage(
+  error: Record<string, unknown>,
+  fallbackMessage: string,
+  usageSummary?: Record<string, unknown>
+): string {
+  if (readString(error.code) === 'max_iterations_exceeded') {
+    const maxIterations = readIterationLimit(error, usageSummary);
+    if (maxIterations) {
+      return `The agent reached the ${maxIterations}-step limit before it finished. Send a follow-up to continue.`;
+    }
+
+    return 'The agent reached its step limit before it finished. Send a follow-up to continue.';
+  }
+
+  if (readString(error.code) === 'run_token_budget_exceeded') {
+    // Mirrors the UI fold byte-for-byte (chunk-from-event parity contract).
+    const details =
+      error.details && typeof error.details === 'object' ? (error.details as Record<string, unknown>) : null;
+    const maxRunInputTokens =
+      typeof details?.maxRunInputTokens === 'number' &&
+      Number.isInteger(details.maxRunInputTokens) &&
+      details.maxRunInputTokens > 0
+        ? details.maxRunInputTokens
+        : null;
+    if (maxRunInputTokens) {
+      return `The agent used its ${maxRunInputTokens.toLocaleString(
+        'en-US'
+      )}-token input budget for this response. Send a follow-up to continue with a fresh budget.`;
+    }
+
+    return 'The agent used its input-token budget for this response. Send a follow-up to continue with a fresh budget.';
+  }
+
+  return readString(error.message) || fallbackMessage;
+}
+
 function pickDefined(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
 
@@ -215,9 +269,22 @@ export function toChunkEvents(chunk: AgentUiMessageChunk): ChunkEvent[] {
         {
           eventType: 'approval.requested',
           payload: {
-            ...pickDefined(chunkRecord, ['actionId']),
+            // Without isAutomatic/signature an auto-approval replays as a pending manual approval.
+            ...pickDefined(chunkRecord, ['actionId', 'isAutomatic', 'signature']),
             approvalId: chunk.approvalId,
             toolCallId: chunk.toolCallId,
+          },
+        },
+      ];
+    case 'tool-approval-response':
+      // In-stream auto-approval responses persist as the same approval.responded event the manual path writes.
+      return [
+        {
+          eventType: 'approval.responded',
+          payload: {
+            ...pickDefined(chunkRecord, ['reason', 'isAutomatic', 'providerExecuted', 'providerMetadata']),
+            approvalId: chunk.approvalId,
+            approved: chunk.approved,
           },
         },
       ];
@@ -473,6 +540,22 @@ export function chunkFromEvent(event: AgentRunEvent): AgentUiMessageChunk | null
         actionId: readString(payload.actionId),
         approvalId,
         toolCallId,
+        ...(payload.isAutomatic === true ? { isAutomatic: true } : {}),
+        signature: readString(payload.signature),
+      });
+    }
+    case 'approval.responded': {
+      const approvalId = readString(payload.approvalId);
+      if (!approvalId || typeof payload.approved !== 'boolean') {
+        return null;
+      }
+
+      // The fold carries isAutomatic from the request part; the response chunk mirrors the SDK shape.
+      return compactChunk({
+        type: 'tool-approval-response',
+        approvalId,
+        approved: payload.approved,
+        reason: readString(payload.reason),
       });
     }
     case 'tool.file_change':
@@ -546,6 +629,17 @@ export function chunkFromEvent(event: AgentRunEvent): AgentUiMessageChunk | null
         finishReason: readString(payload.finishReason),
         messageMetadata: payload.metadata,
       });
+    case 'run.transitioned':
+      return compactChunk({
+        type: 'finish',
+        finishReason: readString(payload.finishReason) ?? 'stop',
+        messageMetadata: {
+          ...(payload.metadata && typeof payload.metadata === 'object'
+            ? (payload.metadata as Record<string, unknown>)
+            : {}),
+          transition: payload.transition && typeof payload.transition === 'object' ? payload.transition : {},
+        },
+      });
     case 'run.aborted':
       return compactChunk({
         type: 'abort',
@@ -558,9 +652,14 @@ export function chunkFromEvent(event: AgentRunEvent): AgentUiMessageChunk | null
       });
     case 'run.failed': {
       const error = asRecord(payload.error);
+      const usageSummary = asRecord(payload.usageSummary);
       return compactChunk({
         type: 'error',
-        errorText: readString(error.message) || readString(payload.errorText) || 'Agent run failed.',
+        errorText: resolveTerminalErrorMessage(
+          error,
+          readString(payload.errorText) || 'Agent run failed.',
+          usageSummary
+        ),
       });
     }
     default:

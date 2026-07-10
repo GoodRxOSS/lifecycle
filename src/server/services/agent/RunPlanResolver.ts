@@ -26,7 +26,12 @@ import AgentCapabilityService from './CapabilityService';
 import AgentPolicyService from './PolicyService';
 import AgentProviderRegistry from './ProviderRegistry';
 import * as AgentDefinitionRegistry from './AgentDefinitionRegistry';
-import { CustomAgentDefinitionServiceError, customAgentDefinitionService } from './CustomAgentDefinitionService';
+import {
+  CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE,
+  CustomAgentDefinitionServiceError,
+  customAgentDefinitionNeedsOneAgentConversion,
+  customAgentDefinitionService,
+} from './CustomAgentDefinitionService';
 import type { AgentRunRuntimeOptions } from './canonicalMessages';
 import AgentThreadService from './ThreadService';
 import AgentThreadRuntimeControlsService from './ThreadRuntimeControlsService';
@@ -35,23 +40,28 @@ import { getAgentCapabilityCatalogEntry, type AgentCapabilityCatalogId } from '.
 import type {
   AgentDebugRunIntent,
   AgentRunPlanResolvedInstructionSnapshot,
+  AgentRunPlanResolvedRuleSnapshot,
   AgentRunPlanSnapshotV1,
   AgentRunPlanSourceKind,
   AgentRunPlanWarning,
 } from './runPlanTypes';
 import {
   isSystemAgentDefinitionId,
-  sourceKindForSystemAgentDefinitionId,
+  SYSTEM_AGENT_DEFINITIONS,
   type SystemAgentDefinitionId,
 } from './systemAgentDefinitions';
+import { resolveAgentHarnessV2ProfileCapabilities, toRunPlanProfileSnapshot } from './profileCapabilityResolver';
 import InstructionTemplateService, {
   InstructionTemplateServiceError,
   type ResolvedInstructionTemplate,
 } from './InstructionTemplateService';
+import InstructionRuleService from './InstructionRuleService';
 
 type FindPriorCompletedDebugIntentRun = (input: {
   threadId: number;
   intents: AgentDebugRunIntent[];
+  buildUuid?: string | null;
+  selectedDeployUuid?: string | null;
 }) => Promise<boolean>;
 
 export class AgentRunPlanCapabilityUnavailableError extends ConflictError {
@@ -186,11 +196,19 @@ async function resolveInstructionSnapshots(
   }
 }
 
+async function resolveRuleSnapshots(
+  instructionRefs: readonly string[],
+  repoFullName?: string | null
+): Promise<AgentRunPlanResolvedRuleSnapshot[]> {
+  return InstructionRuleService.resolveForRun({ instructionRefs, repoFullName });
+}
+
 function hashPromptSnapshot(
   definitionId: string,
   instructionRefs: string[],
   version: number,
   resolvedInstructions: AgentRunPlanResolvedInstructionSnapshot[],
+  resolvedRules: AgentRunPlanResolvedRuleSnapshot[],
   instructionAddendum?: string | null
 ): string {
   return createHash('sha256')
@@ -200,6 +218,7 @@ function hashPromptSnapshot(
         instructionRefs,
         version,
         resolvedInstructions,
+        resolvedRules,
         instructionAddendum: instructionAddendum || null,
       })
     )
@@ -254,17 +273,16 @@ function compactSource({
 }
 
 function resolveSourceKindForDefinition({
-  defaultAgentDefinitionId,
+  defaultSourceKind,
   definition,
   session,
   source,
 }: {
-  defaultAgentDefinitionId: SystemAgentDefinitionId;
+  defaultSourceKind: AgentRunPlanSourceKind;
   definition: AgentDefinitionContract;
   session: AgentSession;
   source: AgentSource;
 }): AgentRunPlanSourceKind {
-  const defaultSourceKind = sourceKindForSystemAgentDefinitionId(defaultAgentDefinitionId);
   const sourceKinds = definition.resourcePolicy.sourceKinds;
 
   if (sourceKinds.includes(defaultSourceKind)) {
@@ -284,6 +302,33 @@ function resolveSourceKindForDefinition({
   }
 
   return defaultSourceKind;
+}
+
+function legacySystemDefinitionForSourceKind(sourceKind: AgentRunPlanSourceKind): AgentDefinitionContract {
+  switch (sourceKind) {
+    case 'build_context_chat':
+      return SYSTEM_AGENT_DEFINITIONS['system.debug'];
+    case 'workspace_session':
+      return SYSTEM_AGENT_DEFINITIONS['system.develop'];
+    case 'freeform_chat':
+      return SYSTEM_AGENT_DEFINITIONS['system.freeform'];
+  }
+}
+
+function effectiveDefinitionForRun({
+  selectedDefinitionId,
+  definition,
+  sourceKind,
+}: {
+  selectedDefinitionId: string;
+  definition: AgentDefinitionContract;
+  sourceKind: AgentRunPlanSourceKind;
+}): AgentDefinitionContract {
+  if (selectedDefinitionId === 'system.agent') {
+    return legacySystemDefinitionForSourceKind(sourceKind);
+  }
+
+  return definition;
 }
 
 function uniqueCapabilityIds(capabilityIds: readonly AgentCapabilityCatalogId[]): AgentCapabilityCatalogId[] {
@@ -316,11 +361,53 @@ function warningForUnavailableOptionalCapability(
   };
 }
 
+const INVESTIGATION_REQUEST_PATTERNS = [
+  /\binvestigate\s+(?:more|further|again|deeper)\b/,
+  /\bkeep\s+investigating\b/,
+  /\bdig\s+deeper\b/,
+  /\blook\s+(?:deeper|further|closer|again)\b/,
+  /\bmore\s+evidence\b/,
+];
+
 function messageRequestsDeeperInvestigation(messageText?: string | null): boolean {
   const normalized = messageText?.toLowerCase() || '';
-  return (
-    normalized.includes('investigate more') || normalized.includes('dig deeper') || normalized.includes('more evidence')
-  );
+  return INVESTIGATION_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+// Word-boundary patterns: bare substring matching misfired ("disapprove" contains "approve",
+// "go ahead and dig deeper" contains "go ahead"). Buttons send an explicit debugIntent; this
+// heuristic only backstops free text, so it stays conservative and defaults to diagnose.
+const REPAIR_REQUEST_PATTERNS = [
+  /\b(?:please\s+)?fix\s+(?:it|this|that|the)\b/,
+  /\bplease\s+fix\b/,
+  /\brepair\s+(?:it|this|that|the)\b/,
+  /\bapply\s+(?:the|this|that)\s+fix\b/,
+  /\bmake\s+(?:the|that)\s+fix\b/,
+  /\bcommit\s+(?:the|that)\s+fix\b/,
+  /\bproceed\s+with\s+(?:the\s+fix|the\s+repair|repairing)\b/,
+  /\bgo\s+ahead\s+and\s+(?:fix|repair)\b/,
+  /\byes,?\s+(?:fix|repair)\b/,
+  /\bapproved?\b/,
+  /\bdo\s+(?:it|that)\b/,
+  /\bgo\s+ahead\b/,
+  /\bplease\s+proceed\b/,
+  // Redeploy/rebuild requests are actions, not questions — without these the run lands in
+  // diagnose where trigger_redeploy is not even registered and the agent cannot comply.
+  /\b(?:trigger|start|run|kick\s+off|do)\s+(?:a\s+|the\s+)?re-?deploy(?:ment)?\b/,
+  /\bre-?deploy\s+(?:it|this|that|the|now)\b/,
+  /\b(?:trigger|start|kick\s+off)\s+(?:a\s+|the\s+)?re-?build\b/,
+  /\bre-?build\s+(?:it|this|that|the\s+environment|now)\b/,
+];
+
+function messageRequestsRepair(messageText?: string | null): boolean {
+  const normalized = messageText?.toLowerCase() || '';
+  if (
+    /\b(do not|don't|dont|not)\s+(approve|repair|fix|proceed|do it)\b/.test(normalized) ||
+    /\b(no|stop|cancel)\b[\s\S]{0,40}\b(repair|fix|do it|proceed|approve)\b/.test(normalized)
+  ) {
+    return false;
+  }
+  return REPAIR_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 async function resolveDebugIntentSnapshot({
@@ -330,6 +417,7 @@ async function resolveDebugIntentSnapshot({
   messageText,
   requestedDebugIntent,
   findPriorCompletedDebugIntentRun,
+  sourceSnapshot,
   warnings,
 }: {
   selectedDefinitionId: string;
@@ -338,27 +426,29 @@ async function resolveDebugIntentSnapshot({
   messageText?: string | null;
   requestedDebugIntent?: AgentDebugRunIntent | null;
   findPriorCompletedDebugIntentRun?: FindPriorCompletedDebugIntentRun;
+  sourceSnapshot: AgentRunPlanSnapshotV1['source'];
   warnings: AgentRunPlanWarning[];
 }): Promise<AgentRunPlanSnapshotV1['debug'] | undefined> {
-  if (selectedDefinitionId !== 'system.debug' || sourceKind !== 'build_context_chat') {
+  if (
+    sourceKind !== 'build_context_chat' ||
+    (selectedDefinitionId !== 'system.debug' && selectedDefinitionId !== 'system.agent')
+  ) {
     return undefined;
   }
 
   const requestedIntent = requestedDebugIntent || null;
-  if (requestedIntent === 'investigate') {
-    return {
-      requestedIntent,
-      resolvedIntent: 'investigate',
-      decisionSource: 'client_request',
-      reasonCode: 'explicit_investigate',
-    };
-  }
 
-  if (requestedIntent === 'repair') {
+  const resolveRepairWithGuard = async (
+    decisionSource: 'client_request' | 'message_heuristic',
+    grantedReasonCode: string
+  ): Promise<AgentRunPlanSnapshotV1['debug']> => {
+    // 'investigate' kept for historical run rows.
     const hasPriorDiagnosisOrInvestigation = findPriorCompletedDebugIntentRun
       ? await findPriorCompletedDebugIntentRun({
           threadId,
           intents: ['diagnose', 'investigate'],
+          buildUuid: sourceSnapshot.buildUuid || null,
+          selectedDeployUuid: sourceSnapshot.selectedDeploy?.selectedDeployUuid || null,
         })
       : false;
 
@@ -366,8 +456,8 @@ async function resolveDebugIntentSnapshot({
       return {
         requestedIntent,
         resolvedIntent: 'repair',
-        decisionSource: 'client_request',
-        reasonCode: 'explicit_repair_after_diagnosis',
+        decisionSource,
+        reasonCode: grantedReasonCode,
       };
     }
 
@@ -382,6 +472,20 @@ async function resolveDebugIntentSnapshot({
       decisionSource: 'repair_guard',
       reasonCode: 'repair_requires_prior_diagnosis',
     };
+  };
+
+  // 'investigate' stays accepted on the wire but runs identically to diagnose.
+  if (requestedIntent === 'investigate') {
+    return {
+      requestedIntent,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'client_request',
+      reasonCode: 'explicit_investigate',
+    };
+  }
+
+  if (requestedIntent === 'repair') {
+    return resolveRepairWithGuard('client_request', 'explicit_repair_after_diagnosis');
   }
 
   if (requestedIntent === 'diagnose') {
@@ -393,13 +497,18 @@ async function resolveDebugIntentSnapshot({
     };
   }
 
+  // Investigation wins over repair phrasing: "go ahead and dig deeper" is a diagnose request.
   if (messageRequestsDeeperInvestigation(messageText)) {
     return {
       requestedIntent: null,
-      resolvedIntent: 'investigate',
+      resolvedIntent: 'diagnose',
       decisionSource: 'message_heuristic',
       reasonCode: 'message_requests_investigation',
     };
+  }
+
+  if (messageRequestsRepair(messageText)) {
+    return resolveRepairWithGuard('message_heuristic', 'message_requests_repair');
   }
 
   return {
@@ -511,6 +620,7 @@ export default class AgentRunPlanResolver {
 
     await AgentDefinitionRegistry.ensureSystemAgentDefinitionsSeeded();
     const defaultAgentDefinitionId = AgentDefinitionRegistry.inferDefaultSystemAgentDefinitionId(session, source);
+    const defaultSourceKind = AgentDefinitionRegistry.inferDefaultAgentSourceKind(session, source);
     const selectedAgentDefinitionId = AgentThreadService.getSelectedAgentDefinitionId(thread);
     const { selectedDefinitionId, definition } = await resolveSelectedDefinition({
       selectedAgentDefinitionId,
@@ -519,11 +629,12 @@ export default class AgentRunPlanResolver {
       warnings,
     });
     const sourceKind = resolveSourceKindForDefinition({
-      defaultAgentDefinitionId,
+      defaultSourceKind,
       definition,
       session,
       source,
     });
+    const effectiveDefinition = effectiveDefinitionForRun({ selectedDefinitionId, definition, sourceKind });
     const resolvedProviderRequest =
       requestedProvider || definition.modelPreference?.provider || readSessionDefaultProvider(source) || undefined;
     const resolvedModelRequest =
@@ -539,6 +650,12 @@ export default class AgentRunPlanResolver {
     });
     if (definition.status !== 'active') {
       throw new AgentRunPlanAgentUnavailableError(selectedDefinitionId, 'disabled_agent');
+    }
+
+    if (customAgentDefinitionNeedsOneAgentConversion(definition)) {
+      throw new AgentRunPlanAgentUnavailableError(selectedDefinitionId, 'needs_conversion', {
+        message: CUSTOM_AGENT_NEEDS_CONVERSION_MESSAGE,
+      });
     }
 
     if (!definition.resourcePolicy.sourceKinds.includes(sourceKind)) {
@@ -559,12 +676,12 @@ export default class AgentRunPlanResolver {
       });
     }
 
-    const requiredCapabilityRefs = definition.requiredCapabilityRefs || definition.capabilityRefs;
-    const optionalCapabilityRefs = definition.optionalCapabilityRefs || [];
+    const requiredCapabilityRefs = effectiveDefinition.requiredCapabilityRefs || effectiveDefinition.capabilityRefs;
+    const optionalCapabilityRefs = effectiveDefinition.optionalCapabilityRefs || [];
     const runtimeChoices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
       thread,
       userIdentity,
-      definition,
+      definition: effectiveDefinition,
       sourceKind,
       capabilityPolicy,
       customAgentCreationPolicy,
@@ -582,7 +699,7 @@ export default class AgentRunPlanResolver {
       capabilityPolicy,
       customAgentCreationPolicy,
       approvalPolicy,
-      definitionOwnerKind: definition.owner.kind,
+      definitionOwnerKind: effectiveDefinition.owner.kind,
       sourceKind,
     });
     const blockedCapability = requiredCapabilityAccess.find((capability) => !capability.allowed);
@@ -593,7 +710,7 @@ export default class AgentRunPlanResolver {
       capabilityPolicy,
       customAgentCreationPolicy,
       approvalPolicy,
-      definitionOwnerKind: definition.owner.kind,
+      definitionOwnerKind: effectiveDefinition.owner.kind,
       sourceKind,
     });
     const allowedOptionalCapabilityAccess = optionalCapabilityAccess.filter((capability) => capability.allowed);
@@ -617,9 +734,11 @@ export default class AgentRunPlanResolver {
       (runtimeChoices.selectedRuntimeCapabilityIds || []).every((capabilityId) =>
         provisionalCapabilityIds.includes(capabilityId)
       );
-    const resolvedInstructions = await resolveInstructionSnapshots(definition.instructionRefs);
+    const resolvedInstructions = await resolveInstructionSnapshots(effectiveDefinition.instructionRefs);
+    const resolvedRules = await resolveRuleSnapshots(effectiveDefinition.instructionRefs, repoFullName);
 
     const capturedAt = new Date().toISOString();
+    const sourceSnapshot = compactSource({ session, source, sourceKind, repoFullName, capturedAt });
     const debugIntentSnapshot = await resolveDebugIntentSnapshot({
       selectedDefinitionId,
       sourceKind,
@@ -627,6 +746,7 @@ export default class AgentRunPlanResolver {
       messageText,
       requestedDebugIntent,
       findPriorCompletedDebugIntentRun,
+      sourceSnapshot,
       warnings,
     });
     const runPlanSnapshot: AgentRunPlanSnapshotV1 = {
@@ -638,10 +758,10 @@ export default class AgentRunPlanResolver {
         ownerKind: definition.owner.kind,
         version: definition.version,
         sourceKind,
-        resourcePolicy: definition.resourcePolicy,
-        modelPreference: definition.modelPreference || null,
+        resourcePolicy: effectiveDefinition.resourcePolicy,
+        modelPreference: effectiveDefinition.modelPreference || definition.modelPreference || null,
       },
-      source: compactSource({ session, source, sourceKind, repoFullName, capturedAt }),
+      source: sourceSnapshot,
       model: {
         requestedProvider: requestedProvider || null,
         requestedModel: requestedModel || null,
@@ -656,16 +776,18 @@ export default class AgentRunPlanResolver {
         approvalPolicy,
       },
       prompt: {
-        instructionRefs: definition.instructionRefs,
+        instructionRefs: effectiveDefinition.instructionRefs,
         resolvedInstructions,
-        instructionAddendum: definition.instructionAddendum || null,
-        renderedSummary: definition.description || definition.name,
+        resolvedRules,
+        instructionAddendum: effectiveDefinition.instructionAddendum || definition.instructionAddendum || null,
+        renderedSummary: effectiveDefinition.description || definition.description || definition.name,
         renderedHash: hashPromptSnapshot(
           selectedDefinitionId,
-          definition.instructionRefs,
-          definition.version,
+          effectiveDefinition.instructionRefs,
+          effectiveDefinition.version,
           resolvedInstructions,
-          definition.instructionAddendum
+          resolvedRules,
+          effectiveDefinition.instructionAddendum || definition.instructionAddendum
         ),
       },
       capabilities: {
@@ -697,9 +819,14 @@ export default class AgentRunPlanResolver {
             }
           : {}),
       },
-      ...(debugIntentSnapshot ? { debug: debugIntentSnapshot } : {}),
       warnings,
     };
+    const profileResolution = resolveAgentHarnessV2ProfileCapabilities({ runPlanSnapshot });
+    runPlanSnapshot.profile = toRunPlanProfileSnapshot(profileResolution);
+    if (debugIntentSnapshot) {
+      runPlanSnapshot.debug = debugIntentSnapshot;
+      runPlanSnapshot.profile = toRunPlanProfileSnapshot(resolveAgentHarnessV2ProfileCapabilities({ runPlanSnapshot }));
+    }
 
     return {
       approvalPolicy,

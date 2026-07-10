@@ -34,6 +34,7 @@ companyIdp:
 githubIdp:
   enabled: true
   githubJsonFormat: true
+  defaultScope: 'repo user:email'
 
 internalIdp:
   internalUrl: http://lifecycle-keycloak-service.lifecycle-app.svc.cluster.local:8080

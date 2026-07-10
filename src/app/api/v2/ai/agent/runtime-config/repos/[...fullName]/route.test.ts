@@ -18,7 +18,6 @@ import { NextRequest } from 'next/server';
 
 const mockGetUser = jest.fn();
 const mockSetRepoConfig = jest.fn();
-const mockUpdateRepoAdditiveRules = jest.fn();
 const mockDeleteRepoConfig = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
@@ -30,13 +29,12 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   default: {
     getInstance: jest.fn(() => ({
       setRepoConfig: (...args: unknown[]) => mockSetRepoConfig(...args),
-      updateRepoAdditiveRules: (...args: unknown[]) => mockUpdateRepoAdditiveRules(...args),
       deleteRepoConfig: (...args: unknown[]) => mockDeleteRepoConfig(...args),
     })),
   },
 }));
 
-import { DELETE, PATCH, PUT } from './route';
+import { DELETE, PUT } from './route';
 
 function makeRequest(body?: unknown): NextRequest {
   return {
@@ -80,18 +78,6 @@ describe('/api/v2/ai/agent/runtime-config/repos/[...fullName]', () => {
     expect(body.error.message).toBe('Forbidden: insufficient permissions');
     expect(request.json).not.toHaveBeenCalled();
     expect(mockSetRepoConfig).not.toHaveBeenCalled();
-  });
-
-  it('rejects non-admin repo additive-rule patches before parsing the body', async () => {
-    const request = makeRequest({ additiveRules: [] });
-
-    const response = await PATCH(request, params);
-    const body = await response.json();
-
-    expect(response.status).toBe(403);
-    expect(body.error.message).toBe('Forbidden: insufficient permissions');
-    expect(request.json).not.toHaveBeenCalled();
-    expect(mockUpdateRepoAdditiveRules).not.toHaveBeenCalled();
   });
 
   it('rejects non-admin repo config deletion before mutating config', async () => {

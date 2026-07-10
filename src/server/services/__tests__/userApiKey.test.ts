@@ -60,6 +60,7 @@ describe('UserApiKeyService', () => {
       });
       (UserApiKey.query as jest.Mock)
         .mockReturnValueOnce(mockQuery)
+        .mockReturnValueOnce(mockQuery) // userId fallback lookup (no owner match) before insert
         .mockReturnValueOnce({ insertAndFetch: insertAndFetchMock });
 
       await UserApiKeyService.storeKey('user-1', 'anthropic', 'sk-ant-api03-abc');
@@ -156,6 +157,7 @@ describe('UserApiKeyService', () => {
       });
       (UserApiKey.query as jest.Mock)
         .mockReturnValueOnce(mockQuery)
+        .mockReturnValueOnce(mockQuery) // userId fallback lookup (no owner match) before insert
         .mockReturnValueOnce({ insertAndFetch: insertAndFetchMock });
 
       await UserApiKeyService.storeKey('user-1', 'google', 'sample-google-key');
@@ -260,6 +262,27 @@ describe('UserApiKeyService', () => {
       const result = await UserApiKeyService.getDecryptedKey('user-1', 'anthropic');
 
       expect(result).toBeNull();
+    });
+
+    test('resolves a username-owned key for an anonymous lookup after the user linked github', async () => {
+      // Key was migrated to a github-username owner; a no-username lookup (e.g. a session created
+      // before the link) must still find it by userId instead of returning null — and must not
+      // downgrade the username owner back to the bare userId.
+      mockQuery.first.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        id: 7,
+        userId: 'user-1',
+        ownerGithubUsername: 'vmelikyan',
+        provider: 'gemini',
+        encryptedKey: 'encrypted-gemini-value',
+      });
+      mockDecrypt.mockReturnValue('gemini-secret');
+
+      const result = await UserApiKeyService.getDecryptedKey('user-1', 'gemini');
+
+      expect(result).toBe('gemini-secret');
+      expect(mockQuery.where).toHaveBeenNthCalledWith(1, { ownerGithubUsername: 'user-1', provider: 'gemini' });
+      expect(mockQuery.where).toHaveBeenNthCalledWith(2, { userId: 'user-1', provider: 'gemini' });
+      expect(mockQuery.patch).not.toHaveBeenCalled();
     });
 
     test('reconciles userId during owner-based decryption', async () => {

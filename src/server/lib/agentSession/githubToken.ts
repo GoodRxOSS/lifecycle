@@ -18,12 +18,19 @@ import type { NextRequest } from 'next/server';
 import { getRequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import GlobalConfigService from 'server/services/globalConfig';
+import type { AgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
+import { normalizeAgentRequestGitHubAuth } from 'server/services/agent/githubAuth';
 
 const logger = () => getLogger();
 
 interface GitHubAuthenticatedUserResponse {
   id?: unknown;
   login?: unknown;
+}
+
+interface GitHubRepositoryResponse {
+  full_name?: unknown;
+  permissions?: unknown;
 }
 
 export interface RequestGitHubUserToken {
@@ -35,11 +42,29 @@ export interface RequestGitHubUserToken {
   githubToken: string | null;
 }
 
+export type RequestGitHubAuth = AgentRequestGitHubAuth;
+
 export interface GitHubAuthenticatedUserProbe {
   ok: boolean;
   id: number | null;
   login: string | null;
   status: number;
+  scopes: string[];
+  rateLimitRemaining: string | null;
+}
+
+export type GitHubRepositoryWritePermission = 'granted' | 'denied' | 'unknown';
+
+export interface GitHubRepositoryWritePermissionProbe {
+  ok: boolean;
+  repository: string;
+  status: number;
+  permission: GitHubRepositoryWritePermission;
+  permissions: {
+    admin: boolean;
+    maintain: boolean;
+    push: boolean;
+  } | null;
   scopes: string[];
   rateLimitRemaining: string | null;
 }
@@ -59,6 +84,38 @@ function normalizeGitHubUserId(value: unknown): number | null {
   }
 
   return value;
+}
+
+function normalizeBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function normalizeRepositoryPermissions(value: unknown): GitHubRepositoryWritePermissionProbe['permissions'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    admin: normalizeBoolean(record.admin),
+    maintain: normalizeBoolean(record.maintain),
+    push: normalizeBoolean(record.push),
+  };
+}
+
+function resolveRepositoryWritePermission(
+  status: number,
+  permissions: GitHubRepositoryWritePermissionProbe['permissions']
+): GitHubRepositoryWritePermission {
+  if (status === 401 || status === 403 || status === 404) {
+    return 'denied';
+  }
+
+  if (!permissions) {
+    return 'unknown';
+  }
+
+  return permissions.admin || permissions.maintain || permissions.push ? 'granted' : 'denied';
 }
 
 function getBearerToken(req: NextRequest): string | null {
@@ -144,27 +201,42 @@ export async function fetchGitHubBrokerToken(keycloakAccessToken: string): Promi
   return parseBrokerTokenResponse(await response.text());
 }
 
-export async function resolveRequestGitHubToken(req: NextRequest): Promise<string | null> {
+export async function resolveRequestGitHubAuth(req: NextRequest): Promise<RequestGitHubAuth> {
+  const keycloakAccessToken = getBearerToken(req);
+  const userIdentity = getRequestUserIdentity(req);
+  const githubUsername = userIdentity?.githubUsername || getGitHubUsernameFromKeycloakAccessToken(keycloakAccessToken);
+
   if (process.env.ENABLE_AUTH !== 'true') {
     try {
-      return await GlobalConfigService.getInstance().getGithubClientToken();
+      return normalizeAgentRequestGitHubAuth({
+        githubToken: await GlobalConfigService.getInstance().getGithubClientToken(),
+        source: 'app',
+        githubUsername,
+      });
     } catch (error) {
       logger().warn({ error }, 'GitHub: app token lookup failed auth=disabled');
-      return null;
+      return normalizeAgentRequestGitHubAuth({ githubToken: null, source: 'none', githubUsername });
     }
   }
 
-  const keycloakAccessToken = getBearerToken(req);
   if (!keycloakAccessToken) {
-    return null;
+    return normalizeAgentRequestGitHubAuth({ githubToken: null, source: 'none', githubUsername });
   }
 
   try {
-    return await fetchGitHubBrokerToken(keycloakAccessToken);
+    return normalizeAgentRequestGitHubAuth({
+      githubToken: await fetchGitHubBrokerToken(keycloakAccessToken),
+      source: 'user',
+      githubUsername,
+    });
   } catch (error) {
     logger().warn({ error }, 'GitHub: broker token failed reason=unexpected_error');
-    return null;
+    return normalizeAgentRequestGitHubAuth({ githubToken: null, source: 'none', githubUsername });
   }
+}
+
+export async function resolveRequestGitHubToken(req: NextRequest): Promise<string | null> {
+  return (await resolveRequestGitHubAuth(req)).githubToken;
 }
 
 /**
@@ -197,7 +269,7 @@ export async function resolveRequestGitHubUserToken(req: NextRequest): Promise<R
 
   return {
     githubUsername,
-    githubToken: await resolveRequestGitHubToken(req),
+    githubToken: (await resolveRequestGitHubAuth(req)).githubToken,
   };
 }
 
@@ -259,5 +331,56 @@ export async function fetchGitHubAuthenticatedUser(githubToken: string): Promise
     ok: Boolean(normalizeGitHubUserId(body?.id)),
     id: normalizeGitHubUserId(body?.id),
     login: normalizeClaim(body?.login),
+  };
+}
+
+export async function fetchGitHubRepositoryWritePermission(
+  githubToken: string,
+  owner: string,
+  repo: string
+): Promise<GitHubRepositoryWritePermissionProbe> {
+  const repository = `${owner.trim()}/${repo.trim()}`;
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(owner.trim())}/${encodeURIComponent(repo.trim())}`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${githubToken}`,
+        'User-Agent': 'lifecycle-github-repository-permission-check',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    }
+  );
+
+  const baseProbe = {
+    repository,
+    status: response.status,
+    scopes: splitHeaderValues(getResponseHeader(response, 'x-oauth-scopes')),
+    rateLimitRemaining: getResponseHeader(response, 'x-ratelimit-remaining'),
+  };
+
+  if (!response.ok) {
+    return {
+      ...baseProbe,
+      ok: false,
+      permission: resolveRepositoryWritePermission(response.status, null),
+      permissions: null,
+    };
+  }
+
+  let body: GitHubRepositoryResponse | null = null;
+  try {
+    body = (await response.json()) as GitHubRepositoryResponse;
+  } catch {
+    body = null;
+  }
+
+  const permissions = normalizeRepositoryPermissions(body?.permissions);
+  return {
+    ...baseProbe,
+    ok: true,
+    permission: resolveRepositoryWritePermission(response.status, permissions),
+    permissions,
   };
 }

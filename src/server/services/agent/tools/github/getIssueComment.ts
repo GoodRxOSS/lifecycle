@@ -15,7 +15,7 @@
  */
 
 import { BaseTool } from '../baseTool';
-import { ToolResult, ToolSafetyLevel } from '../types';
+import { ToolExecutionContext, ToolResult } from '../types';
 import { GitHubClient } from '../shared/githubClient';
 
 export class GetIssueCommentTool extends BaseTool {
@@ -32,23 +32,38 @@ export class GetIssueCommentTool extends BaseTool {
           comment_id: { type: 'number', description: 'Comment ID from pull_requests.commentId or issues' },
         },
         required: ['repository_owner', 'repository_name', 'comment_id'],
-      },
-      ToolSafetyLevel.SAFE,
-      'github'
+      }
     );
   }
 
-  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
     if (this.checkAborted(signal)) {
-      return this.createErrorResult('Operation cancelled', 'CANCELLED', false);
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
     }
 
+    let auth: ToolResult['auth'];
     try {
       const owner = args.repository_owner as string;
       const repo = args.repository_name as string;
       const commentId = args.comment_id as number;
 
-      const octokit = await this.githubClient.getOctokit('agent-runtime-get-issue-comment');
+      if (!this.githubClient.isRepoAllowed(owner, repo)) {
+        return this.createErrorResult(
+          `Repository "${owner}/${repo}" is outside this environment's repositories and cannot be accessed.`,
+          'REPO_NOT_ALLOWED'
+        );
+      }
+
+      const octokitWithAuth = await this.githubClient.getOctokitWithAuth('agent-runtime-get-issue-comment', {
+        requireUserAuth: false,
+        toolCallId: context?.toolCallId,
+      });
+      const octokit = octokitWithAuth.octokit;
+      auth = octokitWithAuth.auth;
 
       const response = await octokit.request('GET /repos/{owner}/{repo}/issues/comments/{comment_id}', {
         owner,
@@ -65,9 +80,12 @@ export class GetIssueCommentTool extends BaseTool {
       };
 
       const displayContent = `Comment by ${result.author || 'unknown'} at ${result.createdAt}`;
-      return this.createSuccessResult(JSON.stringify(result), displayContent);
+      return { ...this.createSuccessResult(JSON.stringify(result), displayContent), auth };
     } catch (error: any) {
-      return this.createErrorResult(error.message || `Failed to fetch comment ${args.comment_id}`, 'EXECUTION_ERROR');
+      return {
+        ...this.createErrorResult(error.message || `Failed to fetch comment ${args.comment_id}`, 'EXECUTION_ERROR'),
+        auth,
+      };
     }
   }
 }

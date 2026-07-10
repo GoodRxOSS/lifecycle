@@ -18,7 +18,7 @@ import { type ToolSet } from 'ai';
 import AgentSession from 'server/models/AgentSession';
 import { getOwnedSession } from 'server/services/agent/sessionOwnership';
 import { McpConfigService } from 'server/services/agentRuntime/mcp/config';
-import { McpClientManager } from 'server/services/agentRuntime/mcp/client';
+import type { ResolvedMcpServer } from 'server/services/agentRuntime/mcp/types';
 import { usesSessionWorkspaceGatewayExecution } from 'server/services/agentRuntime/mcp/sessionPod';
 import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
@@ -26,54 +26,83 @@ import type { AgentSessionToolRule } from 'server/services/types/agentSessionCon
 import type { CapabilityPolicyConfig, CustomAgentCreationPolicyConfig } from 'server/services/types/agentRuntimeConfig';
 import AgentPolicyService from './PolicyService';
 import type { ResolvedAgentCapabilityAccess } from './PolicyService';
-import type { AgentApprovalPolicy, AgentToolAuditRecord } from './types';
+import type { AgentApprovalPolicy } from './types';
 import type { AgentCapabilityCatalogId } from './capabilityCatalog';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
-import { assertSafeWorkspaceMutationCommand, isReadOnlyWorkspaceCommand } from './sandboxExecSafety';
-import { didToolResultFail } from './fileChanges';
-import {
-  buildAgentToolKey,
-  SESSION_WORKSPACE_MUTATION_TOOL_NAME,
-  SESSION_WORKSPACE_READONLY_TOOL_NAME,
-} from './toolKeys';
-import { getSessionWorkspaceCatalogEntriesForRuntimeTool } from './sandboxToolCatalog';
+import { buildAgentToolKey } from './toolKeys';
 import { registerLifecycleDiagnosticFixTools, registerLifecycleDiagnosticReadTools } from './diagnosticTools';
 import type { AgentRuntimeToolMetadata } from './toolMetadata';
 import {
+  configureAiToolFactories,
+  type AgentRuntimeToolApprovalConfig,
   isCatalogCapabilityAllowed,
-  recordToolMetadata,
   resolveToolApprovalMode,
   selectedMcpConnectionRefs,
-  toAiDynamicTool,
-  toAiJsonSchema,
   type ToolExecutionHooks,
 } from './capabilityToolHelpers';
 import { resolveLifecycleDiagnosticGithubSafety, resolvePrimaryRepo } from './capabilitySessionContext';
 import {
-  emitResultFileChanges,
   isChatWorkspaceRuntimeReady,
-  registerChatPublishHttpTool,
-  registerChatWorkspaceTools,
+  registerChatRequestWorkspaceTool,
   resolveSessionExecutionServer,
+  resolveSessionGatewayEndpoint,
   resolveSessionWorkspaceGatewayServer,
-  WORKSPACE_EXEC_INPUT_SCHEMA,
+  type WorkspaceToolDiscoveryMode,
 } from './chatWorkspaceToolRegistration';
 import { registerGenericMcpTool } from './mcpToolRegistration';
+import { isWorkspaceCoreMcpEnabled } from 'server/services/workspaceCoreMcp/config';
+import { registerWorkspaceCoreTools } from 'server/services/workspaceCoreMcp/registration';
+import { loadAiSdk } from './aiSdkRuntime';
+import { buildAgentRuntimeToolsContext, type AgentRuntimeToolsContext } from './runtimeContext';
+import type { AgentRequestGitHubAuth } from './githubAuth';
+import type { DiagnosticGitHubApprovalAuthResolver } from './tools/shared/githubClient';
 
 export type { AgentRuntimeToolMetadata } from './toolMetadata';
 
+// Dynamic import (SandboxService pattern): agentSession imports from this directory, so a static
+// import would be circular. Never throws — reconciliation is best-effort on an already-failing path.
+async function reconcileLostChatWorkspace(
+  session: AgentSession,
+  hooks?: ToolExecutionHooks
+): Promise<AgentSession | null> {
+  let allowedActiveRunUuid: string | null = null;
+  try {
+    allowedActiveRunUuid = hooks?.getActiveRunUuid?.() ?? null;
+  } catch {
+    // Tool build can run before the executor has a run row; the claim just loses its run exemption.
+  }
+  try {
+    const AgentSessionService = (await import('server/services/agentSession')).default;
+    return await AgentSessionService.reconcileLostChatWorkspaceRuntime(session.uuid, { allowedActiveRunUuid });
+  } catch (error) {
+    getLogger().warn(
+      { error, sessionId: session.uuid },
+      `AgentExec: workspace loss reconcile errored sessionId=${session.uuid}`
+    );
+    return null;
+  }
+}
+
 type BuildToolSetOptions = {
   session: AgentSession;
+  // Lets watch-scheduling tools target the initiating conversation.
+  threadUuid?: string | null;
   repoFullName?: string;
   userIdentity: RequestUserIdentity;
   approvalPolicy: AgentApprovalPolicy;
   workspaceToolDiscoveryTimeoutMs: number;
   workspaceToolExecutionTimeoutMs: number;
+  workspaceToolDiscoveryMode?: WorkspaceToolDiscoveryMode;
   requestGitHubToken?: string | null;
+  requestGitHubAuth?: AgentRequestGitHubAuth | null;
+  resolveApprovalGitHubAuth?: DiagnosticGitHubApprovalAuthResolver;
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
   selectedRuntimeMcpConnectionRefs?: string[];
+  autoProvisionWorkspace?: boolean;
+  agentDefinitionId?: string;
+  agentSourceKind?: string;
 };
 
 export default class AgentCapabilityService {
@@ -109,20 +138,38 @@ export default class AgentCapabilityService {
 
   static async buildToolSetWithMetadata({
     session,
+    threadUuid,
     repoFullName,
     userIdentity,
     approvalPolicy,
     workspaceToolDiscoveryTimeoutMs,
     workspaceToolExecutionTimeoutMs,
+    workspaceToolDiscoveryMode,
     requestGitHubToken,
+    requestGitHubAuth,
+    resolveApprovalGitHubAuth,
     hooks,
     toolRules,
     resolvedCapabilityAccess,
     selectedRuntimeMcpConnectionRefs,
-  }: BuildToolSetOptions): Promise<{ tools: ToolSet; metadata: AgentRuntimeToolMetadata[] }> {
+    autoProvisionWorkspace = true,
+    agentDefinitionId,
+    agentSourceKind,
+  }: BuildToolSetOptions): Promise<{
+    tools: ToolSet;
+    metadata: AgentRuntimeToolMetadata[];
+    toolApproval: AgentRuntimeToolApprovalConfig;
+    toolsContext: AgentRuntimeToolsContext;
+    workspaceRuntimeReady: boolean;
+  }> {
+    configureAiToolFactories(await loadAiSdk());
     const tools: ToolSet = {};
     const metadata: AgentRuntimeToolMetadata[] = [];
-    const chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(session);
+    const toolApproval: AgentRuntimeToolApprovalConfig = {};
+    let runtimeSession = session;
+    let chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(runtimeSession);
+    const workspaceCoreEnabled =
+      isWorkspaceCoreMcpEnabled() && agentDefinitionId !== 'system.debug' && agentSourceKind !== 'build_context_chat';
     const effectiveAgentConfig = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
     const lifecycleDiagnosticGithubSafety = session.buildUuid
       ? await resolveLifecycleDiagnosticGithubSafety({
@@ -132,30 +179,21 @@ export default class AgentCapabilityService {
         })
       : undefined;
 
-    if (session.sessionKind === 'chat') {
-      registerChatWorkspaceTools({
+    // Registered for every chat run, ready or not: it is an instant no-op on a live workspace, and it is
+    // the recovery path when the workspace is lost mid-run (a tool set is fixed once the stream starts).
+    if (session.sessionKind === 'chat' && workspaceCoreEnabled) {
+      registerChatRequestWorkspaceTool({
         tools,
         session,
         userIdentity,
         approvalPolicy,
-        workspaceToolExecutionTimeoutMs,
         requestGitHubToken,
         hooks,
         toolRules,
+        autoProvisionWorkspace,
         resolvedCapabilityAccess,
         toolMetadata: metadata,
-      });
-
-      registerChatPublishHttpTool({
-        tools,
-        session,
-        approvalPolicy,
-        userIdentity,
-        requestGitHubToken,
-        hooks,
-        toolRules,
-        resolvedCapabilityAccess,
-        toolMetadata: metadata,
+        toolApproval,
       });
     }
 
@@ -167,17 +205,24 @@ export default class AgentCapabilityService {
       toolRules,
       resolvedCapabilityAccess,
       githubSafety: lifecycleDiagnosticGithubSafety,
+      requestGitHubAuth,
+      resolveApprovalGitHubAuth,
       toolMetadata: metadata,
+      toolApproval,
     });
     registerLifecycleDiagnosticFixTools({
       tools,
       session,
+      threadUuid,
       approvalPolicy,
       hooks,
       toolRules,
       resolvedCapabilityAccess,
       githubSafety: lifecycleDiagnosticGithubSafety,
+      requestGitHubAuth,
+      resolveApprovalGitHubAuth,
       toolMetadata: metadata,
+      toolApproval,
     });
 
     const mcpConfigService = new McpConfigService();
@@ -185,222 +230,111 @@ export default class AgentCapabilityService {
       mcpConfigService.resolveServers(repoFullName, undefined, userIdentity),
       session.sessionKind === 'chat' && !chatWorkspaceRuntimeReady
         ? Promise.resolve(null)
-        : resolveSessionWorkspaceGatewayServer(session, {
-            discoveryTimeoutMs: workspaceToolDiscoveryTimeoutMs,
-            executionTimeoutMs: workspaceToolExecutionTimeoutMs,
+        : resolveSessionWorkspaceGatewayServer(
+            session,
+            {
+              discoveryTimeoutMs: workspaceToolDiscoveryTimeoutMs,
+              executionTimeoutMs: workspaceToolExecutionTimeoutMs,
+            },
+            { discoveryMode: workspaceToolDiscoveryMode }
+          ).catch(async (error) => {
+            // isChatWorkspaceRuntimeReady is status-based, so a chat can report ready before the gateway
+            // is actually reachable (pod just started/attached). Throwing here would abort the whole tool
+            // build and leave the model with zero tools (not even request_workspace) — the "no tools on
+            // the first message" failure. Degrade to null for chats so base tools still register and
+            // workspace tools resolve lazily once the gateway responds. Environment/workspace sessions
+            // still fail loudly: the workspace IS the session there.
+            if (session.sessionKind !== 'chat') {
+              throw error;
+            }
+            getLogger().warn(
+              { error, sessionId: session.uuid },
+              `AgentExec: chat workspace gateway discovery failed during tool build; degrading to base tools sessionId=${session.uuid}`
+            );
+            // The unreachable gateway may mean the runtime is gone, not restarting: reconcile against the
+            // provider/cluster so a confirmed loss settles now and this run builds against the real state.
+            const settled = await reconcileLostChatWorkspace(session, hooks);
+            if (settled) {
+              runtimeSession = settled;
+            }
+            return null;
           }),
     ]);
+    chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(runtimeSession);
     const selectedRuntimeMcpRefs = selectedMcpConnectionRefs(selectedRuntimeMcpConnectionRefs);
     const selectedRepoServers = selectedRuntimeMcpRefs
       ? repoServers.filter((server) => selectedRuntimeMcpRefs.has(`${server.scope}:${server.slug}`))
       : repoServers;
-    const resolvedRepoServers = selectedRepoServers.flatMap((server) => {
-      if (!usesSessionWorkspaceGatewayExecution(server.transport)) {
-        return [server];
-      }
+    // Resolve the session-scoped gateway endpoint once; per-server resolution would issue N parallel lookups.
+    const gatewayEndpoint =
+      workspaceGatewayServer &&
+      selectedRepoServers.some((server) => usesSessionWorkspaceGatewayExecution(server.transport))
+        ? await resolveSessionGatewayEndpoint(session)
+        : null;
+    const resolvedRepoServers = (
+      await Promise.all(
+        selectedRepoServers.map(async (server) => {
+          if (!usesSessionWorkspaceGatewayExecution(server.transport)) {
+            return server;
+          }
 
-      if (!workspaceGatewayServer) {
-        getLogger().warn(`AgentExec: workspace gateway unavailable sessionId=${session.uuid} server=${server.slug}`);
-        return [];
-      }
+          if (!workspaceGatewayServer) {
+            getLogger().warn(
+              `AgentExec: workspace gateway unavailable sessionId=${session.uuid} server=${server.slug}`
+            );
+            return null;
+          }
 
-      const routedServer = resolveSessionExecutionServer(session, server);
-      if (!routedServer) {
-        getLogger().warn(
-          `AgentExec: workspace gateway route unresolved sessionId=${session.uuid} server=${server.slug}`
-        );
-        return [];
-      }
+          const routedServer = await resolveSessionExecutionServer(session, server, gatewayEndpoint);
+          if (!routedServer) {
+            getLogger().warn(
+              `AgentExec: workspace gateway route unresolved sessionId=${session.uuid} server=${server.slug}`
+            );
+            return null;
+          }
 
-      return [routedServer];
-    });
-    const resolvedServers = workspaceGatewayServer
-      ? [workspaceGatewayServer, ...resolvedRepoServers]
-      : resolvedRepoServers;
+          return routedServer;
+        })
+      )
+    ).filter((server): server is ResolvedMcpServer => Boolean(server));
+    const resolvedServers = resolvedRepoServers;
+
+    if (workspaceCoreEnabled) {
+      registerWorkspaceCoreTools({
+        tools,
+        session,
+        userIdentity,
+        approvalPolicy,
+        workspaceGatewayServer,
+        resolveWorkspaceGatewayServer: async () => {
+          const latestSession = await AgentSession.query().findOne({ uuid: session.uuid });
+          if (!latestSession || !isChatWorkspaceRuntimeReady(latestSession)) {
+            return null;
+          }
+
+          try {
+            return await resolveSessionWorkspaceGatewayServer(latestSession, {
+              discoveryTimeoutMs: workspaceToolDiscoveryTimeoutMs,
+              executionTimeoutMs: workspaceToolExecutionTimeoutMs,
+            });
+          } catch (error) {
+            // Mid-run loss: a confirmed-gone runtime settles here, so request_workspace (always
+            // registered for chats) can recover in this same run and the next run reclassifies.
+            await reconcileLostChatWorkspace(latestSession, hooks);
+            throw error;
+          }
+        },
+        workspaceToolExecutionTimeoutMs,
+        hooks,
+        toolRules,
+        resolvedCapabilityAccess,
+        toolMetadata: metadata,
+        toolApproval,
+      });
+    }
 
     for (const server of resolvedServers) {
       for (const discoveredTool of server.discoveredTools) {
-        if (server.slug === 'sandbox') {
-          const catalogEntries = getSessionWorkspaceCatalogEntriesForRuntimeTool(discoveredTool.name, server.name);
-
-          for (const entry of catalogEntries) {
-            const capabilityKey = AgentPolicyService.capabilityForSessionWorkspaceTool(
-              entry.toolName,
-              entry.annotations || discoveredTool.annotations
-            );
-            if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, entry.catalogCapabilityId)) {
-              continue;
-            }
-
-            const mode = resolveToolApprovalMode({
-              toolRules,
-              toolKey: entry.toolKey,
-              capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
-            });
-
-            if (mode === 'deny') {
-              continue;
-            }
-
-            if (entry.toolName === SESSION_WORKSPACE_READONLY_TOOL_NAME) {
-              const inputSchema = toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
-
-              tools[entry.toolKey] = toAiDynamicTool({
-                description: entry.description,
-                inputSchema,
-                needsApproval: mode === 'require_approval',
-                execute: async (input, context) => {
-                  const toolCallId = context?.toolCallId;
-                  const args = (input as Record<string, unknown>) || {};
-                  const command = typeof args.command === 'string' ? args.command : '';
-                  if (!isReadOnlyWorkspaceCommand(command)) {
-                    throw new Error(
-                      'This command is not a safe read-only inspection command. Use the workspace exec mutation tool for state-changing, networked, or process-managing commands.'
-                    );
-                  }
-
-                  const audit: AgentToolAuditRecord = {
-                    source: 'mcp',
-                    serverSlug: server.slug,
-                    toolName: entry.toolName,
-                    toolCallId,
-                    args,
-                    capabilityKey,
-                  };
-
-                  await hooks?.onToolStarted?.(audit);
-
-                  const client = new McpClientManager();
-                  try {
-                    await client.connect(server.transport, server.timeout);
-                    const result = await client.callTool(discoveredTool.name, args, server.timeout);
-                    const failed = result.isError || didToolResultFail(result);
-                    await hooks?.onToolFinished?.({
-                      ...audit,
-                      result,
-                      status: failed ? 'failed' : 'completed',
-                    });
-                    return result;
-                  } catch (error) {
-                    getLogger().warn(
-                      { error },
-                      `AgentExec: mcp tool failed sessionId=${session.uuid} server=${server.slug} tool=${entry.toolName}`
-                    );
-                    await hooks?.onToolFinished?.({
-                      ...audit,
-                      result: {
-                        error: error instanceof Error ? error.message : String(error),
-                      },
-                      status: 'failed',
-                    });
-                    throw error;
-                  } finally {
-                    await client.close();
-                  }
-                },
-              });
-              recordToolMetadata(metadata, {
-                toolKey: entry.toolKey,
-                catalogCapabilityId: entry.catalogCapabilityId,
-                capabilityKey,
-                approvalMode: mode,
-              });
-
-              continue;
-            }
-
-            if (entry.toolName === SESSION_WORKSPACE_MUTATION_TOOL_NAME) {
-              const inputSchema = toAiJsonSchema(WORKSPACE_EXEC_INPUT_SCHEMA);
-
-              tools[entry.toolKey] = toAiDynamicTool({
-                description: entry.description,
-                inputSchema,
-                needsApproval: mode === 'require_approval',
-                execute: async (input, context) => {
-                  const args = (input as Record<string, unknown>) || {};
-                  const command = typeof args.command === 'string' ? args.command : '';
-                  assertSafeWorkspaceMutationCommand(command);
-                  const toolCallId = context?.toolCallId;
-                  const audit: AgentToolAuditRecord = {
-                    source: 'mcp',
-                    serverSlug: server.slug,
-                    toolName: entry.toolName,
-                    toolCallId,
-                    args,
-                    capabilityKey,
-                  };
-
-                  await hooks?.onToolStarted?.(audit);
-
-                  const client = new McpClientManager();
-                  try {
-                    await client.connect(server.transport, server.timeout);
-                    const result = await client.callTool(
-                      discoveredTool.name,
-                      { ...args, captureFileChanges: true },
-                      server.timeout
-                    );
-                    const failed = result.isError || didToolResultFail(result);
-                    await emitResultFileChanges({
-                      hooks,
-                      toolCallId,
-                      sourceTool: entry.toolName,
-                      input: args,
-                      result,
-                      failed,
-                    });
-                    await hooks?.onToolFinished?.({
-                      ...audit,
-                      result,
-                      status: failed ? 'failed' : 'completed',
-                    });
-                    return result;
-                  } catch (error) {
-                    getLogger().warn(
-                      { error },
-                      `AgentExec: mcp tool failed sessionId=${session.uuid} server=${server.slug} tool=${entry.toolName}`
-                    );
-                    await hooks?.onToolFinished?.({
-                      ...audit,
-                      result: {
-                        error: error instanceof Error ? error.message : String(error),
-                      },
-                      status: 'failed',
-                    });
-                    throw error;
-                  } finally {
-                    await client.close();
-                  }
-                },
-              });
-              recordToolMetadata(metadata, {
-                toolKey: entry.toolKey,
-                catalogCapabilityId: entry.catalogCapabilityId,
-                capabilityKey,
-                approvalMode: mode,
-              });
-
-              continue;
-            }
-
-            registerGenericMcpTool({
-              tools,
-              session,
-              server,
-              discoveredTool,
-              exposedToolName: entry.toolName,
-              description: entry.description,
-              capabilityKey,
-              mode,
-              catalogCapabilityId: entry.catalogCapabilityId,
-              hooks,
-              toolMetadata: metadata,
-            });
-          }
-
-          continue;
-        }
-
         const capabilityKey = AgentPolicyService.capabilityForExternalMcpTool(
           discoveredTool.name,
           discoveredTool.annotations
@@ -434,10 +368,17 @@ export default class AgentCapabilityService {
           catalogCapabilityId,
           hooks,
           toolMetadata: metadata,
+          toolApproval,
         });
       }
     }
 
-    return { tools, metadata };
+    return {
+      tools,
+      metadata,
+      toolApproval,
+      toolsContext: buildAgentRuntimeToolsContext(metadata),
+      workspaceRuntimeReady: chatWorkspaceRuntimeReady,
+    };
   }
 }

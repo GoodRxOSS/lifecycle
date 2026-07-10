@@ -47,16 +47,16 @@ function asFileEditApprovalInput(value: unknown): FileEditApprovalInput | null {
   if (
     !isRecord(value) ||
     typeof value.path !== 'string' ||
-    typeof value.oldText !== 'string' ||
-    typeof value.newText !== 'string'
+    typeof value.old_text !== 'string' ||
+    typeof value.new_text !== 'string'
   ) {
     return null;
   }
 
   return {
     path: value.path,
-    oldText: value.oldText,
-    newText: value.newText,
+    oldText: value.old_text,
+    newText: value.new_text,
   };
 }
 
@@ -242,7 +242,7 @@ export function buildProposedFileChanges({
 }): AgentFileChangeData[] {
   const toolKey = normalizeToolKey(sourceTool);
 
-  if (toolKey === 'workspace_edit_file') {
+  if (toolKey === 'edit_file') {
     const args = asFileEditApprovalInput(input);
     if (!args) {
       return [];
@@ -276,7 +276,7 @@ export function buildProposedFileChanges({
     ];
   }
 
-  if (toolKey === 'workspace_write_file') {
+  if (toolKey === 'write_file') {
     const args = asFileWriteApprovalInput(input);
     if (!args) {
       return [];

@@ -15,6 +15,7 @@
  */
 
 import type { UIDataTypes, UIMessage } from 'ai';
+import type { AgentWorkspaceStatus } from 'shared/constants';
 
 export const AGENT_CAPABILITY_KEYS = [
   'read',
@@ -35,9 +36,30 @@ export type AgentRunStatus =
   | 'running'
   | 'waiting_for_approval'
   | 'waiting_for_input'
+  | 'transitioned'
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export interface AgentWorkspaceEscalationPayload {
+  reason: string | null;
+  toolCallId: string | null;
+  workspaceStatus: AgentWorkspaceStatus;
+}
+
+export interface AgentRunWorkspaceEscalationTransition extends AgentWorkspaceEscalationPayload {
+  kind: 'workspace_escalation';
+  targetAgentDefinitionId: string;
+  createdAt: string;
+  continuation: {
+    status: 'queued' | 'ui_auto_continue_fallback';
+    targetAgentDefinitionId: string;
+    runId: string | null;
+    queuedAt?: string | null;
+  };
+}
+
+export type AgentRunTransition = AgentRunWorkspaceEscalationTransition;
 
 export type AgentPendingActionStatus = 'pending' | 'approved' | 'denied';
 export type AgentPendingActionKind = 'tool_approval' | 'user_input';
@@ -86,6 +108,8 @@ export interface AgentFileChangeArtifact {
   newSizeBytes?: number | null;
   oldSha256?: string | null;
   newSha256?: string | null;
+  // Present only for lifecycle config files: schema verdict surfaced on the approval card.
+  schemaValidation?: { valid: boolean; error?: string | null } | null;
 }
 
 export interface AgentFileChangeData extends AgentFileChangeArtifact {
@@ -160,6 +184,12 @@ export interface AgentToolAuditRecord {
   toolCallId?: string | null;
   args: Record<string, unknown>;
   capabilityKey: AgentCapabilityKey;
+  auth?: {
+    provider: string;
+    source: string;
+    required: boolean;
+    githubUsername?: string | null;
+  };
 }
 
 export const DEFAULT_AGENT_APPROVAL_POLICY: AgentApprovalPolicy = {

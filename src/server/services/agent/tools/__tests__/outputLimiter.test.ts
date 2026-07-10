@@ -135,6 +135,55 @@ describe('OutputLimiter', () => {
       expect(result).not.toContain('Error: hidden in the middle');
       expect(result).not.toContain('retained error region');
     });
+
+    it('clamps giant lines instead of letting them eat the budget', () => {
+      const lines = [`giant ${'x'.repeat(200000)}`, ...Array.from({ length: 20 }, (_, i) => `line${i}`), 'error: end'];
+      const result = OutputLimiter.truncateLogOutput(lines.join('\n'), 30000, 50, 100);
+      expect(result.length).toBeLessThan(5000);
+      expect(result).toContain('more chars]');
+      expect(result).toContain('error: end');
+      expect(result).toContain('line19');
+    });
+
+    it('keeps the tail (not the head) when the char cap forces a raw cut', () => {
+      const lines = Array.from({ length: 100 }, (_, i) => `${'y'.repeat(900)} line${i}`);
+      const result = OutputLimiter.truncateLogOutput(lines.join('\n'), 5000, 50, 100);
+      expect(result.length).toBeLessThanOrEqual(5000);
+      expect(result).toContain('line99');
+      expect(result).toContain('[Truncated: showing last');
+    });
+  });
+
+  describe('truncateTail', () => {
+    it('returns short content unchanged', () => {
+      expect(OutputLimiter.truncateTail('abc', 100)).toBe('abc');
+    });
+
+    it('keeps the end of the content with a leading marker', () => {
+      const content = `HEAD${'x'.repeat(5000)}TAIL`;
+      const result = OutputLimiter.truncateTail(content, 1000);
+      expect(result.length).toBeLessThanOrEqual(1000);
+      expect(result).toContain('TAIL');
+      expect(result).not.toContain('HEAD');
+      expect(result).toMatch(/^\[Truncated: showing last/);
+    });
+  });
+
+  describe('clampLogLine', () => {
+    it('leaves normal lines alone', () => {
+      expect(OutputLimiter.clampLogLine('hello')).toBe('hello');
+    });
+
+    it('clamps oversized lines with a char count marker', () => {
+      const clamped = OutputLimiter.clampLogLine('z'.repeat(5000));
+      expect(clamped.length).toBeLessThan(1100);
+      expect(clamped).toContain('[+4000 more chars]');
+    });
+
+    it('is stable when re-applied to an already clamped line', () => {
+      const once = OutputLimiter.clampLogLine('z'.repeat(5000));
+      expect(OutputLimiter.clampLogLine(once)).toBe(once);
+    });
   });
 
   describe('truncateJsonSafely', () => {

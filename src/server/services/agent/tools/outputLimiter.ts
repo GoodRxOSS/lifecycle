@@ -17,6 +17,11 @@
 const DEFAULT_MAX_CHARS = 30000;
 const MARKER_RESERVE = 200;
 
+const MAX_LOG_LINE_CHARS = 1000;
+// Lines between the clamp target and this threshold pass through, so already-clamped
+// lines (target + marker) are stable on re-entry.
+const LOG_LINE_CLAMP_THRESHOLD = 1100;
+
 // Signals that usually carry the actual failure in long logs.
 const ERROR_SIGNAL_RE =
   /\b(error|fatal|exception|panic|traceback|failed|cannot|denied|segfault|oom(killed)?|exit code|stack trace|unhandled)\b/i;
@@ -32,6 +37,19 @@ function isJsonString(s: string): boolean {
 }
 
 export class OutputLimiter {
+  static clampLogLine(line: string): string {
+    if (line.length <= LOG_LINE_CLAMP_THRESHOLD) return line;
+    return `${line.slice(0, MAX_LOG_LINE_CHARS)}… [+${line.length - MAX_LOG_LINE_CHARS} more chars]`;
+  }
+
+  // Tail-keeping truncation for log content, where the failure usually sits at the end.
+  static truncateTail(content: string, maxChars: number = DEFAULT_MAX_CHARS): string {
+    if (content.length <= maxChars) return content;
+    const marker = `[Truncated: showing last ${maxChars - MARKER_RESERVE} of ${content.length} chars]\n`;
+    const kept = maxChars - marker.length;
+    return marker + content.slice(-kept);
+  }
+
   static truncate(content: string, maxChars: number = DEFAULT_MAX_CHARS): string {
     if (content.length <= maxChars) return content;
 
@@ -93,10 +111,11 @@ export class OutputLimiter {
     // Retain a window around the last error signal in the dropped middle.
     retainErrorRegion: boolean = true
   ): string {
-    const lines = content.split('\n');
+    const lines = content.split('\n').map(OutputLimiter.clampLogLine);
     if (lines.length <= headLines + tailLines) {
-      if (content.length <= maxChars) return content;
-      return OutputLimiter.truncate(content, maxChars);
+      const joined = lines.join('\n');
+      if (joined.length <= maxChars) return joined;
+      return OutputLimiter.truncateTail(joined, maxChars);
     }
 
     const headEnd = headLines;
@@ -119,7 +138,7 @@ export class OutputLimiter {
       const omitted = lines.length - headLines - tailLines;
       const marker = `\n... [Truncated: ${omitted} lines omitted of ${lines.length} total] ...\n`;
       const result = head.join('\n') + marker + tail.join('\n');
-      return result.length > maxChars ? OutputLimiter.truncate(result, maxChars) : result;
+      return result.length > maxChars ? OutputLimiter.truncateTail(result, maxChars) : result;
     }
 
     return OutputLimiter.buildWithErrorRegion(lines, headLines, tailLines, errorIdx, maxChars);
@@ -159,13 +178,13 @@ export class OutputLimiter {
     let t = tailLines;
     let result = render(h, t);
     // Trim head/tail proportionally until under the cap (error region is never dropped).
-    while (result.length > maxChars && (h > 5 || t > 5)) {
-      if (h > 5) h = Math.max(5, h - Math.ceil(h * 0.25));
-      if (t > 5) t = Math.max(5, t - Math.ceil(t * 0.25));
+    while (result.length > maxChars && (h > 0 || t > 0)) {
+      h = h > 5 ? Math.max(5, h - Math.ceil(h * 0.25)) : 0;
+      t = t > 5 ? Math.max(5, t - Math.ceil(t * 0.25)) : 0;
       result = render(h, t);
     }
 
-    return result.length > maxChars ? OutputLimiter.truncate(result, maxChars) : result;
+    return result.length > maxChars ? OutputLimiter.truncateTail(result, maxChars) : result;
   }
 
   static truncateJsonSafely(jsonString: string, maxChars: number = DEFAULT_MAX_CHARS): string {

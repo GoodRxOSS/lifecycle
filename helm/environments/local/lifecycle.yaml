@@ -46,12 +46,30 @@ global:
       value: 'false'
     - name: ENABLE_AUTH
       value: 'true'
+    - name: APP_HOST
+      value: 'http://localhost:5001'
+    - name: LIFECYCLE_UI_URL
+      value: 'http://localhost:3000'
+    - name: CHAT_PREVIEW_DOMAIN
+      value: 'localhost:5001'
     - name: AGENT_SESSION_WORKSPACE_IMAGE
       value: 'lifecycle-workspace:latest'
     - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
       value: 'codercom/code-server:4.98.2'
     - name: AGENT_SESSION_WORKSPACE_GATEWAY_IMAGE
       value: 'lifecycle-workspace:latest'
+    - name: AGENT_SESSION_WORKSPACE_BACKEND
+      value: 'opensandbox'
+    - name: OPEN_SANDBOX_PROTOCOL
+      value: 'http'
+    - name: OPEN_SANDBOX_DOMAIN
+      value: 'opensandbox-server.opensandbox-system.svc.cluster.local'
+    - name: OPEN_SANDBOX_API_KEY
+      value: 'lifecycle-opensandbox-dev'
+    - name: OPEN_SANDBOX_POOL_REF
+      value: 'lifecycle-workspace-pool'
+    - name: OPEN_SANDBOX_USE_SERVER_PROXY
+      value: 'true'
   envFrom:
     - secretRef:
         name: app-secrets
@@ -159,8 +177,6 @@ components:
           value: '250'
         - name: GITHUB_API_REQUEST_INTERVAL
           value: '10000'
-        - name: LIFECYCLE_UI_URL
-          value: 'http://localhost:3000'
         - name: DD_TRACE_ENABLED
           value: 'false'
       ports:

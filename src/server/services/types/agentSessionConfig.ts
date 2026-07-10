@@ -20,7 +20,7 @@ import type {
   AgentCapabilityCatalogId,
   AgentCapabilityCategory,
 } from 'server/services/agent/capabilityCatalog';
-import type { AgentSessionWorkspaceStorageAccessMode } from './globalConfig';
+import type { AgentSessionWorkspaceBackendProvider, AgentSessionWorkspaceStorageAccessMode } from './globalConfig';
 
 export type AgentSessionToolRuleMode = AgentApprovalMode;
 export type AgentSessionToolRuleSelection = AgentSessionToolRuleMode | 'inherit';
@@ -34,8 +34,10 @@ export interface AgentSessionControlPlaneConfigValue {
   systemPrompt?: string;
   appendSystemPrompt?: string;
   maxIterations?: number;
+  maxRunInputTokens?: number;
   workspaceToolDiscoveryTimeoutMs?: number;
   workspaceToolExecutionTimeoutMs?: number;
+  autoProvisionWorkspace?: boolean;
   toolRules?: AgentSessionToolRule[];
 }
 
@@ -43,8 +45,10 @@ export interface EffectiveAgentSessionControlPlaneConfig {
   systemPrompt: string;
   appendSystemPrompt?: string;
   maxIterations: number;
+  maxRunInputTokens: number;
   workspaceToolDiscoveryTimeoutMs: number;
   workspaceToolExecutionTimeoutMs: number;
+  autoProvisionWorkspace: boolean;
   toolRules: AgentSessionToolRule[];
 }
 
@@ -63,6 +67,68 @@ export interface AgentSessionWorkspaceStorageSettingsValue {
   allowedSizes?: string[];
   allowClientOverride?: boolean;
   accessMode?: AgentSessionWorkspaceStorageAccessMode;
+}
+
+export interface AgentSessionOpenSandboxBackendSettingsValue {
+  domain?: string;
+  protocol?: 'http' | 'https';
+  apiKey?: string;
+  /** Read-side only: whether an API key is configured (DB or env); the key itself is never returned. */
+  apiKeyConfigured?: boolean;
+  image?: string;
+  poolRef?: string;
+  timeoutSeconds?: number | null;
+  useServerProxy?: boolean;
+  secureAccess?: boolean;
+  resourceLimits?: Record<string, string>;
+  execdPort?: number;
+  gatewayPort?: number;
+  editorPort?: number;
+}
+
+export interface AgentSessionE2bBackendSettingsValue {
+  apiKey?: string;
+  /** Read-side only: whether an API key is configured (DB or env); the key itself is never returned. */
+  apiKeyConfigured?: boolean;
+  templateId?: string;
+  domain?: string;
+  timeoutSeconds?: number | null;
+  autoPause?: boolean;
+}
+
+export interface AgentSessionDaytonaBackendSettingsValue {
+  apiKey?: string;
+  /** Read-side only: whether an API key is configured (DB or env); the key itself is never returned. */
+  apiKeyConfigured?: boolean;
+  snapshot?: string;
+  apiUrl?: string;
+  target?: string;
+  autoArchiveInterval?: number;
+}
+
+export interface AgentSessionModalBackendSettingsValue {
+  tokenId?: string;
+  /** Read-side only: whether a token ID is configured (DB or env); the value itself is never returned. */
+  tokenIdConfigured?: boolean;
+  tokenSecret?: string;
+  /** Read-side only: whether a token secret is configured (DB or env); the value itself is never returned. */
+  tokenSecretConfigured?: boolean;
+  environment?: string;
+  appName?: string;
+  image?: string;
+  imageRegistrySecret?: string;
+  timeoutSeconds?: number;
+  cpu?: number;
+  memoryMiB?: number;
+  inboundCidrAllowlist?: string[];
+}
+
+export interface AgentSessionWorkspaceBackendSettingsValue {
+  provider?: AgentSessionWorkspaceBackendProvider;
+  opensandbox?: AgentSessionOpenSandboxBackendSettingsValue;
+  e2b?: AgentSessionE2bBackendSettingsValue;
+  daytona?: AgentSessionDaytonaBackendSettingsValue;
+  modal?: AgentSessionModalBackendSettingsValue;
 }
 
 export interface AgentSessionCleanupSettingsValue {
@@ -97,6 +163,7 @@ export interface AgentSessionRuntimeSettingsValue {
     workspaceGateway?: AgentSessionResourceRequirementsValue;
   };
   workspaceStorage?: AgentSessionWorkspaceStorageSettingsValue;
+  workspaceBackend?: AgentSessionWorkspaceBackendSettingsValue;
   cleanup?: AgentSessionCleanupSettingsValue;
   durability?: AgentSessionDurabilitySettingsValue;
 }

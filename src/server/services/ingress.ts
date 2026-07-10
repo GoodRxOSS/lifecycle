@@ -110,7 +110,7 @@ export default class IngressService extends BaseService {
         );
       });
       manifests.forEach(async (manifest, idx) => {
-        await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace);
+        await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace, buildId);
       });
 
       getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: created');
@@ -192,7 +192,7 @@ export default class IngressService extends BaseService {
    * @param manifest the manifest to apply
    * @param ingressName a name for the manifest for tmp directory namespacing
    */
-  private applyManifests = async (manifest, ingressName, namespace: string) => {
+  private applyManifests = async (manifest, ingressName, namespace: string, buildId?: number) => {
     try {
       const localPath = `${MANIFEST_PATH}/global-ingress/${ingressName}-ingress.yaml`;
       await fs.promises.mkdir(`${MANIFEST_PATH}/global-ingress/`, {
@@ -202,6 +202,22 @@ export default class IngressService extends BaseService {
       await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
     } catch (error) {
       getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Ingress: manifest apply failed');
+      if (buildId !== undefined) {
+        await this.recordIngressFailureOnBuild(buildId, error).catch(() => undefined);
+      }
     }
+  };
+
+  // Surface broken routing in the build row; the build otherwise reports deployed with no DB trace of the failure.
+  private recordIngressFailureOnBuild = async (buildId: number, error: unknown) => {
+    const note = `Ingress apply failed: ${(error as Error)?.message || String(error)}`
+      .replace(/\s+/g, ' ')
+      .slice(0, 300);
+    const build = await this.db.models.Build.query().findById(buildId);
+    if (!build || build.statusMessage?.includes(note)) {
+      return;
+    }
+    const statusMessage = [build.statusMessage, note].filter(Boolean).join(' | ').slice(-500);
+    await build.$query().patch({ statusMessage });
   };
 }

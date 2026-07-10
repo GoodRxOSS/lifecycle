@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { APICallError } from 'ai';
 import { AgentRunTerminalFailure } from './errors';
 import { AgentRunOwnershipLostError } from './AgentRunOwnershipLostError';
 import { OAuthAuthorizationRequiredError } from '../agentRuntime/mcp/oauthProvider';
@@ -23,6 +22,7 @@ import { OAuthAuthorizationRequiredError } from '../agentRuntime/mcp/oauthProvid
 export type AgentRunFailureCode =
   // finishReason-derived (see classifyTerminalRunFailure in RunExecutor)
   | 'max_iterations_exceeded'
+  | 'run_token_budget_exceeded'
   | 'token_limit_reached'
   | 'content_filtered'
   | 'stream_error'
@@ -38,7 +38,22 @@ export type AgentRunFailureCode =
   | 'run_ownership_lost'
   | 'run_unknown_error';
 
-function looksLikeQuotaExhausted(error: APICallError): boolean {
+type ApiCallErrorLike = Error & {
+  responseBody?: unknown;
+  statusCode?: number;
+  url?: string;
+};
+
+function isApiCallErrorLike(error: unknown): error is ApiCallErrorLike {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const candidate = error as ApiCallErrorLike;
+  return error.name === 'AI_APICallError' || typeof candidate.statusCode === 'number' || 'responseBody' in candidate;
+}
+
+function looksLikeQuotaExhausted(error: ApiCallErrorLike): boolean {
   const haystack = `${error.message} ${typeof error.responseBody === 'string' ? error.responseBody : ''}`.toLowerCase();
   return (
     haystack.includes('credit balance') ||
@@ -71,9 +86,9 @@ export function classifyThrownRunError(error: unknown): AgentRunTerminalFailure 
     });
   }
 
-  if (APICallError.isInstance(error)) {
+  if (isApiCallErrorLike(error)) {
     const status = error.statusCode;
-    const provider = (error as { url?: string }).url || '';
+    const provider = error.url || '';
 
     if (status === 429) {
       if (looksLikeQuotaExhausted(error)) {

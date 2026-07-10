@@ -28,6 +28,7 @@ moduleAlias.addAliases({
 });
 
 import { createServer, IncomingMessage, ServerResponse, request as httpRequest, STATUS_CODES } from 'http';
+import { request as httpsRequest } from 'https';
 import type { Socket } from 'net';
 import { parse, URL } from 'url';
 import next from 'next';
@@ -38,7 +39,6 @@ import { isMcpServerEnabled, isAuthEnabled } from './src/server/mcp/config';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import {
-  buildWorkspaceEditorProxyHeaders,
   serializeSocketHttpResponse,
   EDITOR_PROXY_TIMEOUT_MS,
   EDITOR_PROXY_PING_INTERVAL_MS,
@@ -50,6 +50,25 @@ import {
   isEditorNavigationRequest,
   type EditorProxyFailureContext,
 } from './src/server/lib/agentSession/workspaceEditorProxy';
+import {
+  buildChatPreviewAuthRedirectUrl,
+  buildChatPreviewCookie,
+  buildProxyHeaders,
+  buildRemoteTargetUrl,
+  appendForwardQuery,
+  CHAT_PREVIEW_COOKIE_NAME,
+  EDITOR_PROXY_BLOCKED_QUERY_PARAMS,
+  HOP_BY_HOP_HEADERS,
+  parseCookieHeader,
+  PREVIEW_PROXY_BLOCKED_QUERY_PARAMS,
+  rewritePreviewResponseHeader,
+  stripPreviewBootstrapParams,
+  stripQueryParamsFromRequestUrl,
+  type ChatPreviewPathMatch,
+} from './src/server/lib/agentSession/chatPreviewProxy';
+import { verifyChatPreviewGrant } from './src/server/lib/agentSession/chatPreviewGrant';
+import { parseChatPreviewHost } from './src/server/lib/agentSession/chatPreviewFactory';
+import { resolveChatPreviewSessionForHost } from './src/server/lib/agentSession/chatPreviewHostResolver';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
@@ -84,38 +103,6 @@ if (isMcpServerEnabled()) {
   handleMcpHttpRequest = require('./src/server/mcp/handler').handleMcpHttpRequest as McpHttpHandler;
 }
 let sitesGatewayService: SitesService | null = null;
-const HOP_BY_HOP_HEADERS = new Set([
-  'connection',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-]);
-function parseCookieHeader(cookieHeader: string | string[] | undefined): Record<string, string> {
-  if (!cookieHeader) {
-    return {};
-  }
-
-  const raw = Array.isArray(cookieHeader) ? cookieHeader.join(';') : cookieHeader;
-  return raw.split(';').reduce<Record<string, string>>((cookies, entry) => {
-    const separatorIndex = entry.indexOf('=');
-    if (separatorIndex < 0) {
-      return cookies;
-    }
-
-    const key = entry.slice(0, separatorIndex).trim();
-    const value = entry.slice(separatorIndex + 1).trim();
-    if (!key) {
-      return cookies;
-    }
-
-    cookies[key] = decodeURIComponent(value);
-    return cookies;
-  }, {});
-}
 
 type SessionWorkspaceEditorPathMatch = { sessionId: string; forwardPath: string };
 
@@ -127,23 +114,90 @@ function getSitesGatewayService(): SitesService {
   return sitesGatewayService;
 }
 
+// decodeURIComponent throws URIError on malformed escapes; a crash here would take down the server.
+function safeDecodeURIComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 function parseSessionWorkspaceEditorPath(pathname: string | null | undefined): SessionWorkspaceEditorPathMatch | null {
   const safePathname = pathname || '';
   if (safePathname.startsWith(SESSION_WORKSPACE_EDITOR_PATH_PREFIX)) {
     const remainder = safePathname.slice(SESSION_WORKSPACE_EDITOR_PATH_PREFIX.length);
     const slashIndex = remainder.indexOf('/');
-    const sessionId = slashIndex >= 0 ? remainder.slice(0, slashIndex) : remainder;
+    const rawSessionId = slashIndex >= 0 ? remainder.slice(0, slashIndex) : remainder;
+    const sessionId = rawSessionId ? safeDecodeURIComponent(rawSessionId) : null;
     if (!sessionId) {
       return null;
     }
 
     const forwardPath = slashIndex >= 0 ? remainder.slice(slashIndex) : '/';
     return {
-      sessionId: decodeURIComponent(sessionId),
+      sessionId,
       forwardPath: forwardPath || '/',
     };
   }
   return null;
+}
+
+async function resolveChatPreviewHostPathMatch(
+  request: IncomingMessage,
+  pathname: string | null | undefined
+): Promise<ChatPreviewPathMatch | null> {
+  const hostMatch = parseChatPreviewHost(request.headers.host);
+  if (!hostMatch) {
+    return null;
+  }
+
+  const session = await resolveChatPreviewSessionForHost(hostMatch);
+  if (!session) {
+    return null;
+  }
+
+  return {
+    sessionId: session.sessionId,
+    port: hostMatch.port,
+    forwardPath: pathname || '/',
+    previewHost: hostMatch.host,
+    previewSlug: hostMatch.previewSlug,
+  };
+}
+
+// SECURITY: the preview proxies a workspace's own web app to the public ws-server origin;
+// without this it would be reachable by anyone who learns the session uuid + port. Gated to
+// the session owner with host-bound opaque preview grants.
+async function resolveChatPreviewSessionUserId(sessionId: string): Promise<string | null> {
+  const { default: AgentSession } = await import('./src/server/models/AgentSession');
+  const session = await AgentSession.query().findOne({ uuid: sessionId });
+  return session?.userId ?? null;
+}
+
+async function isAuthorizedChatPreviewRequest(
+  request: IncomingMessage,
+  sessionUserId: string,
+  match: ChatPreviewPathMatch,
+  queryGrant?: string | null
+): Promise<boolean> {
+  // Auth disabled (local dev) keeps the editor's behavior: open, same as that proxy.
+  if (process.env.ENABLE_AUTH !== 'true') {
+    return true;
+  }
+
+  const cookieGrant = parseCookieHeader(request.headers.cookie)[CHAT_PREVIEW_COOKIE_NAME];
+  const expectedGrant = {
+    sessionId: match.sessionId,
+    port: match.port,
+    userId: sessionUserId,
+    previewHost: match.previewHost,
+  };
+  return verifyChatPreviewGrant(cookieGrant, expectedGrant) || verifyChatPreviewGrant(queryGrant, expectedGrant);
+}
+
+function setNoReferrerPolicy(res: ServerResponse): void {
+  res.setHeader('Referrer-Policy', 'no-referrer');
 }
 
 function getSessionWorkspaceEditorCookiePath(sessionId: string): string {
@@ -234,33 +288,207 @@ function buildSessionWorkspaceEditorServiceUrl(
     `${protocol}://${session.podName}.${session.namespace}.svc.cluster.local:${SESSION_WORKSPACE_EDITOR_PORT}${forwardPath}`
   );
 
-  for (const [key, value] of Object.entries(query)) {
-    if (key === 'token' || value == null) {
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      value.forEach((item) => target.searchParams.append(key, item));
-      continue;
-    }
-
-    target.searchParams.set(key, value);
-  }
-
+  appendForwardQuery(target, query, EDITOR_PROXY_BLOCKED_QUERY_PARAMS);
   return target;
 }
 
-function buildProxyHeaders(request: IncomingMessage, target: URL, forwardedPrefix: string): Record<string, string> {
-  return buildWorkspaceEditorProxyHeaders({
-    requestHeaders: request.headers,
-    targetHost: target.host,
-    forwardedHost: request.headers.host || target.host,
-    forwardedProto:
-      (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
-      ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http'),
-    forwardedPrefix,
-    remoteAddress: request.socket.remoteAddress,
+type SessionWorkspaceEditorTarget = {
+  url: URL;
+  headers?: Record<string, string>;
+  // SECURITY: remote (untrusted) editor backends must not receive Lifecycle credentials nor set cookies on our origin.
+  isRemote: boolean;
+};
+
+// Endpoint lookups run on every proxied request (browser previews fan out to dozens); cache the
+// DB-backed resolution briefly so the hot path stays off the database.
+const ENDPOINT_CACHE_TTL_MS = 5000;
+const ENDPOINT_CACHE_NEGATIVE_TTL_MS = 1500;
+const ENDPOINT_CACHE_MAX_ENTRIES = 1000;
+type RemoteEndpointRef = { url: string; headers?: Record<string, string> } | null;
+const endpointCache = new Map<string, { value: RemoteEndpointRef; expiresAt: number }>();
+
+async function resolveCachedEndpoint(key: string, lookup: () => Promise<RemoteEndpointRef>) {
+  const cached = endpointCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const value = await lookup();
+  if (endpointCache.size >= ENDPOINT_CACHE_MAX_ENTRIES) {
+    endpointCache.clear();
+  }
+  endpointCache.set(key, {
+    value,
+    expiresAt: Date.now() + (value ? ENDPOINT_CACHE_TTL_MS : ENDPOINT_CACHE_NEGATIVE_TTL_MS),
   });
+  return value;
+}
+
+async function resolveSessionWorkspaceEditorTarget(
+  session: { id: string; uuid?: string; podName: string; namespace: string },
+  forwardPath: string,
+  query: Record<string, string | string[] | undefined>,
+  isWebSocket = false
+): Promise<SessionWorkspaceEditorTarget> {
+  const endpoint = await resolveCachedEndpoint(`editor:${session.uuid || session.id}`, async () => {
+    const AgentSandboxService = (await import('./src/server/services/agent/SandboxService')).default;
+    return AgentSandboxService.resolveWorkspaceEditorEndpoint(session.uuid || session.id).catch(() => null);
+  });
+  if (endpoint) {
+    return {
+      url: buildRemoteTargetUrl(endpoint.url, forwardPath, query, {
+        isWebSocket,
+        blockedQueryParams: EDITOR_PROXY_BLOCKED_QUERY_PARAMS,
+      }),
+      isRemote: true,
+      ...(endpoint.headers ? { headers: endpoint.headers } : {}),
+    };
+  }
+
+  return {
+    url: buildSessionWorkspaceEditorServiceUrl(session, forwardPath, query, isWebSocket),
+    isRemote: false,
+  };
+}
+
+// The exposure row intentionally holds no bearer token at rest; gateway auth headers are re-resolved
+// per lookup from the exposure's own sandbox so URL and token never span generations.
+async function resolvePreviewEndpointWithAuth(
+  providerState: unknown,
+  sandbox: import('./src/server/models/AgentSandbox').default,
+  session: import('./src/server/models/AgentSession').default
+): Promise<RemoteEndpointRef> {
+  const { resolvePersistedPreviewEndpointWithAuth } = await import(
+    './src/server/services/workspaceRuntime/gatewayPreview'
+  );
+  const { default: AgentSandboxService } = await import('./src/server/services/agent/SandboxService');
+  return resolvePersistedPreviewEndpointWithAuth(providerState || {}, () =>
+    AgentSandboxService.resolveGatewayEndpointForSandbox(sandbox, session).catch((error) => {
+      logger.warn({ error, sessionId: session.uuid }, 'ChatPreview: gateway auth resolution failed');
+      return null;
+    })
+  );
+}
+
+async function lookupChatPreviewEndpoint(match: ChatPreviewPathMatch): Promise<RemoteEndpointRef> {
+  const [{ default: AgentSession }, { default: AgentSandbox }, { default: AgentSandboxExposure }] = await Promise.all([
+    import('./src/server/models/AgentSession'),
+    import('./src/server/models/AgentSandbox'),
+    import('./src/server/models/AgentSandboxExposure'),
+  ]);
+  if (match.previewSlug) {
+    let exposure = await AgentSandboxExposure.query()
+      .where({ kind: 'preview', targetPort: match.port })
+      .whereRaw('"metadata"->>? = ?', ['previewSlug', match.previewSlug])
+      .orderBy('id', 'desc')
+      .first();
+    if (!exposure) {
+      return null;
+    }
+
+    const exposureSandbox = await AgentSandbox.query().findById(exposure.sandboxId);
+    if (!exposureSandbox || exposureSandbox.status !== 'ready') {
+      return null;
+    }
+
+    const session = await AgentSession.query().findById(exposureSandbox.sessionId);
+    if (
+      !session ||
+      session.uuid !== match.sessionId ||
+      session.status !== 'active' ||
+      session.workspaceStatus !== 'ready'
+    ) {
+      return null;
+    }
+
+    if (exposure.status !== 'ready' || exposure.endedAt) {
+      const AgentSandboxService = (await import('./src/server/services/agent/SandboxService')).default;
+      await AgentSandboxService.restorePreviewExposures(session);
+      exposure = await AgentSandboxExposure.query()
+        .where({ sandboxId: exposureSandbox.id, kind: 'preview', targetPort: match.port, status: 'ready' })
+        .whereRaw('"metadata"->>? = ?', ['previewSlug', match.previewSlug])
+        .whereNull('endedAt')
+        .first();
+      if (!exposure) {
+        return null;
+      }
+    }
+
+    return resolvePreviewEndpointWithAuth(exposure.providerState, exposureSandbox, session);
+  }
+
+  const session = await AgentSession.query().findOne({ uuid: match.sessionId });
+  if (!session || session.status !== 'active' || session.workspaceStatus !== 'ready') {
+    return null;
+  }
+
+  const sandbox = await AgentSandbox.query().where({ sessionId: session.id }).orderBy('generation', 'desc').first();
+  if (!sandbox || sandbox.status !== 'ready') {
+    return null;
+  }
+
+  let exposure = await AgentSandboxExposure.query()
+    .where({ sandboxId: sandbox.id, kind: 'preview', targetPort: match.port, status: 'ready' })
+    .whereNull('endedAt')
+    .first();
+  if (!exposure) {
+    const AgentSandboxService = (await import('./src/server/services/agent/SandboxService')).default;
+    await AgentSandboxService.restorePreviewExposures(session);
+    exposure = await AgentSandboxExposure.query()
+      .where({ sandboxId: sandbox.id, kind: 'preview', targetPort: match.port, status: 'ready' })
+      .whereNull('endedAt')
+      .first();
+    if (!exposure) {
+      return null;
+    }
+  }
+
+  return resolvePreviewEndpointWithAuth(exposure.providerState, sandbox, session);
+}
+
+async function resolveChatPreviewTarget(
+  match: ChatPreviewPathMatch,
+  query: Record<string, string | string[] | undefined>,
+  isWebSocket = false
+): Promise<SessionWorkspaceEditorTarget | null> {
+  const cacheKey = match.previewSlug
+    ? `preview:${match.sessionId}:${match.port}:${match.previewSlug}`
+    : `preview:${match.sessionId}:${match.port}`;
+  const endpoint = await resolveCachedEndpoint(cacheKey, () => lookupChatPreviewEndpoint(match));
+  if (!endpoint) {
+    return null;
+  }
+
+  return {
+    url: buildRemoteTargetUrl(endpoint.url, match.forwardPath, query, {
+      isWebSocket,
+      blockedQueryParams: PREVIEW_PROXY_BLOCKED_QUERY_PARAMS,
+    }),
+    isRemote: true,
+    ...(endpoint.headers ? { headers: endpoint.headers } : {}),
+  };
+}
+
+function requestForTarget(target: URL): typeof httpRequest {
+  return target.protocol === 'https:' || target.protocol === 'wss:' ? httpsRequest : httpRequest;
+}
+
+// node's http/https.request reject ws:/wss: URLs. A proxied WebSocket is issued as a normal
+// http/https request carrying Upgrade headers — the scheme, not the URL, makes it a WebSocket —
+// so the upstream URL must be normalized back to http/https before the request is built.
+function toUpgradeRequestUrl(target: URL): URL {
+  if (target.protocol !== 'ws:' && target.protocol !== 'wss:') {
+    return target;
+  }
+  const normalized = new URL(target.toString());
+  normalized.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
+  return normalized;
+}
+
+// SECURITY: untrusted preview responses must not set cookies on the Lifecycle origin.
+function stripSetCookieHeaders(headers: IncomingMessage['headers']): IncomingMessage['headers'] {
+  const { 'set-cookie': _setCookie, ...rest } = headers;
+  return rest;
 }
 
 async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
@@ -313,25 +541,18 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
     registered = true;
 
     const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
-    const targetUrl = buildSessionWorkspaceEditorServiceUrl(
+    const target = await resolveSessionWorkspaceEditorTarget(
       session,
       match.forwardPath,
-      parsedUrl.query as Record<string, string | string[] | undefined>
+      parsedUrl.query as Record<string, string | string[] | undefined>,
+      true
     );
-    const proxyHeaders = buildWorkspaceEditorProxyHeaders({
-      requestHeaders: request.headers,
-      targetHost: targetUrl.host,
-      forwardedHost: request.headers.host || targetUrl.host,
-      forwardedProto:
-        (typeof request.headers['x-forwarded-proto'] === 'string' && request.headers['x-forwarded-proto']) ||
-        ((request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http'),
-      forwardedPrefix,
-      remoteAddress: request.socket.remoteAddress,
-      includeUpgradeHeaders: true,
-    });
+    const targetUrl = target.url;
+    const proxyHeaders = buildProxyHeaders(request, targetUrl, forwardedPrefix, target.headers, true, target.isRemote);
 
+    const upstreamUrl = toUpgradeRequestUrl(targetUrl);
     await new Promise<void>((resolve, reject) => {
-      proxyReq = httpRequest(targetUrl, {
+      proxyReq = requestForTarget(upstreamUrl)(upstreamUrl, {
         method: request.method || 'GET',
         headers: proxyHeaders,
       });
@@ -358,7 +579,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
           serializeSocketHttpResponse({
             statusCode: upstreamRes.statusCode || 101,
             statusMessage: upstreamRes.statusMessage,
-            headers: upstreamRes.headers,
+            headers: target.isRemote ? stripSetCookieHeaders(upstreamRes.headers) : upstreamRes.headers,
           })
         );
 
@@ -496,6 +717,219 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
   }
 }
 
+async function handleChatPreviewUpgrade(request: IncomingMessage, socket: Socket, head: Buffer) {
+  const parsedUrl = parse(request.url || '', true);
+  let match: ChatPreviewPathMatch | null = null;
+  try {
+    match = await resolveChatPreviewHostPathMatch(request, parsedUrl.pathname || '/');
+    if (!match) {
+      socket.end(
+        serializeSocketHttpResponse({ statusCode: 400, statusMessage: 'Bad Request', body: 'Invalid preview path' })
+      );
+      return;
+    }
+
+    const previewSessionUserId = await resolveChatPreviewSessionUserId(match.sessionId);
+    if (!previewSessionUserId || !(await isAuthorizedChatPreviewRequest(request, previewSessionUserId, match))) {
+      socket.end(serializeSocketHttpResponse({ statusCode: 401, statusMessage: 'Unauthorized', body: 'Unauthorized' }));
+      return;
+    }
+  } catch (error) {
+    logger.warn({ error, path: parsedUrl.pathname }, 'ChatPreview: websocket authorization failed');
+    socket.end(
+      serializeSocketHttpResponse({
+        statusCode: 502,
+        statusMessage: 'Bad Gateway',
+        headers: { 'X-Preview-Proxy-Reason': 'preview-unavailable' },
+        body: 'Preview is unavailable',
+      })
+    );
+    return;
+  }
+
+  if (!match) {
+    return;
+  }
+
+  let upstreamSocket: Socket | null = null;
+  let proxyReq: ReturnType<typeof httpRequest> | null = null;
+  let clientClosedEarly = false;
+  // Preview pipes share the editor's live-connection registry so they count toward caps/metrics.
+  const registryKey = `preview:${match.sessionId}`;
+  const registryToken = {};
+  let registered = false;
+  let pipeEstablished = false;
+  const onEarlyClientClose = () => {
+    clientClosedEarly = true;
+    proxyReq?.destroy();
+    if (upstreamSocket && !upstreamSocket.destroyed) {
+      upstreamSocket.destroy();
+    }
+  };
+  socket.on('close', onEarlyClientClose);
+  socket.on('error', onEarlyClientClose);
+
+  try {
+    const target = await resolveChatPreviewTarget(
+      match,
+      parsedUrl.query as Record<string, string | string[] | undefined>,
+      true
+    );
+    if (!target) {
+      throw new Error('Preview target not found');
+    }
+
+    if (clientClosedEarly) {
+      return;
+    }
+
+    if (!editorProxyConnections.tryRegister(registryKey, registryToken)) {
+      throw new Error('preview-proxy-capacity');
+    }
+    registered = true;
+
+    const targetUrl = target.url;
+    const proxyHeaders = buildProxyHeaders(request, targetUrl, '', target.headers, true, true);
+
+    const upstreamUrl = toUpgradeRequestUrl(targetUrl);
+    await new Promise<void>((resolve, reject) => {
+      proxyReq = requestForTarget(upstreamUrl)(upstreamUrl, {
+        method: request.method || 'GET',
+        headers: proxyHeaders,
+      });
+      proxyReq.setTimeout(EDITOR_PROXY_TIMEOUT_MS, () => {
+        proxyReq?.destroy(new Error('preview-proxy-timeout'));
+      });
+
+      proxyReq.on('upgrade', (upstreamRes, proxiedSocket, upstreamHead) => {
+        upstreamSocket = proxiedSocket as Socket;
+        socket.removeListener('close', onEarlyClientClose);
+        socket.removeListener('error', onEarlyClientClose);
+
+        if (clientClosedEarly || socket.destroyed) {
+          upstreamSocket.destroy();
+          resolve();
+          return;
+        }
+
+        socket.write(
+          serializeSocketHttpResponse({
+            statusCode: upstreamRes.statusCode || 101,
+            statusMessage: upstreamRes.statusMessage,
+            headers: stripSetCookieHeaders(upstreamRes.headers),
+          })
+        );
+
+        if (upstreamHead.length > 0) {
+          socket.write(upstreamHead);
+        }
+        if (head.length > 0) {
+          upstreamSocket.write(head);
+        }
+
+        // A byte-pipe can't parse WS frames, so enforce liveness via a bidirectional idle timeout.
+        const idleMs = EDITOR_PROXY_PING_INTERVAL_MS + EDITOR_PROXY_PONG_DEADLINE_MS;
+        const reapIdle = (source: 'client' | 'upstream') => {
+          logger.warn(
+            { sessionId: match.sessionId, port: match.port, source, idleMs },
+            `ChatPreview: idle timeout source=${source} sessionId=${match.sessionId}`
+          );
+          if (!socket.destroyed) {
+            socket.destroy();
+          }
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.destroy();
+          }
+        };
+        socket.setTimeout(idleMs, () => reapIdle('client'));
+        upstreamSocket.setTimeout(idleMs, () => reapIdle('upstream'));
+
+        socket.on('error', (error) => {
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.destroy(error as Error);
+          }
+        });
+        upstreamSocket.on('error', (error) => {
+          if (!socket.destroyed) {
+            socket.destroy(error as Error);
+          }
+        });
+        socket.on('close', () => {
+          if (registered) {
+            registered = false;
+            editorProxyConnections.release(registryKey, registryToken);
+          }
+          if (upstreamSocket && !upstreamSocket.destroyed) {
+            upstreamSocket.end();
+          }
+        });
+        upstreamSocket.on('close', () => {
+          if (!socket.destroyed) {
+            socket.end();
+          }
+        });
+
+        pipeEstablished = true;
+        socket.pipe(upstreamSocket);
+        upstreamSocket.pipe(socket);
+        socket.resume();
+        upstreamSocket.resume();
+        resolve();
+      });
+
+      proxyReq.on('response', (upstreamRes) => {
+        const chunks: Buffer[] = [];
+        upstreamRes.on('data', (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        upstreamRes.on('end', () => {
+          if (!socket.destroyed) {
+            socket.end(
+              serializeSocketHttpResponse({
+                statusCode: upstreamRes.statusCode || 502,
+                statusMessage: upstreamRes.statusMessage,
+                headers: stripSetCookieHeaders(upstreamRes.headers),
+                body: Buffer.concat(chunks),
+              })
+            );
+          }
+          reject(new Error(`Preview upgrade rejected with status ${upstreamRes.statusCode || 502}`));
+        });
+      });
+
+      proxyReq.on('error', reject);
+      proxyReq.end();
+    });
+  } catch (error) {
+    logger.warn(
+      { error, path: parsedUrl.pathname, sessionId: match.sessionId, port: match.port },
+      'ChatPreview: websocket proxy failed'
+    );
+    proxyReq?.destroy();
+    if (upstreamSocket && !upstreamSocket.destroyed) {
+      upstreamSocket.destroy();
+    }
+    if (!socket.destroyed) {
+      socket.end(
+        serializeSocketHttpResponse({
+          statusCode: 502,
+          statusMessage: 'Bad Gateway',
+          headers: { 'X-Preview-Proxy-Reason': 'preview-unavailable' },
+          body: 'Preview is unavailable',
+        })
+      );
+    }
+  } finally {
+    socket.removeListener('close', onEarlyClientClose);
+    socket.removeListener('error', onEarlyClientClose);
+    // Release only when the pipe never went live; a live pipe's slot is released on socket close.
+    if (registered && !pipeEstablished) {
+      registered = false;
+      editorProxyConnections.release(registryKey, registryToken);
+    }
+  }
+}
+
 // err-4: coded error carrying failure context so callers can map suspended vs pod-gone vs auth.
 class EditorProxyError extends Error {
   failureContext: EditorProxyFailureContext;
@@ -593,16 +1027,27 @@ async function handleSessionWorkspaceEditorHttp(
     const queryToken = typeof query.token === 'string' ? query.token : null;
     const session = await resolveOwnedAgentSession(req, match.sessionId, queryToken);
 
+    // The token only bootstraps the cookie; redirect to the clean URL so the credential never
+    // lingers in the address bar or history and code-server's own requests stay cookie-only.
+    if (process.env.ENABLE_AUTH === 'true' && queryToken) {
+      res.statusCode = 302;
+      appendSetCookie(res, buildSessionWorkspaceEditorCookie(req, match.sessionId, queryToken));
+      res.setHeader('Location', stripQueryParamsFromRequestUrl(req.url, EDITOR_PROXY_BLOCKED_QUERY_PARAMS));
+      res.end();
+      return true;
+    }
+
     if (!editorProxyConnections.tryRegister(match.sessionId, registryToken)) {
       throw new EditorProxyError('editor-proxy-capacity');
     }
     registered = true;
 
     const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
-    const targetUrl = buildSessionWorkspaceEditorServiceUrl(session, match.forwardPath, query);
-    const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix);
+    const target = await resolveSessionWorkspaceEditorTarget(session, match.forwardPath, query);
+    const targetUrl = target.url;
+    const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix, target.headers, false, target.isRemote);
     await new Promise<void>((resolve, reject) => {
-      const proxyReq = httpRequest(
+      const proxyReq = requestForTarget(targetUrl)(
         targetUrl,
         {
           method: req.method,
@@ -620,15 +1065,14 @@ async function handleSessionWorkspaceEditorHttp(
             res.setHeader(key, Array.isArray(value) ? value : value.toString());
           });
 
-          const upstreamSetCookies = proxyRes.headers['set-cookie'] || [];
-          (Array.isArray(upstreamSetCookies) ? upstreamSetCookies : [upstreamSetCookies]).forEach((cookie) => {
-            if (cookie) {
-              appendSetCookie(res, cookie);
-            }
-          });
-
-          if (process.env.ENABLE_AUTH === 'true' && queryToken) {
-            appendSetCookie(res, buildSessionWorkspaceEditorCookie(req, match.sessionId, queryToken));
+          // SECURITY: untrusted remote editor responses must not set cookies on the Lifecycle origin.
+          if (!target.isRemote) {
+            const upstreamSetCookies = proxyRes.headers['set-cookie'] || [];
+            (Array.isArray(upstreamSetCookies) ? upstreamSetCookies : [upstreamSetCookies]).forEach((cookie) => {
+              if (cookie) {
+                appendSetCookie(res, cookie);
+              }
+            });
           }
 
           proxyRes.on('error', reject);
@@ -681,6 +1125,113 @@ async function handleSessionWorkspaceEditorHttp(
     if (registered) {
       editorProxyConnections.release(match.sessionId, registryToken);
     }
+  }
+}
+
+async function handleChatPreviewHttp(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  query: Record<string, string | string[] | undefined>,
+  resolvedMatch: ChatPreviewPathMatch | null
+) {
+  const match = resolvedMatch;
+  if (!match) {
+    return false;
+  }
+
+  const sessionUserId = await resolveChatPreviewSessionUserId(match.sessionId);
+  if (!sessionUserId) {
+    return false;
+  }
+
+  const queryGrant = typeof query.grant === 'string' ? query.grant : null;
+  if (!(await isAuthorizedChatPreviewRequest(req, sessionUserId, match, queryGrant))) {
+    res.statusCode = 302;
+    setNoReferrerPolicy(res);
+    res.setHeader('Location', buildChatPreviewAuthRedirectUrl(match, query));
+    res.end();
+    return true;
+  }
+
+  // The grant only bootstraps the cookie. Persist it as a path-scoped or host-scoped cookie, then redirect to the
+  // clean URL so the user never sees the credential and all later requests are cookie-only.
+  if (process.env.ENABLE_AUTH === 'true' && queryGrant) {
+    res.statusCode = 302;
+    setNoReferrerPolicy(res);
+    appendSetCookie(res, buildChatPreviewCookie(req, queryGrant));
+    res.setHeader('Location', stripPreviewBootstrapParams(req.url));
+    res.end();
+    return true;
+  }
+
+  const target = await resolveChatPreviewTarget(match, query);
+  if (!target) {
+    res.statusCode = 503;
+    res.setHeader('X-Preview-Proxy-Reason', 'preview-unavailable');
+    res.end('Preview is unavailable');
+    return true;
+  }
+
+  try {
+    const targetUrl = target.url;
+    const proxyHeaders = buildProxyHeaders(req, targetUrl, '', target.headers, false, true);
+    await new Promise<void>((resolve, reject) => {
+      const proxyReq = requestForTarget(targetUrl)(
+        targetUrl,
+        {
+          method: req.method,
+          headers: proxyHeaders,
+        },
+        (proxyRes) => {
+          res.statusCode = proxyRes.statusCode || 502;
+
+          Object.entries(proxyRes.headers).forEach(([key, value]) => {
+            const normalizedKey = key.toLowerCase();
+            if (HOP_BY_HOP_HEADERS.has(normalizedKey) || normalizedKey === 'set-cookie' || value == null) {
+              return;
+            }
+
+            if (Array.isArray(value)) {
+              res.setHeader(
+                key,
+                value.map((entry) => rewritePreviewResponseHeader(key, entry, targetUrl, req, ''))
+              );
+            } else {
+              res.setHeader(key, rewritePreviewResponseHeader(key, value.toString(), targetUrl, req, ''));
+            }
+          });
+
+          proxyRes.on('error', reject);
+          proxyRes.on('end', () => resolve());
+          proxyRes.pipe(res);
+        }
+      );
+
+      proxyReq.setTimeout(EDITOR_PROXY_TIMEOUT_MS, () => {
+        proxyReq.destroy(new Error('preview-proxy-timeout'));
+      });
+      req.on('close', () => proxyReq.destroy());
+      proxyReq.on('error', reject);
+
+      if (req.method && !['GET', 'HEAD'].includes(req.method.toUpperCase())) {
+        req.pipe(proxyReq);
+      } else {
+        proxyReq.end();
+      }
+    });
+
+    return true;
+  } catch (error) {
+    logger.warn({ error, path: pathname, sessionId: match.sessionId, port: match.port }, 'ChatPreview: proxy failed');
+    if (!res.headersSent) {
+      res.statusCode = 502;
+      res.setHeader('X-Preview-Proxy-Reason', 'preview-unavailable');
+      res.end('Preview is unavailable');
+    } else if (!(res as ServerResponse & { writableEnded?: boolean }).writableEnded) {
+      res.end();
+    }
+    return true;
   }
 }
 
@@ -739,6 +1290,27 @@ app.prepare().then(() => {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const parsedUrl = parse(req.url!, true);
+      const chatPreviewHost = parseChatPreviewHost(req.headers.host);
+      if (chatPreviewHost) {
+        const chatPreviewHostMatch = await resolveChatPreviewHostPathMatch(req, parsedUrl.pathname || '/');
+        if (
+          chatPreviewHostMatch &&
+          (await handleChatPreviewHttp(
+            req,
+            res,
+            parsedUrl.pathname || '/',
+            parsedUrl.query as Record<string, string | string[] | undefined>,
+            chatPreviewHostMatch
+          ))
+        ) {
+          return;
+        }
+
+        res.statusCode = 404;
+        res.setHeader('X-Preview-Proxy-Reason', 'preview-not-found');
+        res.end('Preview is unavailable');
+        return;
+      }
       if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res, parsedUrl.pathname))) {
         return;
       }
@@ -767,18 +1339,27 @@ app.prepare().then(() => {
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (request: IncomingMessage, socket, head) => {
-    const { pathname } = parse(request.url!, true);
-    const connectionLogCtx = { path: pathname, remoteAddress: request.socket.remoteAddress };
+    // A throw here would be an uncaughtException that kills the whole server; drop the socket instead.
+    try {
+      const { pathname } = parse(request.url!, true);
+      const connectionLogCtx = { path: pathname, remoteAddress: request.socket.remoteAddress };
 
-    if (pathname === LOG_STREAM_PATH) {
-      logger.debug(connectionLogCtx, 'Handling upgrade request for log stream');
-      wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-        wss.emit('connection', ws, request);
-      });
-    } else if (parseSessionWorkspaceEditorPath(pathname)) {
-      logger.debug(connectionLogCtx, 'WebSocket: upgrade path=session_workspace_editor');
-      void handleSessionWorkspaceEditorUpgrade(request, socket as Socket, head);
-    } else {
+      if (pathname === LOG_STREAM_PATH) {
+        logger.debug(connectionLogCtx, 'Handling upgrade request for log stream');
+        wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+          wss.emit('connection', ws, request);
+        });
+      } else if (parseSessionWorkspaceEditorPath(pathname)) {
+        logger.debug(connectionLogCtx, 'WebSocket: upgrade path=session_workspace_editor');
+        void handleSessionWorkspaceEditorUpgrade(request, socket as Socket, head);
+      } else if (parseChatPreviewHost(request.headers.host)) {
+        logger.debug(connectionLogCtx, 'WebSocket: upgrade path=chat_preview');
+        void handleChatPreviewUpgrade(request, socket as Socket, head);
+      } else {
+        socket.destroy();
+      }
+    } catch (error) {
+      logger.warn({ error, url: request.url }, 'WebSocket: upgrade dispatch failed');
       socket.destroy();
     }
   });

@@ -30,11 +30,12 @@ export type AgentRuntimeToolResourceDomain =
   | 'git'
   | 'mcp'
   | 'preview'
-  | 'network'
-  | 'approval';
+  | 'network';
 
 export type AgentRuntimeToolMetadata = {
   toolKey: string;
+  serverSlug?: string;
+  sourceToolName?: string;
   catalogCapabilityId: AgentCapabilityCatalogId;
   capabilityKey: AgentCapabilityKey;
   approvalMode: AgentApprovalMode;
@@ -43,6 +44,18 @@ export type AgentRuntimeToolMetadata = {
   workspaceNeed?: AgentRuntimeToolWorkspaceNeed;
   exposure?: AgentRuntimeToolExposure;
 };
+
+function parseAgentToolKey(toolKey: string): { serverSlug?: string; sourceToolName?: string } {
+  const parts = toolKey.split('__');
+  if (parts.length < 3 || parts[0] !== 'mcp') {
+    return {};
+  }
+
+  return {
+    serverSlug: parts[1],
+    sourceToolName: parts.slice(2).join('__'),
+  };
+}
 
 export function classifyToolEffect(capabilityKey: AgentCapabilityKey): AgentRuntimeToolEffect {
   return capabilityKey === 'read' || capabilityKey === 'external_mcp_read' ? 'read' : 'write';
@@ -64,7 +77,6 @@ function classifyToolResourceDomain({
   if (catalogCapabilityId === 'external_mcp_read' || catalogCapabilityId === 'external_mcp_write') return 'mcp';
   if (catalogCapabilityId === 'preview_publish') return 'preview';
   if (catalogCapabilityId === 'network_access') return 'network';
-  if (catalogCapabilityId === 'approval_controls') return 'approval';
   if (toolKey.includes('__lifecycle__')) return 'lifecycle';
   return 'workspace';
 }
@@ -90,7 +102,10 @@ export function buildAgentRuntimeToolMetadata(
   metadata: Omit<AgentRuntimeToolMetadata, 'effect' | 'resourceDomain' | 'workspaceNeed' | 'exposure'>
 ): AgentRuntimeToolMetadata {
   const effect = classifyToolEffect(metadata.capabilityKey);
+  const parsedToolKey = parseAgentToolKey(metadata.toolKey);
   return {
+    serverSlug: parsedToolKey.serverSlug,
+    sourceToolName: parsedToolKey.sourceToolName,
     ...metadata,
     effect,
     resourceDomain: classifyToolResourceDomain(metadata),
@@ -105,4 +120,12 @@ export function isReadOnlyRuntimeTool(metadata: AgentRuntimeToolMetadata): boole
 
 export function isApprovalGatedWriteRuntimeTool(metadata: AgentRuntimeToolMetadata): boolean {
   return !isReadOnlyRuntimeTool(metadata) && metadata.approvalMode === 'require_approval';
+}
+
+export function isRepairRuntimeTool(metadata: AgentRuntimeToolMetadata): boolean {
+  return (
+    !isReadOnlyRuntimeTool(metadata) &&
+    metadata.approvalMode !== 'deny' &&
+    (metadata.exposure === undefined || metadata.exposure === 'repair')
+  );
 }

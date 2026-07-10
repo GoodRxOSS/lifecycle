@@ -30,7 +30,7 @@ jest.mock('../kubernetes/common/serviceAccount', () => ({
   ensureServiceAccountForJob: jest.fn().mockResolvedValue(void 0),
 }));
 jest.mock('../kubernetes', () => ({
-  waitForDeployPodReady: jest.fn().mockResolvedValue(true),
+  waitForDeployPodReady: jest.fn().mockResolvedValue({ ready: true }),
 }));
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
@@ -41,15 +41,19 @@ jest.mock('server/services/globalConfig', () => ({
 jest.mock('server/services/logArchival', () => ({
   getLogArchivalService: jest.fn(),
 }));
+const mockRecordDeployFailure = jest.fn().mockResolvedValue(false);
 jest.mock('server/services/deploy', () => {
   return jest.fn().mockImplementation(() => ({
     patchAndUpdateActivityFeed: jest.fn().mockResolvedValue(void 0),
+    recordDeployFailure: (...args: any[]) => mockRecordDeployFailure(...args),
   }));
 });
 
 import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
+import { waitForDeployPodReady } from '../kubernetes';
 import GlobalConfigService from 'server/services/globalConfig';
 import { getLogArchivalService } from 'server/services/logArchival';
+import { DeployStatus } from 'shared/constants';
 
 // todo: add more tests for the below scenarios
 // let deploysWithoutDependencies: Deploy[];
@@ -213,6 +217,64 @@ describe('DeploymentManager', () => {
   //   });
   // });
 
+  describe('dependency cycles', () => {
+    function cyclicDeploy(name: string, dependsOn: string[], patch: jest.Mock) {
+      return {
+        deployable: { name, deploymentDependsOn: [...dependsOn], type: 'helm' },
+        service: { type: 'helm' },
+        $query: () => ({ patch }),
+      } as unknown as Deploy;
+    }
+
+    it('leaves cycle members out of every level', () => {
+      const patch = jest.fn().mockResolvedValue(undefined);
+      const manager = new DeploymentManager([
+        cyclicDeploy('a', ['b'], patch),
+        cyclicDeploy('b', ['a'], patch),
+        cyclicDeploy('standalone', [], patch),
+      ]);
+
+      const levels = manager['deploymentLevels'];
+      expect(levels.size).toBe(1);
+      expect(levels.get(0)).toMatchObject([{ deployable: { name: 'standalone' } }]);
+      expect(manager['unresolvedDeploys'].map((d) => d.deployable.name).sort()).toEqual(['a', 'b']);
+    });
+
+    it('fails cycle members and their dependents with a cycle message instead of leaving them queued', async () => {
+      const patchByName = new Map<string, jest.Mock>();
+      const make = (name: string, dependsOn: string[]) => {
+        const patch = jest.fn().mockResolvedValue(undefined);
+        patchByName.set(name, patch);
+        return cyclicDeploy(name, dependsOn, patch);
+      };
+
+      const manager = new DeploymentManager([
+        make('a', ['b']),
+        make('b', ['a']),
+        make('depends-on-cycle', ['a']),
+        make('standalone', []),
+      ]);
+
+      await manager.deploy();
+
+      const cycleMessage = 'Dependency cycle detected: a -> b -> a; deploy order cannot be resolved';
+      expect(patchByName.get('a')).toHaveBeenCalledWith({
+        status: DeployStatus.DEPLOY_FAILED,
+        statusMessage: cycleMessage,
+      });
+      expect(patchByName.get('b')).toHaveBeenCalledWith({
+        status: DeployStatus.DEPLOY_FAILED,
+        statusMessage: cycleMessage,
+      });
+      expect(patchByName.get('depends-on-cycle')).toHaveBeenCalledWith({
+        status: DeployStatus.DEPLOY_FAILED,
+        statusMessage: cycleMessage,
+      });
+      expect(patchByName.get('standalone')).toHaveBeenCalledWith({ status: DeployStatus.QUEUED });
+      expect(patchByName.get('a')).not.toHaveBeenCalledWith({ status: DeployStatus.QUEUED });
+    });
+  });
+
   describe('deployManifests', () => {
     it('monitors the canonical truncated deploy job name for long deploy uuids', async () => {
       const deploy = {
@@ -252,6 +314,35 @@ describe('DeploymentManager', () => {
       });
 
       expect(monitorKubernetesJob).toHaveBeenCalledWith(expectedJobName, 'testns');
+    });
+
+    it('throws the collected pod failure cause when pods never become ready', async () => {
+      (waitForDeployPodReady as jest.Mock).mockResolvedValueOnce({
+        ready: false,
+        causeSummary: 'pod web-1: web waiting=ImagePullBackOff (Back-off pulling image "x") restarts=0',
+      });
+
+      const deploy = {
+        uuid: 'web-preview-build-123456',
+        sha: 'abcdef1234567890',
+        manifest: 'apiVersion: v1\nkind: ConfigMap',
+        runUUID: 'run-1',
+        build: { namespace: 'testns' },
+        deployable: { name: 'web', type: 'github', deploymentDependsOn: [] },
+        service: { type: 'github' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Deploy;
+
+      deploymentManager = new DeploymentManager([deploy]);
+
+      await expect(deploymentManager['deployManifests'](deploy)).rejects.toThrow(
+        'Pods failed to become ready within timeout: pod web-1: web waiting=ImagePullBackOff (Back-off pulling image "x") restarts=0'
+      );
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        'run-1',
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
     });
 
     it('archives kubernetes apply logs for non-helm deploys when log archival is enabled', async () => {

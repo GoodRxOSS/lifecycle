@@ -223,6 +223,28 @@ describe('OpenAPI v2 agent session contract', () => {
     expect(schemas.AgentRunPlanSummary.properties.capabilities).toEqual({
       $ref: '#/components/schemas/AgentRunPlanCapabilitiesSummary',
     });
+    expect(schemas.AgentRunPlanSummary.properties.profile).toEqual({
+      $ref: '#/components/schemas/AgentRunPlanProfileSummary',
+    });
+    expect(schemas.AgentRunPlanProfileSummary).toEqual({
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['answer', 'debug', 'change', 'legacy'],
+        },
+        intent: {
+          type: 'string',
+          enum: ['chat', 'diagnose', 'repair', 'workspace', 'legacy'],
+        },
+        workspaceCore: {
+          type: 'string',
+          enum: ['absent', 'requested'],
+        },
+      },
+      required: ['kind', 'intent', 'workspaceCore'],
+      additionalProperties: false,
+    });
     expect(schemas.AgentRunPlanSummary.properties.debug).toEqual({
       type: 'object',
       properties: {
@@ -242,6 +264,7 @@ describe('OpenAPI v2 agent session contract', () => {
       AgentRunPlanCapabilitySummary: schemas.AgentRunPlanCapabilitySummary,
       AgentRunPlanCapabilitiesSummary: schemas.AgentRunPlanCapabilitiesSummary,
       AgentRunPlanSelectedRuntimeChoicesSummary: schemas.AgentRunPlanSelectedRuntimeChoicesSummary,
+      AgentRunPlanProfileSummary: schemas.AgentRunPlanProfileSummary,
     });
 
     for (const forbidden of [
@@ -659,6 +682,65 @@ describe('OpenAPI v2 agent session contract', () => {
         additionalProperties: false,
       })
     );
+  });
+
+  it('documents the workspace runtime backend catalog and test-connection contracts', () => {
+    expect(getOperation('/api/v2/ai/workspace-runtime/backends', 'get')?.tags).toEqual(['Agent Admin']);
+    expect(getOperation('/api/v2/ai/workspace-runtime/backends/{id}/test-connection', 'post')?.tags).toEqual([
+      'Agent Admin',
+    ]);
+
+    expect(schemas.WorkspaceRuntimeBackendId.enum).toEqual([
+      'lifecycle_kubernetes',
+      'opensandbox',
+      'e2b',
+      'modal',
+      'daytona',
+      'substrate',
+    ]);
+    expect(schemas.WorkspaceRuntimeProvider.enum).toEqual([
+      'lifecycle_kubernetes',
+      'opensandbox',
+      'e2b',
+      'daytona',
+      'modal',
+    ]);
+    expect(schemas.WorkspaceRuntimeBackendCatalogEntry.required).toEqual([
+      'id',
+      'displayName',
+      'status',
+      'capabilities',
+      'configured',
+      'selectable',
+      'active',
+    ]);
+    expect(schemas.WorkspaceBackendCapability.required).toEqual(['supported']);
+    expect(Object.keys(schemas.WorkspaceBackendCapabilities.properties)).toEqual(
+      schemas.WorkspaceBackendCapabilityKey.enum
+    );
+    expect(schemas.WorkspaceBackendTestConnectionResult.required).toEqual(['ok', 'message']);
+    expect(schemas.TestWorkspaceRuntimeBackendSuccessResponse.allOf[1].properties.data).toEqual({
+      $ref: '#/components/schemas/WorkspaceBackendTestConnectionResult',
+    });
+    expect(
+      schemas.GetWorkspaceRuntimeBackendsSuccessResponse.allOf[1].properties.data.properties.backends.items
+    ).toEqual({ $ref: '#/components/schemas/WorkspaceRuntimeBackendCatalogEntry' });
+  });
+
+  it('documents multi-backend runtime settings with write-only secrets and nullable removal sentinels', () => {
+    expect(schemas.AgentSessionWorkspaceBackendSettings.properties.provider).toEqual({
+      $ref: '#/components/schemas/WorkspaceRuntimeProvider',
+    });
+    for (const backend of ['opensandbox', 'e2b', 'daytona', 'modal']) {
+      expect(schemas.AgentSessionWorkspaceBackendSettings.properties[backend].nullable).toBe(true);
+    }
+
+    expect(schemas.AgentSessionE2bBackendSettings.properties.apiKeyConfigured.type).toBe('boolean');
+    expect(schemas.AgentSessionE2bBackendSettings.properties.apiKey.description).toContain('Write-only');
+    expect(schemas.AgentSessionDaytonaBackendSettings.properties.apiKeyConfigured.type).toBe('boolean');
+    expect(schemas.AgentSessionModalBackendSettings.properties.tokenIdConfigured.type).toBe('boolean');
+    expect(schemas.AgentSessionModalBackendSettings.properties.tokenSecretConfigured.type).toBe('boolean');
+    expect(schemas.AgentSessionModalBackendSettings.properties.timeoutSeconds.maximum).toBe(86400);
   });
 
   it('documents JSON error responses for changed canonical endpoints', () => {

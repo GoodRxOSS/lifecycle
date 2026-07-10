@@ -15,24 +15,36 @@
  */
 
 import { createHash } from 'crypto';
-import { dynamicTool, jsonSchema, type ToolSet } from 'ai';
+import { type ToolSet } from 'ai';
 import type AgentSession from 'server/models/AgentSession';
 import * as models from 'server/models';
 import { GetCodefreshLogsTool } from 'server/services/agent/tools/codefresh/getCodefreshLogs';
 import { GetFileTool } from 'server/services/agent/tools/github/getFile';
 import { GetIssueCommentTool } from 'server/services/agent/tools/github/getIssueComment';
 import { ListDirectoryTool } from 'server/services/agent/tools/github/listDirectory';
-import { UpdateFileTool } from 'server/services/agent/tools/github/updateFile';
+import {
+  isLifecycleConfigPath,
+  UpdateFileTool,
+  validateLifecycleConfigContent,
+} from 'server/services/agent/tools/github/updateFile';
 import { UpdatePrLabelsTool } from 'server/services/agent/tools/github/updatePrLabels';
 import { GetK8sResourcesTool } from 'server/services/agent/tools/k8s/getK8sResources';
 import { GetLifecycleLogsTool } from 'server/services/agent/tools/k8s/getLifecycleLogs';
 import { PatchK8sResourceTool } from 'server/services/agent/tools/k8s/patchK8sResource';
+import { TriggerRedeployTool } from 'server/services/agent/tools/lifecycle/triggerRedeploy';
+import { GetBuildLogsTool } from 'server/services/agent/tools/lifecycle/getBuildLogs';
+import { GetEnvironmentStatusTool } from 'server/services/agent/tools/lifecycle/getEnvironmentStatus';
+import { ValidateLifecycleConfigTool } from 'server/services/agent/tools/lifecycle/validateLifecycleConfig';
 import { GetPodLogsTool } from 'server/services/agent/tools/k8s/getPodLogs';
 import { QueryDatabaseTool } from 'server/services/agent/tools/k8s/queryDatabase';
 import { DatabaseClient, type DatabaseBuildScope } from 'server/services/agent/tools/shared/databaseClient';
-import { GitHubClient } from 'server/services/agent/tools/shared/githubClient';
+import {
+  GitHubClient,
+  type DiagnosticGitHubApprovalAuthResolver,
+} from 'server/services/agent/tools/shared/githubClient';
 import { K8sClient } from 'server/services/agent/tools/shared/k8sClient';
-import type { Tool } from 'server/services/agent/tools/types';
+import type { Tool, ToolAuthProvenance } from 'server/services/agent/tools/types';
+import type { AgentRequestGitHubAuth } from './githubAuth';
 import type {
   AgentApprovalMode,
   AgentApprovalPolicy,
@@ -48,24 +60,72 @@ import type { AgentSessionToolRule } from 'server/services/types/agentSessionCon
 import { buildAgentToolKey, LIFECYCLE_BUILTIN_SERVER_SLUG } from './toolKeys';
 import { getLogger } from 'server/lib/logger';
 import { DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS } from 'server/lib/agentSession/runtimeConfig';
+import {
+  recordToolApproval,
+  recordToolMetadata,
+  toAiDynamicTool,
+  toAiJsonSchema,
+  toAiRuntimeToolContextSchema,
+} from './capabilityToolHelpers';
+import type { AgentRuntimeToolApprovalConfig } from './capabilityToolHelpers';
+import { buildAgentRuntimeToolContextFromMetadataInput, resolveAgentRuntimeToolContext } from './runtimeContext';
 
 type ToolExecutionHooks = {
   onToolStarted?: (audit: AgentToolAuditRecord) => Promise<void>;
-  onToolFinished?: (audit: AgentToolAuditRecord & { result: unknown; status: 'completed' | 'failed' }) => Promise<void>;
+  onToolFinished?: (
+    audit: AgentToolAuditRecord & { result: unknown; status: 'completed' | 'failed'; auth?: ToolAuthProvenance }
+  ) => Promise<void>;
   onFileChange?: (change: AgentFileChangeData) => Promise<void>;
+  getActiveRunUuid?: () => string | null | undefined;
 };
 
 const LIFECYCLE_DIAGNOSTIC_READ_CAPABILITY: AgentCapabilityKey = 'read';
 const FILE_CHANGE_PREVIEW_CHARS = DEFAULT_AGENT_SESSION_FILE_CHANGE_PREVIEW_CHARS;
 const MAX_EXACT_DIFF_MATRIX_CELLS = 1_000_000;
 
-function toAiJsonSchema(schema: unknown) {
-  return jsonSchema(schema as any);
-}
-
-function toAiDynamicTool(config: unknown) {
-  return dynamicTool(config as any);
-}
+// Static manifest for surfaces that need the Debug tool roster without constructing tool
+// instances (admin tool inventory / per-tool rules). Keep in sync with the spec builders below.
+export const LIFECYCLE_DIAGNOSTIC_TOOL_MANIFEST: ReadonlyArray<{
+  toolName: string;
+  description: string;
+  capabilityKey: AgentCapabilityKey;
+}> = [
+  {
+    toolName: 'get_environment_status',
+    description: 'Read current build, deploy, and PR state.',
+    capabilityKey: 'read',
+  },
+  { toolName: 'get_codefresh_logs', description: 'Read CI logs for this build.', capabilityKey: 'read' },
+  {
+    toolName: 'get_k8s_resources',
+    description: "Read Kubernetes resources in this environment's namespace.",
+    capabilityKey: 'read',
+  },
+  { toolName: 'get_pod_logs', description: 'Read pod logs in this environment.', capabilityKey: 'read' },
+  { toolName: 'get_lifecycle_logs', description: 'Read Lifecycle build/deploy logs.', capabilityKey: 'read' },
+  { toolName: 'get_build_logs', description: 'Read persisted build and deploy logs.', capabilityKey: 'read' },
+  { toolName: 'query_database', description: "Read Lifecycle's own records for this build.", capabilityKey: 'read' },
+  {
+    toolName: 'validate_lifecycle_config',
+    description: 'Validate candidate lifecycle.yaml content.',
+    capabilityKey: 'read',
+  },
+  { toolName: 'get_file', description: 'Read a repository file from the PR branch.', capabilityKey: 'read' },
+  { toolName: 'list_directory', description: 'List repository files on the PR branch.', capabilityKey: 'read' },
+  { toolName: 'get_issue_comment', description: 'Read pull request comments.', capabilityKey: 'read' },
+  { toolName: 'update_file', description: 'Commit a file change to the PR branch.', capabilityKey: 'git_write' },
+  { toolName: 'update_pr_labels', description: 'Add or remove pull request labels.', capabilityKey: 'git_write' },
+  {
+    toolName: 'patch_k8s_resource',
+    description: 'Patch a Kubernetes resource to test a hypothesis.',
+    capabilityKey: 'deploy_k8s_mutation',
+  },
+  {
+    toolName: 'trigger_redeploy',
+    description: 'Redeploy the environment without a commit.',
+    capabilityKey: 'deploy_k8s_mutation',
+  },
+];
 
 type LifecycleDiagnosticToolSpec = {
   tool: Tool;
@@ -82,6 +142,7 @@ type LifecycleDiagnosticToolSpec = {
 
 export type LifecycleDiagnosticGithubSafety = {
   allowedBranch?: string | null;
+  primaryRepoFullName?: string | null;
   referencedFiles?: string[];
   excludedFilePatterns?: string[];
   allowedWritePatterns?: string[];
@@ -90,6 +151,7 @@ export type LifecycleDiagnosticGithubSafety = {
   allowedRepos?: string[];
   buildUuid?: string | null;
   pullRequestId?: number | null;
+  allowedPullRequestNumber?: number | null;
   databaseScope?: DatabaseBuildScope | null;
 };
 
@@ -120,7 +182,16 @@ function resolveToolMode({
   return toolRule?.mode || capabilityMode;
 }
 
-function configureGithubClient(client: GitHubClient, safety?: LifecycleDiagnosticGithubSafety): GitHubClient {
+type LifecycleDiagnosticGithubAuthConfig = {
+  requestGitHubAuth?: AgentRequestGitHubAuth | null;
+  resolveApprovalGitHubAuth?: DiagnosticGitHubApprovalAuthResolver;
+};
+
+function configureGithubClient(
+  client: GitHubClient,
+  safety?: LifecycleDiagnosticGithubSafety,
+  authConfig?: LifecycleDiagnosticGithubAuthConfig
+): GitHubClient {
   const allowedBranch = safety?.allowedBranch?.trim();
   if (allowedBranch) {
     client.setAllowedBranch(allowedBranch);
@@ -131,6 +202,13 @@ function configureGithubClient(client: GitHubClient, safety?: LifecycleDiagnosti
   client.setAllowedWritePatterns(safety?.allowedWritePatterns || []);
   // SECURITY: lock GitHub reads/writes to the build's repositories.
   client.setAllowedRepos(safety?.allowedRepos || null);
+  client.setDefaultRepo(safety?.primaryRepoFullName || null);
+  // SECURITY: lock PR mutations to the build's own pull request number.
+  client.setAllowedPullRequestNumber(safety?.allowedPullRequestNumber ?? null);
+  client.setRequestAuth({
+    ...(authConfig?.requestGitHubAuth || { githubToken: null, source: 'none' as const }),
+    resolveApprovalAuth: authConfig?.resolveApprovalGitHubAuth,
+  });
 
   return client;
 }
@@ -143,10 +221,6 @@ function configureK8sClient(client: K8sClient, safety?: LifecycleDiagnosticGithu
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
-}
-
-function normalizeUpdateFileContent(value: string): string {
-  return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
 }
 
 export async function shouldRequestUpdateFileApproval(
@@ -169,14 +243,17 @@ export async function shouldRequestUpdateFileApproval(
   }
 
   const currentContent = await readGithubFileContent(client, input, normalizeFilePath(filePath));
-  return currentContent === null || currentContent !== normalizeUpdateFileContent(newContent);
+  // Judge verbatim — update_file commits new_content byte-for-byte.
+  return currentContent === null || currentContent !== newContent;
 }
 
 function createLifecycleDiagnosticReadToolSpecs(
-  safety?: LifecycleDiagnosticGithubSafety
+  safety?: LifecycleDiagnosticGithubSafety,
+  authConfig?: LifecycleDiagnosticGithubAuthConfig,
+  session?: Pick<AgentSession, 'id' | 'namespace' | 'buildUuid'>
 ): LifecycleDiagnosticToolSpec[] {
   const k8sClient = configureK8sClient(new K8sClient(), safety);
-  const githubClient = configureGithubClient(new GitHubClient(), safety);
+  const githubClient = configureGithubClient(new GitHubClient(), safety, authConfig);
   const databaseClient = new DatabaseClient({ models });
   // SECURITY: constrain DB reads to the build's own records.
   databaseClient.setBuildScope(safety?.databaseScope || null);
@@ -184,12 +261,23 @@ function createLifecycleDiagnosticReadToolSpecs(
   const lifecycleLogsTool = new GetLifecycleLogsTool(k8sClient);
   lifecycleLogsTool.setAllowedBuildUuid(safety?.buildUuid || null);
 
+  const buildLogsTool = new GetBuildLogsTool();
+  buildLogsTool.setAllowedBuildUuid(safety?.buildUuid || null);
+
+  const environmentStatusTool = new GetEnvironmentStatusTool();
+  environmentStatusTool.setSessionContext(
+    session ? { sessionDbId: session.id, namespace: session.namespace, buildUuid: session.buildUuid } : null
+  );
+
   const specs: Array<{ tool: Tool; catalogCapabilityId: AgentCapabilityCatalogId }> = [
+    { tool: environmentStatusTool, catalogCapabilityId: 'diagnostics_kubernetes' },
     { tool: new GetCodefreshLogsTool(), catalogCapabilityId: 'diagnostics_codefresh' },
     { tool: new GetK8sResourcesTool(k8sClient), catalogCapabilityId: 'diagnostics_kubernetes' },
     { tool: new GetPodLogsTool(k8sClient), catalogCapabilityId: 'diagnostics_logs' },
     { tool: lifecycleLogsTool, catalogCapabilityId: 'diagnostics_logs' },
+    { tool: buildLogsTool, catalogCapabilityId: 'diagnostics_logs' },
     { tool: new QueryDatabaseTool(databaseClient), catalogCapabilityId: 'diagnostics_database' },
+    { tool: new ValidateLifecycleConfigTool(), catalogCapabilityId: 'github_read' },
     { tool: new GetFileTool(githubClient), catalogCapabilityId: 'github_read' },
     { tool: new ListDirectoryTool(githubClient), catalogCapabilityId: 'github_read' },
     { tool: new GetIssueCommentTool(githubClient), catalogCapabilityId: 'github_read' },
@@ -306,7 +394,8 @@ function buildSingleHunkUnifiedDiff(path: string, oldContent: string, newContent
 async function readGithubFileContent(
   githubClient: GitHubClient,
   input: Record<string, unknown>,
-  path: string
+  path: string,
+  toolCallId?: string | null
 ): Promise<string | null> {
   const owner = readString(input.repository_owner);
   const repo = readString(input.repository_name);
@@ -316,7 +405,10 @@ async function readGithubFileContent(
   }
 
   try {
-    const octokit = await githubClient.getOctokit('agent-runtime-update-file-preview');
+    const { octokit } = await githubClient.getOctokitWithAuth('agent-runtime-update-file-preview', {
+      requireUserAuth: false,
+      toolCallId,
+    });
     const currentFile = await octokit.request(`GET /repos/${owner}/${repo}/contents/${path}`, {
       ref: branch,
     });
@@ -342,8 +434,8 @@ export async function buildUpdateFilePreview(
   }
 
   const path = normalizeFilePath(input.file_path);
-  const content = normalizeUpdateFileContent(input.new_content);
-  const oldContent = await readGithubFileContent(githubClient, input, path);
+  const content = input.new_content;
+  const oldContent = await readGithubFileContent(githubClient, input, path, toolCallId);
   if (oldContent !== null && oldContent === content) {
     return [];
   }
@@ -351,6 +443,8 @@ export async function buildUpdateFilePreview(
   const diff = oldContent === null ? null : buildSingleHunkUnifiedDiff(path, oldContent, content);
   const beforeTextPreview = oldContent === null ? null : trimPreview(oldContent);
   const afterTextPreview = trimPreview(content);
+  // The approver sees the schema verdict before approving; update_file re-validates at commit time.
+  const schemaValidation = isLifecycleConfigPath(path) ? validateLifecycleConfigContent(content) : null;
 
   return [
     {
@@ -370,6 +464,9 @@ export async function buildUpdateFilePreview(
       beforeTextPreview,
       afterTextPreview,
       summary: `Proposed update to ${path}`,
+      ...(schemaValidation
+        ? { schemaValidation: { valid: schemaValidation.valid, error: schemaValidation.error ?? null } }
+        : {}),
       encoding: 'utf-8',
       oldSizeBytes: oldContent === null ? null : Buffer.byteLength(oldContent, 'utf8'),
       newSizeBytes: Buffer.byteLength(content, 'utf8'),
@@ -380,10 +477,15 @@ export async function buildUpdateFilePreview(
 }
 
 function createLifecycleDiagnosticFixToolSpecs(
-  safety?: LifecycleDiagnosticGithubSafety
+  safety?: LifecycleDiagnosticGithubSafety,
+  authConfig?: LifecycleDiagnosticGithubAuthConfig,
+  watchTarget?: { threadUuid: string; sessionUuid: string | null } | null
 ): LifecycleDiagnosticToolSpec[] {
   const k8sClient = configureK8sClient(new K8sClient(), safety);
-  const githubClient = configureGithubClient(new GitHubClient(), safety);
+  const githubClient = configureGithubClient(new GitHubClient(), safety, authConfig);
+  const triggerRedeployTool = new TriggerRedeployTool();
+  triggerRedeployTool.setAllowedBuildUuid(safety?.buildUuid || null);
+  triggerRedeployTool.setWatchTarget(watchTarget || null);
 
   return [
     {
@@ -403,6 +505,12 @@ function createLifecycleDiagnosticFixToolSpecs(
     },
     {
       tool: new PatchK8sResourceTool(k8sClient),
+      capabilityKey: 'deploy_k8s_mutation',
+      catalogCapabilityId: 'diagnostics_kubernetes',
+      forceApproval: true,
+    },
+    {
+      tool: triggerRedeployTool,
       capabilityKey: 'deploy_k8s_mutation',
       catalogCapabilityId: 'diagnostics_kubernetes',
       forceApproval: true,
@@ -430,16 +538,22 @@ function registerLifecycleDiagnosticToolSpecs({
   specs,
   resolvedCapabilityAccess,
   toolMetadata,
+  toolApproval,
 }: {
   tools: ToolSet;
   session: AgentSession;
+  // Watch-scheduling tools post their outcome to this thread, not a heuristic target.
+  threadUuid?: string | null;
   approvalPolicy: AgentApprovalPolicy;
   hooks?: ToolExecutionHooks;
   toolRules?: AgentSessionToolRule[];
   specs: LifecycleDiagnosticToolSpec[];
   resolvedCapabilityAccess?: ResolvedAgentCapabilityAccess[];
   githubSafety?: LifecycleDiagnosticGithubSafety;
+  requestGitHubAuth?: AgentRequestGitHubAuth | null;
+  resolveApprovalGitHubAuth?: DiagnosticGitHubApprovalAuthResolver;
   toolMetadata?: AgentRuntimeToolMetadata[];
+  toolApproval?: AgentRuntimeToolApprovalConfig;
 }) {
   if (!session.buildUuid) {
     return;
@@ -469,17 +583,20 @@ function registerLifecycleDiagnosticToolSpecs({
     if (mode === 'deny') {
       continue;
     }
+    const metadataInput = {
+      toolKey,
+      serverSlug: LIFECYCLE_BUILTIN_SERVER_SLUG,
+      sourceToolName: diagnosticTool.name,
+      catalogCapabilityId,
+      capabilityKey,
+      approvalMode: mode,
+    };
+    const fallbackToolContext = buildAgentRuntimeToolContextFromMetadataInput(metadataInput);
 
     tools[toolKey] = toAiDynamicTool({
       description: diagnosticTool.description,
       inputSchema: toAiJsonSchema(diagnosticTool.parameters as Record<string, unknown>),
-      needsApproval:
-        mode === 'require_approval'
-          ? shouldRequestApproval
-            ? async (input: unknown) =>
-                shouldRequestApproval(((input as Record<string, unknown>) || {}) as Record<string, unknown>)
-            : true
-          : false,
+      contextSchema: toAiRuntimeToolContextSchema(),
       onInputAvailable: buildProposedFileChanges
         ? async ({ input, toolCallId }) => {
             if (!toolCallId) {
@@ -487,34 +604,37 @@ function registerLifecycleDiagnosticToolSpecs({
             }
 
             const args = (input as Record<string, unknown>) || {};
-            for (const change of await buildProposedFileChanges(args, toolCallId, diagnosticTool.name)) {
+            for (const change of await buildProposedFileChanges(args, toolCallId, fallbackToolContext.sourceToolName)) {
               await hooks?.onFileChange?.(change);
             }
           }
         : undefined,
       execute: async (input, context) => {
+        const runtimeToolContext = resolveAgentRuntimeToolContext(context?.context, fallbackToolContext);
         const args = (input as Record<string, unknown>) || {};
         const toolCallId = context?.toolCallId;
         const audit: AgentToolAuditRecord = {
           source: 'mcp',
-          serverSlug: LIFECYCLE_BUILTIN_SERVER_SLUG,
-          toolName: diagnosticTool.name,
+          serverSlug: runtimeToolContext.serverSlug,
+          toolName: runtimeToolContext.sourceToolName,
           toolCallId,
           args,
-          capabilityKey,
+          capabilityKey: runtimeToolContext.capabilityKey,
         };
 
         await hooks?.onToolStarted?.(audit);
 
         try {
           const abortSignal = (context as { abortSignal?: AbortSignal } | undefined)?.abortSignal;
-          const result = await diagnosticTool.execute(args, abortSignal);
+          const result = await diagnosticTool.execute(args, abortSignal, { toolCallId });
           await hooks?.onToolFinished?.({
             ...audit,
             result,
             status: result.success ? 'completed' : 'failed',
+            auth: result.auth,
           });
-          return result;
+          // The model gets plain text (agentContent); hooks keep the full ToolResult for UI/persistence.
+          return result.agentContent;
         } catch (error) {
           const result = {
             error: error instanceof Error ? error.message : String(error),
@@ -532,30 +652,53 @@ function registerLifecycleDiagnosticToolSpecs({
         }
       },
     });
-    toolMetadata?.push({
-      toolKey,
-      catalogCapabilityId,
-      capabilityKey,
-      approvalMode: mode,
-      exposure: capabilityKey === 'read' || capabilityKey === 'external_mcp_read' ? 'read' : 'repair',
-    });
+    recordToolMetadata(toolMetadata, metadataInput);
+    recordToolApproval(toolApproval, { toolKey, mode, shouldRequestApproval });
   }
 }
 
 export function registerLifecycleDiagnosticReadTools(
   options: Omit<Parameters<typeof registerLifecycleDiagnosticToolSpecs>[0], 'specs'>
 ) {
+  const activeRunAuthResolver: DiagnosticGitHubApprovalAuthResolver | undefined = options.resolveApprovalGitHubAuth
+    ? async ({ toolCallId }) =>
+        options.resolveApprovalGitHubAuth?.({
+          runUuid: options.hooks?.getActiveRunUuid?.() || null,
+          toolCallId,
+        }) || null
+    : undefined;
   registerLifecycleDiagnosticToolSpecs({
     ...options,
-    specs: createLifecycleDiagnosticReadToolSpecs(options.githubSafety),
+    specs: createLifecycleDiagnosticReadToolSpecs(
+      options.githubSafety,
+      {
+        requestGitHubAuth: options.requestGitHubAuth,
+        resolveApprovalGitHubAuth: activeRunAuthResolver,
+      },
+      options.session
+    ),
   });
 }
 
 export function registerLifecycleDiagnosticFixTools(
   options: Omit<Parameters<typeof registerLifecycleDiagnosticToolSpecs>[0], 'specs'>
 ) {
+  const activeRunAuthResolver: DiagnosticGitHubApprovalAuthResolver | undefined = options.resolveApprovalGitHubAuth
+    ? async ({ toolCallId }) =>
+        options.resolveApprovalGitHubAuth?.({
+          runUuid: options.hooks?.getActiveRunUuid?.() || null,
+          toolCallId,
+        }) || null
+    : undefined;
   registerLifecycleDiagnosticToolSpecs({
     ...options,
-    specs: createLifecycleDiagnosticFixToolSpecs(options.githubSafety),
+    specs: createLifecycleDiagnosticFixToolSpecs(
+      options.githubSafety,
+      {
+        requestGitHubAuth: options.requestGitHubAuth,
+        resolveApprovalGitHubAuth: activeRunAuthResolver,
+      },
+      options.threadUuid ? { threadUuid: options.threadUuid, sessionUuid: options.session.uuid } : null
+    ),
   });
 }

@@ -74,8 +74,6 @@ export interface AgentRuntimeConfig {
   approvalPolicy?: ApprovalPolicyConfig;
   capabilityPolicy?: CapabilityPolicyConfig;
   customAgentCreationPolicy?: CustomAgentCreationPolicyConfig;
-  additiveRules?: string[];
-  systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
   allowedWritePatterns?: string[];
@@ -105,8 +103,6 @@ export interface AgentRuntimeRepoOverride {
   sessionTTL?: number;
   approvalPolicy?: ApprovalPolicyConfig;
   capabilityPolicy?: CapabilityPolicyConfig;
-  additiveRules?: string[];
-  systemPromptOverride?: string;
   excludedTools?: string[];
   excludedFilePatterns?: string[];
   allowedWritePatterns?: string[];

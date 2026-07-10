@@ -17,7 +17,12 @@
 import type { AgentDefinitionContract } from './agentDefinitionTypes';
 import type { AgentCapabilitySourceKind } from './capabilityCatalog';
 
-export const SYSTEM_AGENT_DEFINITION_IDS = ['system.debug', 'system.develop', 'system.freeform'] as const;
+export const SYSTEM_VISIBLE_AGENT_DEFINITION_IDS = ['system.agent'] as const;
+export const SYSTEM_LEGACY_AGENT_DEFINITION_IDS = ['system.debug', 'system.develop', 'system.freeform'] as const;
+export const SYSTEM_AGENT_DEFINITION_IDS = [
+  ...SYSTEM_VISIBLE_AGENT_DEFINITION_IDS,
+  ...SYSTEM_LEGACY_AGENT_DEFINITION_IDS,
+] as const;
 
 export type SystemAgentDefinitionId = (typeof SYSTEM_AGENT_DEFINITION_IDS)[number];
 
@@ -33,7 +38,7 @@ function defineSystemAgent(
     | 'status'
     | 'codeOwned'
     | 'readOnly'
-  >
+  > & { optionalCapabilityRefs?: AgentDefinitionContract['optionalCapabilityRefs'] }
 ): AgentDefinitionContract {
   return {
     id: systemId,
@@ -41,7 +46,7 @@ function defineSystemAgent(
     owner: { kind: 'system' },
     ...definition,
     requiredCapabilityRefs: [...definition.capabilityRefs],
-    optionalCapabilityRefs: [],
+    optionalCapabilityRefs: [...(definition.optionalCapabilityRefs || [])],
     status: 'active',
     codeOwned: true,
     readOnly: true,
@@ -49,6 +54,17 @@ function defineSystemAgent(
 }
 
 export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefinitionContract> = {
+  'system.agent': defineSystemAgent('system.agent', {
+    name: 'Lifecycle Agent',
+    description: 'Help with Lifecycle questions, debugging, and workspace-backed development.',
+    instructionRefs: ['system:freeform'],
+    capabilityRefs: ['read_context', 'external_mcp_read'],
+    resourcePolicy: {
+      sourceKinds: ['build_context_chat', 'workspace_session', 'freeform_chat'],
+      sandboxRequired: false,
+      workspaceRequired: false,
+    },
+  }),
   'system.debug': defineSystemAgent('system.debug', {
     name: 'Debug',
     description: 'Investigate build and environment context.',
@@ -92,6 +108,14 @@ export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefi
     description: 'Answer general questions without build or workspace requirements.',
     instructionRefs: ['system:freeform'],
     capabilityRefs: ['read_context', 'external_mcp_read'],
+    // Optional so a freeform chat can use the workspace it explicitly requests mid-run; policy may deny them without blocking chat.
+    optionalCapabilityRefs: [
+      'workspace_files',
+      'workspace_shell',
+      'workspace_git',
+      'network_access',
+      'preview_publish',
+    ],
     resourcePolicy: {
       sourceKinds: ['build_context_chat', 'workspace_session', 'freeform_chat'],
       sandboxRequired: false,
@@ -106,6 +130,8 @@ export function isSystemAgentDefinitionId(value: unknown): value is SystemAgentD
 
 export function sourceKindForSystemAgentDefinitionId(id: SystemAgentDefinitionId): AgentCapabilitySourceKind {
   switch (id) {
+    case 'system.agent':
+      return 'freeform_chat';
     case 'system.debug':
       return 'build_context_chat';
     case 'system.develop':

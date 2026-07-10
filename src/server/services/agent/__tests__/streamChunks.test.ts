@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { sanitizeAgentRunStreamChunks } from '../streamChunks';
+import { sanitizeAgentRunStreamChunks, scrubSecretsFromAgentRunStreamChunks } from '../streamChunks';
 
 describe('agent stream chunk sanitization', () => {
   it('removes duplicate fileChanges from tool-output chunks when canonical file-change chunks exist', () => {
@@ -63,5 +63,18 @@ describe('agent stream chunk sanitization', () => {
 
     expect(text).not.toContain('fileChanges');
     expect(text).toContain('"path": "file.ts"');
+  });
+});
+
+describe('scrubSecretsFromAgentRunStreamChunks', () => {
+  it('redacts secrets in reasoning-delta chunk text', () => {
+    const scrubbed = scrubSecretsFromAgentRunStreamChunks([
+      { type: 'reasoning-delta', id: 'r1', delta: 'use ghp_1234567890abcdefghij1234567890ABCDwxyz now' },
+      { type: 'text-delta', id: 't1', delta: 'token ghp_1234567890abcdefghij1234567890ABCDwxyz stays' },
+    ] as never[]);
+
+    expect((scrubbed[0] as { delta: string }).delta).toBe('use [redacted] now');
+    // text chunks are out of scope — left untouched.
+    expect((scrubbed[1] as { delta: string }).delta).toContain('ghp_');
   });
 });
