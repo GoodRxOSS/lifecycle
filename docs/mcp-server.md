@@ -123,11 +123,13 @@ admin pre-registers one shared OAuth client in the realm and distributes its cli
 1. In the Keycloak admin console (realm `lifecycle`), create a client: **OpenID Connect**, public
    (client authentication off), standard flow enabled, PKCE required (`Advanced -> Proof Key for
    Code Exchange Code Challenge Method: S256`).
-2. Add the redirect URIs your users' tools need. MCP clients use loopback redirects, e.g.
+2. Turn on **Consent required** in the client settings so users get the same one-time consent
+   screen dynamically registered clients show.
+3. Add the redirect URIs your users' tools need. MCP clients use loopback redirects, e.g.
    `http://127.0.0.1/*` and `http://localhost/*`; consult each tool's docs for exact values and
    tighten the patterns as far as your clients allow.
-3. Assign the `mcp` client scope to the client (optional scope is enough — clients request it).
-4. Share the client ID with users. Whether it can be used instead of dynamic registration depends
+4. Assign the `mcp` client scope to the client (optional scope is enough — clients request it).
+5. Share the client ID with users. Whether it can be used instead of dynamic registration depends
    on the MCP client: Claude Code supports `claude mcp add --transport http --client-id <id>`,
    Cursor supports a static `auth` block in `mcp.json`; VS Code and Codex CLI currently document no
    pre-registered client ID option and rely on dynamic client registration.
