@@ -6,8 +6,10 @@ fetch build/deploy job logs, and browse published static sites.
 
 - **Endpoint**: `https://<your-lifecycle-app-host>/mcp` (Streamable HTTP)
 - **Auth**: OAuth 2.1 via your Lifecycle Keycloak realm — the same SSO login as the `lfc` CLI.
-  Clients discover everything automatically (RFC 9728 protected-resource metadata + dynamic client
-  registration); you only paste the URL.
+  Clients discover the auth settings automatically (RFC 9728 protected-resource metadata). When your
+  admin has enabled anonymous dynamic client registration, clients also register themselves and you
+  only paste the URL; otherwise your admin pre-registers a client and gives you its client ID (see
+  [Without dynamic client registration](#without-dynamic-client-registration)).
 - **Access tokens** are audience-bound to the MCP endpoint. CLI/API tokens are not accepted at
   `/mcp`, and MCP tokens are not accepted by the REST API.
 
@@ -59,8 +61,8 @@ url = "https://app.lifecycle.example.com/mcp"
 
 Then run `codex mcp login lifecycle`.
 
-On first login each tool registers itself with Keycloak and you'll see a one-time consent screen
-listing the requested access.
+On first login each tool registers itself with Keycloak (when anonymous dynamic client registration
+is enabled) and you'll see a one-time consent screen listing the requested access.
 
 ## Tools
 
@@ -83,7 +85,7 @@ service, log, or site — `myEnvironmentsOnly`/`mineOnly` are convenience filter
 controls. This is intentional; if a preview environment's logs may contain sensitive data, treat
 them as visible to all authenticated Lifecycle users.
 
-## Server configuration (operators)
+## Server configuration (admins)
 
 | Env var | Purpose |
 | --- | --- |
@@ -101,8 +103,31 @@ The realm needs a `mcp` client scope whose audience mapper adds `MCP_RESOURCE_UR
 on the `lifecycle-keycloak` chart — a post-install/post-upgrade Job configures the realm idempotently,
 on both fresh installs and existing realms.
 
+All URLs the realm is configured with (`mcp.resourceUrl` plus any `mcp.extraAudiences`) share a
+**single token trust boundary**: every audience is added to the same `mcp` scope, so an access token
+issued for one URL is accepted by all of them. Use `extraAudiences` only for alternate URLs of the
+same deployment (e.g. the in-cluster URL and a host dev server) — never to share one realm across
+production and staging.
+
 Anonymous dynamic client registration is **off by default (`mcp.dcr.enabled`, default `false`)**.
 Enabling it **deletes** the realm's anonymous Trusted Hosts policy — a one-way change that disabling
 the setting later does not undo. Only enable it when Keycloak is **not** reachable from the public
 internet; otherwise leave it off and pre-register a client instead. Back up the realm first if you
 may want to revert.
+
+### Without dynamic client registration
+
+When `mcp.dcr.enabled` stays `false` (the secure default), MCP clients cannot self-register, so an
+admin pre-registers one shared OAuth client in the realm and distributes its client ID:
+
+1. In the Keycloak admin console (realm `lifecycle`), create a client: **OpenID Connect**, public
+   (client authentication off), standard flow enabled, PKCE required (`Advanced -> Proof Key for
+   Code Exchange Code Challenge Method: S256`).
+2. Add the redirect URIs your users' tools need. MCP clients use loopback redirects, e.g.
+   `http://127.0.0.1/*` and `http://localhost/*`; consult each tool's docs for exact values and
+   tighten the patterns as far as your clients allow.
+3. Assign the `mcp` client scope to the client (optional scope is enough — clients request it).
+4. Share the client ID with users. Whether it can be used instead of dynamic registration depends
+   on the MCP client: Claude Code supports `claude mcp add --transport http --client-id <id>`,
+   Cursor supports a static `auth` block in `mcp.json`; VS Code and Codex CLI currently document no
+   pre-registered client ID option and rely on dynamic client registration.
