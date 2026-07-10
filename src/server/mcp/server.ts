@@ -26,6 +26,7 @@ import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
 import { getK8sJobStatusAndPod } from 'server/lib/logStreamingHelper';
 import { getLogArchivalService } from 'server/services/logArchival';
 import GlobalConfigService from 'server/services/globalConfig';
+import { truncateUtf8Tail } from './truncate';
 
 const MAX_LOG_TAIL_LINES = 2000;
 const DEFAULT_LOG_TAIL_LINES = 200;
@@ -182,7 +183,9 @@ async function readJobLogs(
       if (archived !== null) {
         const lines = archived.split('\n');
         const tail = lines.length > tailLines ? lines.slice(-tailLines).join('\n') : archived;
-        return { ...base, source: 'archived', logs: tail };
+        // Line limits alone don't bound the payload; mirror the live path's MAX_LOG_BYTES cap.
+        const { text, truncated } = truncateUtf8Tail(tail, MAX_LOG_BYTES);
+        return { ...base, source: 'archived', logs: text, ...(truncated ? { truncated: true } : {}) };
       }
     } catch (error) {
       getLogger().warn({ error }, `MCP: archived log fetch failed jobName=${job.jobName}`);
