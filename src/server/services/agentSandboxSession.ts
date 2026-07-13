@@ -888,7 +888,7 @@ interface ResolvedLifecycleServiceSource extends EnvironmentSource {
 }
 
 function getDeployTypeFromBaseDeploy(deploy: Deploy): DeployTypes {
-  return deploy.deployable?.type || deploy.service?.type || DeployTypes.GITHUB;
+  return deploy.deployable?.type || DeployTypes.GITHUB;
 }
 
 function toPostgresTextArrayLiteral(value: unknown): unknown {

@@ -15,7 +15,7 @@
  */
 
 import { BuildKind, DeployStatus } from 'shared/constants';
-import { BuildServiceOverride, Deploy, Deployable, Environment, PullRequest, Service } from '.';
+import { Deploy, Deployable, Environment, PullRequest, Service } from '.';
 import Model from './_Model';
 
 export default class Build extends Model {
@@ -33,7 +33,6 @@ export default class Build extends Model {
   baseBuild?: Build;
   deploys?: Deploy[];
   services?: Service[];
-  buildServiceOverrides?: BuildServiceOverride[];
   pullRequest: PullRequest;
   deployables?: Deployable[];
 
@@ -54,8 +53,6 @@ export default class Build extends Model {
   // Whether or not this service tolerates well being run on a spot instance
   capacityType: string;
 
-  // Feature flag to switch to new logic to handle yaml
-  enableFullYaml: boolean;
   webhooksYaml: string;
 
   enabledFeatures: string[];
@@ -128,14 +125,6 @@ export default class Build extends Model {
       join: {
         from: 'builds.pullRequestId',
         to: 'pull_requests.id',
-      },
-    },
-    buildServiceOverrides: {
-      relation: Model.HasManyRelation,
-      modelClass: () => BuildServiceOverride,
-      join: {
-        from: 'builds.id',
-        to: 'build_service_overrides.buildId',
       },
     },
     deployables: {

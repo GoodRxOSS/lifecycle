@@ -96,7 +96,7 @@ function buildSelectedDeployMetadata(deploy: Deploy): AgentBuildContextSelectedD
   return {
     selectedDeployUuid: deploy.uuid,
     deployId: deploy.id,
-    deployableName: readString(deployable?.name) || readString(deploy.service?.name) || deploy.uuid,
+    deployableName: readString(deployable?.name) || deploy.uuid,
     deployableType: readString(deployable?.type),
     repositoryFullName: readString(deploy.repository?.fullName),
     branchName: readString(deploy.branchName) || readString(deployable?.branchName),
@@ -126,7 +126,7 @@ async function resolveSelectedDeploy(build: Build, selectedDeployUuid?: string):
 
   const selectedDeploy = await Deploy.query()
     .findOne({ uuid: selectedDeployUuid })
-    .withGraphFetched('[deployable, repository, service]');
+    .withGraphFetched('[deployable, repository]');
   if (!selectedDeploy || selectedDeploy.buildId !== build.id) {
     throw new BuildContextChatSelectedDeployError(build.uuid, selectedDeployUuid);
   }

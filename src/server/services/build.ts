@@ -23,7 +23,7 @@ import { ingressBannerSnippet } from 'server/lib/helm/utils';
 import { customAlphabet, nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 
-import { Build, Deploy, Environment, Service, BuildServiceOverride } from 'server/models';
+import { Build, Deploy, Environment } from 'server/models';
 import { BuildKind, BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
 import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
@@ -111,22 +111,18 @@ export default class BuildService extends BaseService {
   private async getBuildForQueueFingerprint(buildId: number): Promise<Build | null> {
     return this.db.models.Build.query()
       .findOne({ id: buildId })
-      .withGraphFetched('[pullRequest, deploys.[service, deployable]]');
+      .withGraphFetched('[pullRequest, deploys.[deployable]]');
   }
 
-  private getBuildFingerprintDeployKey(build: Build, deploy: Deploy): string {
-    if (build.enableFullYaml) {
-      return deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
-    }
-
-    return deploy.service?.name || deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
+  private getBuildFingerprintDeployKey(deploy: Deploy): string {
+    return deploy.deployable?.name || deploy.uuid || String(deploy.id || '');
   }
 
   private buildFingerprintPayload(build: Build, githubRepositoryId?: number) {
     const deploys = (build.deploys || [])
       .filter((deploy) => !githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId)
       .map((deploy) => ({
-        key: this.getBuildFingerprintDeployKey(build, deploy),
+        key: this.getBuildFingerprintDeployKey(deploy),
         githubRepositoryId: deploy.githubRepositoryId ?? null,
         branchName: deploy.branchName ?? null,
         active: deploy.active ?? true,
@@ -142,7 +138,6 @@ export default class BuildService extends BaseService {
       latestCommit: build.pullRequest?.latestCommit ?? null,
       commentRuntimeEnv: build.commentRuntimeEnv || {},
       commentInitEnv: build.commentInitEnv || {},
-      enableFullYaml: build.enableFullYaml ?? false,
       isStatic: build.isStatic ?? false,
       deploys: _.sortBy(deploys, 'key'),
     };
@@ -157,7 +152,7 @@ export default class BuildService extends BaseService {
     }
 
     if (!build.pullRequest || !build.deploys) {
-      await build.$fetchGraph('[pullRequest, deploys.[service, deployable]]');
+      await build.$fetchGraph('[pullRequest, deploys.[deployable]]');
     }
 
     return hash(this.buildFingerprintPayload(build, githubRepositoryId));
@@ -251,7 +246,7 @@ export default class BuildService extends BaseService {
       .where('kind', BuildKind.ENVIRONMENT)
       .whereNot('status', 'torn_down')
       .whereNot('status', 'pending')
-      .withGraphFetched('deploys.[service.[repository]]');
+      .withGraphFetched('deploys.[deployable.[repository]]');
     return builds;
   }
 
@@ -404,22 +399,19 @@ export default class BuildService extends BaseService {
 
     const buildForServiceOverrides = await this.db.models.Build.query()
       .findOne({ id: build.id })
-      .select('id', 'uuid', 'environmentId', 'enableFullYaml')
-      .withGraphFetched('[environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
+      .select('id', 'uuid', 'environmentId')
+      .withGraphFetched('[environment, deploys.[deployable]]');
 
     if (!buildForServiceOverrides) {
       return;
     }
 
     const overrideService = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
-    const overrideStates = await overrideService.getServiceOverrideStates(
-      buildForServiceOverrides,
-      buildForServiceOverrides.deploys || []
-    );
+    const overrideStates = await overrideService.getServiceOverrideStates(buildForServiceOverrides.deploys || []);
     const overrideStateByName = new Map(overrideStates.map((state) => [state.name, state]));
 
     build.deploys.forEach((deploy) => {
-      const serviceName = deploy.deployable?.name || deploy.service?.name;
+      const serviceName = deploy.deployable?.name;
       const state = serviceName ? overrideStateByName.get(serviceName) : null;
       (deploy as Deploy & { serviceOverride: DeployServiceOverrideState | null }).serviceOverride = state
         ? {
@@ -642,52 +634,26 @@ export default class BuildService extends BaseService {
    * Returns an array of domain configurations for this build
    */
   async domainsAndCertificatesForBuild(build: Build, allServices: boolean): Promise<IngressConfiguration[]> {
-    let result: IngressConfiguration[];
+    await build?.$fetchGraph('deploys.[deployable]');
+    const deploys = build?.deploys;
 
-    if (build?.enableFullYaml) {
-      await build?.$fetchGraph('deploys.[deployable]');
-      const deploys = build?.deploys;
-
-      result = _.flatten(
-        await Promise.all(
-          deploys
-            .filter(
-              (deploy) =>
-                deploy &&
-                (allServices || deploy.active) &&
-                deploy.deployable &&
-                deploy.deployable.public &&
-                DeployTypes.HELM !== deploy.deployable.type && // helm deploy ingresses will be managed by helm
-                (deploy.deployable.type === DeployTypes.DOCKER || deploy.deployable.type === DeployTypes.GITHUB)
-            )
-            .map(async (deploy) => {
-              return this.ingressConfigurationForDeploy(deploy);
-            })
-        )
-      );
-    } else {
-      await build?.$fetchGraph('deploys.[service]');
-      const deploys = build?.deploys;
-      if (!deploys) return [];
-
-      result = _.flatten(
-        await Promise.all(
-          deploys
-            .filter(
-              (deploy) =>
-                deploy &&
-                (allServices || deploy.active) &&
-                deploy.service &&
-                deploy.service.public &&
-                (deploy.service.type === DeployTypes.DOCKER || deploy.service.type === DeployTypes.GITHUB)
-            )
-            .map((deploy) => {
-              getLogger().debug(`Deploy active status: deployUuid=${deploy.uuid} active=${deploy.active}`);
-              return this.ingressConfigurationForDeploy(deploy);
-            })
-        )
-      );
-    }
+    const result: IngressConfiguration[] = _.flatten(
+      await Promise.all(
+        deploys
+          .filter(
+            (deploy) =>
+              deploy &&
+              (allServices || deploy.active) &&
+              deploy.deployable &&
+              deploy.deployable.public &&
+              DeployTypes.HELM !== deploy.deployable.type && // helm deploy ingresses will be managed by helm
+              (deploy.deployable.type === DeployTypes.DOCKER || deploy.deployable.type === DeployTypes.GITHUB)
+          )
+          .map(async (deploy) => {
+            return this.ingressConfigurationForDeploy(deploy);
+          })
+      )
+    );
 
     return result;
   }
@@ -697,15 +663,15 @@ export default class BuildService extends BaseService {
    * @param deploy
    */
   private async ingressConfigurationForDeploy(deploy: Deploy): Promise<IngressConfiguration[]> {
-    await deploy.$fetchGraph('[build.[pullRequest], service, deployable]');
-    const { build, service, deployable } = deploy;
+    await deploy.$fetchGraph('[build.[pullRequest], deployable]');
+    const { deployable } = deploy;
 
     if (!deployable) {
       throw new Error(`Deployable not found for deploy ${deploy.uuid}`);
     }
 
     const getIngressAnnotations = (baseAnnotations: Record<string, any> | undefined): Record<string, any> => {
-      if (build?.enableFullYaml && deployable.envLens) {
+      if (deployable.envLens) {
         const bannerSnippet = ingressBannerSnippet(deploy);
         const bannerAnnotation = bannerSnippet.metadata?.annotations || {};
         return { ...(baseAnnotations || {}), ...bannerAnnotation };
@@ -713,81 +679,43 @@ export default class BuildService extends BaseService {
       return baseAnnotations || {};
     };
 
-    if (build?.enableFullYaml) {
-      if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
-        return Object.keys(deployable.hostPortMapping).map((key) => {
-          return {
-            host: `${key}-${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            deployUUID: `${key}-${deploy.uuid}`,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deployable.ipWhitelist,
-            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
-            pathPortMapping: {
-              '/': parseInt(deployable.hostPortMapping[key], 10),
-            },
-          };
-        });
-      } else if (deployable.pathPortMapping && Object.keys(deployable.pathPortMapping).length > 0) {
-        return [
-          {
-            host: `${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
-            deployUUID: `${deploy.uuid}`,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deployable.ipWhitelist,
-            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
-            pathPortMapping: deployable.pathPortMapping,
+    if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
+      return Object.keys(deployable.hostPortMapping).map((key) => {
+        return {
+          host: `${key}-${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
+          deployUUID: `${key}-${deploy.uuid}`,
+          serviceHost: `${deploy.uuid}`,
+          ipWhitelist: deployable.ipWhitelist,
+          ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
+          pathPortMapping: {
+            '/': parseInt(deployable.hostPortMapping[key], 10),
           },
-        ];
-      } else {
-        return [
-          {
-            host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
-            deployUUID: deploy.uuid,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deployable.ipWhitelist,
-            ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
-            pathPortMapping: {
-              '/': parseInt(deployable.port, 10),
-            },
-          },
-        ];
-      }
+        };
+      });
+    } else if (deployable.pathPortMapping && Object.keys(deployable.pathPortMapping).length > 0) {
+      return [
+        {
+          host: `${this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)}`,
+          deployUUID: `${deploy.uuid}`,
+          serviceHost: `${deploy.uuid}`,
+          ipWhitelist: deployable.ipWhitelist,
+          ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
+          pathPortMapping: deployable.pathPortMapping,
+        },
+      ];
     } else {
-      if (service.hostPortMapping && Object.keys(service.hostPortMapping).length > 0) {
-        return Object.keys(service.hostPortMapping).map((key) => {
-          return {
-            host: `${key}-${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            deployUUID: `${key}-${deploy.uuid}`,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: service.ipWhitelist,
-            pathPortMapping: {
-              '/': parseInt(service.hostPortMapping[key], 10),
-            },
-          };
-        });
-      } else if (service.pathPortMapping && Object.keys(service.pathPortMapping).length > 0) {
-        return [
-          {
-            host: `${this.db.services.Deploy.hostForServiceDeploy(deploy, service)}`,
-            deployUUID: `${deploy.uuid}`,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deploy.service.ipWhitelist,
-            pathPortMapping: deploy.service.pathPortMapping,
+      return [
+        {
+          host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
+          deployUUID: deploy.uuid,
+          serviceHost: `${deploy.uuid}`,
+          ipWhitelist: deployable.ipWhitelist,
+          ingressAnnotations: getIngressAnnotations(deployable.ingressAnnotations),
+          pathPortMapping: {
+            '/': parseInt(deployable.port, 10),
           },
-        ];
-      } else {
-        return [
-          {
-            host: this.db.services.Deploy.hostForServiceDeploy(deploy, service),
-            deployUUID: deploy.uuid,
-            serviceHost: `${deploy.uuid}`,
-            ipWhitelist: deploy.service.ipWhitelist,
-            pathPortMapping: {
-              '/': parseInt(deploy.service.port, 10),
-            },
-          },
-        ];
-      }
+        },
+      ];
     }
   }
 
@@ -809,7 +737,7 @@ export default class BuildService extends BaseService {
    */
   async configurationsForBuildId(buildId: number, allServices: boolean = false): Promise<IngressConfiguration[]> {
     const build = await this.db.models.Build.findOne({ id: buildId });
-    await build?.$fetchGraph('deploys.[service.[repository]]');
+    await build?.$fetchGraph('deploys.[deployable.[repository]]');
     return this.domainsAndCertificatesForBuild(build, allServices);
   }
 
@@ -898,7 +826,7 @@ export default class BuildService extends BaseService {
     reconciliationResult: DeployableReconciliationResult,
     filterGithubRepositoryId?: number
   ) {
-    if (!build?.enableFullYaml || !reconciliationResult?.canReconcile) {
+    if (!reconciliationResult?.canReconcile) {
       return;
     }
 
@@ -953,7 +881,7 @@ export default class BuildService extends BaseService {
     const staleDeploys = await this.db.models.Deploy.query()
       .where({ buildId })
       .whereIn('deployableId', staleDeployableIds)
-      .withGraphFetched('[build, service, deployable]');
+      .withGraphFetched('[build, deployable]');
     const cleanupService =
       this.db.services?.DeployCleanupService ||
       new DeployCleanupService(this.db, this.redis, this.redlock, this.queueManager);
@@ -1015,23 +943,7 @@ export default class BuildService extends BaseService {
         });
 
         try {
-          const isClassicModeOnly = environment?.classicModeOnly ?? false;
-          if (!isClassicModeOnly) {
-            await this.importYamlConfigFile(environment, build);
-          }
-
-          if (options.repositoryId && options.repositoryBranchName) {
-            getLogger().debug(
-              `Setting up default build services: repositoryId=${options.repositoryId} branch=${options.repositoryBranchName}`
-            );
-
-            await this.setupDefaultBuildServiceOverrides(
-              build,
-              environment,
-              options.repositoryId,
-              options.repositoryBranchName
-            );
-          }
+          await this.importYamlConfigFile(environment, build);
 
           const deploys = await this.db.services.Deploy.findOrCreateDeploys(environment, build);
 
@@ -1089,7 +1001,7 @@ export default class BuildService extends BaseService {
       await build.$query().patch({
         runUUID,
       });
-      await build?.$fetchGraph('[environment.[services], pullRequest.[repository]]');
+      await build?.$fetchGraph('[environment, pullRequest.[repository]]');
       const environment = build?.environment;
       const [owner, name] = fullName.split('/');
       if (!latestCommit) {
@@ -1185,7 +1097,6 @@ export default class BuildService extends BaseService {
         status: BuildStatus.QUEUED,
         pullRequestId: options.pullRequestId,
         sha: nanoId(),
-        enableFullYaml: this.db.services.Environment.enableFullYamlSupport(environment),
         enabledFeatures: JSON.stringify(enabledFeatures),
         githubDeployments,
         namespace: `env-${uuid}`,
@@ -1194,68 +1105,11 @@ export default class BuildService extends BaseService {
     return build;
   }
 
-  private async setupDefaultBuildServiceOverrides(
-    build: Build,
-    environment: Environment,
-    repositoryId: number,
-    branchName: string
-  ): Promise<BuildServiceOverride[]> {
-    // Deal with database configuration first
-    await environment.$fetchGraph('[defaultServices, optionalServices]');
-
-    let servicesToOverride = environment.defaultServices
-      .concat(environment.optionalServices)
-      .filter((s) => s.repositoryId === repositoryId);
-
-    const dependencies = (
-      await this.db.models.Service.query().whereIn(
-        'dependsOnServiceId',
-        servicesToOverride.map((el) => el.id)
-      )
-    ).filter((s) => s.repositoryId === repositoryId);
-
-    servicesToOverride = servicesToOverride.concat(dependencies);
-    const buildServiceOverrides = Promise.all(
-      servicesToOverride.map(async (serviceToOverride) => {
-        return this.createBuildServiceOverride(build, serviceToOverride, branchName);
-      })
-    );
-
-    return buildServiceOverrides;
-  }
-
-  private async createBuildServiceOverride(
-    build: Build,
-    service: Service,
-    branchName: string
-  ): Promise<BuildServiceOverride> {
-    const buildId = build?.id;
-    if (!buildId) {
-      getLogger().error('Build: id missing for=createBuildServiceOverride');
-    }
-    const serviceId = service?.id;
-    if (!serviceId) {
-      getLogger().error('Service: id missing for=createBuildServiceOverride');
-    }
-    const buildServiceOverride =
-      (await this.db.models.BuildServiceOverride.findOne({
-        buildId,
-        serviceId,
-      })) ||
-      (await this.db.models.BuildServiceOverride.create({
-        buildId,
-        serviceId,
-        branchName,
-      }));
-
-    return buildServiceOverride;
-  }
-
   async deleteBuild(build: Build) {
     if (build !== undefined && build !== null && ![BuildStatus.TORN_DOWN].includes(build.status as BuildStatus)) {
       try {
         await build.reload();
-        await build?.$fetchGraph('[services, deploys.[service, build]]');
+        await build?.$fetchGraph('[services, deploys.[build]]');
 
         if (build?.uuid) {
           updateLogContext({ buildUuid: build.uuid });
@@ -1318,7 +1172,7 @@ export default class BuildService extends BaseService {
     return withLogContext({ buildUuid: build.uuid }, async () => {
       try {
         await build.reload();
-        await build?.$fetchGraph('[deploys.[service, deployable], pullRequest.[repository]]');
+        await build?.$fetchGraph('[deploys.[deployable], pullRequest.[repository]]');
 
         const { deploys, pullRequest } = build;
         const isSandboxBuild = build.kind === BuildKind.SANDBOX;
@@ -1399,7 +1253,7 @@ export default class BuildService extends BaseService {
           )
       )
       .map((deploy) => {
-        const serviceName = deploy.deployable?.name || deploy.service?.name || deploy.uuid || 'unknown service';
+        const serviceName = deploy.deployable?.name || deploy.uuid || 'unknown service';
         return deploy.statusMessage ? `${serviceName}: ${deploy.statusMessage}` : `${serviceName}: ${deploy.status}`;
       });
 
@@ -1414,16 +1268,13 @@ export default class BuildService extends BaseService {
     try {
       await build?.$fetchGraph({
         deploys: {
-          service: true,
           deployable: true,
         },
       });
       const deploys = build?.deploys || [];
       const configType = DeployTypes.CONFIGURATION;
       if (!deploys) return;
-      const configDeploys = deploys.filter(
-        ({ service, deployable }) => service?.type === configType || deployable?.type === configType
-      );
+      const configDeploys = deploys.filter(({ deployable }) => deployable?.type === configType);
       if (configDeploys?.length === 0) {
         return;
       }
@@ -1440,7 +1291,6 @@ export default class BuildService extends BaseService {
   async deployCLIServices(build: Build, githubRepositoryId = null): Promise<boolean> {
     await build?.$fetchGraph({
       deploys: {
-        service: true,
         deployable: true,
       },
     });
@@ -1450,57 +1300,32 @@ export default class BuildService extends BaseService {
     }
     const deploys = await Deploy.query()
       .where({ buildId, ...(githubRepositoryId ? { githubRepositoryId } : {}) })
-      .withGraphFetched({ service: true, deployable: true });
+      .withGraphFetched({ deployable: true });
     if (!deploys || deploys.length === 0) return false;
     try {
-      if (build?.enableFullYaml) {
-        return _.every(
-          await Promise.all(
-            deploys
-              .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
-              .map(async (deploy) => {
-                if (!deploy) {
-                  getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
-                  return false;
-                }
-                try {
-                  const result = await this.db.services.Deploy.deployCLI(deploy);
-                  return result;
-                } catch (err) {
-                  getLogger().error({ error: err }, `CLI: deploy failed uuid=${deploy?.uuid}`);
-                  return this.db.services.Deploy.recordDeployFailure(deploy, deploy.runUUID || build.runUUID, {
-                    status: DeployStatus.ERROR,
-                    error: err,
-                    fallbackMessage: 'CLI deploy failed.',
-                  });
-                }
-              })
-          )
-        );
-      } else {
-        return _.every(
-          await Promise.all(
-            deploys
-              .filter((d) => d.active && CLIDeployTypes.has(d.service.type))
-              .map(async (deploy) => {
-                if (deploy === undefined) {
-                  getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
-                }
-                const result = await this.db.services.Deploy.deployCLI(deploy).catch((error) => {
-                  getLogger().error({ error }, 'CLI: deploy failed');
-                  return this.db.services.Deploy.recordDeployFailure(deploy, deploy.runUUID || build.runUUID, {
-                    status: DeployStatus.ERROR,
-                    error,
-                    fallbackMessage: 'CLI deploy failed.',
-                  });
-                });
-
-                if (!result) getLogger().info(`CLI: deploy failed uuid=${deploy.uuid}`);
+      return _.every(
+        await Promise.all(
+          deploys
+            .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
+            .map(async (deploy) => {
+              if (!deploy) {
+                getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
+                return false;
+              }
+              try {
+                const result = await this.db.services.Deploy.deployCLI(deploy);
                 return result;
-              })
-          )
-        );
-      }
+              } catch (err) {
+                getLogger().error({ error: err }, `CLI: deploy failed uuid=${deploy?.uuid}`);
+                return this.db.services.Deploy.recordDeployFailure(deploy, deploy.runUUID || build.runUUID, {
+                  status: DeployStatus.ERROR,
+                  error: err,
+                  fallbackMessage: 'CLI deploy failed.',
+                });
+              }
+            })
+        )
+      );
     } catch (error) {
       getLogger().error({ error }, 'CLI: build failed');
       return false;
@@ -1524,72 +1349,44 @@ export default class BuildService extends BaseService {
         ...(githubRepositoryId ? { githubRepositoryId } : {}),
       })
       .withGraphFetched({
-        service: true,
         deployable: true,
       });
 
-    if (build?.enableFullYaml) {
-      try {
-        const deploysToBuild = deploys.filter((d) => {
-          return (
-            d.active &&
-            (d.deployable.type === DeployTypes.DOCKER ||
-              d.deployable.type === DeployTypes.GITHUB ||
-              d.deployable.type === DeployTypes.HELM)
-          );
-        });
-        getLogger().debug(
-          `Processing deploys for build: count=${deploysToBuild.length} deployUuids=${deploysToBuild
-            .map((d) => d.uuid)
-            .join(',')}`
+    try {
+      const deploysToBuild = deploys.filter((d) => {
+        return (
+          d.active &&
+          (d.deployable.type === DeployTypes.DOCKER ||
+            d.deployable.type === DeployTypes.GITHUB ||
+            d.deployable.type === DeployTypes.HELM)
         );
+      });
+      getLogger().debug(
+        `Processing deploys for build: count=${deploysToBuild.length} deployUuids=${deploysToBuild
+          .map((d) => d.uuid)
+          .join(',')}`
+      );
 
-        const results = await Promise.all(
-          deploysToBuild.map(async (deploy, index) => {
-            if (deploy === undefined) {
-              getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
-            }
-            await deploy.$query().patchAndFetch({
-              deployPipelineId: null,
-              deployOutput: null,
-            });
-            const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
-            getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
-            return result;
-          })
-        );
-        const finalResult = _.every(results);
-        getLogger().debug(`Build results: results=${results.join(',')} final=${finalResult}`);
-        return finalResult;
-      } catch (error) {
-        getLogger().error({ error }, 'Docker: build error');
-        return false;
-      }
-    } else {
-      try {
-        const results = await Promise.all(
-          deploys
-            .filter((d) => {
-              getLogger().debug(
-                `Check service type for docker builds: deployUuid=${d.uuid} serviceType=${d.service?.type}`
-              );
-              return d.active && (d.service.type === DeployTypes.DOCKER || d.service.type === DeployTypes.GITHUB);
-            })
-            .map(async (deploy, index) => {
-              if (deploy === undefined) {
-                getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
-              }
-              const result = await this.db.services.Deploy.buildImage(deploy, build.enableFullYaml, index);
-              getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
-              if (!result) getLogger().info(`Build: image failed deployUuid=${deploy.uuid}`);
-              return result;
-            })
-        );
-        return _.every(results);
-      } catch (error) {
-        getLogger().error({ error }, 'Docker: build error');
-        return false;
-      }
+      const results = await Promise.all(
+        deploysToBuild.map(async (deploy, index) => {
+          if (deploy === undefined) {
+            getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
+          }
+          await deploy.$query().patchAndFetch({
+            deployPipelineId: null,
+            deployOutput: null,
+          });
+          const result = await this.db.services.Deploy.buildImage(deploy, index);
+          getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
+          return result;
+        })
+      );
+      const finalResult = _.every(results);
+      getLogger().debug(`Build results: results=${results.join(',')} final=${finalResult}`);
+      return finalResult;
+    } catch (error) {
+      getLogger().error({ error }, 'Docker: build error');
+      return false;
     }
   }
 
@@ -1606,172 +1403,101 @@ export default class BuildService extends BaseService {
     githubRepositoryId: number | null;
     namespace: string;
   }): Promise<boolean> {
-    if (build?.enableFullYaml) {
-      try {
-        const buildId = build?.id;
+    try {
+      const buildId = build?.id;
 
-        const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
-        const serviceAccountName = serviceAccount?.name || 'default';
-        // create namespace and annotate the service account
-        await k8s.createOrUpdateNamespace({
-          name: build.namespace,
-          buildUUID: build.uuid,
-          staticEnv: build.isStatic,
-          pullRequest: build.pullRequest,
-        });
-        await ensureServiceAccountForJob(build.namespace, 'deploy');
-        if (build.kind === BuildKind.ENVIRONMENT && build.uuid) {
-          await new AgentPrewarmService(this.db, this.redis, this.redlock, this.queueManager)
-            .queueBuildPrewarm(build.uuid)
-            .catch((error) => {
-              getLogger().warn(
-                { error, buildUuid: build.uuid, namespace: build.namespace },
-                'Agent prewarm queueing failed before deployment rollout'
-              );
-            });
-        }
-
-        const allDeploys = await Deploy.query()
-          .where({
-            buildId,
-            ...(githubRepositoryId ? { githubRepositoryId } : {}),
-          })
-          .withGraphFetched({
-            service: {
-              serviceDisks: true,
-            },
-            deployable: true,
+      const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+      const serviceAccountName = serviceAccount?.name || 'default';
+      // create namespace and annotate the service account
+      await k8s.createOrUpdateNamespace({
+        name: build.namespace,
+        buildUUID: build.uuid,
+        staticEnv: build.isStatic,
+        pullRequest: build.pullRequest,
+      });
+      await ensureServiceAccountForJob(build.namespace, 'deploy');
+      if (build.kind === BuildKind.ENVIRONMENT && build.uuid) {
+        await new AgentPrewarmService(this.db, this.redis, this.redlock, this.queueManager)
+          .queueBuildPrewarm(build.uuid)
+          .catch((error) => {
+            getLogger().warn(
+              { error, buildUuid: build.uuid, namespace: build.namespace },
+              'Agent prewarm queueing failed before deployment rollout'
+            );
           });
+      }
 
-        const activeDeploys = allDeploys.filter((d) => d.active);
-
-        // Generate manifests for GitHub/Docker/CLI deploys
-        for (const deploy of activeDeploys) {
-          const deployType = deploy.deployable.type;
-          if (
-            deployType === DeployTypes.GITHUB ||
-            deployType === DeployTypes.DOCKER ||
-            CLIDeployTypes.has(deployType)
-          ) {
-            // Generate individual manifest for this deploy
-            const manifest = k8s.generateDeployManifest({
-              deploy,
-              build,
-              namespace,
-              serviceAccountName,
-            });
-
-            // Store manifest in deploy record
-            if (manifest && manifest.trim().length > 0) {
-              await deploy.$query().patch({ manifest });
-            }
-          }
-        }
-
-        // Use DeploymentManager for all active deploys (both Helm and GitHub types)
-        if (activeDeploys.length > 0) {
-          // we should ignore Codefresh and Configuration services here since we dont deploy anything
-          const managedDeploys = activeDeploys.filter(
-            (d) => d.deployable.type !== DeployTypes.CODEFRESH && d.deployable.type !== DeployTypes.CONFIGURATION
-          );
-          const deploymentManager = new DeploymentManager(managedDeploys);
-          await deploymentManager.deploy();
-        }
-
-        // Queue ingress creation after all deployments
-        await this.ingressService.ingressManifestQueue.add('manifest', {
+      const allDeploys = await Deploy.query()
+        .where({
           buildId,
-          ...extractContextForQueue(),
+          ...(githubRepositoryId ? { githubRepositoryId } : {}),
+        })
+        .withGraphFetched({
+          deployable: true,
         });
 
-        // Legacy manifest generation for backwards compatibility
-        const githubTypeDeploys = activeDeploys.filter(
-          (d) =>
-            d.deployable.type === DeployTypes.GITHUB ||
-            d.deployable.type === DeployTypes.DOCKER ||
-            CLIDeployTypes.has(d.deployable.type)
-        );
+      const activeDeploys = allDeploys.filter((d) => d.active);
 
-        if (githubTypeDeploys.length > 0) {
-          const legacyManifest = k8s.generateManifest({
+      // Generate manifests for GitHub/Docker/CLI deploys
+      for (const deploy of activeDeploys) {
+        const deployType = deploy.deployable.type;
+        if (deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType)) {
+          // Generate individual manifest for this deploy
+          const manifest = k8s.generateDeployManifest({
+            deploy,
             build,
-            deploys: githubTypeDeploys,
-            uuid: build.uuid,
             namespace,
             serviceAccountName,
           });
-          if (legacyManifest && legacyManifest.replace(/---/g, '').trim().length > 0) {
-            await build.$query().patch({ manifest: legacyManifest });
+
+          // Store manifest in deploy record
+          if (manifest && manifest.trim().length > 0) {
+            await deploy.$query().patch({ manifest });
           }
         }
-        await this.updateDeploysImageDetails(build, githubRepositoryId);
-        return true;
-      } catch (e) {
-        getLogger().warn({ error: e }, 'K8s: deploy failed');
-        throw e;
       }
-    } else {
-      let deploys: Deploy[] = [];
-      try {
-        const buildId = build?.id;
-        if (!buildId) {
-          getLogger().error('Build: id missing for=generateAndApplyManifests');
-        }
 
-        const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
-        const serviceAccountName = serviceAccount?.name || 'default';
-
-        deploys = (
-          await Deploy.query()
-            .where({ buildId })
-            .withGraphFetched({
-              service: {
-                serviceDisks: true,
-              },
-            })
-        ).filter(
-          (d) =>
-            d.active &&
-            (d.service.type === DeployTypes.GITHUB ||
-              d.service.type === DeployTypes.DOCKER ||
-              CLIDeployTypes.has(d.service.type))
+      // Use DeploymentManager for all active deploys (both Helm and GitHub types)
+      if (activeDeploys.length > 0) {
+        // we should ignore Codefresh and Configuration services here since we dont deploy anything
+        const managedDeploys = activeDeploys.filter(
+          (d) => d.deployable.type !== DeployTypes.CODEFRESH && d.deployable.type !== DeployTypes.CONFIGURATION
         );
-        const manifest = k8s.generateManifest({ build, deploys, uuid: build.uuid, namespace, serviceAccountName });
-        if (manifest && manifest.replace(/---/g, '').trim().length > 0) {
-          await build.$query().patch({ manifest });
-          await k8s.applyManifests(build);
-        }
-
-        /* Generate the nginx manifests for this new build */
-        await this.ingressService.ingressManifestQueue.add('manifest', {
-          buildId,
-          ...extractContextForQueue(),
-        });
-
-        const isReady = await k8s.waitForPodReady(build);
-        if (isReady) {
-          // Mark all deploys as READY after pods are ready
-          const deployService = new DeployService();
-          await Promise.all(
-            deploys.map((deploy) =>
-              deployService.patchAndUpdateActivityFeed(
-                deploy,
-                {
-                  status: DeployStatus.READY,
-                  statusMessage: 'K8s pods are ready',
-                },
-                build.runUUID
-              )
-            )
-          );
-          await this.updateDeploysImageDetails(build, githubRepositoryId);
-        }
-
-        return true;
-      } catch (e) {
-        getLogger().warn({ error: e }, 'K8s: deploy failed');
-        throw e;
+        const deploymentManager = new DeploymentManager(managedDeploys);
+        await deploymentManager.deploy();
       }
+
+      // Queue ingress creation after all deployments
+      await this.ingressService.ingressManifestQueue.add('manifest', {
+        buildId,
+        ...extractContextForQueue(),
+      });
+
+      // Legacy manifest generation for backwards compatibility
+      const githubTypeDeploys = activeDeploys.filter(
+        (d) =>
+          d.deployable.type === DeployTypes.GITHUB ||
+          d.deployable.type === DeployTypes.DOCKER ||
+          CLIDeployTypes.has(d.deployable.type)
+      );
+
+      if (githubTypeDeploys.length > 0) {
+        const legacyManifest = k8s.generateManifest({
+          build,
+          deploys: githubTypeDeploys,
+          uuid: build.uuid,
+          namespace,
+          serviceAccountName,
+        });
+        if (legacyManifest && legacyManifest.replace(/---/g, '').trim().length > 0) {
+          await build.$query().patch({ manifest: legacyManifest });
+        }
+      }
+      await this.updateDeploysImageDetails(build, githubRepositoryId);
+      return true;
+    } catch (e) {
+      getLogger().warn({ error: e }, 'K8s: deploy failed');
+      throw e;
     }
   }
 

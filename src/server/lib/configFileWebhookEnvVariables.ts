@@ -38,7 +38,7 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
     let result: Record<string, any>;
 
     if (build != null) {
-      await build?.$fetchGraph('[services, deploys.service.repository]');
+      await build?.$fetchGraph('[services, deploys.deployable.repository]');
       const availableEnv = this.cleanup(await this.availableEnvironmentVariablesForBuild(build));
       const useDefaultUUID =
         !Array.isArray(build?.enabledFeatures) || !build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE);
@@ -52,7 +52,7 @@ export class ConfigFileWebhookEnvironmentVariables extends EnvironmentVariables 
         )
       );
 
-      await build?.$fetchGraph('[services, deploys.service.repository]');
+      await build?.$fetchGraph('[services, deploys.deployable.repository]');
     } else {
       getLogger().fatal('Webhook: build and webhook undefined');
     }

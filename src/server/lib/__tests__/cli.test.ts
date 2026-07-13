@@ -103,7 +103,6 @@ function createDeploy(overrides: any = {}) {
       sha: 'build-sha',
       namespace: 'env-build-uuid',
       commentRuntimeEnv: {},
-      enableFullYaml: true,
     },
     service: {
       name: 'service-name',
@@ -154,9 +153,7 @@ describe('codefresh cli external secret resolution', () => {
   test('resolves deploy env secret refs before invoking Codefresh and redacts debug command', async () => {
     const deploy = createDeploy();
 
-    await expect(codefreshDeploy(deploy, deploy.build, deploy.service, deploy.deployable)).resolves.toBe(
-      'codefresh-run-id'
-    );
+    await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).resolves.toBe('codefresh-run-id');
 
     const [command, options] = mockShellPromise.mock.calls[0];
     expect(command).toContain("-v 'API_TOKEN'='resolved-token'");
@@ -181,7 +178,7 @@ describe('codefresh cli external secret resolution', () => {
     });
     const deploy = createDeploy();
 
-    await codefreshDeploy(deploy, deploy.build, deploy.service, deploy.deployable);
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable);
 
     const [command, options] = mockShellPromise.mock.calls[0];
     expect(command).toContain("-v 'API_TOKEN'='resolved'\\''token $(echo bad)'");
@@ -199,19 +196,18 @@ describe('codefresh cli external secret resolution', () => {
         commentRuntimeEnv: {
           API_TOKEN: '{{aws:repo/example/service:API_TOKEN}}',
         },
-        enableFullYaml: false,
       },
     });
 
     await expect(codefreshDestroy(deploy)).resolves.toBe('codefresh-run-id');
 
     const [command, options] = mockShellPromise.mock.calls[0];
-    expect(command).toContain("codefresh run 'service/destroy' -b 'service-branch'");
+    expect(command).toContain("codefresh run 'deployable/destroy' -b 'deployable-branch'");
     expect(command).toContain("-v 'BUILD_UUID'='build-uuid'");
     expect(command).toContain("-v 'API_TOKEN'='resolved-token'");
     expect(options.redactCommand).toContain("-v 'API_TOKEN'='[REDACTED]'");
-    expect(mockDeleteExternalSecret).toHaveBeenCalledWith('service-name-aws-secrets', 'env-build-uuid');
-    expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith('service-name-aws-secrets', 'env-build-uuid');
+    expect(mockDeleteExternalSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
+    expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
   });
 
   test('cleans up synced resources when Codefresh destroy fails', async () => {
@@ -225,14 +221,13 @@ describe('codefresh cli external secret resolution', () => {
         commentRuntimeEnv: {
           API_TOKEN: '{{aws:repo/example/service:API_TOKEN}}',
         },
-        enableFullYaml: false,
       },
     });
 
     await expect(codefreshDestroy(deploy)).rejects.toThrow('destroy failed');
 
-    expect(mockDeleteExternalSecret).toHaveBeenCalledWith('service-name-aws-secrets', 'env-build-uuid');
-    expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith('service-name-aws-secrets', 'env-build-uuid');
+    expect(mockDeleteExternalSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
+    expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
   });
 
   test('resolves nested object env refs and preserves JSON stringification for Codefresh variables', async () => {
@@ -247,7 +242,7 @@ describe('codefresh cli external secret resolution', () => {
       },
     });
 
-    await codefreshDeploy(deploy, deploy.build, deploy.service, deploy.deployable);
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable);
 
     const [command, options] = mockShellPromise.mock.calls[0];
     expect(command).toContain(
@@ -263,7 +258,7 @@ describe('codefresh cli external secret resolution', () => {
       },
     });
 
-    await codefreshDeploy(deploy, deploy.build, deploy.service, deploy.deployable);
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable);
 
     expect(mockGetAllConfigs).not.toHaveBeenCalled();
     expect(mockProcessSecretRefs).not.toHaveBeenCalled();
@@ -274,7 +269,7 @@ describe('codefresh cli external secret resolution', () => {
     mockGetAllConfigs.mockResolvedValue({ secretProviders: undefined });
     const deploy = createDeploy();
 
-    await expect(codefreshDeploy(deploy, deploy.build, deploy.service, deploy.deployable)).rejects.toThrow(
+    await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).rejects.toThrow(
       'external secret providers are not configured'
     );
 

@@ -103,7 +103,6 @@ describe('DeployCleanupService', () => {
         type: DeployTypes.HELM,
         serviceDisksYaml: JSON.stringify([{ name: 'data' }]),
       },
-      service: null,
       env: {
         API_TOKEN: '{{aws:/service/api:token}}',
       },
@@ -358,7 +357,6 @@ describe('DeployCleanupService', () => {
     });
     const build = {
       uuid: 'build-1',
-      enableFullYaml: true,
       isStatic: false,
       deploys: [deploy],
     };
@@ -382,7 +380,7 @@ describe('DeployCleanupService', () => {
     const result = await service.destroyServiceDeployment('build-1', 'api');
 
     expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: 'build-1' });
-    expect(buildQuery.withGraphFetched).toHaveBeenCalledWith('deploys.[build, service, deployable]');
+    expect(buildQuery.withGraphFetched).toHaveBeenCalledWith('deploys.[build, deployable]');
     expect(cleanupDeploy).not.toHaveBeenCalled();
     expect(queueAdd).toHaveBeenCalledWith(
       'cleanup',
@@ -411,7 +409,6 @@ describe('DeployCleanupService', () => {
     });
     const build = {
       uuid: 'build-1',
-      enableFullYaml: true,
       isStatic: false,
       deploys: [deploy],
     };
@@ -437,54 +434,6 @@ describe('DeployCleanupService', () => {
     });
   });
 
-  test('destroyServiceDeployment matches classic services by service name', async () => {
-    const deploy = createDeploy({
-      id: 89,
-      service: {
-        name: 'api',
-        type: DeployTypes.DOCKER,
-      },
-      deployable: null,
-    });
-    const build = {
-      uuid: 'build-1',
-      enableFullYaml: false,
-      isStatic: false,
-      deploys: [deploy],
-    };
-    const buildQuery = {
-      findOne: jest.fn(() => buildQuery),
-      withGraphFetched: jest.fn().mockResolvedValue(build),
-    };
-    const queueAdd = jest.fn().mockResolvedValue(undefined);
-    const service = createService(
-      {
-        models: {
-          Build: {
-            query: jest.fn(() => buildQuery),
-          },
-        },
-      },
-      queueAdd
-    );
-    const cleanupDeploy = jest.spyOn(service, 'cleanupDeploy').mockResolvedValue(true);
-
-    const result = await service.destroyServiceDeployment('build-1', 'api');
-
-    expect(cleanupDeploy).not.toHaveBeenCalled();
-    expect(queueAdd).toHaveBeenCalledWith(
-      'cleanup',
-      expect.objectContaining({
-        deployId: 89,
-        mode: 'infra',
-      })
-    );
-    expect(result).toEqual({
-      status: 'success',
-      message: 'Service api in build build-1 teardown has been queued',
-    });
-  });
-
   test('destroyServiceDeployment allows static environments', async () => {
     const deploy = createDeploy({
       id: 90,
@@ -496,7 +445,6 @@ describe('DeployCleanupService', () => {
     });
     const build = {
       uuid: 'static-build',
-      enableFullYaml: true,
       isStatic: true,
       deploys: [deploy],
     };
@@ -558,7 +506,6 @@ describe('DeployCleanupService', () => {
   test('destroyServiceDeployment returns not_found when the service is missing', async () => {
     const build = {
       uuid: 'build-1',
-      enableFullYaml: true,
       isStatic: false,
       deploys: [
         createDeploy({

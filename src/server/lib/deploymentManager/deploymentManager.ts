@@ -170,14 +170,16 @@ export class DeploymentManager {
   }
 
   private shouldDeployWithHelm(deploy: Deploy): boolean {
-    const deployType = deploy.deployable?.type || deploy.service?.type;
+    const deployType = deploy.deployable?.type;
     return deployType === DeployTypes.HELM;
   }
 
   private shouldDeployWithKubernetes(deploy: Deploy): boolean {
-    const deployType = deploy.deployable?.type || deploy.service?.type;
+    const deployType = deploy.deployable?.type;
     // Note: only the below types have Kubernetes manifests
-    return [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType);
+    return (
+      deployType != null && [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType)
+    );
   }
 
   private async archiveDeployLogs(
@@ -200,7 +202,7 @@ export class DeploymentManager {
       {
         jobName,
         jobType: 'deploy',
-        serviceName: deploy.deployable?.name || deploy.service?.name || '',
+        serviceName: deploy.deployable?.name || '',
         namespace: deploy.build.namespace,
         status: result.success ? 'Complete' : 'Failed',
         sha: deploy.sha || '',
@@ -235,7 +237,7 @@ export class DeploymentManager {
           runUUID
         );
 
-        await deploy.$fetchGraph('[build, deployable, service]');
+        await deploy.$fetchGraph('[build, deployable]');
 
         if (!deploy.manifest) {
           throw new Error(`Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`);

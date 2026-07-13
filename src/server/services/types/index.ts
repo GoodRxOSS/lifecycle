@@ -23,7 +23,6 @@ import ActivityStream from 'server/services/activityStream';
 import Codefresh from 'server/services/codefresh';
 import Webhook from 'server/services/webhook';
 import Ingress from 'server/services/ingress';
-import LCService from 'server/services/service';
 import Deployable from 'server/services/deployable';
 import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
@@ -45,7 +44,6 @@ export interface IServices {
   Webhook: Webhook;
   Codefresh: Codefresh;
   Ingress: Ingress;
-  LCService: LCService;
   Deployable: Deployable;
   BotUser: BotUser;
   GlobalConfig: GlobalConfig;

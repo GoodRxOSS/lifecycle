@@ -92,7 +92,6 @@ jest.mock('server/services/deploy', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     hostForDeployableDeploy: jest.fn(),
-    hostForServiceDeploy: jest.fn(),
   })),
 }));
 
@@ -120,7 +119,6 @@ function createActivityStream() {
     services: {
       Deploy: {
         hostForDeployableDeploy: jest.fn(),
-        hostForServiceDeploy: jest.fn(),
       },
     },
   };

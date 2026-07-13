@@ -407,7 +407,7 @@ describe('agent session system prompt', () => {
     });
 
     expect(buildGraphQuery.withGraphFetched).toHaveBeenCalledWith(
-      '[pullRequest.[repository], deploys.[deployable, repository, service]]'
+      '[pullRequest.[repository], deploys.[deployable, repository]]'
     );
   });
 });

@@ -54,9 +54,6 @@ export default class WebhookService extends BaseService {
 
     await pullRequest.$fetchGraph('repository');
 
-    // if build is in classic mode, we should not proceed with yaml webhooks since db webhooks are not supported anymore
-    if (build?.environment?.classicModeOnly) return webhooks;
-
     if (pullRequest.repository != null && pullRequest.branchName != null) {
       const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
         pullRequest.repository,
@@ -100,11 +97,6 @@ export default class WebhookService extends BaseService {
         return;
     }
 
-    // if build is not full yaml and no webhooks defined in YAML config, we should not run webhooks (no more db webhook support)
-    if (!build.enableFullYaml && build.webhooksYaml == null) {
-      getLogger().debug(`Skipping Lifecycle Webhooks (non yaml config build) execution for status: ${build.status}`);
-      return;
-    }
     const webhooks: YamlService.Webhook[] = JSON.parse(build.webhooksYaml);
     // no webhooks defined in YAML config, we should not run webhooks
     if (!webhooks) {

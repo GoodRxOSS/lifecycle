@@ -291,7 +291,7 @@ export default class BuildMetadataService extends BaseService {
   async renderMetadataForBuildUUID(uuid: string): Promise<BuildMetadataConfig> {
     const build = await this.db.models.Build.query()
       .findOne({ uuid })
-      .select('id', 'uuid', 'sha', 'namespace', 'enableFullYaml', 'runUUID');
+      .select('id', 'uuid', 'sha', 'namespace', 'runUUID');
 
     if (!build) {
       throw new BuildMetadataError(`Build with UUID ${uuid} not found.`, 'not_found');

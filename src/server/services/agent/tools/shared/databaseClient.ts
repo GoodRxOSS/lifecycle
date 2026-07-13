@@ -329,7 +329,6 @@ export class DatabaseClient {
           build: 'belongs to Build',
           deployable: 'belongs to Deployable',
           repository: 'belongs to Repository',
-          service: 'belongs to Service',
         },
       },
       deployables: {

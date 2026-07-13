@@ -320,7 +320,6 @@ function sampleDeploy(overrides: Record<string, unknown> = {}) {
     repository: {
       fullName: 'example-org/service-repo',
     },
-    service: null,
     ...overrides,
   };
 }
@@ -520,7 +519,7 @@ describe('BuildContextChatService', () => {
     });
 
     expect(deployLookup.findOne).toHaveBeenCalledWith({ uuid: 'deploy-uuid-1' });
-    expect(deployLookup.withGraphFetched).toHaveBeenCalledWith('[deployable, repository, service]');
+    expect(deployLookup.withGraphFetched).toHaveBeenCalledWith('[deployable, repository]');
     expect(arranged.sessionInsertAndFetch).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceRepos: [

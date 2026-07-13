@@ -70,8 +70,6 @@ import BuildService from 'server/services/build';
  *                     type: boolean
  *                   hostPortMapping:
  *                     type: object
- *                   enableFullYaml:
- *                     type: boolean
  *                   grpc:
  *                     type: object
  *                   capacityType:
@@ -147,7 +145,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         "publicUrl",
         "public",
         "hostPortMapping",
-        "enableFullYaml",
         "grpc",
         "capacityType"
       FROM "deploySummary" 

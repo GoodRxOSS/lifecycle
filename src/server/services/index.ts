@@ -24,7 +24,6 @@ import ActivityStream from 'server/services/activityStream';
 import Codefresh from 'server/services/codefresh';
 import Webhook from 'server/services/webhook';
 import Ingress from 'server/services/ingress';
-import LCService from 'server/services/service';
 import Deployable from 'server/services/deployable';
 import BotUser from 'server/services/botUser';
 import GlobalConfig from 'server/services/globalConfig';
@@ -47,7 +46,6 @@ export default function createAndBindServices(): IServices {
     Webhook: new Webhook(),
     Codefresh: new Codefresh(),
     Ingress: new Ingress(),
-    LCService: new LCService(),
     Deployable: new Deployable(),
     BotUser: new BotUser(),
     GlobalConfig: GlobalConfig.getInstance(),

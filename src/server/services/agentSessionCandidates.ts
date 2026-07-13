@@ -84,10 +84,7 @@ async function resolveCandidateForDeploy(
   buildSource: { repo?: string; branch?: string },
   lifecycleConfigCache: Map<string, Promise<LifecycleConfig | null>>
 ): Promise<AgentSessionServiceCandidate | null> {
-  const serviceName =
-    normalizeOptionalString(deploy.deployable?.name) ||
-    normalizeOptionalString(deploy.service?.name) ||
-    normalizeOptionalString(deploy.uuid);
+  const serviceName = normalizeOptionalString(deploy.deployable?.name) || normalizeOptionalString(deploy.uuid);
   const repo = normalizeOptionalString(deploy.repository?.fullName) || buildSource.repo;
   const branch = normalizeOptionalString(deploy.branchName) || buildSource.branch;
 
@@ -121,7 +118,7 @@ async function resolveCandidateForDeploy(
 export async function loadAgentSessionServiceCandidates(buildUuid: string): Promise<AgentSessionServiceCandidate[]> {
   const build = await Build.query()
     .findOne({ uuid: buildUuid })
-    .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
+    .withGraphFetched('[pullRequest, deploys.[deployable, repository]]');
   if (!build?.pullRequest) {
     throw new Error('Build not found');
   }

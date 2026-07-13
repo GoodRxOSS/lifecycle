@@ -118,19 +118,9 @@ export const mockBuildService = {
 /**
  * Environment Service Mock
  */
-export const mockEnableFullYamlSupport = jest.fn();
 export const mockFindOrCreateEnvironment = jest.fn();
 export const mockEnvironmentService = {
-  enableFullYamlSupport: mockEnableFullYamlSupport,
   findOrCreateEnvironment: mockFindOrCreateEnvironment,
-};
-
-/**
- * LC Service Mock
- */
-export const mockFindOrCreateDefaultService = jest.fn();
-export const mockLCService = {
-  findOrCreateDefaultService: mockFindOrCreateDefaultService,
 };
 
 /**
@@ -167,7 +157,6 @@ export const mockServices = {
   ActivityStream: mockActivityStreamService,
   BotUser: mockBotUserService,
   Build: mockBuildService,
-  LCService: mockLCService,
   Environment: mockEnvironmentService,
   PullRequest: mockPullRequestService,
   Repository: mockRepositoryService,
@@ -254,10 +243,9 @@ export const mockDeploy = (name = 'test') => ({
   },
 });
 
-export const mockPullrequestBuildResponse = (enableFullYaml: boolean = true) => ({
+export const mockPullrequestBuildResponse = () => ({
   build: {
     $query: mockBuild$Query,
-    enableFullYaml,
     id: 123,
     uuid: 'abc123',
     deploys: [mockDeploy()],

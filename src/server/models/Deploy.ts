@@ -16,7 +16,7 @@
 
 import Model from './_Model';
 import { DeployStatus } from 'shared/constants';
-import { Service, Build, Deployable, Repository } from '.';
+import { Build, Deployable, Repository } from '.';
 
 export default class Deploy extends Model {
   uuid: string;
@@ -37,9 +37,6 @@ export default class Deploy extends Model {
   internalHostname: string;
   sha: string;
   cname: string;
-
-  serviceId: number;
-  service: Service;
 
   buildId: number;
   build: Build;
@@ -83,14 +80,6 @@ export default class Deploy extends Model {
   static get relationMappings() {
     const AgentSession = require('./AgentSession').default;
     return {
-      service: {
-        relation: Model.BelongsToOneRelation,
-        modelClass: Service,
-        join: {
-          from: 'deploys.serviceId',
-          to: 'services.id',
-        },
-      },
       build: {
         relation: Model.BelongsToOneRelation,
         modelClass: () => Build,

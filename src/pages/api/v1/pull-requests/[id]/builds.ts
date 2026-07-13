@@ -54,8 +54,6 @@ import PullRequestService from 'server/services/pullRequest';
  *                     type: string
  *                   statusMessage:
  *                     type: string
- *                   enableFullYaml:
- *                     type: boolean
  *                   sha:
  *                     type: string
  *                   createdAt:
@@ -139,7 +137,6 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
         'uuid',
         'status',
         'statusMessage',
-        'enableFullYaml',
         'sha',
         'createdAt',
         'updatedAt',

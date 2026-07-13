@@ -78,8 +78,6 @@ jest.mock('server/models', () => ({
     query: () => mockDeployQuery(),
   },
   Environment: class {},
-  Service: class {},
-  BuildServiceOverride: class {},
 }));
 
 jest.mock('server/lib/kubernetes', () => ({
@@ -160,7 +158,7 @@ jest.mock('server/lib/fastly', () =>
 );
 
 import BuildService from '../build';
-import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployTypes } from 'shared/constants';
 
 function createThenableQuery(result: any[] = []) {
   const query: any = {
@@ -320,13 +318,8 @@ describe('BuildService build response queries', () => {
     await expect(buildService.getBuildByUUID('sample-build')).resolves.toBe(build);
 
     expect(serviceOverrideQuery.findOne).toHaveBeenCalledWith({ id: 10 });
-    expect(serviceOverrideQuery.withGraphFetched).toHaveBeenCalledWith(
-      '[environment.[defaultServices, optionalServices], deploys.[service, deployable]]'
-    );
-    expect(mockGetServiceOverrideStates).toHaveBeenCalledWith(
-      buildForServiceOverrides,
-      buildForServiceOverrides.deploys
-    );
+    expect(serviceOverrideQuery.withGraphFetched).toHaveBeenCalledWith('[environment, deploys.[deployable]]');
+    expect(mockGetServiceOverrideStates).toHaveBeenCalledWith(buildForServiceOverrides.deploys);
     expect(build.deploys).toEqual([
       {
         uuid: 'api-sample-build',
@@ -344,88 +337,6 @@ describe('BuildService build response queries', () => {
         serviceOverride: null,
       },
     ]);
-  });
-});
-
-describe('BuildService failure boundaries', () => {
-  let buildService: BuildService;
-  let recordDeployFailure: jest.Mock;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    recordDeployFailure = jest.fn();
-    const queueManager = {
-      registerQueue: jest.fn(() => ({
-        add: mockQueueAdd,
-        process: jest.fn(),
-        on: jest.fn(),
-      })),
-    };
-    buildService = new BuildService(
-      {
-        services: {
-          Deploy: {
-            recordDeployFailure,
-          },
-        },
-      } as any,
-      {} as any,
-      {} as any,
-      queueManager as any
-    );
-    (buildService as any).ingressService = {
-      ingressManifestQueue: {
-        add: mockQueueAdd,
-      },
-    };
-    mockGetAllConfigs.mockResolvedValue({ serviceAccount: { name: 'sample-service-account' } });
-  });
-
-  test('classic manifest failures stay build-scoped when no deploy can be identified', async () => {
-    const deploys = [
-      {
-        id: 1,
-        active: true,
-        uuid: 'sample-api',
-        status: DeployStatus.BUILT,
-        service: { type: DeployTypes.GITHUB, name: 'sample-api' },
-      },
-      {
-        id: 2,
-        active: true,
-        uuid: 'sample-worker',
-        status: DeployStatus.BUILT,
-        service: { type: DeployTypes.DOCKER, name: 'sample-worker' },
-      },
-    ];
-    const query = {
-      where: jest.fn().mockReturnThis(),
-      withGraphFetched: jest.fn().mockResolvedValue(deploys),
-    };
-    const rolloutError = new Error('Pods for build not ready after 15 minutes');
-    mockDeployQuery.mockReturnValue(query);
-    mockGenerateManifest.mockReturnValue('apiVersion: apps/v1\nkind: Deployment\n');
-    mockApplyManifests.mockResolvedValue([]);
-    mockWaitForPodReady.mockRejectedValue(rolloutError);
-
-    await expect(
-      buildService.generateAndApplyManifests({
-        build: {
-          id: 123,
-          uuid: 'sample-build',
-          runUUID: 'run-1',
-          namespace: 'sample-namespace',
-          enableFullYaml: false,
-          $query: jest.fn(() => ({
-            patch: jest.fn().mockResolvedValue(undefined),
-          })),
-        } as any,
-        githubRepositoryId: null,
-        namespace: 'sample-namespace',
-      })
-    ).rejects.toThrow(rolloutError);
-
-    expect(recordDeployFailure).not.toHaveBeenCalled();
   });
 });
 
@@ -648,7 +559,6 @@ describe('BuildService stale deploy reconciliation', () => {
     ({
       id: 10,
       uuid: 'build-1',
-      enableFullYaml: true,
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
       ...overrides,
     } as any);
@@ -657,7 +567,7 @@ describe('BuildService stale deploy reconciliation', () => {
     createService([{ id: 1, name: 'old-api' }]);
     mockIsFeatureEnabled.mockResolvedValue(false);
 
-    await (buildService as any).reconcileDeletedDeployables({ id: 10, uuid: 'build-1', enableFullYaml: true } as any, {
+    await (buildService as any).reconcileDeletedDeployables({ id: 10, uuid: 'build-1' } as any, {
       canReconcile: true,
       deployables: [],
       reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
@@ -689,6 +599,22 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(deployQuery.whereIn).toHaveBeenCalledWith('deployableId', [1]);
     expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [1] });
     expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
+  });
+
+  test('stale-deploy lookup does not eager-load the removed Deploy.service relation', async () => {
+    createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
+
+    await (buildService as any).reconcileDeletedDeployables(createBuild(), {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [{ name: 'api', source: 'yaml', reconcileEligible: true }],
+    });
+
+    // Deploy.service was removed with the legacy DB-config path; eager-loading it here would
+    // make Objection reject the query with "unknown relation service", breaking stale-service cleanup.
+    expect(deployQuery.withGraphFetched).toHaveBeenCalledWith('[build, deployable]');
+    const graphArg = deployQuery.withGraphFetched.mock.calls[0][0];
+    expect(graphArg).not.toContain('service');
   });
 
   test('treats renamed YAML services as deleted old service plus created new service', async () => {
@@ -760,7 +686,7 @@ describe('BuildService stale deploy reconciliation', () => {
     createService([], []);
 
     await (buildService as any).reconcileDeletedDeployables(
-      { id: 10, uuid: 'build-1', enableFullYaml: true } as any,
+      { id: 10, uuid: 'build-1' } as any,
       {
         canReconcile: true,
         deployables: [],
@@ -874,7 +800,6 @@ describe('BuildService queue fingerprinting', () => {
   const createMockBuild = (overrides: any = {}) =>
     ({
       id: 1,
-      enableFullYaml: true,
       commentRuntimeEnv: { FEATURE_FLAG: 'on' },
       commentInitEnv: {},
       pullRequest: { latestCommit: 'abcdef123456' },

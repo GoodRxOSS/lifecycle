@@ -28,7 +28,7 @@ export class QueryDatabaseTool extends BaseTool {
 
   constructor(private databaseClient: DatabaseClient) {
     super(
-      "Read-only database query to fetch fresh Lifecycle data for THIS build only. Every query is automatically scoped to this build's own records (builds.uuid = this build, deploys/deployables of this build, this build's pull request / environment / repositories); you cannot read other tenants' rows. The latest environment-state event already has current statuses — use this only to fetch fields the state event lacks. Large columns (manifest, buildOutput, config, env) are omitted unless explicitly listed in select; deploys.buildOutput holds persisted build/deploy logs for failed deploys — select it when job pods are gone. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository, service), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like \"deploys.repository\". deployables.deploymentDependsOn holds the declared service dependency edges when the full graph is needed beyond the state event's Dependency chains.",
+      "Read-only database query to fetch fresh Lifecycle data for THIS build only. Every query is automatically scoped to this build's own records (builds.uuid = this build, deploys/deployables of this build, this build's pull request / environment / repositories); you cannot read other tenants' rows. The latest environment-state event already has current statuses — use this only to fetch fields the state event lacks. Large columns (manifest, buildOutput, config, env) are omitted unless explicitly listed in select; deploys.buildOutput holds persisted build/deploy logs for failed deploys — select it when job pods are gone. CRITICAL: READ-ONLY - no write operations allowed. TABLE-SPECIFIC RELATIONS: builds (pullRequest, environment, deploys, deployables), deploys (build, deployable, repository), deployables (repository, deploys), pull_requests (repository, build), repositories (pullRequests, deployables), environments (builds). Use dot notation for nested relations like \"deploys.repository\". deployables.deploymentDependsOn holds the declared service dependency edges when the full graph is needed beyond the state event's Dependency chains.",
       {
         type: 'object',
         properties: {
@@ -46,7 +46,7 @@ export class QueryDatabaseTool extends BaseTool {
           relations: {
             type: 'array',
             description:
-              'Relations to eager load (top-level only). Valid per table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository, service], deployables: [repository, deploys], pull_requests: [repository, build], repositories: [pullRequests, deployables], environments: [builds]. Relations are returned as compact {id, name} objects.',
+              'Relations to eager load (top-level only). Valid per table - builds: [pullRequest, environment, deploys, deployables], deploys: [build, deployable, repository], deployables: [repository, deploys], pull_requests: [repository, build], repositories: [pullRequests, deployables], environments: [builds]. Relations are returned as compact {id, name} objects.',
             items: { type: 'string' },
           },
           limit: {

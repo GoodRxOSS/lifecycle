@@ -45,7 +45,6 @@ jest.mock('../deploy', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     hostForDeployableDeploy: jest.fn(() => 'deployable-host'),
-    hostForServiceDeploy: jest.fn(() => 'service-host'),
   })),
 }));
 
@@ -80,7 +79,6 @@ function createService() {
       },
       Deploy: {
         hostForDeployableDeploy: jest.fn(() => 'api-public-url'),
-        hostForServiceDeploy: jest.fn(() => 'classic-public-url'),
       },
     },
   };
@@ -101,7 +99,6 @@ function createFullYamlArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyB
   const build = {
     id: 42,
     uuid: 'current-build',
-    enableFullYaml: true,
     $query: buildPatchable.model.$query,
   };
   const deployable = {
@@ -117,11 +114,6 @@ function createFullYamlArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyB
     branchName: 'main',
     publicUrl: 'api-public-url',
     deployable,
-    service: {
-      id: 7,
-      name: 'api',
-      type: DeployTypes.GITHUB,
-    },
     $query: deployPatchable.model.$query,
   };
   const dependentDeploy = {
@@ -133,94 +125,6 @@ function createFullYamlArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyB
       buildUUID: 'current-build',
       buildId: 42,
       active: true,
-      type: DeployTypes.GITHUB,
-    },
-    service: {
-      id: 8,
-      name: 'api-worker',
-      type: DeployTypes.GITHUB,
-    },
-    $query: dependentPatchable.model.$query,
-  };
-
-  return {
-    build: build as any,
-    deploys: [deploy, dependentDeploy] as any,
-    pullRequest: {
-      deployOnUpdate: true,
-    } as any,
-    runUuid: 'run-uuid',
-    overrides: {
-      serviceOverrides: [
-        {
-          active: true,
-          serviceName: 'api',
-          branchOrExternalUrl: 'feature/api',
-        },
-      ],
-      vanityUrl: null,
-      envOverrides: {
-        FEATURE_ENABLED: 'true',
-      },
-      redeployOnPush: true,
-      ...overrides,
-    },
-  };
-}
-
-function createClassicArgs(overrides: Partial<BuildOverrideInput> = {}): ApplyBuildOverridesArgs {
-  const buildPatchable = createPatchable();
-  const deployPatchable = createPatchable();
-  const deployablePatchable = createPatchable();
-  const dependentPatchable = createPatchable();
-
-  const build = {
-    id: 42,
-    uuid: 'current-build',
-    enableFullYaml: false,
-    environment: {
-      defaultServices: [
-        {
-          id: 7,
-        },
-      ],
-      optionalServices: [],
-    },
-    $query: buildPatchable.model.$query,
-  };
-  const deployable = {
-    name: 'api',
-    buildUUID: 'current-build',
-    buildId: 42,
-    type: DeployTypes.GITHUB,
-    $query: deployablePatchable.model.$query,
-  };
-  const deploy = {
-    serviceId: 7,
-    active: true,
-    branchName: 'main',
-    publicUrl: 'classic-public-url',
-    deployable,
-    service: {
-      id: 7,
-      name: 'api',
-      type: DeployTypes.GITHUB,
-    },
-    $query: deployPatchable.model.$query,
-  };
-  const dependentDeploy = {
-    serviceId: 8,
-    active: true,
-    deployable: {
-      name: 'api-worker',
-      buildUUID: 'current-build',
-      buildId: 42,
-      type: DeployTypes.GITHUB,
-    },
-    service: {
-      id: 8,
-      name: 'api-worker',
-      dependsOnServiceId: 7,
       type: DeployTypes.GITHUB,
     },
     $query: dependentPatchable.model.$query,
@@ -575,31 +479,6 @@ describe('OverrideService.applyBuildOverrides', () => {
     });
   });
 
-  it('cascades active state through service dependencies for non-full-yaml builds', async () => {
-    const { service } = createService();
-    const args = createClassicArgs();
-
-    await service.applyServiceOverrides({
-      build: args.build,
-      deploys: args.deploys,
-      pullRequest: args.pullRequest,
-      serviceOverrides: [
-        {
-          name: 'api',
-          active: false,
-        },
-      ],
-      runUuid: 'run-uuid',
-    });
-
-    expect(args.deploys[0]!.$query().patch).toHaveBeenCalledWith({
-      active: false,
-    });
-    expect(args.deploys[1]!.$query().patch).toHaveBeenCalledWith({
-      active: false,
-    });
-  });
-
   it('applies multiple service overrides and queues only once', async () => {
     const { service, enqueueResolveAndDeployBuild } = createService();
     const args = createFullYamlArgs();
@@ -613,11 +492,6 @@ describe('OverrideService.applyBuildOverrides', () => {
         active: true,
         type: DeployTypes.GITHUB,
         $query: webDeployablePatchable.model.$query,
-      },
-      service: {
-        id: 9,
-        name: 'web',
-        type: DeployTypes.GITHUB,
       },
       active: true,
       branchName: 'main',
@@ -783,15 +657,10 @@ describe('OverrideService.applyBuildOverrides', () => {
         dockerImage: 'repo/worker',
         defaultTag: 'latest',
       },
-      service: {
-        id: 9,
-        name: 'worker',
-        type: DeployTypes.DOCKER,
-      },
     };
     args.deploys.push(dockerDeploy as any);
 
-    await expect(service.getServiceOverrideStates(args.build, args.deploys)).resolves.toEqual([
+    await expect(service.getServiceOverrideStates(args.deploys)).resolves.toEqual([
       expect.objectContaining({
         name: 'api',
         active: true,
@@ -808,43 +677,6 @@ describe('OverrideService.applyBuildOverrides', () => {
         updatedAt: '2026-05-08T12:00:00.000Z',
         group: 'optional',
         editable: false,
-      }),
-    ]);
-  });
-
-  it('returns classic service override edit state grouped by environment membership', async () => {
-    const { service } = createService();
-    const args = createClassicArgs();
-    const optionalDeploy = {
-      serviceId: 9,
-      active: false,
-      branchName: 'feature/worker',
-      publicUrl: 'worker-public-url',
-      deployable: {
-        name: 'worker',
-        type: DeployTypes.HELM,
-      },
-      service: {
-        id: 9,
-        name: 'worker',
-        type: DeployTypes.HELM,
-      },
-    };
-    (args.build.environment!.optionalServices as any[]).push({ id: 9 });
-    args.deploys.push(optionalDeploy as any);
-
-    await expect(service.getServiceOverrideStates(args.build, args.deploys)).resolves.toEqual([
-      expect.objectContaining({
-        name: 'api',
-        branchOrExternalUrl: 'main',
-        group: 'default',
-        editable: true,
-      }),
-      expect.objectContaining({
-        name: 'worker',
-        branchOrExternalUrl: 'feature/worker',
-        group: 'optional',
-        editable: true,
       }),
     ]);
   });

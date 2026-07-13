@@ -21,7 +21,6 @@ import ServiceDisk from './ServiceDisk';
 import Environment from './Environment';
 import Deploy from './Deploy';
 import Repository from './Repository';
-import BuildServiceOverride from './BuildServiceOverride';
 import Configuration from './Configuration';
 import Deployable from './Deployable';
 import BotUser from './BotUser';
@@ -47,7 +46,6 @@ import TelemetryEvent from './TelemetryEvent';
 
 export interface IModels {
   Build: typeof Build;
-  BuildServiceOverride: typeof BuildServiceOverride;
   Configuration: typeof Configuration;
   Deploy: typeof Deploy;
   Environment: typeof Environment;
@@ -80,7 +78,6 @@ export interface IModels {
 
 export {
   Build,
-  BuildServiceOverride,
   Configuration,
   Deploy,
   Environment,

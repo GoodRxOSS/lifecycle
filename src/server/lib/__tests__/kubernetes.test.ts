@@ -50,7 +50,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'ON_DEMAND',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -71,14 +70,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       expect(parsed.spec.template.spec.affinity.nodeAffinity).toEqual(customAffinity);
@@ -89,7 +81,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'ON_DEMAND',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -110,14 +101,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       // Should have default ON_DEMAND affinity with required scheduling
@@ -139,7 +123,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'SPOT',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -160,14 +143,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       // SPOT should use preferred scheduling
@@ -205,7 +181,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'SPOT',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -226,14 +201,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       // Should use custom affinity, not SPOT affinity
@@ -247,7 +215,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'ON_DEMAND',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -271,14 +238,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       expect(parsed.spec.template.spec.nodeSelector).toEqual({
@@ -292,7 +252,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'ON_DEMAND',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -313,60 +272,10 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       expect(parsed.spec.template.spec.nodeSelector).toBeUndefined();
-    });
-
-    it('should include nodeSelector from service model when not using full yaml', () => {
-      const build: any = {
-        uuid: 'test-build-uuid',
-        isStatic: false,
-        capacityType: 'ON_DEMAND',
-        enableFullYaml: false,
-      };
-
-      const deploy: any = {
-        uuid: 'test-deploy-uuid',
-        active: true,
-        replicaCount: 1,
-        dockerImage: 'test-image:latest',
-        env: {},
-        service: {
-          name: 'test-service',
-          port: '8080',
-          capacityType: 'ON_DEMAND',
-          nodeSelector: {
-            environment: 'production',
-          },
-          memoryRequest: '512Mi',
-          memoryLimit: '1Gi',
-          cpuRequest: '250m',
-          cpuLimit: '500m',
-        },
-      };
-
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        false,
-        'test-namespace',
-        'default'
-      );
-
-      const parsed: any = yaml.load(manifest);
-      expect(parsed.spec.template.spec.nodeSelector).toEqual({
-        environment: 'production',
-      });
     });
   });
 
@@ -392,7 +301,6 @@ describe('Kubernetes Node Placement', () => {
         uuid: 'test-build-uuid',
         isStatic: false,
         capacityType: 'ON_DEMAND',
-        enableFullYaml: true,
       };
 
       const deploy: any = {
@@ -416,14 +324,7 @@ describe('Kubernetes Node Placement', () => {
         },
       };
 
-      const manifest = k8s.generateDeployManifests(
-        build,
-        [deploy],
-        'test-build-uuid',
-        true,
-        'test-namespace',
-        'default'
-      );
+      const manifest = k8s.generateDeployManifests(build, [deploy], 'test-build-uuid', 'test-namespace', 'default');
 
       const parsed: any = yaml.load(manifest);
       expect(parsed.spec.template.spec.nodeSelector).toEqual({
@@ -440,7 +341,6 @@ describe('generateDeployManifest labels for envLens', () => {
       uuid: 'test-build-uuid',
       isStatic: false,
       capacityType: 'ON_DEMAND',
-      enableFullYaml: true,
     };
 
     const deploy: any = {

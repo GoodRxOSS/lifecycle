@@ -40,7 +40,6 @@ export default class EnvironmentService extends Service {
         (await this.db.models.Environment.create({
           name: envName,
           uuid,
-          enableFullYaml: true,
           autoDeploy,
         }));
     } catch (error) {
@@ -49,9 +48,5 @@ export default class EnvironmentService extends Service {
     }
 
     return env;
-  }
-
-  public enableFullYamlSupport(environment: Environment): boolean {
-    return environment.enableFullYaml;
   }
 }

@@ -271,8 +271,8 @@ async function verifyWorkspaceHttpEndpoint(endpoint: WorkspaceRuntimeEndpoint): 
 
 const SESSION_REDIS_PREFIX = 'lifecycle:agent:session:';
 const ACTIVE_ENVIRONMENT_SESSION_UNIQUE_INDEX = 'agent_sessions_active_environment_build_unique';
-const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, service, build.[pullRequest.[repository]]]';
-const SESSION_DEPLOY_GRAPH = '[deployable, repository, service]';
+const DEV_MODE_REDEPLOY_GRAPH = '[deployable.[repository], repository, build.[pullRequest.[repository]]]';
+const SESSION_DEPLOY_GRAPH = '[deployable, repository]';
 const agentNetworkPolicySetupByNamespace = new Map<string, Promise<void>>();
 
 type AgentSessionSummaryRecordBase = AgentSession & {
@@ -733,7 +733,7 @@ async function resolveTemplatedDevConfigEnvs(
 
   const build = await Build.query()
     .findOne({ uuid: buildUuid })
-    .withGraphFetched('[deploys.[service, deployable], pullRequest]');
+    .withGraphFetched('[deploys.[deployable], pullRequest]');
   if (!build) {
     throw new Error('Build not found');
   }
@@ -779,12 +779,12 @@ async function cleanupDevModePatches(
 
   const devModeManager = new DevModeManager();
   for (const deploy of deploys) {
-    const deploymentName = deploy.uuid || deploy.deployable?.name || deploy.service?.name;
+    const deploymentName = deploy.uuid || deploy.deployable?.name;
     if (!deploymentName) {
       continue;
     }
 
-    const serviceName = deploy.uuid || deploy.service?.name || deploymentName;
+    const serviceName = deploy.uuid || deploy.deployable?.name || deploymentName;
     const snapshot = getSessionSnapshot(snapshots, deploy.id);
     await devModeManager.disableDevMode(namespace, deploymentName, serviceName, snapshot);
   }
@@ -818,9 +818,7 @@ function triggerDevModeDeployRestore(
   // Restore runs in the background after agent teardown so ending a session
   // does not block on workload rollout/readiness.
   void (async () => {
-    const deployIds = deploys.map(
-      (deploy) => deploy.uuid || deploy.deployable?.name || deploy.service?.name || deploy.id
-    );
+    const deployIds = deploys.map((deploy) => deploy.uuid || deploy.deployable?.name || deploy.id);
     const deployList = deployIds.join(',');
 
     try {
@@ -1292,7 +1290,7 @@ export default class AgentSessionService {
       const primaryDeploy = sessionDeploys[0] || null;
       const persistedServices = (session.selectedServices || []).map((service) => service.name).filter(Boolean);
       const liveServices = sessionDeploys
-        .map((deploy) => deploy.deployable?.name || deploy.service?.name || null)
+        .map((deploy) => deploy.deployable?.name || null)
         .filter((name): name is string => Boolean(name));
       const services = [...new Set([...(persistedServices || []), ...liveServices])];
 
@@ -2984,7 +2982,7 @@ export default class AgentSessionService {
         const build = cleanupSession.buildUuid
           ? await Build.query()
               .findOne({ uuid: cleanupSession.buildUuid })
-              .withGraphFetched('[deploys.[service, build], pullRequest.[repository]]')
+              .withGraphFetched('[deploys.[build], pullRequest.[repository]]')
           : null;
         if (build?.kind === BuildKind.SANDBOX) {
           const { default: BuildService } = await import('./build');
@@ -3042,7 +3040,7 @@ export default class AgentSessionService {
       const build = cleanupSession.buildUuid
         ? await Build.query()
             .findOne({ uuid: cleanupSession.buildUuid })
-            .withGraphFetched('[deploys.[service, build], pullRequest.[repository]]')
+            .withGraphFetched('[deploys.[build], pullRequest.[repository]]')
         : null;
 
       if (build?.kind === BuildKind.SANDBOX) {

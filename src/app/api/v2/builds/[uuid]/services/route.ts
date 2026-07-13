@@ -138,7 +138,7 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   const override = new OverrideService();
   const build = await override.db.models.Build.query()
     .findOne({ uuid: routeParams.uuid })
-    .withGraphFetched('[pullRequest, environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
+    .withGraphFetched('[pullRequest, environment, deploys.[deployable]]');
 
   if (!build) {
     return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
@@ -154,13 +154,13 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
     });
     const updatedBuild = await override.db.models.Build.query()
       .findOne({ uuid: routeParams.uuid })
-      .withGraphFetched('[environment.[defaultServices, optionalServices], deploys.[service, deployable]]');
+      .withGraphFetched('[environment, deploys.[deployable]]');
 
     if (!updatedBuild) {
       return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
     }
 
-    const updatedServiceOverrides = await override.getServiceOverrideStates(updatedBuild, updatedBuild.deploys || []);
+    const updatedServiceOverrides = await override.getServiceOverrideStates(updatedBuild.deploys || []);
 
     return successResponse({ serviceOverrides: updatedServiceOverrides, queued: result.queued }, { status: 200 }, req);
   } catch (error) {

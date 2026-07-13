@@ -97,7 +97,6 @@ export type GithubInstallationData = {
   >;
 };
 
-// findOrCreateDefaultService take in a Repository Model but only needs an ID
 export type RepositoryWithID = {
   githubRepositoryId: number;
 };

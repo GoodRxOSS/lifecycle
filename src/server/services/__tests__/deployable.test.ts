@@ -174,7 +174,6 @@ describe('Deployable Service', () => {
       );
       expect(result).toEqual({
         name: 'github-app',
-        serviceId: null,
         type: 'github',
         buildUUID: 'unit-test-12345',
         buildId: 100,
@@ -339,7 +338,6 @@ describe('Deployable Service', () => {
 
       expect(result).toEqual({
         name: 'github-app',
-        serviceId: null,
         type: 'github',
         buildUUID: 'unit-test-12345',
         buildId: 100,

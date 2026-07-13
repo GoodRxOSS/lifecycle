@@ -33,7 +33,6 @@ async function retrieveBuild(req: NextApiRequest, res: NextApiResponse) {
         'uuid',
         'status',
         'statusMessage',
-        'enableFullYaml',
         'sha',
         'createdAt',
         'updatedAt',
@@ -157,8 +156,6 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *                   type: string
  *                 statusMessage:
  *                   type: string
- *                 enableFullYaml:
- *                   type: boolean
  *                 sha:
  *                   type: string
  *                 createdAt:
@@ -260,9 +257,6 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
  *                     statusMessage:
  *                       type: string
  *                       example: Build is running
- *                     enableFullYaml:
- *                       type: boolean
- *                       example: true
  *                     sha:
  *                       type: string
  *                       example: abc123def456
