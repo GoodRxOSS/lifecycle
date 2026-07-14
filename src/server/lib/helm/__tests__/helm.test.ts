@@ -17,15 +17,28 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
-import { constructHelmDeploysBuildMetaData, grpcMapping, helmOrgAppDeployStep } from 'server/lib/helm';
-import { Deploy } from 'server/models';
+import {
+  constructHelmDeploysBuildMetaData,
+  grpcMapping,
+  helmOrgAppDeployStep,
+  uninstallHelmReleases,
+} from 'server/lib/helm';
+import type { Deploy } from 'server/models';
 import GlobalConfigService from 'server/services/globalConfig';
+
+const mockDeployQuery = jest.fn();
 
 jest.mock('server/lib/envVariables', () => ({
   EnvironmentVariables: class {},
 }));
 
 jest.mock('server/services/globalConfig');
+jest.mock('server/models/Deploy', () => ({
+  __esModule: true,
+  default: {
+    query: () => mockDeployQuery(),
+  },
+}));
 jest.mock('server/lib/helm/utils', () => {
   const originalModule = jest.requireActual('server/lib/helm/utils');
   return {
@@ -35,6 +48,17 @@ jest.mock('server/lib/helm/utils', () => {
 });
 
 describe('Helm tests', () => {
+  test('does not eager-load the removed Deploy.service relation during uninstall', async () => {
+    const withGraphFetched = jest.fn().mockResolvedValue([]);
+    const where = jest.fn(() => ({ withGraphFetched }));
+    mockDeployQuery.mockReturnValue({ where });
+
+    await uninstallHelmReleases({ id: 42, namespace: 'env-build-uuid' } as any);
+
+    expect(withGraphFetched).toHaveBeenCalledWith({ build: true, deployable: true });
+    expect(withGraphFetched.mock.calls[0][0]).not.toHaveProperty('service');
+  });
+
   test('constructHelmDeploysBuildMetaData should return the correct metadata', async () => {
     const deploys = [
       {

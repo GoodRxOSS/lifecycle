@@ -24,6 +24,7 @@ const mockDeleteExternalSecret = jest.fn();
 const mockCreateOrUpdateNamespace = jest.fn();
 const mockLoggerDebug = jest.fn();
 const mockLoggerError = jest.fn();
+const mockDeployQuery = jest.fn();
 
 jest.mock('server/lib/shell', () => ({
   shellPromise: (...args: any[]) => mockShellPromise(...args),
@@ -75,7 +76,13 @@ jest.mock('server/lib/kubernetes', () => ({
   createOrUpdateNamespace: (...args: any[]) => mockCreateOrUpdateNamespace(...args),
 }));
 
-import { codefreshDeploy, codefreshDestroy } from '../cli';
+jest.mock('server/models', () => ({
+  Deploy: {
+    query: () => mockDeployQuery(),
+  },
+}));
+
+import { codefreshDeploy, codefreshDestroy, deleteBuild } from '../cli';
 
 const secretProviders = {
   aws: {
@@ -274,5 +281,22 @@ describe('codefresh cli external secret resolution', () => {
     );
 
     expect(mockShellPromise).not.toHaveBeenCalled();
+  });
+});
+
+describe('CLI build cleanup', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('does not eager-load the removed Deploy.service relation', async () => {
+    const withGraphFetched = jest.fn().mockResolvedValue([]);
+    const where = jest.fn(() => ({ withGraphFetched }));
+    mockDeployQuery.mockReturnValue({ where });
+
+    await deleteBuild({ id: 42, uuid: 'build-uuid' } as any);
+
+    expect(withGraphFetched).toHaveBeenCalledWith({ build: true, deployable: true });
+    expect(withGraphFetched.mock.calls[0][0]).not.toHaveProperty('service');
   });
 });

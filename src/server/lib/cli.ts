@@ -215,7 +215,6 @@ export async function deleteBuild(build: Build) {
     const buildId = build?.id;
 
     const deploys = await Deploy.query().where({ buildId }).withGraphFetched({
-      service: true,
       build: true,
       deployable: true,
     });
