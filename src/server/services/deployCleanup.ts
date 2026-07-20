@@ -123,7 +123,7 @@ export default class DeployCleanupService extends BaseService {
     return withLogContext({ buildUuid, serviceName }, async () => {
       const build = await this.db.models.Build.query()
         .findOne({ uuid: buildUuid })
-        .withGraphFetched('deploys.[build, service, deployable]');
+        .withGraphFetched('deploys.[build, deployable]');
 
       if (!build) {
         return {
@@ -132,9 +132,7 @@ export default class DeployCleanupService extends BaseService {
         };
       }
 
-      const deploy = build.deploys?.find((candidate) =>
-        build.enableFullYaml ? candidate.deployable?.name === serviceName : candidate.service?.name === serviceName
-      );
+      const deploy = build.deploys?.find((candidate) => candidate.deployable?.name === serviceName);
 
       if (!deploy) {
         return {
@@ -222,13 +220,10 @@ export default class DeployCleanupService extends BaseService {
 
   private async resolveDeploy(deployOrId: Deploy | number): Promise<Deploy | null> {
     if (typeof deployOrId === 'number') {
-      return (
-        (await this.db.models.Deploy.query().findById(deployOrId).withGraphFetched('[build, service, deployable]')) ??
-        null
-      );
+      return (await this.db.models.Deploy.query().findById(deployOrId).withGraphFetched('[build, deployable]')) ?? null;
     }
 
-    await deployOrId.$fetchGraph('[build, service, deployable]');
+    await deployOrId.$fetchGraph('[build, deployable]');
     return deployOrId;
   }
 
@@ -236,8 +231,8 @@ export default class DeployCleanupService extends BaseService {
     deploy: Deploy
   ): { namespace: string; serviceName: string; deployType: DeployTypes } | null {
     const namespace = deploy.build?.namespace;
-    const serviceName = deploy.deployable?.name || deploy.service?.name;
-    const deployType = deploy.deployable?.type || deploy.service?.type;
+    const serviceName = deploy.deployable?.name;
+    const deployType = deploy.deployable?.type;
 
     if (!namespace || !deploy.uuid || !serviceName || !deployType) {
       return null;
@@ -252,7 +247,7 @@ export default class DeployCleanupService extends BaseService {
       tags: {
         mode,
         deployUuid: deploy?.uuid,
-        serviceName: deploy?.deployable?.name || deploy?.service?.name,
+        serviceName: deploy?.deployable?.name ?? '',
       },
     });
   }

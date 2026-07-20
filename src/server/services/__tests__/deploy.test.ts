@@ -109,9 +109,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       type: DeployTypes.DOCKER,
       helm: {},
     },
-    build: {
-      enableFullYaml: true,
-    },
+    build: {},
     ...overrides,
   });
 
@@ -232,9 +230,8 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
   });
 
   describe('public filtering', () => {
-    test('should return true when deployable is public (fullYaml mode)', async () => {
+    test('should return true when deployable is public', async () => {
       const deploy = createMockDeploy({
-        build: { enableFullYaml: true },
         deployable: { public: true, type: DeployTypes.DOCKER, helm: {} },
       });
 
@@ -242,31 +239,8 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(result).toBe(true);
     });
 
-    test('should return false when deployable is not public (fullYaml mode)', async () => {
+    test('should return false when deployable is not public', async () => {
       const deploy = createMockDeploy({
-        build: { enableFullYaml: true },
-        deployable: { public: false, type: DeployTypes.DOCKER, helm: {} },
-      });
-
-      const result = await deployService['shouldTriggerGithubDeployment'](deploy as any);
-      expect(result).toBe(false);
-    });
-
-    test('should return true when service is public (classic mode)', async () => {
-      const deploy = createMockDeploy({
-        build: { enableFullYaml: false },
-        service: { public: true, type: DeployTypes.DOCKER },
-        deployable: { public: false, type: DeployTypes.DOCKER, helm: {} },
-      });
-
-      const result = await deployService['shouldTriggerGithubDeployment'](deploy as any);
-      expect(result).toBe(true);
-    });
-
-    test('should return false when service is not public (classic mode)', async () => {
-      const deploy = createMockDeploy({
-        build: { enableFullYaml: false },
-        service: { public: false, type: DeployTypes.DOCKER },
         deployable: { public: false, type: DeployTypes.DOCKER, helm: {} },
       });
 
@@ -278,7 +252,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
   describe('org chart handling', () => {
     test('should return true for org helm chart even if not explicitly public', async () => {
       const deploy = createMockDeploy({
-        build: { enableFullYaml: true },
         deployable: {
           public: false,
           type: DeployTypes.HELM,
@@ -293,7 +266,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     test('should return true for PUBLIC helm chart even if not explicitly public', async () => {
       mockDetermineChartType.mockResolvedValue(ChartType.PUBLIC);
       const deploy = createMockDeploy({
-        build: { enableFullYaml: true },
         deployable: {
           public: false,
           type: DeployTypes.HELM,
@@ -308,7 +280,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     test('should return false for LOCAL helm chart that is not explicitly public', async () => {
       mockDetermineChartType.mockResolvedValue(ChartType.LOCAL);
       const deploy = createMockDeploy({
-        build: { enableFullYaml: true },
         deployable: {
           public: false,
           type: DeployTypes.HELM,
@@ -374,7 +345,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         },
         build: {
           uuid: 'sample-build',
-          enableFullYaml: true,
           commentRuntimeEnv: {},
           enabledFeatures: [],
           pullRequest: {
@@ -384,7 +354,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         },
       };
 
-      const result = await deployService.buildImage(deploy as any, true, 0);
+      const result = await deployService.buildImage(deploy as any, 0);
 
       expect(result).toBe(false);
       expect(github.getSHAForBranch).toHaveBeenCalledWith('missing-branch', 'example-org', 'example-repo');
@@ -421,7 +391,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           id: 1,
           uuid: 'sample-build',
           namespace: 'env-sample',
-          enableFullYaml: true,
           isStatic: false,
           commentRuntimeEnv: {},
           enabledFeatures: [],
@@ -536,7 +505,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           id: 1,
           uuid: 'sample-build',
           namespace: 'env-sample',
-          enableFullYaml: true,
           isStatic: false,
           commentRuntimeEnv: {},
           enabledFeatures: [],
@@ -678,7 +646,6 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           id: 1,
           uuid: 'sample-build',
           namespace: 'env-sample',
-          enableFullYaml: true,
           commentRuntimeEnv: {},
           commentInitEnv: {
             INIT_TOKEN: '{{aws:repo/example-repo/api:INIT_TOKEN}}',

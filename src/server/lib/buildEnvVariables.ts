@@ -15,108 +15,11 @@
  */
 
 import { EnvironmentVariables } from 'server/lib/envVariables';
-import { Build, Deploy } from 'server/models';
+import { Build } from 'server/models';
 import { DeployTypes, FeatureFlags } from 'shared/constants';
 import { getLogger } from 'server/lib/logger';
-import { ValidationError } from './yamlConfigValidator';
-import * as YamlService from 'server/models/yaml';
 
 export class BuildEnvironmentVariables extends EnvironmentVariables {
-  /**
-   * Retrieve Environment variables. Use lifecycle yaml file while exists; otherwise, falling back to the old LC services table env column.
-   * @param deploy LC deploy db model
-   * @returns Environment variables key/value pairs per deploy
-   */
-  private async fetchEnvironmentVariables(deploy: Deploy): Promise<Record<string, any>> {
-    let result: Record<string, any> = {};
-
-    await deploy.$fetchGraph('[service.[repository], build.[environment]]');
-
-    if (deploy?.service != null) {
-      const { service } = deploy;
-      await service.$fetchGraph('repository');
-
-      if (service.env != null) {
-        result = service.env;
-      }
-
-      if (service.type === DeployTypes.GITHUB && service.repository) {
-        try {
-          let config: YamlService.LifecycleConfig;
-          if (!deploy.build.environment.classicModeOnly) {
-            config = await YamlService.fetchLifecycleConfigByRepository(service.repository, deploy.branchName);
-          }
-
-          if (config != null) {
-            // Merge the database service environment variables with config file ones
-            const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(config, service.name);
-            if (yamlService !== null && yamlService !== undefined) {
-              Object.assign(result, YamlService.getEnvironmentVariables(yamlService));
-            }
-          }
-        } catch (error) {
-          if (error instanceof ValidationError) {
-            error.uuid = deploy.uuid;
-            throw error;
-          } else {
-            getLogger().warn({ error }, 'EnvVars: fallback to database');
-          }
-        }
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Retrieve Init environment variables. Use lifecycle yaml file while exists; otherwise, falling back to the old LC services table env column.
-   * @param deploy LC deploy db model
-   * @returns Environment variables key/value pairs per deploy
-   */
-  private async fetchInitEnvironmentVariables(deploy: Deploy): Promise<Record<string, any>> {
-    let result: Record<string, any> = {};
-
-    await deploy.$fetchGraph('[service.[repository], build.[environment]]');
-
-    if (deploy?.service != null) {
-      // If above works, the :poop: below can all go away!!!!!
-      const { service } = deploy;
-      await service.$fetchGraph('repository');
-
-      if (service.initEnv != null) {
-        result = service.initEnv;
-      }
-
-      if (service.type === DeployTypes.GITHUB && service.repository) {
-        try {
-          let config: YamlService.LifecycleConfig;
-          if (!deploy.build.environment.classicModeOnly) {
-            config = await YamlService.fetchLifecycleConfigByRepository(service.repository, deploy.branchName);
-          }
-
-          if (config != null) {
-            // Merge the database service environment variables with config file ones
-            const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(config, service.name);
-            if (yamlService != null) {
-              Object.assign(result, YamlService.getInitEnvironmentVariables(yamlService));
-            }
-          }
-        } catch (error) {
-          if (error instanceof ValidationError) {
-            error.uuid = deploy.uuid;
-            throw error;
-          } else {
-            getLogger().warn({ error }, 'EnvVars: init fallback to database');
-          }
-        }
-      }
-    } else {
-      throw new Error(`Deploy and Service object cannot be undefined.`);
-    }
-
-    return result;
-  }
-
   /**
    * Now we need to resolve the environment the service expects
    * Once we have the resolved environment for each service in place, we'll
@@ -130,7 +33,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
    */
   public async resolve(build: Build, githubRepositoryId?: number): Promise<Record<string, any>> {
     if (build != null) {
-      await build?.$fetchGraph('[services, deploys.[service.[repository], deployable]]');
+      await build?.$fetchGraph('[services, deploys.[deployable]]');
       const allDeploys = build?.deploys;
       const deploys = githubRepositoryId
         ? allDeploys.filter((d) => d.githubRepositoryId === githubRepositoryId)
@@ -144,7 +47,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
         // directly into availableEnv from deployable.env (see configurationServiceEnvironments).
         // Skip patching deploy.env so we never persist the (possibly secret-ref-bearing)
         // configuration data as plaintext on the unused configuration deploy.
-        if (build.enableFullYaml && deploy.deployable?.type === DeployTypes.CONFIGURATION) {
+        if (deploy.deployable?.type === DeployTypes.CONFIGURATION) {
           return;
         }
 
@@ -152,33 +55,19 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
           .$query()
           .patch({
             env: this.parseTemplateData(
-              await this.compileEnv(
-                build.enableFullYaml && deploy?.deployable?.env
-                  ? deploy.deployable.env
-                  : await this.fetchEnvironmentVariables(deploy),
-                availableEnv,
-                useDeafulttUUID,
-                build.namespace
-              )
+              await this.compileEnv(deploy.deployable?.env ?? {}, availableEnv, useDeafulttUUID, build.namespace)
             ),
           })
           .catch((error) => {
             getLogger().error({ error }, 'EnvVars: preparation failed');
           });
 
-        if (deploy.deployable?.initDockerfilePath || deploy.service?.initDockerfilePath) {
+        if (deploy.deployable?.initDockerfilePath) {
           await deploy
             .$query()
             .patch({
               initEnv: this.parseTemplateData(
-                await this.compileEnv(
-                  build.enableFullYaml && deploy?.deployable?.initEnv
-                    ? deploy.deployable.initEnv
-                    : await this.fetchInitEnvironmentVariables(deploy),
-                  availableEnv,
-                  useDeafulttUUID,
-                  build.namespace
-                )
+                await this.compileEnv(deploy.deployable?.initEnv ?? {}, availableEnv, useDeafulttUUID, build.namespace)
               ),
             })
             .catch((error) => {
@@ -188,7 +77,7 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
       });
 
       await Promise.all(promises);
-      await build?.$fetchGraph('[services, deploys.[service.[repository], deployable]]');
+      await build?.$fetchGraph('[services, deploys.[deployable]]');
     }
 
     return build;

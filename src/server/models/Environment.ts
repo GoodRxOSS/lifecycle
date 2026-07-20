@@ -15,18 +15,12 @@
  */
 
 import Model from './_Model';
-import { Repository, Service } from '.';
+import { Repository } from '.';
 
 export default class Environment extends Model {
   name!: string;
 
-  services?: [Service];
-  enableFullYaml: boolean;
-  classicModeOnly: boolean;
-
   autoDeploy?: boolean;
-  defaultServices?: [Service];
-  optionalServices?: [Service];
 
   repositories?: [Repository];
 
@@ -43,39 +37,6 @@ export default class Environment extends Model {
   };
 
   static relationMappings = {
-    // Services is deprecated. It was replaced by defaultServices and optionalServices.
-    services: {
-      relation: Model.HasManyRelation,
-      modelClass: () => Service,
-      join: {
-        from: 'services.environmentId',
-        to: 'environments.id',
-      },
-    },
-    defaultServices: {
-      relation: Model.ManyToManyRelation,
-      modelClass: () => Service,
-      join: {
-        from: 'environments.id',
-        through: {
-          from: 'environmentDefaultServices.environmentId',
-          to: 'environmentDefaultServices.serviceId',
-        },
-        to: 'services.id',
-      },
-    },
-    optionalServices: {
-      relation: Model.ManyToManyRelation,
-      modelClass: () => Service,
-      join: {
-        from: 'environments.id',
-        through: {
-          from: 'environmentOptionalServices.environmentId',
-          to: 'environmentOptionalServices.serviceId',
-        },
-        to: 'services.id',
-      },
-    },
     repositories: {
       relation: Model.HasManyRelation,
       modelClass: () => Repository,

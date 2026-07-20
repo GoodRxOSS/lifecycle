@@ -16,7 +16,7 @@
 
 import { getLogger } from 'server/lib/logger';
 import BaseService from './_service';
-import { Environment, Repository, Service, PullRequest, Build, Deploy } from 'server/models';
+import { Environment, Repository, PullRequest, Build, Deploy } from 'server/models';
 import Deployable from 'server/models/Deployable';
 import * as YamlService from 'server/models/yaml';
 import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
@@ -24,7 +24,7 @@ import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 import { Builder, Helm } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
 
-export type DeployableConfigSource = 'yaml' | 'db' | 'db-yaml-merged';
+export type DeployableConfigSource = 'yaml';
 
 export interface DeployableReconciliationEntry {
   name: string;
@@ -44,7 +44,6 @@ export interface DeployableAttributes {
   appShort?: string;
   ecr?: string;
   buildUUID: string;
-  serviceId?: number;
   buildId: number;
   name: string;
   layer?: number;
@@ -120,128 +119,6 @@ export interface DeployableAttributes {
 export default class DeployableService extends BaseService {
   private isYamlReconcileEligible(type: string): boolean {
     return type !== DeployTypes.CONFIGURATION;
-  }
-
-  /**
-   *
-   * @param buildId
-   * @param buildUUID
-   * @param branch
-   * @param service
-   * @returns
-   */
-  private generateAttributesFromDbConfig(
-    buildId: number,
-    buildUUID: string,
-    branch: string,
-    service: Service,
-    active: boolean,
-    dependsOnDeployableName: string
-  ): DeployableAttributes {
-    let attributes: DeployableAttributes;
-
-    try {
-      attributes = {
-        buildUUID,
-        serviceId: service.id,
-        buildId,
-        name: service.name,
-        layer: service.layer,
-        type: service.type,
-        dockerImage: service.dockerImage,
-        repositoryId: service.repositoryId,
-        resolvedFromRepositoryId: service.repositoryId != null ? Number(service.repositoryId) : null,
-        defaultTag: service.defaultTag,
-        dockerfilePath: service.dockerfilePath,
-        // buildArgs: NOT IN USE
-        port: service.port,
-        command: service.command,
-        arguments: service.arguments,
-        env: service.env,
-        environmentId: service.environmentId,
-        public: service.public,
-        cpuRequest: service.cpuRequest,
-        memoryRequest: service.memoryRequest,
-        cpuLimit: service.cpuLimit,
-        memoryLimit: service.memoryLimit,
-        readinessInitialDelaySeconds: service.readinessInitialDelaySeconds,
-        readinessPeriodSeconds: service.readinessPeriodSeconds,
-        readinessTimeoutSeconds: service.readinessTimeoutSeconds,
-        readinessSuccessThreshold: service.readinessSuccessThreshold,
-        readinessFailureThreshold: service.readinessFailureThreshold,
-        readinessTcpSocketPort: service.readinessTcpSocketPort,
-        readinessHttpGetPath: service.readinessHttpGetPath,
-        readinessHttpGetPort: service.readinessHttpGetPort,
-        host: service.host,
-        acmARN: service.acmARN,
-        initDockerfilePath: service.initDockerfilePath,
-        initCommand: service.initCommand,
-        initArguments: service.initArguments,
-        initEnv: service.initEnv,
-        hostPortMapping: service.hostPortMapping,
-        defaultInternalHostname: service.defaultInternalHostname,
-        defaultPublicUrl: service.defaultPublicUrl,
-        dependsOnServiceId: service.dependsOnServiceId,
-        dependsOnDeployableName,
-        deployPipelineId: service.deployPipelineId,
-        deployTrigger: service.deployTrigger,
-        destroyPipelineId: service.destroyPipelineId,
-        destroyTrigger: service.destroyTrigger,
-        ipWhitelist: null,
-        pathPortMapping: service.pathPortMapping,
-        afterBuildPipelineId: service.afterBuildPipelineId,
-        detatchAfterBuildPipeline: service.detatchAfterBuildPipeline,
-        grpc: service.grpc,
-        grpcHost: service.grpcHost,
-        defaultGrpcHost: service.defaultGrpcHost,
-        defaultUUID: service.defaultUUID,
-        serviceDisksYaml: null,
-        capacityType: service.capacityType,
-        runtimeName: service.runtimeName,
-        dockerBuildPipelineName: service.dockerBuildPipelineName,
-        active,
-        defaultBranchName: service.branchName,
-        nodeSelector: service.nodeSelector ?? null,
-        nodeAffinity: service.nodeAffinity ?? null,
-        source: 'db',
-        reconcileEligible: false,
-      };
-
-      if (branch != null) {
-        attributes.branchName = branch;
-      }
-
-      if (service.ipWhitelist != null) {
-        attributes.ipWhitelist = '{' + service.ipWhitelist + '}';
-      }
-
-      // Retrieve the service disk configuration from db and converts into yaml config
-      let yamlServiceDisks: YamlService.ServiceDiskConfig[] = [];
-      if (service.serviceDisks != null && service.serviceDisks.length > 0) {
-        service.serviceDisks.map((serviceDisk) => {
-          let yamlServiceDisk: YamlService.ServiceDiskConfig = {
-            name: serviceDisk.name,
-            mountPath: serviceDisk.mountPath,
-            accessModes: serviceDisk.accessModes,
-            storageSize: serviceDisk.storage,
-            medium: serviceDisk.medium,
-          };
-
-          yamlServiceDisks.push(yamlServiceDisk);
-        });
-
-        attributes.serviceDisksYaml = JSON.stringify(yamlServiceDisks);
-      }
-    } catch (error) {
-      getLogger({
-        buildUUID,
-        service: service.name,
-        error,
-      }).error('Deployable: generate attributes from DB failed');
-      throw error;
-    }
-
-    return attributes;
   }
 
   /**
@@ -327,7 +204,6 @@ export default class DeployableService extends BaseService {
           ecr,
           appShort,
           buildUUID,
-          serviceId: null,
           buildId,
           name: service.name,
           type: YamlService.getDeployType(service),
@@ -431,7 +307,7 @@ export default class DeployableService extends BaseService {
    */
   private mergeDeployableAttributes(
     buildUUID: string,
-    service: Service | YamlService.Service,
+    service: YamlService.Service,
     yamlAttributes: DeployableAttributes,
     dbAttributes: DeployableAttributes
   ): DeployableAttributes {
@@ -455,126 +331,6 @@ export default class DeployableService extends BaseService {
     return mergedAttributes;
   }
 
-  private async overwriteDbConfigDeployableWithYamlConfig(
-    deployableServices: Map<string, DeployableAttributes>,
-    buildId: number,
-    buildUUID: string,
-    service: Service,
-    build?: Build
-  ) {
-    try {
-      // We need to find out if the service has YAML config file overwrite the db config
-      if (service.type === DeployTypes.GITHUB || service.type === DeployTypes.CODEFRESH) {
-        await service.$fetchGraph('[repository, environment]');
-
-        // Always use the branchName from the DeployableAttributes first, since it may have been overridden by the commentBranchName
-        // if the user has updated the branch in the lifecycle comment of their pull request
-        const branchName = deployableServices.get(service.name).branchName;
-        const isClassicModeOnly = service?.environment?.classicModeOnly ?? false;
-        const yamlConfig: YamlService.LifecycleConfig | null = !isClassicModeOnly
-          ? await YamlService.fetchLifecycleConfigByRepository(service.repository, branchName)
-          : null;
-        if (yamlConfig != null) {
-          const yamlService: YamlService.Service = YamlService.getDeployingServicesByName(yamlConfig, service.name);
-          if (yamlService != null) {
-            const serviceRepositoryId = await this.determineRepositoryId(service, build);
-            const yamlAttributes = await this.generateAttributesFromYamlConfig(
-              buildId,
-              buildUUID,
-              serviceRepositoryId,
-              branchName,
-              yamlService,
-              true,
-              null,
-              build
-            );
-            const mergedAttributes = this.mergeDeployableAttributes(
-              buildUUID,
-              service,
-              yamlAttributes,
-              deployableServices.get(service.name)
-            );
-            mergedAttributes.source = 'db-yaml-merged';
-            mergedAttributes.reconcileEligible = false;
-            mergedAttributes.resolvedFromRepositoryId = serviceRepositoryId ?? null;
-            deployableServices.set(service.name, mergedAttributes);
-          }
-        }
-      }
-    } catch (error) {
-      getLogger({
-        buildUUID,
-        service: service.name,
-        error,
-      }).error('Deployable: overwrite config with YAML failed');
-      throw error;
-    }
-  }
-
-  /**
-   *
-   * @param deployableServices
-   * @param service
-   * @param pullRequest
-   */
-  async updateOrCreateDeployableAttributesUsingDbConfig(
-    deployableServices: Map<string, DeployableAttributes>,
-    buildId: number,
-    buildUUID: string,
-    service: Service,
-    branchName: string,
-    active: boolean,
-    mergeYaml: boolean,
-    build?: Build
-  ) {
-    try {
-      await service.$fetchGraph('serviceDisks');
-
-      deployableServices.set(
-        service.name,
-        this.generateAttributesFromDbConfig(buildId, buildUUID, branchName, service, active, null)
-      );
-
-      if (mergeYaml) {
-        await this.overwriteDbConfigDeployableWithYamlConfig(deployableServices, buildId, buildUUID, service, build);
-      }
-
-      const dependencies: Service[] = await this.db.models.Service.query().where('dependsOnServiceId', service.id);
-
-      getLogger({ buildUUID, service: service.name }).debug(
-        `Service has ${dependencies.length} database dependency(dependsOnServiceId)`
-      );
-
-      await Promise.all(
-        dependencies.map(async (dependency) => {
-          await dependency.$fetchGraph('serviceDisks');
-
-          deployableServices.set(
-            dependency.name,
-            this.generateAttributesFromDbConfig(buildId, buildUUID, branchName, dependency, active, service.name)
-          );
-
-          if (mergeYaml) {
-            await this.overwriteDbConfigDeployableWithYamlConfig(
-              deployableServices,
-              buildId,
-              buildUUID,
-              dependency,
-              build
-            );
-          }
-        })
-      );
-    } catch (error) {
-      getLogger({
-        buildUUID,
-        service: service.name,
-        error,
-      }).error('Deployable: upsert attributes from DB failed');
-      throw error;
-    }
-  }
-
   /**
    *
    * @param deployableServices
@@ -593,18 +349,6 @@ export default class DeployableService extends BaseService {
     build?: Build
   ) {
     try {
-      // Look for service entry in the config database. Just ingest the env variable in case secrets stored in the db but not in yaml config file.
-      const dbService: Service = await Service.query()
-        .findOne({ name: service.name })
-        .catch((error) => {
-          getLogger({
-            buildUUID,
-            service: service.name,
-            error,
-          }).debug('No database config for this yaml based service');
-          return null;
-        });
-
       let repository: Repository;
       let branch: string;
       const repoName: string = YamlService.getRepositoryName(service);
@@ -639,23 +383,6 @@ export default class DeployableService extends BaseService {
         build
       );
 
-      // Need to merge with existing config since it may come from db config
-      if (dbService != null) {
-        if (dbService.env != null) {
-          deployableAttributes.env = {
-            ...dbService.env,
-            ...deployableAttributes.env,
-          };
-        }
-
-        if (dbService.initEnv != null) {
-          deployableAttributes.initEnv = {
-            ...dbService.initEnv,
-            ...deployableAttributes.initEnv,
-          };
-        }
-      }
-
       if (!deployableServices.has(deployableAttributes.name)) {
         deployableServices.set(deployableAttributes.name, deployableAttributes);
       } else {
@@ -675,99 +402,6 @@ export default class DeployableService extends BaseService {
         service: service.name,
         error,
       }).error('Deployable: upsert attributes from YAML failed');
-      throw error;
-    }
-  }
-
-  /**
-   * Resolve service configuration from the database service table
-   * @param deployableServices
-   * @param buildId
-   * @param buildUUID
-   * @param pullRequest
-   * @param environment
-   */
-  private async updateOrCreateDeployableUsingDbConfig(
-    deployableServices: Map<string, DeployableAttributes>,
-    buildId: number,
-    buildUUID: string,
-    pullRequest: PullRequest,
-    environment: Environment,
-    build?: Build
-  ) {
-    try {
-      const attribution = async (services: Service[], active: boolean) => {
-        if (services != null && services.length > 0) {
-          await Promise.all(
-            services.map(async (dbEnvService) => {
-              try {
-                let branchName: string;
-                if (dbEnvService.repositoryId != null) {
-                  // If this service is the same as the service where the pull request is opened, use the branch name from the pull request.
-                  if (Number(dbEnvService.repositoryId) === pullRequest.repository.githubRepositoryId) {
-                    branchName = pullRequest.branchName;
-                  }
-                  // External dependencies should use the branch name from the config table, or from the lifecycle comment if it has been updated.
-                  else {
-                    /*
-                      We need to try and determine if a deployable already exists so that if it does,
-                      we can leverage the commentBranchName from the deployable table since the commentBranchName
-                      should always override any other branch name. If the deployable or the commentBranchName
-                      do not exist, we will use the branch name defined in the service.
-                    */
-                    let deployable: Deployable = await this.db.models.Deployable.query()
-                      .where('buildUUID', buildUUID)
-                      .where('buildId', buildId)
-                      .where('name', dbEnvService.name)
-                      .first()
-                      .catch(() => {
-                        return undefined;
-                      });
-                    branchName = deployable?.commentBranchName ?? dbEnvService.branchName;
-                  }
-                } else {
-                  if (dbEnvService.type === DeployTypes.CONFIGURATION) {
-                    branchName = dbEnvService.branchName;
-                  }
-                }
-
-                // Generate and update/create attributes for the service and all the services depend on it
-                await this.updateOrCreateDeployableAttributesUsingDbConfig(
-                  deployableServices,
-                  buildId,
-                  buildUUID,
-                  dbEnvService,
-                  branchName,
-                  active,
-                  true,
-                  build
-                );
-              } catch (error) {
-                getLogger({
-                  buildUUID,
-                  service: dbEnvService.name,
-                  error,
-                }).error('Deployable: attribution failed source=db');
-                throw error;
-              }
-            })
-          );
-        }
-      };
-
-      if (environment != null) {
-        await environment.$fetchGraph('[defaultServices, optionalServices]');
-        await pullRequest.$fetchGraph('repository');
-
-        await attribution(environment.defaultServices, true);
-        await attribution(environment.optionalServices, false);
-      }
-    } catch (error) {
-      getLogger({
-        buildUUID,
-        environment: environment.name,
-        error,
-      }).error('Deployable: upsert from DB config failed');
       throw error;
     }
   }
@@ -806,152 +440,104 @@ export default class DeployableService extends BaseService {
           await Promise.all(
             services.map(async (yamlEnvService) => {
               try {
-                //
-                // Using DatabaseYamlService. If environment service is defined in database instead of YAML (using service ID in the YAML config)
-                //
                 if (yamlEnvService.serviceId != null) {
-                  try {
-                    const service: Service = await Service.query()
-                      .findOne({
-                        id: yamlEnvService.serviceId,
-                      })
-                      .catch((error) => {
-                        getLogger({ buildUUID, error }).warn('Query: failed');
-                        return null;
-                      });
+                  getLogger({ buildUUID, service: yamlEnvService.name, serviceId: yamlEnvService.serviceId }).warn(
+                    'serviceId references in lifecycle.yaml are no longer supported; skipping service ' +
+                      yamlEnvService.name
+                  );
+                  return;
+                }
 
-                    if (service != null) {
-                      // Ingest database configuration based on the yaml meta data along with all the internal dependencies (dependsOnServiceId) in the database
-                      await this.updateOrCreateDeployableAttributesUsingDbConfig(
-                        deployableServices,
-                        buildId,
-                        buildUUID,
-                        service,
-                        service.repositoryId != null &&
-                          Number(service.repositoryId) === pullRequest.repository.githubRepositoryId
-                          ? pullRequest.branchName
-                          : service.branchName,
-                        active,
-                        false,
-                        build
-                      );
-                    } else {
-                      getLogger({ buildUUID, serviceId: yamlEnvService.serviceId }).error(
-                        'Service ID cannot be found in the database configuration'
+                //
+                // Using YAML Config
+                //
+                // By default, repository is the same as the current pull request local repository
+                let repository: Repository = pullRequest.repository;
+
+                // By default, Service defined in local repo. Using local YAML
+                let dependencyYamlConfig: YamlService.LifecycleConfig = yamlConfig;
+
+                let branchName: string = pullRequest.branchName;
+                let deploy: Deploy;
+                // Service defined in remote repo. Need to fetch remote YAML
+                if (yamlEnvService?.repository != null) {
+                  // Skip remote services that don't match the triggering repository.
+                  // This avoids re-fetching all remote YAMLs on a targeted push, while
+                  // still updating the service whose repo actually changed.
+                  if (
+                    filterRepositoryFullName &&
+                    yamlEnvService.repository.toLowerCase() !== filterRepositoryFullName
+                  ) {
+                    getLogger({ buildUUID, service: yamlEnvService.name }).debug(
+                      'Skipping remote YAML fetch for filtered deploy'
+                    );
+                    return;
+                  }
+                  // If the dependency service does not have a branch name defined use 'main' as the default branch name.
+                  branchName = yamlEnvService?.branch ?? 'main';
+                  // Check if the deployable has a commentBranchName which is set in the lifecycle comment. If it does
+                  // Use the commentBranchName to override whatever branchName has been set from the YAML.
+                  deploy = pullRequest.build.deploys.find((d) => d.deployable.name === yamlEnvService.name);
+                  branchName = deploy?.deployable.commentBranchName ?? branchName;
+
+                  repository = await YamlService.resolveRepository(yamlEnvService.repository);
+
+                  // Fetch the lifecycle yaml from the dependency services repositories and parse them
+                  dependencyYamlConfig = await YamlService.fetchLifecycleConfig(yamlEnvService.repository, branchName);
+                }
+
+                let yamlService: YamlService.Service;
+                if (dependencyYamlConfig != null) {
+                  yamlService = YamlService.getDeployingServicesByName(dependencyYamlConfig, yamlEnvService.name);
+
+                  if (yamlService != null) {
+                    if (yamlService.requires != null) {
+                      // Just like Database config, we only handle 1 level deep inner dependency
+                      await Promise.all(
+                        yamlService.requires.map(async (requireService) => {
+                          let innerService: YamlService.Service;
+                          innerService = YamlService.getDeployingServicesByName(
+                            dependencyYamlConfig,
+                            requireService.name
+                          );
+                          if (innerService != null) {
+                            await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
+                              deployableServices,
+                              buildId,
+                              buildUUID,
+                              innerService,
+                              repository.githubRepositoryId,
+                              branchName,
+                              active,
+                              yamlService.name,
+                              build
+                            );
+                          }
+                        })
                       );
                     }
-                  } catch (error) {
-                    getLogger({
+
+                    await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
+                      deployableServices,
+                      buildId,
                       buildUUID,
-                      service: yamlEnvService.name,
-                      error,
-                    }).error('Deployable: create/update from yaml failed source=serviceId');
-                    throw error;
+                      yamlService,
+                      repository.githubRepositoryId,
+                      branchName,
+                      active,
+                      null,
+                      build
+                    );
+                  } else {
+                    getLogger({ buildUUID, service: yamlEnvService.name }).warn(
+                      'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
+                    );
                   }
                 } else {
-                  try {
-                    //
-                    // Using YAML Config
-                    //
-                    // By default, repository is the same as the current pull request local repository
-                    let repository: Repository = pullRequest.repository;
-
-                    // By default, Service defined in local repo. Using local YAML
-                    let dependencyYamlConfig: YamlService.LifecycleConfig = yamlConfig;
-
-                    let branchName: string = pullRequest.branchName;
-                    let deploy: Deploy;
-                    // Service defined in remote repo. Need to fetch remote YAML
-                    if (yamlEnvService?.repository != null) {
-                      // Skip remote services that don't match the triggering repository.
-                      // This avoids re-fetching all remote YAMLs on a targeted push, while
-                      // still updating the service whose repo actually changed.
-                      if (
-                        filterRepositoryFullName &&
-                        yamlEnvService.repository.toLowerCase() !== filterRepositoryFullName
-                      ) {
-                        getLogger({ buildUUID, service: yamlEnvService.name }).debug(
-                          'Skipping remote YAML fetch for filtered deploy'
-                        );
-                        return;
-                      }
-                      // If the dependency service does not have a branch name defined use 'main' as the default branch name.
-                      branchName = yamlEnvService?.branch ?? 'main';
-                      // Check if the deployable has a commentBranchName which is set in the lifecycle comment. If it does
-                      // Use the commentBranchName to override whatever branchName has been set from the YAML.
-                      deploy = pullRequest.build.deploys.find((d) => d.deployable.name === yamlEnvService.name);
-                      branchName = deploy?.deployable.commentBranchName ?? branchName;
-
-                      repository = await YamlService.resolveRepository(yamlEnvService.repository);
-
-                      // Fetch the lifecycle yaml from the dependency services repositories and parse them
-                      dependencyYamlConfig = await YamlService.fetchLifecycleConfig(
-                        yamlEnvService.repository,
-                        branchName
-                      );
-                    }
-
-                    let yamlService: YamlService.Service;
-                    if (dependencyYamlConfig != null) {
-                      yamlService = YamlService.getDeployingServicesByName(dependencyYamlConfig, yamlEnvService.name);
-
-                      if (yamlService != null) {
-                        if (yamlService.requires != null) {
-                          // Just like Database config, we only handle 1 level deep inner dependency
-                          await Promise.all(
-                            yamlService.requires.map(async (requireService) => {
-                              let innerService: YamlService.Service;
-                              innerService = YamlService.getDeployingServicesByName(
-                                dependencyYamlConfig,
-                                requireService.name
-                              );
-                              if (innerService != null) {
-                                await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
-                                  deployableServices,
-                                  buildId,
-                                  buildUUID,
-                                  innerService,
-                                  repository.githubRepositoryId,
-                                  branchName,
-                                  active,
-                                  yamlService.name,
-                                  build
-                                );
-                              }
-                            })
-                          );
-                        }
-
-                        await this.updateOrCreateDeployableAttributesUsingYAMLConfig(
-                          deployableServices,
-                          buildId,
-                          buildUUID,
-                          yamlService,
-                          repository.githubRepositoryId,
-                          branchName,
-                          active,
-                          null,
-                          build
-                        );
-                      } else {
-                        getLogger({ buildUUID, service: yamlEnvService.name }).warn(
-                          'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
-                        );
-                      }
-                    } else {
-                      allReferencedYamlConfigsResolved = false;
-                      getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
-                        `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
-                      );
-                    }
-                  } catch (error) {
-                    getLogger({
-                      buildUUID,
-                      service: yamlEnvService.name,
-                      error,
-                    }).error('Deployable: create/update from yaml failed');
-                    throw error;
-                  }
+                  allReferencedYamlConfigsResolved = false;
+                  getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
+                    `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
+                  );
                 }
               } catch (error) {
                 getLogger({
@@ -970,10 +556,10 @@ export default class DeployableService extends BaseService {
 
       await pullRequest.$fetchGraph('[build.[deploys.[deployable], environment], repository]');
       if (pullRequest.repository != null && pullRequest.branchName != null) {
-        const isClassicModeOnly = pullRequest?.build?.environment?.classicModeOnly ?? false;
-        const yamlConfig: YamlService.LifecycleConfig = !isClassicModeOnly
-          ? await YamlService.fetchLifecycleConfigByRepository(pullRequest.repository, pullRequest.branchName)
-          : null;
+        const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
+          pullRequest.repository,
+          pullRequest.branchName
+        );
 
         if (yamlConfig != null) {
           const yamlEnvServices: YamlService.DependencyService[] = [
@@ -1055,18 +641,7 @@ export default class DeployableService extends BaseService {
           await this.db.services.PullRequest.updatePullRequestBranchName(pullRequest);
         }
 
-        // Let's deal with services db config and YAML override here first before the local YAML override below
-        await this.updateOrCreateDeployableUsingDbConfig(
-          deployableServices,
-          buildId,
-          buildUUID,
-          pullRequest,
-          environment,
-          build
-        );
-
-        // Next read the YAML config file from the PR's repository and branch
-        // Overwrite the db config exists in the YAML + any YAML only configurations
+        // Read the YAML config file from the PR's repository and branch
         canReconcile = await this.updateOrCreateDeployableUsingYamlConfig(
           deployableServices,
           buildId,
@@ -1102,7 +677,7 @@ export default class DeployableService extends BaseService {
         .filter((deployable) => deployable.reconcileEligible)
         .map((deployable) => ({
           name: deployable.name,
-          source: deployable.source ?? 'db',
+          source: deployable.source ?? 'yaml',
           reconcileEligible: deployable.reconcileEligible ?? false,
           resolvedFromRepositoryId: deployable.resolvedFromRepositoryId ?? null,
         })),
@@ -1170,26 +745,5 @@ export default class DeployableService extends BaseService {
     }
 
     return deployables;
-  }
-
-  /**
-   * determineRepositoryId
-   * @description determines the repositoryId for the service
-   * @note
-   * this is useful if the service is and won't be defined in the lifecycle database
-   * because it's produced from a 3rd party for example
-   * @param service
-   * @param build
-   * @returns number|null
-   */
-  private async determineRepositoryId(service, build) {
-    if (service?.repositoryId) {
-      return Number(service?.repositoryId);
-    }
-    let repoId = build?.pullRequest?.repository?.githubRepositoryId;
-    if (repoId) return Number(repoId);
-    build.$fetchGraph('pullRequest.repository');
-    repoId = build?.pullRequest?.repository?.githubRepositoryId;
-    return repoId ? Number(repoId) : null;
   }
 }

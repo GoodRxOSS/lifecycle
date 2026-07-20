@@ -15,7 +15,7 @@
  */
 
 import { merge } from 'lodash';
-import { Build, Deploy, Service, Deployable } from 'server/models';
+import { Build, Deploy, Deployable } from 'server/models';
 import { CLIDeployTypes, DeployTypes } from 'shared/constants';
 import { shellPromise } from './shell';
 import { getLogger, withLogContext, updateLogContext } from './logger';
@@ -36,14 +36,13 @@ export async function deployBuild(build: Build) {
   await Promise.all(
     build.deploys
       ?.filter((d) => {
-        const serviceType: DeployTypes = build.enableFullYaml ? d.deployable.type : d.service.type;
+        const serviceType: DeployTypes = d.deployable.type;
 
         return CLIDeployTypes.has(serviceType);
       })
       .map(async (deploy) => {
-        return withLogContext(
-          { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
-          async () => cliDeploy(deploy)
+        return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () =>
+          cliDeploy(deploy)
         );
       })
   );
@@ -54,10 +53,10 @@ export async function deployBuild(build: Build) {
  * @param deploy the deploy to run
  */
 export async function cliDeploy(deploy: Deploy) {
-  await deploy.$fetchGraph('[build, service, deployable]');
+  await deploy.$fetchGraph('[build, deployable]');
 
-  const { build, service, deployable } = deploy;
-  const serviceCommand: string = build.enableFullYaml ? deployable.command : service.command;
+  const { deployable } = deploy;
+  const serviceCommand: string = deployable.command;
   const { settings, region } = await getSettingsFor(serviceCommand);
   return await shellPromise(
     `AWS_REGION=${region} pnpm run babel-node -- ${serviceCommand} deploy ${contextForDeploy(deploy, settings)}`
@@ -68,13 +67,13 @@ export async function cliDeploy(deploy: Deploy) {
  * Shells out to run the codefresh deploy
  * @param deploy the deploy to run
  */
-export async function codefreshDeploy(deploy: Deploy, build: Build, service: Service, deployable: Deployable) {
+export async function codefreshDeploy(deploy: Deploy, build: Build, deployable: Deployable) {
   const buildUuid = build?.uuid;
   updateLogContext({ buildUuid });
   getLogger().debug('Invoking the codefresh CLI to deploy this deploy');
 
   const envVariables = merge(deploy.env || {}, deploy.build.commentRuntimeEnv);
-  const serviceName = build?.enableFullYaml ? deployable?.name : service?.name;
+  const serviceName = deployable?.name;
   const globalConfigs = hasCodefreshExternalSecretRefs(envVariables)
     ? await GlobalConfigService.getInstance().getAllConfigs()
     : undefined;
@@ -88,15 +87,8 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, service: Ser
   });
   const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
 
-  let deployTrigger: string;
-  let serviceDeployPipelineId: string;
-  if (build?.enableFullYaml) {
-    deployTrigger = deployable.deployTrigger ? `--trigger ${deployable.deployTrigger}` : ``;
-    serviceDeployPipelineId = deployable.deployPipelineId;
-  } else {
-    deployTrigger = service.deployTrigger ? `--trigger ${service.deployTrigger}` : ``;
-    serviceDeployPipelineId = service.deployPipelineId;
-  }
+  const deployTrigger = deployable.deployTrigger ? `--trigger ${deployable.deployTrigger}` : ``;
+  const serviceDeployPipelineId = deployable.deployPipelineId;
 
   const command = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
     deploy.branchName
@@ -135,7 +127,7 @@ export async function codefreshDestroy(deploy: Deploy) {
       deploy.env || {},
       deploy.build.commentRuntimeEnv
     );
-    const serviceName = deploy.build.enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+    const serviceName = deploy.deployable?.name;
     const hasExternalSecretRefs = hasCodefreshExternalSecretRefs(envVariables);
     const globalConfigs = hasExternalSecretRefs ? await GlobalConfigService.getInstance().getAllConfigs() : undefined;
 
@@ -150,18 +142,9 @@ export async function codefreshDestroy(deploy: Deploy) {
       });
       const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
 
-      let destroyTrigger: string;
-      let destroyPipelineId: string;
-      let serviceBranchName: string;
-      if (deploy.build.enableFullYaml) {
-        destroyTrigger = deploy.deployable.destroyTrigger ? `--trigger ${deploy.deployable.destroyTrigger}` : ``;
-        destroyPipelineId = deploy.deployable.destroyPipelineId;
-        serviceBranchName = deploy.deployable.branchName;
-      } else {
-        destroyTrigger = deploy.service.destroyTrigger ? `--trigger ${deploy.service.destroyTrigger}` : ``;
-        destroyPipelineId = deploy.service.destroyPipelineId;
-        serviceBranchName = deploy.service.branchName;
-      }
+      const destroyTrigger = deploy.deployable.destroyTrigger ? `--trigger ${deploy.deployable.destroyTrigger}` : ``;
+      const destroyPipelineId = deploy.deployable.destroyPipelineId;
+      const serviceBranchName = deploy.deployable.branchName;
 
       const command = `codefresh run ${shellQuote(destroyPipelineId)} -b ${shellQuote(
         serviceBranchName
@@ -232,25 +215,21 @@ export async function deleteBuild(build: Build) {
     const buildId = build?.id;
 
     const deploys = await Deploy.query().where({ buildId }).withGraphFetched({
-      service: true,
       build: true,
       deployable: true,
     });
     await Promise.all(
       deploys
         ?.filter((d) => {
-          const serviceType: DeployTypes = build.enableFullYaml ? d.deployable.type : d.service.type;
+          const serviceType: DeployTypes = d.deployable.type;
           return CLIDeployTypes.has(serviceType) && d.active;
         })
         .map(async (deploy) => {
-          return withLogContext(
-            { deployUuid: deploy.uuid, serviceName: deploy.deployable?.name || deploy.service?.name },
-            async () => {
-              const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
-              getLogger().info('CLI: deleting');
-              return serviceType === DeployTypes.CODEFRESH ? codefreshDestroy(deploy) : deleteDeploy(deploy);
-            }
-          );
+          return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
+            const serviceType: DeployTypes = deploy.deployable.type;
+            getLogger().info('CLI: deleting');
+            return serviceType === DeployTypes.CODEFRESH ? codefreshDestroy(deploy) : deleteDeploy(deploy);
+          });
         })
     );
     getLogger().info('CLI: deleted');
@@ -265,8 +244,8 @@ export async function deleteBuild(build: Build) {
  */
 function contextForDeploy(deploy: Deploy, settings: string) {
   const stackName = `${deploy.build.uuid}-${deploy.build.sha}`;
-  const serviceName = deploy.build.enableFullYaml ? deploy.deployable.name : deploy.service.name;
-  const serviceArgs = deploy.build.enableFullYaml ? deploy.deployable.arguments : deploy.service.arguments;
+  const serviceName = deploy.deployable.name;
+  const serviceArgs = deploy.deployable.arguments;
   return `--stackName ${stackName} --serviceName ${serviceName} --buildUUID ${deploy.build.uuid} ${serviceArgs} --settings '${settings}'`;
 }
 
@@ -275,7 +254,7 @@ function contextForDeploy(deploy: Deploy, settings: string) {
  * @param deploy cli deploys to delete
  */
 export async function deleteDeploy(deploy: Deploy) {
-  const serviceCmd = deploy.build.enableFullYaml ? deploy.deployable.command : deploy.service.command;
+  const serviceCmd = deploy.deployable.command;
 
   const { settings, region } = await getSettingsFor(serviceCmd);
   return await shellPromise(

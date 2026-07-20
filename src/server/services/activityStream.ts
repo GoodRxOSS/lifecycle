@@ -79,7 +79,7 @@ export default class ActivityStream extends BaseService {
         const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
           id,
         });
-        await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
+        await pullRequest.$fetchGraph('[build.[deploys.[deployable]], repository]');
         const { build } = pullRequest;
         if (!build) {
           getLogger({ stage: LogStage.COMMENT_FAILED }).warn(`Build: id not found pullRequestId=${id}`);
@@ -126,7 +126,7 @@ export default class ActivityStream extends BaseService {
    * @param body
    */
   async updateBuildsAndDeploysFromCommentEdit(pullRequest: PullRequest, commentBody: string) {
-    await pullRequest.$fetchGraph('[build.[deploys.[service, deployable]], repository]');
+    await pullRequest.$fetchGraph('[build.[deploys.[deployable]], repository]');
     const { build, repository } = pullRequest;
     const { id: buildId } = build;
     const deploys = build.deploys || [];
@@ -312,7 +312,6 @@ export default class ActivityStream extends BaseService {
 
     const buildId = build?.id;
     const uuid = build?.uuid;
-    const isFullYaml = build?.enableFullYaml;
     const fullName = pullRequest?.fullName;
     const branchName = pullRequest?.branchName;
     const isStatic = build?.isStatic ?? false;
@@ -348,7 +347,7 @@ export default class ActivityStream extends BaseService {
           await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
             getLogger().warn(
               { error },
-              `Comment: mission control update failed repo=${fullName}/${branchName} fullYaml=${isFullYaml} queued=${queued}`
+              `Comment: mission control update failed repo=${fullName}/${branchName} queued=${queued}`
             );
           });
         } else {
@@ -358,10 +357,7 @@ export default class ActivityStream extends BaseService {
 
       if (updateStatus && isShowingStatusComment) {
         await this.updateStatusComment(build, deploys, pullRequest, repository).catch((error) => {
-          getLogger().warn(
-            { error },
-            `Comment: status update failed repo=${fullName}/${branchName} fullYaml=${isFullYaml} queued=${queued}`
-          );
+          getLogger().warn({ error }, `Comment: status update failed repo=${fullName}/${branchName} queued=${queued}`);
         });
       }
     } catch (error) {
@@ -406,84 +402,48 @@ export default class ActivityStream extends BaseService {
     message += COMMENT_EDIT_DESCRIPTION;
     message += `\n\n${CommentParser.HEADER}\n\n`;
 
-    await build?.$fetchGraph('[deploys.[service, deployable]]');
+    await build?.$fetchGraph('[deploys.[deployable]]');
     deploys = build?.deploys;
 
-    if (build?.enableFullYaml) {
-      message += '\n// **Default Services**\n';
-      const filters = [(deploy: Deploy) => deploy.deployable.active, (deploy: Deploy) => !deploy.deployable.active];
+    message += '\n// **Default Services**\n';
+    const filters = [(deploy: Deploy) => deploy.deployable.active, (deploy: Deploy) => !deploy.deployable.active];
 
-      for (const [idx, filter] of filters.entries()) {
-        deploys
-          .filter(filter)
-          .sort((a, b) => (a.deployable.name > b.deployable.name ? 1 : -1))
-          .forEach((deploy) => {
-            const checked = deploy.active ? 'x' : ' ';
+    for (const [idx, filter] of filters.entries()) {
+      deploys
+        .filter(filter)
+        .sort((a, b) => (a.deployable.name > b.deployable.name ? 1 : -1))
+        .forEach((deploy) => {
+          const checked = deploy.active ? 'x' : ' ';
 
-            // Only internal parent services should appear in the list
-            if (deploy.deployable.dependsOnServiceId == null) {
-              switch (deploy.deployable.type) {
-                case DeployTypes.GITHUB:
-                  message += `- [${checked}] ${deploy.deployable.name}: ${
-                    deploy.branchName ? deploy.branchName : deploy.publicUrl
-                  }\n`;
-                  break;
-                case DeployTypes.EXTERNAL_HTTP:
-                  message += `- [${checked}] ${deploy.deployable.name}: ${deploy.publicUrl}\n`;
-                  break;
-                case DeployTypes.CONFIGURATION:
-                case DeployTypes.CODEFRESH:
-                  message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
-                  break;
-                case DeployTypes.DOCKER:
-                  message += `- [${checked}] ${deploy.deployable.name}: ${deploy.deployable.dockerImage}@${deploy.deployable.defaultTag}\n`;
-                  break;
-                case DeployTypes.HELM:
-                  message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
-                  break;
-              }
-            } else {
-              getLogger().debug(`Skipping ${deploy.deployable.name} because it is an internal dependency`);
+          // Only internal parent services should appear in the list
+          if (deploy.deployable.dependsOnServiceId == null) {
+            switch (deploy.deployable.type) {
+              case DeployTypes.GITHUB:
+                message += `- [${checked}] ${deploy.deployable.name}: ${
+                  deploy.branchName ? deploy.branchName : deploy.publicUrl
+                }\n`;
+                break;
+              case DeployTypes.EXTERNAL_HTTP:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.publicUrl}\n`;
+                break;
+              case DeployTypes.CONFIGURATION:
+              case DeployTypes.CODEFRESH:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
+                break;
+              case DeployTypes.DOCKER:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.deployable.dockerImage}@${deploy.deployable.defaultTag}\n`;
+                break;
+              case DeployTypes.HELM:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
+                break;
             }
-          });
+          } else {
+            getLogger().debug(`Skipping ${deploy.deployable.name} because it is an internal dependency`);
+          }
+        });
 
-        if (idx === 0) {
-          message += '\n\n\n// **Optional Services**\n';
-        }
-      }
-    } else {
-      await build?.$fetchGraph('environment');
-      const { environment } = build;
-
-      await environment.$fetchGraph('[defaultServices, optionalServices]');
-
-      const optionalServiceIds = new Set(environment.optionalServices.map((s) => s.id));
-      const defaultServiceIds = new Set(environment.defaultServices.map((s) => s.id));
-
-      message += '\n// **Default Services**\n';
-      const filters = [
-        (el: { serviceId: number }) => defaultServiceIds.has(el.serviceId),
-        (el: { serviceId: number }) => optionalServiceIds.has(el.serviceId),
-      ];
-      for (const [idx, filter] of filters.entries()) {
-        deploys
-          .filter(filter)
-          .sort((a, b) => (a.service.name > b.service.name ? 1 : -1))
-          .forEach((deploy) => {
-            const checked = deploy.active ? 'x' : ' ';
-            if (deploy.service.type === DeployTypes.GITHUB) {
-              message += `- [${checked}] ${deploy.service.name}: ${
-                deploy.branchName ? deploy.branchName : deploy.publicUrl
-              }\n`;
-            } else if (deploy.service.type === DeployTypes.EXTERNAL_HTTP) {
-              message += `- [${checked}] ${deploy.service.name}: ${deploy.publicUrl}\n`;
-            } else if ([DeployTypes.CODEFRESH, DeployTypes.CONFIGURATION].includes(deploy.service.type)) {
-              message += `- [${checked}] ${deploy.service.name}: ${deploy.branchName}\n`;
-            }
-          });
-        if (idx === 0) {
-          message += '\n\n\n// **Optional Services**\n';
-        }
+      if (idx === 0) {
+        message += '\n\n\n// **Optional Services**\n';
       }
     }
 
@@ -617,7 +577,7 @@ export default class ActivityStream extends BaseService {
       }
 
       message += await this.editCommentForBuild(build, deploys).catch((error) => {
-        getLogger().error({ error }, `Comment: mission control generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: mission control generation failed`);
         return '';
       });
 
@@ -625,7 +585,7 @@ export default class ActivityStream extends BaseService {
         message += '\n---\n\n';
         message += `## 📦 Deployments\n\n`;
         message += await this.environmentBlock(build).catch((error) => {
-          getLogger().error({ error }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: env block generation failed`);
           return '';
         });
       }
@@ -697,13 +657,13 @@ export default class ActivityStream extends BaseService {
       message += 'We are busy building your code...\n';
       message += '## Build Status\n';
       message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-        getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: build status generation failed`);
         return '';
       });
 
       message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((error) => {
-        getLogger().error({ error }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: env block generation failed`);
         return '';
       });
 
@@ -717,26 +677,23 @@ export default class ActivityStream extends BaseService {
       message += `We're deploying your code. Please stand by....\n\n`;
       message += '## Build Status\n';
       message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-        getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error }, `Comment: build status generation failed`);
         return '';
       });
       message += `\nHere's where you can find your services after they're deployed:\n`;
       message += await this.environmentBlock(build).catch((e) => {
-        getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error: e }, `Comment: env block generation failed`);
         return '';
       });
       message += await this.dashboardBlock(build).catch((e) => {
-        getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
+        getLogger().error({ error: e }, `Comment: dashboard generation failed`);
         return '';
       });
     } else if (isReadyToDeployBuild) {
       message += '## 🚀 Ready to deploy\n';
       message += `Your code is built. We're ready to deploy whenever you are.\n`;
       message += await this.deployingBlock(build).catch((e) => {
-        getLogger().error(
-          { error: e },
-          `Comment: deployment status generation failed fullYaml=${build.enableFullYaml}`
-        );
+        getLogger().error({ error: e }, `Comment: deployment status generation failed`);
         return '';
       });
       message += await createDeployMessage();
@@ -747,15 +704,15 @@ export default class ActivityStream extends BaseService {
         message += `There was a problem deploying your code. Some services may have not rolled out successfully. Here are the URLs for your services:\n\n`;
         message += '## Build Status\n';
         message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-          getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: build status generation failed`);
           return '';
         });
         message += await this.environmentBlock(build).catch((e) => {
-          getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: env block generation failed`);
           return '';
         });
         message += await this.dashboardBlock(build).catch((e) => {
-          getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: dashboard generation failed`);
           return '';
         });
       } else if (build.status === BuildStatus.CONFIG_ERROR) {
@@ -765,16 +722,16 @@ export default class ActivityStream extends BaseService {
         message += '## ✅ Deployed\n';
         message += '## Build Status\n';
         message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
-          getLogger().error({ error }, `Comment: build status generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error }, `Comment: build status generation failed`);
           return '';
         });
         message += `\nWe've deployed your code. Here's where you can find your services:\n`;
         message += await this.environmentBlock(build).catch((e) => {
-          getLogger().error({ error: e }, `Comment: env block generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: env block generation failed`);
           return '';
         });
         message += await this.dashboardBlock(build).catch((e) => {
-          getLogger().error({ error: e }, `Comment: dashboard generation failed fullYaml=${build.enableFullYaml}`);
+          getLogger().error({ error: e }, `Comment: dashboard generation failed`);
           return '';
         });
       } else {
@@ -795,14 +752,14 @@ export default class ActivityStream extends BaseService {
     build: Build,
     deploys: Deploy[],
     // eslint-disable-next-line no-unused-vars
-    isSelectedDeployType: (deploy: Deploy, fullYamlSupport: boolean, orgChart: string) => boolean
+    isSelectedDeployType: ((deploy: Deploy, orgChart: string) => boolean) | null
   ): Promise<string> {
     let message = '';
 
     message += '| Service | Branch | Status |\n';
     message += '|---|---|---|\n';
 
-    await build?.$fetchGraph('[deploys.[service, deployable.repository]]');
+    await build?.$fetchGraph('[deploys.[deployable.repository]]');
     deploys = build.deploys;
 
     const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
@@ -812,13 +769,13 @@ export default class ActivityStream extends BaseService {
 
     // Convert forEach to for...of to handle async/await properly
     for (const deploy of deploys) {
-      const serviceName: string = build.enableFullYaml ? deploy.deployable.name : deploy.service.name;
-      const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
+      const serviceName: string = deploy.deployable.name;
+      const serviceType: DeployTypes = deploy.deployable.type;
       const serviceNameWithUrl = deploy.deployable.repositoryId
         ? `[${serviceName}](${GIT_SERVICE_URL}/${deploy.deployable?.repository?.fullName}/tree/${deploy.branchName})`
         : serviceName;
 
-      if (isSelectedDeployType == null || isSelectedDeployType(deploy, build.enableFullYaml, orgChartName)) {
+      if (isSelectedDeployType == null || isSelectedDeployType(deploy, orgChartName)) {
         if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
           message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(deploy)}_ |\n`;
         } else if (CLIDeployTypes.has(serviceType) && deploy.active) {
@@ -839,7 +796,7 @@ export default class ActivityStream extends BaseService {
     message += '| Service | Branch | Status |\n';
     message += '|---|---|---|\n';
 
-    await build?.$fetchGraph('[deploys.[service, deployable]]');
+    await build?.$fetchGraph('[deploys.[deployable]]');
 
     let { deploys } = build;
     if (deploys.length > 1) {
@@ -849,9 +806,9 @@ export default class ActivityStream extends BaseService {
     deploys
       .sort((a, b) => a.id - b.id)
       .forEach((deploy) => {
-        const serviceName: string = build.enableFullYaml ? deploy.deployable.name : deploy.service.name;
+        const serviceName: string = deploy.deployable.name;
 
-        const serviceType: DeployTypes = build.enableFullYaml ? deploy.deployable.type : deploy.service.type;
+        const serviceType: DeployTypes = deploy.deployable.type;
 
         if (serviceType === DeployTypes.GITHUB) {
           message += `|${serviceName}|${deploy.branchName}|${deploy.status}|\n`;
@@ -867,23 +824,21 @@ export default class ActivityStream extends BaseService {
     message += '| Service | Branch | Link |\n';
     message += '|---|---|---|\n';
 
-    await build?.$fetchGraph('[deploys.[service, deployable.repository]]');
+    await build?.$fetchGraph('[deploys.[deployable.repository]]');
 
     let { deploys } = build;
     if (deploys.length > 1) {
       deploys = deploys.sort((a, b) => a.id - b.id);
     }
     for (const deploy of deploys) {
-      const { service, deployable } = deploy;
+      const { deployable } = deploy;
       const chartType = await determineChartType(deploy);
       const isPublicChart = chartType === ChartType.PUBLIC;
 
-      const servicePublic: boolean = build.enableFullYaml ? deployable.public || !isPublicChart : service.public;
-      const serviceName: string = build.enableFullYaml ? deployable.name : service.name;
-      const serviceType: DeployTypes = build.enableFullYaml ? deployable.type : service.type;
-      const serviceHostPortMapping: Record<string, any> = build.enableFullYaml
-        ? deployable.hostPortMapping
-        : service.hostPortMapping;
+      const servicePublic: boolean = deployable.public || !isPublicChart;
+      const serviceName: string = deployable.name;
+      const serviceType: DeployTypes = deployable.type;
+      const serviceHostPortMapping: Record<string, any> = deployable.hostPortMapping;
       const serviceNameWithUrl = deploy.deployable.repositoryId
         ? `[${serviceName}](${GIT_SERVICE_URL}/${deploy.deployable?.repository?.fullName}/tree/${deploy.branchName})`
         : serviceName;

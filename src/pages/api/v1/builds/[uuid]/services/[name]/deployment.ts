@@ -117,7 +117,7 @@ async function getGitHubDeploymentDetails(
     const manifestConfigMap = configMaps.body.items.find((cm) => cm.metadata?.name?.includes('-manifest'));
 
     if (!manifestConfigMap || !manifestConfigMap.data?.['manifest.yaml']) {
-      const deploy = await Deploy.query().where('uuid', deployUuid).withGraphFetched('[deployable, service]').first();
+      const deploy = await Deploy.query().where('uuid', deployUuid).withGraphFetched('[deployable]').first();
 
       if (!deploy?.manifest) {
         return null;

@@ -521,7 +521,7 @@ export default class AgentPrewarmService extends BaseService {
   private async resolveBuildPrewarmPlan(buildUuid: string): Promise<ResolvedBuildPrewarmPlan | null> {
     const build = await Build.query()
       .findOne({ uuid: buildUuid })
-      .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
+      .withGraphFetched('[pullRequest, deploys.[deployable, repository]]');
     if (
       !build ||
       build.kind !== BuildKind.ENVIRONMENT ||

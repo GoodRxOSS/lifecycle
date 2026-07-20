@@ -111,7 +111,7 @@ const MAX_WARNING_EVENTS = 5;
 const POD_NOT_READY_RE = /pods? failed to become ready/i;
 
 function deployName(deploy: TriageDeployInput): string {
-  return deploy.deployable?.name || deploy.service?.name || deploy.uuid || 'unknown';
+  return deploy.deployable?.name || deploy.uuid || 'unknown';
 }
 
 function isFailureStatus(status: string | null | undefined): boolean {

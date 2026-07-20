@@ -200,7 +200,7 @@ export default class OverrideService extends BaseService {
     getLogger().debug(`Service overrides: ${JSON.stringify(overrides.serviceOverrides)}`);
 
     await Promise.all(
-      overrides.serviceOverrides.map((serviceOverride) => this.patchServiceOverride(build, deploys, serviceOverride))
+      overrides.serviceOverrides.map((serviceOverride) => this.patchServiceOverride(deploys, serviceOverride))
     );
 
     if (requestedUuid) {
@@ -273,7 +273,7 @@ export default class OverrideService extends BaseService {
       throw new Error('serviceOverrides is required');
     }
 
-    const overrideStates = await this.getServiceOverrideStates(build, deploys);
+    const overrideStates = await this.getServiceOverrideStates(deploys);
     const overrideStateByName = new Map(overrideStates.map((state) => [state.name, state]));
     const sanitizedServiceOverrides: ServiceOverridePatchInput[] = [];
 
@@ -282,7 +282,7 @@ export default class OverrideService extends BaseService {
         throw new Error('active or branchOrExternalUrl is required');
       }
 
-      if (!this.findDeployForService(build, deploys, serviceOverride.name)) {
+      if (!this.findDeployForService(deploys, serviceOverride.name)) {
         throw new ServiceOverrideNotFoundError(serviceOverride.name);
       }
 
@@ -316,7 +316,6 @@ export default class OverrideService extends BaseService {
     await Promise.all(
       sanitizedServiceOverrides.map((serviceOverride) =>
         this.patchServiceOverride(
-          build,
           deploys,
           {
             ...serviceOverride,
@@ -336,24 +335,14 @@ export default class OverrideService extends BaseService {
     };
   }
 
-  async getServiceOverrideStates(build: Build, deploys: Deploy[]): Promise<BuildServiceOverrideState[]> {
-    if (build.enableFullYaml) {
-      return deploys
-        .map((deploy) => this.getFullYamlServiceOverrideState(deploy))
-        .filter((state): state is BuildServiceOverrideState => state != null)
-        .sort(sortServiceOverrideStates);
-    }
-
-    const groups = await this.getClassicServiceGroups(build);
-
+  async getServiceOverrideStates(deploys: Deploy[]): Promise<BuildServiceOverrideState[]> {
     return deploys
-      .map((deploy) => this.getClassicServiceOverrideState(deploy, groups))
+      .map((deploy) => this.getFullYamlServiceOverrideState(deploy))
       .filter((state): state is BuildServiceOverrideState => state != null)
       .sort(sortServiceOverrideStates);
   }
 
   private async patchServiceOverride(
-    build: Build,
     deploys: Deploy[],
     {
       active,
@@ -369,7 +358,7 @@ export default class OverrideService extends BaseService {
   ) {
     getLogger().debug(`Patching service: ${serviceName} active=${active} branch/url=${branchOrExternalUrl}`);
 
-    const deploy = this.findDeployForService(build, deploys, serviceName);
+    const deploy = this.findDeployForService(deploys, serviceName);
 
     if (!deploy) {
       getLogger().warn(`Deploy: not found service=${serviceName}`);
@@ -379,7 +368,6 @@ export default class OverrideService extends BaseService {
       return;
     }
 
-    const { service } = deploy;
     const deployable = deploy.deployable!;
 
     if (branchOrExternalUrl != null && psl.isValid(branchOrExternalUrl)) {
@@ -407,9 +395,7 @@ export default class OverrideService extends BaseService {
       await this.patchWithFailureMode(
         deploy.$query().patch({
           branchName: branchOrExternalUrl,
-          publicUrl: build.enableFullYaml
-            ? deployService.hostForDeployableDeploy(deploy, deployable)
-            : deployService.hostForServiceDeploy(deploy, service),
+          publicUrl: deployService.hostForDeployableDeploy(deploy, deployable),
           ...(active != null ? { active } : {}),
         }),
         `Deploy: patch failed service=${serviceName} field=branch`,
@@ -427,18 +413,13 @@ export default class OverrideService extends BaseService {
       return;
     }
 
-    if (build.enableFullYaml) {
-      const dependents = deploys.filter(
-        (d) =>
-          d.deployable!.dependsOnDeployableName === deployable.name &&
-          d.deployable!.buildUUID === deployable.buildUUID &&
-          d.deployable!.buildId === deployable.buildId
-      );
-      await Promise.all(dependents.map((d) => d.$query().patch({ active })));
-    } else {
-      const dependents = deploys.filter((d) => d.service.dependsOnServiceId === service.id);
-      await Promise.all(dependents.map((d) => d.$query().patch({ active })));
-    }
+    const dependents = deploys.filter(
+      (d) =>
+        d.deployable!.dependsOnDeployableName === deployable.name &&
+        d.deployable!.buildUUID === deployable.buildUUID &&
+        d.deployable!.buildId === deployable.buildId
+    );
+    await Promise.all(dependents.map((d) => d.$query().patch({ active })));
   }
 
   private async patchWithFailureMode(
@@ -456,10 +437,8 @@ export default class OverrideService extends BaseService {
     }
   }
 
-  private findDeployForService(build: Build, deploys: Deploy[], serviceName: string): Deploy | undefined {
-    return build.enableFullYaml
-      ? deploys.find((deploy) => deploy.deployable!.name === serviceName)
-      : deploys.find((deploy) => deploy.service.name === serviceName);
+  private findDeployForService(deploys: Deploy[], serviceName: string): Deploy | undefined {
+    return deploys.find((deploy) => deploy.deployable!.name === serviceName);
   }
 
   private getFullYamlServiceOverrideState(deploy: Deploy): BuildServiceOverrideState | null {
@@ -472,57 +451,12 @@ export default class OverrideService extends BaseService {
     return this.getServiceOverrideStateForDeploy(deploy, deployable.name, deployable.active ? 'default' : 'optional');
   }
 
-  private async getClassicServiceGroups(build: Build): Promise<{
-    defaultServiceIds: Set<number>;
-    optionalServiceIds: Set<number>;
-  }> {
-    if (!build.environment && typeof build.$fetchGraph === 'function') {
-      await build.$fetchGraph('environment');
-    }
-
-    if (
-      build.environment &&
-      (!Array.isArray(build.environment.defaultServices) || !Array.isArray(build.environment.optionalServices)) &&
-      typeof build.environment.$fetchGraph === 'function'
-    ) {
-      await build.environment.$fetchGraph('[defaultServices, optionalServices]');
-    }
-
-    return {
-      defaultServiceIds: new Set((build.environment?.defaultServices || []).map((service) => service.id)),
-      optionalServiceIds: new Set((build.environment?.optionalServices || []).map((service) => service.id)),
-    };
-  }
-
-  private getClassicServiceOverrideState(
-    deploy: Deploy,
-    {
-      defaultServiceIds,
-      optionalServiceIds,
-    }: {
-      defaultServiceIds: Set<number>;
-      optionalServiceIds: Set<number>;
-    }
-  ): BuildServiceOverrideState | null {
-    if (!deploy.service) {
-      return null;
-    }
-
-    const serviceId = deploy.serviceId ?? deploy.service.id;
-    const group = defaultServiceIds.has(serviceId) ? 'default' : optionalServiceIds.has(serviceId) ? 'optional' : null;
-    if (!group) {
-      return null;
-    }
-
-    return this.getServiceOverrideStateForDeploy(deploy, deploy.service.name, group);
-  }
-
   private getServiceOverrideStateForDeploy(
     deploy: Deploy,
     name: string,
     group: 'default' | 'optional'
   ): BuildServiceOverrideState | null {
-    const deployConfig = deploy.deployable || deploy.service;
+    const deployConfig = deploy.deployable;
     const deployType = deployConfig?.type;
     const branchOrExternalUrl = getBranchOrExternalUrl(deploy, deployConfig);
 
@@ -619,13 +553,13 @@ export default class OverrideService extends BaseService {
 
         const deploys = await this.db.models.Deploy.query(trx)
           .where('buildId', build.id)
-          .withGraphFetched('[service, deployable]');
+          .withGraphFetched('[deployable]');
 
         // Update all deploys
         // this will not work for database configured services
         const deployService = new DeployService();
         const updateDeploys = deploys.map(async (deploy) => {
-          const deployName = deploy.deployable?.name ?? deploy.service?.name;
+          const deployName = deploy.deployable?.name;
           if (!deployName) {
             getLogger().warn(`Deploy: missing service name while updating build UUID deployId=${deploy.id}`);
             return;
@@ -638,10 +572,7 @@ export default class OverrideService extends BaseService {
             internalHostname: newDeployUuid,
           };
 
-          const publicUrl =
-            build.enableFullYaml && deploy.deployable
-              ? deployService.hostForDeployableDeploy(deploy, deploy.deployable)
-              : deployService.hostForServiceDeploy(deploy, deploy.service);
+          const publicUrl = deploy.deployable ? deployService.hostForDeployableDeploy(deploy, deploy.deployable) : null;
           if (publicUrl) {
             patchFields.publicUrl = publicUrl;
           }

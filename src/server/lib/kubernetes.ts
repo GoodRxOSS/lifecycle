@@ -17,7 +17,7 @@
 import { getLogger } from './logger';
 import yaml from 'js-yaml';
 import _ from 'lodash';
-import { Build, Deploy, Deployable, Service } from 'server/models';
+import { Build, Deploy, Deployable } from 'server/models';
 import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
 import { shellPromise } from './shell';
 import { flattenObject, getKeepLabel, parsePullRequestLabels } from 'server/lib/utils';
@@ -611,32 +611,21 @@ export function generateManifest({
   // External Service only deployment
 
   const cliDeploys = deploys.filter((deploy) => {
-    return build.enableFullYaml ? CLIDeployTypes.has(deploy.deployable.type) : CLIDeployTypes.has(deploy.service.type);
+    return CLIDeployTypes.has(deploy.deployable.type);
   });
 
   const kubernetesDeploys = deploys.filter((deploy) => {
-    return (
-      (build.enableFullYaml
-        ? KubernetesDeployTypes.has(deploy.deployable.type)
-        : KubernetesDeployTypes.has(deploy.service.type)) && deploy.dockerImage !== null
-    );
+    return KubernetesDeployTypes.has(deploy.deployable.type) && deploy.dockerImage !== null;
   });
 
   const externalNameServices = generateExternalNameManifests(cliDeploys, uuid, namespace);
   // General Deployment
 
-  const disks = generatePersistentDisks(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const builds = generateDeployManifests(
-    build,
-    kubernetesDeploys,
-    uuid,
-    build.enableFullYaml,
-    namespace,
-    serviceAccountName
-  );
-  const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
-  const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, build.enableFullYaml, namespace);
+  const disks = generatePersistentDisks(kubernetesDeploys, uuid, namespace);
+  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, namespace, serviceAccountName);
+  const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, namespace);
+  const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, namespace);
+  const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, namespace);
   const manifest = `${disks}---\n${builds}---\n${nodePorts}---\n${grpcMappings}---\n${loadBalancers}---\n${externalNameServices}`;
   const isDev = APP_ENV?.includes('dev') ?? false;
   if (!isDev) {
@@ -645,81 +634,41 @@ export function generateManifest({
   return manifest;
 }
 
-export function generatePersistentDisks(
-  deploys: Deploy[],
-  buildUUID: string,
-  enableFullYaml: boolean,
-  namespace: string
-) {
-  if (enableFullYaml) {
-    return deploys
-      .filter((deploy) => {
-        return deploy.active && deploy.deployable.serviceDisksYaml != null;
-      })
-      .map((deploy) => {
-        const { uuid: name } = deploy;
-        const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
+export function generatePersistentDisks(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      return deploy.active && deploy.deployable.serviceDisksYaml != null;
+    })
+    .map((deploy) => {
+      const { uuid: name } = deploy;
+      const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
 
-        return serviceDisks
-          .filter((disk) => disk.medium == null || disk.medium === MEDIUM_TYPE.EBS || disk.medium === MEDIUM_TYPE.DISK)
-          .map((disk) => {
-            return yaml.dump({
-              apiVersion: 'v1',
-              kind: 'PersistentVolumeClaim',
-              metadata: {
-                namespace,
-                name: `${name}-${disk.name}-claim`,
-                labels: {
-                  ...buildLifecycleLabels({ buildUuid: buildUUID }),
-                  name: buildUUID,
+      return serviceDisks
+        .filter((disk) => disk.medium == null || disk.medium === MEDIUM_TYPE.EBS || disk.medium === MEDIUM_TYPE.DISK)
+        .map((disk) => {
+          return yaml.dump({
+            apiVersion: 'v1',
+            kind: 'PersistentVolumeClaim',
+            metadata: {
+              namespace,
+              name: `${name}-${disk.name}-claim`,
+              labels: {
+                ...buildLifecycleLabels({ buildUuid: buildUUID }),
+                name: buildUUID,
+              },
+            },
+            spec: {
+              accessModes: [disk.accessModes ?? 'ReadWriteOnce'],
+              resources: {
+                requests: {
+                  storage: disk.storageSize,
                 },
               },
-              spec: {
-                accessModes: [disk.accessModes ?? 'ReadWriteOnce'],
-                resources: {
-                  requests: {
-                    storage: disk.storageSize,
-                  },
-                },
-              },
-            });
+            },
           });
-      })
-      .join('\n---\n');
-  } else {
-    return deploys
-      .filter((deploy) => {
-        return deploy.active && deploy.service.serviceDisks && deploy.service.serviceDisks.length > 0;
-      })
-      .map((deploy) => {
-        const { uuid: name } = deploy;
-        return deploy.service.serviceDisks
-          .filter((disk) => disk.medium == null || disk.medium === MEDIUM_TYPE.DISK || disk.medium === MEDIUM_TYPE.EBS)
-          .map((disk) => {
-            return yaml.dump({
-              apiVersion: 'v1',
-              kind: 'PersistentVolumeClaim',
-              metadata: {
-                namespace,
-                name: `${name}-${disk.name}-claim`,
-                labels: {
-                  ...buildLifecycleLabels({ buildUuid: buildUUID }),
-                  name: buildUUID,
-                },
-              },
-              spec: {
-                accessModes: [disk.accessModes],
-                resources: {
-                  requests: {
-                    storage: disk.storage,
-                  },
-                },
-              },
-            });
-          });
-      })
-      .join('\n---\n');
-  }
+        });
+    })
+    .join('\n---\n');
 }
 
 /**
@@ -793,7 +742,6 @@ export function generateDeployManifests(
   build: Build,
   deploys: Deploy[],
   buildUUID: string,
-  enableFullYaml: boolean,
   namespace: string,
   serviceAccountName: string
 ) {
@@ -802,41 +750,25 @@ export function generateDeployManifests(
       return deploy.active;
     })
     .map((deploy) => {
-      const capacityType = build.capacityType
-        ? build.capacityType
-        : enableFullYaml
-        ? deploy.deployable.capacityType
-        : deploy?.service.capacityType;
+      const capacityType = build.capacityType ? build.capacityType : deploy.deployable.capacityType;
       const isStatic = build?.isStatic ?? false;
 
       // Extract custom node affinity from schema
-      const customNodeAffinity = enableFullYaml ? deploy.deployable.nodeAffinity : deploy?.service.nodeAffinity;
+      const customNodeAffinity = deploy.deployable.nodeAffinity;
       const affinity = generateAffinity(capacityType, isStatic, customNodeAffinity);
       // Extract node selector from schema
-      const nodeSelector = enableFullYaml ? deploy.deployable.nodeSelector : deploy?.service.nodeSelector;
+      const nodeSelector = deploy.deployable.nodeSelector;
 
-      const { uuid: name, service, deployable } = deploy;
+      const { uuid: name, deployable } = deploy;
       const ports = [];
 
-      if (enableFullYaml) {
-        if (deploy?.deployable.port) {
-          // eslint-disable-next-line no-unsafe-optional-chaining
-          for (const port of deploy?.deployable.port.split(',')) {
-            ports.push({
-              name: `port-${port}`,
-              containerPort: Number(port),
-            });
-          }
-        }
-      } else {
-        if (deploy?.service.port) {
-          // eslint-disable-next-line no-unsafe-optional-chaining
-          for (const port of deploy?.service.port.split(',')) {
-            ports.push({
-              name: `port-${port}`,
-              containerPort: Number(port),
-            });
-          }
+      if (deploy?.deployable.port) {
+        // eslint-disable-next-line no-unsafe-optional-chaining
+        for (const port of deploy?.deployable.port.split(',')) {
+          ports.push({
+            name: `port-${port}`,
+            containerPort: Number(port),
+          });
         }
       }
       const containers = [];
@@ -858,7 +790,7 @@ export function generateDeployManifests(
       for (const ref of secretRefs) {
         secretRefMap.set(ref.envKey, ref);
       }
-      const envServiceName = enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
+      const envServiceName = deploy.deployable?.name;
 
       const env: Array<Record<string, any>> = _.compact(
         _.flatten(
@@ -962,47 +894,26 @@ export function generateDeployManifests(
         name,
         image: deploy.dockerImage,
         resources: {
-          requests: enableFullYaml
-            ? generateResourceRequestsForDeployable(deployable)
-            : generateResourceRequestsForService(service),
-          limits: enableFullYaml
-            ? generateResourceLimitsForDeployable(deployable)
-            : generateResourceLimitsForService(service),
+          requests: generateResourceRequestsForDeployable(deployable),
+          limits: generateResourceLimitsForDeployable(deployable),
         },
         ports,
         env,
       };
 
-      if (enableFullYaml) {
-        if (deployable.readinessHttpGetPort || deployable.readinessTcpSocketPort) {
-          applicationContainer.readinessProbe = generateReadinessProbeForDeployable(deployable);
-          applicationContainer.livenessProbe = generateReadinessProbeForDeployable(deployable);
-          // Restarts a pod only after 10 minutes of being granted readiness time
-          applicationContainer.livenessProbe.initialDelaySeconds = 600;
-        }
+      if (deployable.readinessHttpGetPort || deployable.readinessTcpSocketPort) {
+        applicationContainer.readinessProbe = generateReadinessProbeForDeployable(deployable);
+        applicationContainer.livenessProbe = generateReadinessProbeForDeployable(deployable);
+        // Restarts a pod only after 10 minutes of being granted readiness time
+        applicationContainer.livenessProbe.initialDelaySeconds = 600;
+      }
 
-        if (deployable.command) {
-          applicationContainer.command = [deployable.command];
-        }
+      if (deployable.command) {
+        applicationContainer.command = [deployable.command];
+      }
 
-        if (deployable.arguments) {
-          applicationContainer.args = deployable.arguments.split('%%SPLIT%%');
-        }
-      } else {
-        if (service.readinessHttpGetPort || service.readinessTcpSocketPort) {
-          applicationContainer.readinessProbe = generateReadinessProbe(service);
-          applicationContainer.livenessProbe = generateReadinessProbe(service);
-          // Restarts a pod only after 10 minutes of being granted readiness time
-          applicationContainer.livenessProbe.initialDelaySeconds = 600;
-        }
-
-        if (service.command) {
-          applicationContainer.command = [service.command];
-        }
-
-        if (service.arguments) {
-          applicationContainer.args = service.arguments.split('%%SPLIT%%');
-        }
+      if (deployable.arguments) {
+        applicationContainer.args = deployable.arguments.split('%%SPLIT%%');
       }
 
       /* Code specifically for any init container */
@@ -1066,31 +977,18 @@ export function generateDeployManifests(
           name: `init-${name}`,
           image: deploy.initDockerImage,
           resources: {
-            requests: enableFullYaml
-              ? generateResourceRequestsForDeployable(deployable)
-              : generateResourceRequestsForService(service),
-            limits: enableFullYaml
-              ? generateResourceLimitsForDeployable(deployable)
-              : generateResourceLimitsForService(service),
+            requests: generateResourceRequestsForDeployable(deployable),
+            limits: generateResourceLimitsForDeployable(deployable),
           },
           ports,
           env: initEnv,
         };
 
-        if (enableFullYaml) {
-          if (deployable.initCommand) {
-            initContainer.command = [deployable.initCommand];
-          }
-          if (deployable.initArguments) {
-            initContainer.args = deployable.initArguments.split('%%SPLIT%%');
-          }
-        } else {
-          if (service.initCommand) {
-            initContainer.command = [service.initCommand];
-          }
-          if (service.initArguments) {
-            initContainer.args = service.initArguments.split('%%SPLIT%%');
-          }
+        if (deployable.initCommand) {
+          initContainer.command = [deployable.initCommand];
+        }
+        if (deployable.initArguments) {
+          initContainer.args = deployable.initArguments.split('%%SPLIT%%');
         }
 
         initContainer.volumeMounts = [
@@ -1116,69 +1014,25 @@ export function generateDeployManifests(
         },
       };
 
-      if (enableFullYaml) {
-        if (deployable?.serviceDisksYaml != null) {
-          const serviceDisks: ServiceDiskConfig[] = JSON.parse(deployable.serviceDisksYaml);
-          if (serviceDisks != null && serviceDisks.length > 0) {
-            strategy = {
-              // @ts-ignore
-              type: 'Recreate',
-            };
-
-            serviceDisks.forEach((disk) => {
-              applicationContainer.volumeMounts.push({
-                name: `${name}-${disk.name}`,
-                mountPath: disk.mountPath,
-              });
-
-              // By default, any services disk is EBS type.
-              const diskMedium: string = disk.medium != null ? disk.medium : MEDIUM_TYPE.EBS;
-              switch (diskMedium) {
-                case MEDIUM_TYPE.EBS:
-                case MEDIUM_TYPE.DISK:
-                  volumes.push({
-                    name: `${name}-${disk.name}`,
-                    persistentVolumeClaim: {
-                      claimName: `${name}-${disk.name}-claim`,
-                    },
-                  });
-                  break;
-                case MEDIUM_TYPE.MEMORY:
-                  volumes.push({
-                    name: `${name}-${disk.name}`,
-                    emptyDir: {
-                      medium: 'Memory',
-                      sizeLimit: `${disk.storageSize}`,
-                    },
-                  });
-                  break;
-                default:
-                  getLogger({ medium: disk.medium }).warn(`Disk: unknown medium medium=${disk.medium}`);
-              }
-            });
-          }
-        }
-      } else {
-        getLogger({ serviceDisks: service.serviceDisks }).debug('Processing service disks');
-        if (service.serviceDisks && service.serviceDisks.length > 0) {
+      if (deployable?.serviceDisksYaml != null) {
+        const serviceDisks: ServiceDiskConfig[] = JSON.parse(deployable.serviceDisksYaml);
+        if (serviceDisks != null && serviceDisks.length > 0) {
           strategy = {
             // @ts-ignore
             type: 'Recreate',
           };
 
-          service.serviceDisks.forEach((disk) => {
+          serviceDisks.forEach((disk) => {
             applicationContainer.volumeMounts.push({
               name: `${name}-${disk.name}`,
               mountPath: disk.mountPath,
             });
 
-            if (disk.medium == null) {
-              disk.medium = MEDIUM_TYPE.DISK;
-            }
-
-            switch (disk.medium) {
-              case MEDIUM_TYPE.DISK:
+            // By default, any services disk is EBS type.
+            const diskMedium: string = disk.medium != null ? disk.medium : MEDIUM_TYPE.EBS;
+            switch (diskMedium) {
               case MEDIUM_TYPE.EBS:
+              case MEDIUM_TYPE.DISK:
                 volumes.push({
                   name: `${name}-${disk.name}`,
                   persistentVolumeClaim: {
@@ -1191,10 +1045,12 @@ export function generateDeployManifests(
                   name: `${name}-${disk.name}`,
                   emptyDir: {
                     medium: 'Memory',
-                    sizeLimit: `${disk.storage}`,
+                    sizeLimit: `${disk.storageSize}`,
                   },
                 });
                 break;
+              default:
+                getLogger({ medium: disk.medium }).warn(`Disk: unknown medium medium=${disk.medium}`);
             }
           });
         }
@@ -1206,7 +1062,7 @@ export function generateDeployManifests(
         'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
       };
 
-      const serviceName: string = enableFullYaml ? deploy.deployable.name : deploy.service.name;
+      const serviceName: string = deploy.deployable.name;
 
       /**
        * Labels for the Kubernetes deployment
@@ -1289,26 +1145,6 @@ export function generateDeployManifests(
     .join('\n---\n');
 }
 
-function generateResourceRequestsForService(service: Service): Record<string, string> {
-  return _.pickBy(
-    {
-      memory: service.memoryRequest,
-      cpu: service.cpuRequest,
-    },
-    _.identity
-  );
-}
-
-function generateResourceLimitsForService(service: Service): Record<string, string> {
-  return _.pickBy(
-    {
-      memory: service.memoryLimit,
-      cpu: service.cpuLimit,
-    },
-    _.identity
-  );
-}
-
 function generateResourceRequestsForDeployable(deployable: Deployable): Record<string, string> {
   return _.pickBy(
     {
@@ -1327,40 +1163,6 @@ function generateResourceLimitsForDeployable(deployable: Deployable): Record<str
     },
     _.identity
   );
-}
-
-function generateReadinessProbe({
-  readinessInitialDelaySeconds: initialDelaySeconds,
-  readinessPeriodSeconds: periodSeconds,
-  readinessTimeoutSeconds: timeoutSeconds,
-  readinessSuccessThreshold: successThreshold,
-  readinessFailureThreshold: failureThreshold,
-  readinessHttpGetPath: httpGetPath,
-  readinessHttpGetPort: httpGetPort,
-  readinessTcpSocketPort,
-}: Service) {
-  const probe = {
-    initialDelaySeconds,
-    periodSeconds,
-    timeoutSeconds,
-    successThreshold,
-    failureThreshold,
-  };
-  if (readinessTcpSocketPort) {
-    // TCP Check
-
-    probe['tcpSocket'] = {
-      port: readinessTcpSocketPort,
-    };
-  } else if (httpGetPath && httpGetPort) {
-    probe['httpGet'] = {
-      path: httpGetPath,
-      port: httpGetPort,
-    };
-  } else {
-    return {};
-  }
-  return probe;
 }
 
 export function generateReadinessProbeForDeployable({
@@ -1402,12 +1204,7 @@ export function generateReadinessProbeForDeployable({
  * @param deploys the deploys to generate manifests for
  * @param buildUUID the associated buildUUID, which we use for deleting a build
  */
-export function generateNodePortManifests(
-  deploys: Deploy[],
-  buildUUID: string,
-  enableFullYamlSupport: boolean,
-  namespace: string
-) {
+export function generateNodePortManifests(deploys: Deploy[], buildUUID: string, namespace: string) {
   return deploys
     .filter((deploy) => {
       return deploy.active;
@@ -1416,7 +1213,7 @@ export function generateNodePortManifests(
       const name = deploy.uuid;
       const ports = [];
 
-      const servicePort: string = enableFullYamlSupport ? deploy.deployable.port : deploy.service.port;
+      const servicePort: string = deploy.deployable.port;
       if (servicePort) {
         for (const port of servicePort.split(',')) {
           ports.push({
@@ -1466,16 +1263,16 @@ export function generateNodePortManifests(
  * @param deploys the deploys to generate manifests for
  * @param buildUUID the associated buildUUID, which we use for deleting a build
  */
-export function generateGRPCMappings(deploys: Deploy[], buildUUID: string, enableFullYaml: boolean, namespace: string) {
+export function generateGRPCMappings(deploys: Deploy[], buildUUID: string, namespace: string) {
   return deploys
     .filter((deploy) => {
-      const enableGrpc: boolean = enableFullYaml ? deploy.deployable.grpc : deploy.service.grpc;
+      const enableGrpc: boolean = deploy.deployable.grpc;
 
       return deploy.active && enableGrpc;
     })
     .map((deploy) => {
-      const serviceGrpcHost: string = enableFullYaml ? deploy.deployable.grpcHost : deploy.service.grpcHost;
-      const servicePort: string = enableFullYaml ? deploy.deployable.port : deploy.service.port;
+      const serviceGrpcHost: string = deploy.deployable.grpcHost;
+      const servicePort: string = deploy.deployable.port;
 
       const name = deploy.uuid;
       return yaml.dump(
@@ -1552,19 +1349,14 @@ export function generateExternalNameManifests(deploys: Deploy[], buildUUID: stri
  * @param deploys the deploys to generate manifests for
  * @param buildUUID the associated buildUUID, which we use for deleting a build
  */
-export function generateLoadBalancerManifests(
-  deploys: Deploy[],
-  buildUUID: string,
-  enableFullYamlSupport: boolean,
-  namespace: string
-) {
+export function generateLoadBalancerManifests(deploys: Deploy[], buildUUID: string, namespace: string) {
   return deploys
     .filter((deploy) => {
       return deploy.active;
     })
     .map((deploy) => {
       const name = deploy.uuid;
-      const servicePort = enableFullYamlSupport ? deploy.deployable.port : deploy.service.port;
+      const servicePort = deploy.deployable.port;
 
       const ports = [];
       if (servicePort) {
@@ -1741,7 +1533,6 @@ export function generateDeployManifest({
   serviceAccountName: string;
 }): string {
   const manifests: string[] = [];
-  const enableFullYaml = build.enableFullYaml;
 
   // ExternalName service for CLI deploys
   // return the ExternalName service if we have a cname
@@ -1771,15 +1562,14 @@ export function generateDeployManifest({
   }
 
   // Reuse existing PVC generation logic
-  const pvcManifests = generatePersistentDisks([deploy], build.uuid, enableFullYaml, namespace);
+  const pvcManifests = generatePersistentDisks([deploy], build.uuid, namespace);
   if (pvcManifests) manifests.push(pvcManifests);
 
   // Generate deployment with custom node affinity
-  const capacityType =
-    build.capacityType || (enableFullYaml ? deploy.deployable?.capacityType : deploy.service?.capacityType);
+  const capacityType = build.capacityType || deploy.deployable?.capacityType;
 
   // Extract custom node affinity from schema
-  const customNodeAffinity = enableFullYaml ? deploy.deployable?.nodeAffinity : deploy.service?.nodeAffinity;
+  const customNodeAffinity = deploy.deployable?.nodeAffinity;
 
   const affinity = generateAffinity(capacityType, build?.isStatic ?? false, customNodeAffinity);
 
@@ -1790,18 +1580,17 @@ export function generateDeployManifest({
     namespace,
     serviceAccountName,
     affinity,
-    enableFullYaml,
   });
   manifests.push(deploymentManifest);
 
   // Reuse existing service generation logic
-  const serviceManifests = generateNodePortManifests([deploy], build.uuid, enableFullYaml, namespace);
+  const serviceManifests = generateNodePortManifests([deploy], build.uuid, namespace);
   if (serviceManifests) manifests.push(serviceManifests);
 
-  const lbManifests = generateLoadBalancerManifests([deploy], build.uuid, enableFullYaml, namespace);
+  const lbManifests = generateLoadBalancerManifests([deploy], build.uuid, namespace);
   if (lbManifests) manifests.push(lbManifests);
 
-  const grpcManifests = generateGRPCMappings([deploy], build.uuid, enableFullYaml, namespace);
+  const grpcManifests = generateGRPCMappings([deploy], build.uuid, namespace);
   if (grpcManifests) manifests.push(grpcManifests);
 
   return manifests.filter((m) => m).join('---\n');
@@ -1814,7 +1603,6 @@ function generateSingleDeploymentManifest({
   namespace,
   serviceAccountName,
   affinity,
-  enableFullYaml,
 }: {
   deploy: Deploy;
   build: Build;
@@ -1822,16 +1610,15 @@ function generateSingleDeploymentManifest({
   namespace: string;
   serviceAccountName: string;
   affinity: any;
-  enableFullYaml: boolean;
 }): string {
-  const serviceName = enableFullYaml ? deploy.deployable?.name : deploy.service?.name;
-  const serviceMemory = enableFullYaml ? deploy.deployable?.memoryLimit : deploy.service?.memoryLimit;
-  const serviceCPU = enableFullYaml ? deploy.deployable?.cpuLimit : deploy.service?.cpuLimit;
-  const servicePort = enableFullYaml ? deploy.deployable?.port : deploy.service?.port;
+  const serviceName = deploy.deployable?.name;
+  const serviceMemory = deploy.deployable?.memoryLimit;
+  const serviceCPU = deploy.deployable?.cpuLimit;
+  const servicePort = deploy.deployable?.port;
   const replicaCount = deploy.replicaCount ?? 1;
 
   // Extract node selector from schema
-  const nodeSelector = enableFullYaml ? deploy.deployable?.nodeSelector : deploy.service?.nodeSelector;
+  const nodeSelector = deploy.deployable?.nodeSelector;
 
   const envToUse = deploy.env || {};
   const containers: Array<Record<string, any>> = [];
@@ -1944,13 +1731,11 @@ function generateSingleDeploymentManifest({
       }
     }
 
-    if (enableFullYaml) {
-      if (deploy.deployable?.initCommand) {
-        initContainer.command = [deploy.deployable.initCommand];
-      }
-      if (deploy.deployable?.initArguments) {
-        initContainer.args = deploy.deployable.initArguments.split('%%SPLIT%%');
-      }
+    if (deploy.deployable?.initCommand) {
+      initContainer.command = [deploy.deployable.initCommand];
+    }
+    if (deploy.deployable?.initArguments) {
+      initContainer.args = deploy.deployable.initArguments.split('%%SPLIT%%');
     }
 
     initContainers.push(initContainer);
@@ -2090,31 +1875,9 @@ function generateSingleDeploymentManifest({
   // Handle additional volumes (service disks)
   let hasPersistentVolumeClaims = false;
 
-  if (enableFullYaml && deploy.deployable?.serviceDisksYaml) {
+  if (deploy.deployable?.serviceDisksYaml) {
     const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
     serviceDisks.forEach((disk) => {
-      if (disk.medium === MEDIUM_TYPE.MEMORY) {
-        volumes.push({
-          name: disk.name,
-          emptyDir: {},
-        });
-      } else {
-        // EBS or other persistent disk - requires Recreate strategy
-        hasPersistentVolumeClaims = true;
-        volumes.push({
-          name: disk.name,
-          persistentVolumeClaim: {
-            claimName: `${name}-${disk.name}-claim`,
-          },
-        });
-      }
-      volumeMounts.push({
-        name: disk.name,
-        mountPath: disk.mountPath,
-      });
-    });
-  } else if (!enableFullYaml && deploy.service?.serviceDisks) {
-    deploy.service.serviceDisks.forEach((disk) => {
       if (disk.medium === MEDIUM_TYPE.MEMORY) {
         volumes.push({
           name: disk.name,
@@ -2143,30 +1906,19 @@ function generateSingleDeploymentManifest({
   }
 
   // Add probes
-  if (enableFullYaml) {
-    if (deploy.deployable?.readinessHttpGetPort || deploy.deployable?.readinessTcpSocketPort) {
-      mainContainer.readinessProbe = generateReadinessProbeForDeployable(deploy.deployable);
-      mainContainer.livenessProbe = generateReadinessProbeForDeployable(deploy.deployable);
-      // Restarts a pod only after 10 minutes of being granted readiness time
-      mainContainer.livenessProbe.initialDelaySeconds = 600;
-    }
-  } else {
-    if (deploy.service?.livenessProbe) {
-      mainContainer.livenessProbe = JSON.parse(deploy.service.livenessProbe);
-    }
-    if (deploy.service?.readinessProbe) {
-      mainContainer.readinessProbe = JSON.parse(deploy.service.readinessProbe);
-    }
+  if (deploy.deployable?.readinessHttpGetPort || deploy.deployable?.readinessTcpSocketPort) {
+    mainContainer.readinessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+    mainContainer.livenessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+    // Restarts a pod only after 10 minutes of being granted readiness time
+    mainContainer.livenessProbe.initialDelaySeconds = 600;
   }
 
   // Add command/args if specified
-  if (enableFullYaml) {
-    if (deploy.deployable?.command) {
-      mainContainer.command = [deploy.deployable.command];
-    }
-    if (deploy.deployable?.arguments) {
-      mainContainer.args = deploy.deployable.arguments.split('%%SPLIT%%');
-    }
+  if (deploy.deployable?.command) {
+    mainContainer.command = [deploy.deployable.command];
+  }
+  if (deploy.deployable?.arguments) {
+    mainContainer.args = deploy.deployable.arguments.split('%%SPLIT%%');
   }
 
   containers.push(mainContainer);
@@ -2297,7 +2049,7 @@ export function summarizeDeployPodFailures(pods: k8s.V1Pod[]): string | undefine
 export async function waitForDeployPodReady(deploy: Deploy): Promise<DeployPodReadiness> {
   const { uuid, build } = deploy;
   const { namespace } = build;
-  const deployableName = deploy.deployable?.name || deploy.service?.name || 'unknown';
+  const deployableName = deploy.deployable?.name || 'unknown';
 
   const logCtx = { deployUuid: uuid, service: deployableName, namespace };
 

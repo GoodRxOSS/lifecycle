@@ -4556,7 +4556,6 @@ describe('AgentSessionService', () => {
       const buildContext = {
         uuid: 'sample-build-123',
         namespace: 'sample-ns',
-        enableFullYaml: true,
         enabledFeatures: [],
         pullRequest: {
           pullRequestNumber: 42,
@@ -4610,7 +4609,7 @@ describe('AgentSessionService', () => {
 
       await AgentSessionService.createSession(optsWithServices);
 
-      expect(buildContext.$fetchGraph).toHaveBeenCalledWith('[deploys.[service, deployable], pullRequest]');
+      expect(buildContext.$fetchGraph).toHaveBeenCalledWith('[deploys.[deployable], pullRequest]');
       expect(mockEnableDevMode).toHaveBeenCalledWith(
         expect.objectContaining({
           devConfig: expect.objectContaining({

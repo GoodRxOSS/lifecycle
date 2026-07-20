@@ -70,8 +70,6 @@ export abstract class EnvironmentVariables {
 
   async buildEnvironmentVariableDictionary(
     deploys: Deploy[],
-    buildUUID: string,
-    fullYamlSupport: boolean,
     build: Build,
     additionalVariables?: Record<string, any>,
     options: EnvironmentVariableDictionaryOptions = {}
@@ -79,104 +77,59 @@ export abstract class EnvironmentVariables {
     let availableEnv: Record<string, any>;
     const applyNoDefaultEnvResolveFeatureFlag = options.applyNoDefaultEnvResolveFeatureFlag ?? true;
 
-    if (fullYamlSupport) {
-      availableEnv = deploys
-        .filter((deploy) => {
-          return deploy.deployable?.type !== DeployTypes.CONFIGURATION;
-        })
-        .reduce((env, deploy) => {
-          const deployable = deploy.deployable;
-          if (deployable == null) {
-            return env;
-          }
+    availableEnv = deploys
+      .filter((deploy) => {
+        return deploy.deployable?.type !== DeployTypes.CONFIGURATION;
+      })
+      .reduce((env, deploy) => {
+        const deployable = deploy.deployable;
+        if (deployable == null) {
+          return env;
+        }
 
-          const serviceEnv: Array<[string, string | null | undefined]> = ALLOWED_PROPERTIES.map((prop) => {
-            let propValue: string | null | undefined = null;
-            if (deploy.active) {
-              propValue = deploy[prop];
-              if (prop === 'UUID') {
-                propValue = deployable.buildUUID;
+        const serviceEnv: Array<[string, string | null | undefined]> = ALLOWED_PROPERTIES.map((prop) => {
+          let propValue: string | null | undefined = null;
+          if (deploy.active) {
+            propValue = deploy[prop];
+            if (prop === 'UUID') {
+              propValue = deployable.buildUUID;
+            }
+          } else {
+            if (prop === 'UUID') {
+              propValue = deployable.defaultUUID;
+            } else if (prop === 'publicUrl') {
+              propValue = deployable.defaultPublicUrl;
+            } else if (prop === 'internalHostname') {
+              if (
+                applyNoDefaultEnvResolveFeatureFlag &&
+                Array.isArray(build?.enabledFeatures) &&
+                build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)
+              ) {
+                propValue = NO_DEFAULT_ENV_UUID;
+              } else {
+                propValue = deployable.defaultInternalHostname;
               }
             } else {
-              if (prop === 'UUID') {
-                propValue = deployable.defaultUUID;
-              } else if (prop === 'publicUrl') {
-                propValue = deployable.defaultPublicUrl;
-              } else if (prop === 'internalHostname') {
-                if (
-                  applyNoDefaultEnvResolveFeatureFlag &&
-                  Array.isArray(build?.enabledFeatures) &&
-                  build.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)
-                ) {
-                  propValue = NO_DEFAULT_ENV_UUID;
-                } else {
-                  propValue = deployable.defaultInternalHostname;
-                }
-              } else {
-                propValue = '';
-              }
+              propValue = '';
             }
-            return [`${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
+          }
+          return [`${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
+        });
+
+        if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
+          Object.keys(deployable.hostPortMapping).forEach((key) => {
+            const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : deployable.defaultPublicUrl;
+            serviceEnv.push([`${key}-${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
           });
-
-          if (deployable.hostPortMapping && Object.keys(deployable.hostPortMapping).length > 0) {
-            Object.keys(deployable.hostPortMapping).forEach((key) => {
-              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : deployable.defaultPublicUrl;
-              serviceEnv.push([`${key}-${deployable.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
-            });
-          }
-          return {
-            ...env,
-            ...Object.fromEntries(serviceEnv),
-          };
-        }, {});
-    } else {
-      availableEnv = deploys
-        .filter((deploy) => {
-          return deploy.service?.type !== DeployTypes.CONFIGURATION;
-        })
-        .reduce((env, deploy) => {
-          const service = deploy.service;
-          if (service == null) {
-            return env;
-          }
-
-          const serviceEnv: Array<[string, string | null | undefined]> = ALLOWED_PROPERTIES.map((prop) => {
-            let propValue: string | null | undefined = null;
-            if (deploy.active) {
-              propValue = deploy[prop];
-              if (prop === 'UUID') {
-                propValue = buildUUID;
-              }
-            } else {
-              if (prop === 'UUID') {
-                propValue = service.defaultUUID;
-              } else if (prop === 'publicUrl') {
-                propValue = service.defaultPublicUrl;
-              } else if (prop === 'internalHostname') {
-                propValue = service.defaultInternalHostname;
-              } else {
-                propValue = '';
-              }
-            }
-            return [`${service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_${prop}`, propValue];
-          });
-
-          if (service.hostPortMapping && Object.keys(service.hostPortMapping).length > 0) {
-            Object.keys(service.hostPortMapping).forEach((key) => {
-              const propValue = deploy.active ? `${key}-${deploy.publicUrl}` : service.defaultPublicUrl;
-              serviceEnv.push([`${key}-${service.name.replace(/-/g, HYPHEN_REPLACEMENT)}_publicUrl`, propValue]);
-            });
-          }
-          return {
-            ...env,
-            ...Object.fromEntries(serviceEnv),
-          };
-        }, {});
-    }
+        }
+        return {
+          ...env,
+          ...Object.fromEntries(serviceEnv),
+        };
+      }, {});
 
     // Grab any configuration types and merge them into the available environment
-    const configurationServiceEnvironments = await this.configurationServiceEnvironments(deploys, fullYamlSupport);
+    const configurationServiceEnvironments = await this.configurationServiceEnvironments(deploys);
 
     configurationServiceEnvironments.forEach((configuration) => {
       availableEnv = _.assign(availableEnv, configuration);
@@ -207,7 +160,7 @@ export abstract class EnvironmentVariables {
       );
     }
 
-    await build?.$fetchGraph('[deploys.[service, deployable], pullRequest]');
+    await build?.$fetchGraph('[deploys.[deployable], pullRequest]');
     const deploys = build?.deploys;
 
     if (deploys == null) {
@@ -220,8 +173,6 @@ export abstract class EnvironmentVariables {
 
     availableEnv = await this.buildEnvironmentVariableDictionary(
       deploys,
-      build.uuid,
-      build.enableFullYaml,
       build,
       {
         buildUUID: build.uuid,
@@ -242,45 +193,18 @@ export abstract class EnvironmentVariables {
    * @param deploys the deploys to return configuration blocks for
    * @returns all of the configuration data blocks
    */
-  async configurationServiceEnvironments(
-    deploys: Deploy[],
-    fullYamlSupport: boolean
-  ): Promise<Array<Record<string, any>>> {
+  async configurationServiceEnvironments(deploys: Deploy[]): Promise<Array<Record<string, any>>> {
     const configurationDeploys = deploys.filter((deploy) => {
-      const serviceType = fullYamlSupport ? deploy.deployable?.type : deploy.service?.type;
+      const serviceType = deploy.deployable?.type;
 
       return serviceType === DeployTypes.CONFIGURATION;
     });
 
-    if (!this?.db?.models) this.db = new Database();
-
     const configurations = await Promise.all(
       configurationDeploys.map(async (deploy) => {
-        // Full-yaml: configuration data is declared inline in lifecycle.yaml and
+        // Configuration data is declared inline in lifecycle.yaml and
         // materialized onto the deployable's env at ingestion (see YamlService.getEnvironmentVariables).
-        // Source it directly from the deployable instead of the configurations table.
-        if (fullYamlSupport) {
-          return deploy.deployable?.env ?? null;
-        }
-
-        // Classic: configuration data lives in the configurations table, keyed by the
-        // referenced serviceId + branchName.
-        if (deploy.serviceId != null) {
-          const configuration = await this.db.models.Configuration.query()
-            .where('serviceId', deploy.serviceId)
-            .where('key', deploy.branchName)
-            .first();
-          return configuration ? configuration.data : null;
-        }
-
-        // A YAML-defined configuration service has no serviceId, so in classic mode its
-        // data cannot be resolved and would be silently dropped. Warn so the misconfiguration
-        // is visible (configuration via YAML requires full-yaml support).
-        getLogger().warn(
-          { deployName: deploy.deployable?.name ?? deploy.service?.name },
-          'EnvVars: configuration service defined in YAML is ignored without full-yaml support'
-        );
-        return null;
+        return deploy.deployable?.env ?? null;
       })
     );
 

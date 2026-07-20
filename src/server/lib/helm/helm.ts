@@ -411,7 +411,6 @@ export async function uninstallHelmReleases(build: Build) {
   try {
     const buildId = build?.id;
     const deploys = (await Deploy.query().where({ buildId }).withGraphFetched({
-      service: true,
       build: true,
       deployable: true,
     })) as Deploy[];

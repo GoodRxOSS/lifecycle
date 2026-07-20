@@ -320,7 +320,6 @@ describe('RepositoryService', () => {
       expect(db.models.Environment.create).toHaveBeenCalledWith({
         name: 'example-repo',
         uuid: 'example-repo',
-        enableFullYaml: true,
         autoDeploy: false,
       });
       expect(db.models.Repository.create).toHaveBeenCalledWith({
@@ -371,7 +370,6 @@ describe('RepositoryService', () => {
       expect(db.models.Environment.create).toHaveBeenCalledWith({
         name: 'example-repo',
         uuid: 'example-repo',
-        enableFullYaml: true,
         autoDeploy: false,
       });
       expect(db.models.Repository.create).toHaveBeenCalledWith(

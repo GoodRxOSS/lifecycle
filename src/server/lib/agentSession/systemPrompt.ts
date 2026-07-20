@@ -321,10 +321,7 @@ function formatDeployDiagnosticService(
   deploy: Deploy,
   buildSource: { repo?: string; branch?: string }
 ): AgentSessionPromptServiceContext | null {
-  const name =
-    normalizeOptionalString(deploy.deployable?.name) ||
-    normalizeOptionalString(deploy.service?.name) ||
-    normalizeOptionalString(deploy.uuid);
+  const name = normalizeOptionalString(deploy.deployable?.name) || normalizeOptionalString(deploy.uuid);
 
   if (!name) {
     return null;
@@ -359,7 +356,7 @@ async function resolveBuildDiagnosticContext(
 
   const build = await Build.query()
     .findOne({ uuid: normalizedBuildUuid })
-    .withGraphFetched('[pullRequest.[repository], deploys.[deployable, repository, service]]');
+    .withGraphFetched('[pullRequest.[repository], deploys.[deployable, repository]]');
   const labelsConfig = await GlobalConfigService.getInstance()
     .getLabels()
     .catch(() => undefined);
@@ -413,9 +410,7 @@ export async function resolveAgentSessionTriage(buildUuid: string | null | undef
     return null;
   }
 
-  const build = await Build.query()
-    .findOne({ uuid: normalizedBuildUuid })
-    .withGraphFetched('[deploys.[deployable, service]]');
+  const build = await Build.query().findOne({ uuid: normalizedBuildUuid }).withGraphFetched('[deploys.[deployable]]');
   if (!build) {
     return null;
   }
@@ -433,9 +428,7 @@ export async function resolveAgentSessionPromptContext(
   const lifecycleConfigCache = new Map<string, Promise<LifecycleConfig | null>>();
   const [session, deploys, buildSource] = await Promise.all([
     AgentSession.query().findById(lookup.sessionDbId),
-    Deploy.query()
-      .where({ devModeSessionId: lookup.sessionDbId })
-      .withGraphFetched('[deployable, repository, service]'),
+    Deploy.query().where({ devModeSessionId: lookup.sessionDbId }).withGraphFetched('[deployable, repository]'),
     resolveBuildDiagnosticContext(lookup.buildUuid, lifecycleConfigCache),
   ]);
   const allDeploys = deploys.length > 0 ? deploys : buildSource.deploys;
@@ -491,10 +484,7 @@ export async function resolveAgentSessionPromptContext(
     services = (
       await Promise.all(
         allDeploys.map(async (deploy): Promise<AgentSessionPromptServiceContext | null> => {
-          const serviceName =
-            normalizeOptionalString(deploy.deployable?.name) ||
-            normalizeOptionalString(deploy.service?.name) ||
-            normalizeOptionalString(deploy.uuid);
+          const serviceName = normalizeOptionalString(deploy.deployable?.name) || normalizeOptionalString(deploy.uuid);
 
           if (!serviceName) {
             return null;

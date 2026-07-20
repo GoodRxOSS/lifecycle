@@ -390,7 +390,7 @@ export default class GithubService extends Service {
   }
 
   private getDeployServiceName(deploy: Deploy): string | null {
-    return (deploy.build?.enableFullYaml ? deploy.deployable?.name : deploy.service?.name) ?? null;
+    return deploy.deployable?.name ?? null;
   }
 
   private async getPushIgnoreServicePolicies({
@@ -540,7 +540,7 @@ export default class GithubService extends Service {
         .where('githubRepositoryId', githubRepositoryId)
         .where('active', true)
         .whereNot('status', 'torn_down')
-        .withGraphFetched('[build.[pullRequest], service, deployable]');
+        .withGraphFetched('[build.[pullRequest], deployable]');
 
       if (!allDeploys.length) {
         // additional check for static env branch
@@ -554,12 +554,10 @@ export default class GithubService extends Service {
       const deploysToRebuild = allDeploys.filter((deploy) => {
         if (!deploy?.build) return false;
         if (deploy.devMode) {
-          getLogger().info(`Push: skipping dev mode service deployId=${deploy.id} service=${deploy.service?.name}`);
+          getLogger().info(`Push: skipping dev mode service deployId=${deploy.id} service=${deploy.deployable?.name}`);
           return false;
         }
-        const serviceBranchName = deploy.build.enableFullYaml
-          ? deploy.deployable?.defaultBranchName
-          : deploy.service?.branchName;
+        const serviceBranchName = deploy.deployable?.defaultBranchName;
         if (!serviceBranchName) {
           return false;
         }

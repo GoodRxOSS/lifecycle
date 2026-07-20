@@ -47,7 +47,7 @@ export async function createKubernetesApplyJob({
   kc.loadFromDefault();
   const batchApi = kc.makeApiClient(k8s.BatchV1Api);
   const jobName = getKubernetesApplyJobName(deploy, jobId);
-  const serviceName = deploy.deployable?.name || deploy.service?.name || '';
+  const serviceName = deploy.deployable?.name || '';
 
   getLogger().info(`Job: creating name=${jobName} service=${serviceName}`);
 
@@ -69,7 +69,7 @@ export async function createKubernetesApplyJob({
       annotations: {
         'lifecycle/deploy-id': deploy.id.toString(),
         'lifecycle/job-type': 'kubernetes-apply',
-        'lifecycle/service-name': deploy.deployable?.name || deploy.service?.name || '',
+        'lifecycle/service-name': deploy.deployable?.name || '',
       },
     },
     spec: {

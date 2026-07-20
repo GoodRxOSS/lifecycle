@@ -148,7 +148,7 @@ function watchFingerprint(build: Build): string {
 }
 
 async function loadBuildForWatch(buildUuid: string): Promise<Build | null> {
-  return (await Build.query().findOne({ uuid: buildUuid }).withGraphFetched('[deploys.[deployable, service]]')) || null;
+  return (await Build.query().findOne({ uuid: buildUuid }).withGraphFetched('[deploys.[deployable]]')) || null;
 }
 
 async function resolveWatchTarget(

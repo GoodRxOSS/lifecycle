@@ -424,7 +424,6 @@ describe('Github Service - handlePushWebhook', () => {
     id: buildId,
     uuid: buildUuid,
     status: BuildStatus.DEPLOYED,
-    enableFullYaml: false,
     trackDefaultBranches: true,
     pullRequest: {
       status: PullRequestStatus.OPEN,

@@ -195,9 +195,7 @@ function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSe
 
 async function resolveBuildContext(buildUuid: string) {
   const { default: Build } = await import('server/models/Build');
-  return Build.query()
-    .findOne({ uuid: buildUuid })
-    .withGraphFetched('[pullRequest, deploys.[deployable, repository, service]]');
+  return Build.query().findOne({ uuid: buildUuid }).withGraphFetched('[pullRequest, deploys.[deployable, repository]]');
 }
 
 async function resolveRequestedServices(
