@@ -25,8 +25,21 @@ const API_KEYS_DESCRIPTION =
 
 const PERSONAL_GRANTABLE_SCOPES = '["env:read", "env:write", "sites:read", "sites:write", "repos:read", "repos:write"]';
 
-// Active personal tokens (ownerUserId set, not revoked) must carry a non-empty non-admin scope set
-// and either an explicit all-repository grant (both allowlists null) or non-empty name+id allowlists.
+const BUILDS_INDEXES = [
+  { name: 'builds_createdbytokenid_index', definition: 'on builds ("createdByTokenId")' },
+  { name: 'builds_createdbyuserid_index', definition: 'on builds ("createdByUserId")' },
+  { name: 'builds_triggertype_index', definition: 'on builds ("triggerType")' },
+  {
+    name: 'builds_api_expiry_sweep',
+    definition: `on builds ("expiresAt") where "triggerType" = 'api' and "expiresAt" is not null`,
+  },
+  {
+    name: 'builds_api_auto_track',
+    definition: `on builds ("githubRepositoryId", "branchName") where "triggerType" = 'api' and "autoTrack" = true`,
+  },
+] as const;
+
+// Both allowlists null means an all-repository grant; otherwise both must be non-empty.
 const ACTIVE_PERSONAL_AUTHORITY_CHECK = `
   "ownerUserId" IS NULL OR
   "revokedAt" IS NOT NULL OR (
@@ -131,7 +144,6 @@ export async function up(knex: Knex): Promise<void> {
     table.string('createdByGithubLogin').nullable();
   });
 
-  /* Unique indexes stay here: the alter's exclusive lock makes them race-free; non-unique builds indexes are created concurrently by 031. */
   await knex.raw(`
     create unique index builds_uuid_live_unique
     on builds ("uuid")
@@ -142,6 +154,9 @@ export async function up(knex: Knex): Promise<void> {
     on builds ("idempotencyKey")
     where "idempotencyKey" is not null and "deletedAt" is null
   `);
+  for (const { name, definition } of BUILDS_INDEXES) {
+    await knex.raw(`create index if not exists ?? ${definition}`, [name]);
+  }
 
   const existing = await knex('global_config').where('key', 'api_environments').first();
   if (!existing) {
@@ -176,6 +191,9 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 export async function down(knex: Knex): Promise<void> {
+  for (const { name } of BUILDS_INDEXES) {
+    await knex.raw(`drop index if exists ??`, [name]);
+  }
   await knex.raw('drop index if exists builds_idempotency_key_live_unique');
   await knex.raw('drop index if exists builds_uuid_live_unique');
 
