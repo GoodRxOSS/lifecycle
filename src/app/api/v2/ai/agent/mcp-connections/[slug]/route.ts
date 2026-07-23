@@ -274,5 +274,5 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ s
   return successResponse(state, { status: 200 }, req);
 };
 
-export const PUT = createApiHandler(putHandler);
-export const DELETE = createApiHandler(deleteHandler);
+export const PUT = createApiHandler(putHandler, { auth: 'session' });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session' });

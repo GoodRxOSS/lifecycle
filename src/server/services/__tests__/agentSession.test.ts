@@ -187,19 +187,17 @@ jest.mock('server/lib/logger', () => ({
 }));
 
 jest.mock('server/services/build', () => {
-  const deleteQueueAdd = jest.fn().mockResolvedValue(undefined);
+  const enqueueBuildDeletion = jest.fn().mockResolvedValue(undefined);
   const deleteBuild = jest.fn().mockResolvedValue(undefined);
 
   return {
     __esModule: true,
     default: jest.fn().mockImplementation(() => ({
-      deleteQueue: {
-        add: deleteQueueAdd,
-      },
+      enqueueBuildDeletion,
       deleteBuild,
     })),
     __mocked: {
-      deleteQueueAdd,
+      enqueueBuildDeletion,
       deleteBuild,
     },
   };
@@ -339,7 +337,7 @@ function buildDevModeSnapshot(deploymentName = 'service') {
 }
 
 const mockedBuildServiceModule = jest.requireMock('server/services/build').__mocked as {
-  deleteQueueAdd: jest.Mock;
+  enqueueBuildDeletion: jest.Mock;
   deleteBuild: jest.Mock;
 };
 
@@ -976,7 +974,7 @@ describe('AgentSessionService', () => {
     (DeploymentManager as jest.Mock).mockImplementation(() => ({
       deploy: jest.fn().mockResolvedValue(undefined),
     }));
-    mockedBuildServiceModule.deleteQueueAdd.mockResolvedValue(undefined);
+    mockedBuildServiceModule.enqueueBuildDeletion.mockResolvedValue(undefined);
     mockedBuildServiceModule.deleteBuild.mockResolvedValue(undefined);
     mockGetCompatibleReadyPrewarm.mockResolvedValue(null);
     mockGetReadyPrewarmByPvc.mockResolvedValue(null);
@@ -5635,7 +5633,7 @@ describe('AgentSessionService', () => {
       expect(deleteAgentPvc).not.toHaveBeenCalled();
       expect(mockDeleteNamespace).not.toHaveBeenCalled();
       expect(mockRedis.del).not.toHaveBeenCalledWith('lifecycle:agent:session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
-      expect(mockedBuildServiceModule.deleteQueueAdd).not.toHaveBeenCalled();
+      expect(mockedBuildServiceModule.enqueueBuildDeletion).not.toHaveBeenCalled();
       expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
     });
 
@@ -5676,7 +5674,7 @@ describe('AgentSessionService', () => {
       expect(cleanupForwardedAgentEnvSecrets).not.toHaveBeenCalled();
       expect(deleteAgentPvc).not.toHaveBeenCalled();
       expect(mockDeleteNamespace).not.toHaveBeenCalled();
-      expect(mockedBuildServiceModule.deleteQueueAdd).not.toHaveBeenCalled();
+      expect(mockedBuildServiceModule.enqueueBuildDeletion).not.toHaveBeenCalled();
       expect(mockSessionQuery.patchAndFetchById).not.toHaveBeenCalled();
     });
 
@@ -6330,16 +6328,9 @@ describe('AgentSessionService', () => {
       await AgentSessionService.archiveSession('sess-sbx');
 
       expect(BuildServiceModule).toHaveBeenCalled();
-      expect(mockedBuildServiceModule.deleteQueueAdd).toHaveBeenCalledWith(
-        'delete',
-        expect.objectContaining({
-          buildId: 444,
-          buildUuid: 'sandbox-build-uuid',
-          sender: 'agent-session',
-        })
-      );
+      expect(mockedBuildServiceModule.enqueueBuildDeletion).toHaveBeenCalledWith(sandboxBuild, 'agent_session_archive');
       expect(mockSessionQuery.patchAndFetchById.mock.invocationCallOrder[0]).toBeLessThan(
-        mockedBuildServiceModule.deleteQueueAdd.mock.invocationCallOrder[0]
+        mockedBuildServiceModule.enqueueBuildDeletion.mock.invocationCallOrder[0]
       );
       expect(mockedBuildServiceModule.deleteBuild).not.toHaveBeenCalled();
       expect(mockSessionQuery.patchAndFetchById).toHaveBeenCalledWith(

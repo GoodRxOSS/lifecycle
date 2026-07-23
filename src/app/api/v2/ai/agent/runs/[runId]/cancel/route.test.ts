@@ -59,9 +59,7 @@ function makeRequest(): NextRequest {
 describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-user',
-    });
+    mockGetRequestUserIdentity.mockReturnValue({ roles: ['user'], userId: 'sample-user' });
     mockIsRunNotFoundError.mockReturnValue(false);
   });
 

@@ -25,7 +25,7 @@ interface Metadata {
   maxLimit?: number;
 }
 
-type SuccessStatusCode = 200 | 201;
+type SuccessStatusCode = 200 | 201 | 202;
 
 type ErrorStatusCode = 400 | 401 | 403 | 404 | 409 | 410 | 422 | 429 | 500 | 502 | 503;
 
@@ -72,6 +72,13 @@ export function successResponse<T>(data: T, options: SuccessResponseOptions, req
   }
 
   return NextResponse.json(body, { status });
+}
+
+/** SECURITY: issue-once credential responses must never be cached by browsers or intermediaries. */
+export function withNoStore(response: NextResponse): NextResponse {
+  response.headers.set('Cache-Control', 'private, no-store');
+  response.headers.set('Pragma', 'no-cache');
+  return response;
 }
 
 export function errorResponse(error: unknown, options: ErrorResponseOptions, req: NextRequest): NextResponse {

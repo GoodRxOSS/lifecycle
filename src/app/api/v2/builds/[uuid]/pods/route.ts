@@ -17,8 +17,11 @@
 import { NextRequest } from 'next/server';
 import { getLogger } from 'server/lib/logger';
 import { HttpError } from '@kubernetes/client-node';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
+import BuildService from 'server/services/build';
 import { getEnvironmentPods } from 'server/lib/kubernetes/getEnvironmentPods';
 
 /**
@@ -26,6 +29,9 @@ import { getEnvironmentPods } from 'server/lib/kubernetes/getEnvironmentPods';
  * /api/v2/builds/{uuid}/pods:
  *   get:
  *     summary: List all pods for a build
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Returns a list of all pods running in the environment namespace for a specific build.
  *       Each pod includes its service name, status, age, restarts, readiness, and container information.
@@ -71,7 +77,11 @@ import { getEnvironmentPods } from 'server/lib/kubernetes/getEnvironmentPods';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const getHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const { uuid } = routeParams;
 
@@ -79,6 +89,12 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
     getLogger().warn(`API: invalid params uuid=${uuid}`);
     return errorResponse('Missing or invalid uuid parameter', { status: 400 }, req);
   }
+
+  const build = await new BuildService().getBuildByUUID(uuid);
+  if (!build) {
+    return errorResponse('Environment not found.', { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
 
   try {
     const pods = await getEnvironmentPods(uuid);
@@ -100,4 +116,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);

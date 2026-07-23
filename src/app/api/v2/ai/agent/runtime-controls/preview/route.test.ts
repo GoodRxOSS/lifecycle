@@ -93,6 +93,7 @@ describe('/api/v2/ai/agent/runtime-controls/preview', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -112,7 +113,7 @@ describe('/api/v2/ai/agent/runtime-controls/preview', () => {
 
     expect(response.status).toBe(200);
     expect(mockGetEntryPreview).toHaveBeenCalledWith({
-      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
       ...body,
     });
     expect(payload.data).toEqual(previewState);

@@ -21,7 +21,12 @@ const mockGetSitesConfig = jest.fn();
 const mockSetSitesConfig = jest.fn();
 
 jest.mock('server/lib/get-user', () => ({
+  __esModule: true,
   getUser: (...args: unknown[]) => mockGetUser(...args),
+  getRequestUserIdentity: (req: unknown) => {
+    const payload = mockGetUser(req) as { sub?: string; realm_access?: { roles?: string[] } } | null;
+    return payload ? { userId: payload.sub, roles: payload.realm_access?.roles ?? [] } : null;
+  },
 }));
 
 jest.mock('server/services/sitesConfig', () => ({

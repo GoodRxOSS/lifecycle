@@ -132,4 +132,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ laun
   return successResponse(toPublicSandboxLaunchState(state), { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

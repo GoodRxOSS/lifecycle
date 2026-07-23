@@ -269,7 +269,9 @@ export default class GithubService extends Service {
           getLogger({}).warn(`Build: not found for closed PR repo=${fullName}/${branch}`);
           return;
         }
-        await this.db.services.BuildService.deleteBuild(build);
+        // Cleanup can fail transiently (Kubernetes/API/Helm). Route PR teardown through the
+        // retrying, deterministic delete queue so a webhook delivery cannot strand the build.
+        await this.db.services.BuildService.enqueueBuildDeletion(build, 'pull_request_closed');
         // remove deploy label on PR close via queue
         await this.db.services.LabelService.labelQueue.add('label', {
           pullRequestId: pullRequest.id,
@@ -360,7 +362,7 @@ export default class GithubService extends Service {
         getLogger().info(
           `PR label decision: action=${action} changedLabel=${changedLabelName} pullRequestId=${pullRequest.id} decision=delete-build`
         );
-        return this.db.services.BuildService.deleteBuild(build);
+        return this.db.services.BuildService.enqueueBuildDeletion(build, 'deploy_disabled');
       }
 
       const buildId = build?.id;
@@ -542,6 +544,10 @@ export default class GithubService extends Service {
         .whereNot('status', 'torn_down')
         .withGraphFetched('[build.[pullRequest], deployable]');
 
+      await this.enqueueAutoTrackedApiBuilds(githubRepositoryId, branchName, deployTriggerRef).catch((error) => {
+        getLogger({ error, githubRepositoryId, branchName }).error('Push: API auto-track processing failed');
+      });
+
       if (!allDeploys.length) {
         // additional check for static env branch
         await this.handlePushForStaticEnv({
@@ -570,9 +576,27 @@ export default class GithubService extends Service {
         deploysToRebuild.map((deploy) => deploy.build),
         (b) => b.id
       );
-      const buildsToDeploy = allBuilds.filter(
-        (b) => b.pullRequest.status === PullRequestStatus.OPEN && b.pullRequest.deployOnUpdate
-      );
+      const buildsToDeploy = allBuilds.filter((build) => {
+        if (
+          build.pullRequest != null &&
+          build.pullRequest.status === PullRequestStatus.OPEN &&
+          build.pullRequest.deployOnUpdate
+        ) {
+          return true;
+        }
+
+        // API environments opt into dependency/default-branch tracking separately from root autoTrack.
+        // A push to the root repository must still honor autoTrack=false and is handled by the dedicated path.
+        const targetsApiRootSource =
+          Number(build.githubRepositoryId) === Number(githubRepositoryId) && build.branchName === branchName;
+
+        return (
+          build.triggerType === 'api' &&
+          build.deployEnabled !== false &&
+          build.trackDefaultBranches === true &&
+          !targetsApiRootSource
+        );
+      });
 
       for (const build of buildsToDeploy) {
         const buildId = build?.id;
@@ -653,16 +677,54 @@ export default class GithubService extends Service {
 
         await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId,
-          ...(hasFailedDeploys ? {} : { githubRepositoryId }),
+          ...(hasFailedDeploys && build.pullRequest != null ? {} : { githubRepositoryId }),
           // The pushed commit is the deploy trigger. It keeps back-to-back pushes to the same branch from collapsing
           // onto one dedupe key (which would silently drop the later commit), while a redelivered webhook for the
           // same commit still coalesces.
           ...(deployTriggerRef ? { triggerRef: deployTriggerRef } : {}),
+          ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
+          sourceGithubRepositoryId: githubRepositoryId,
+          sourceBranch: branchName,
           ...extractContextForQueue(),
         });
       }
     } catch (error) {
       getLogger({}).error({ error }, `Push: webhook processing failed`);
+    }
+  };
+
+  /**
+   * Opt-in push tracking for API-created environments: pinned-sha builds and
+   * builds without autoTrack never redeploy from pushes; ignoreFiles diffing
+   * is intentionally skipped for this path.
+   */
+  private enqueueAutoTrackedApiBuilds = async (
+    githubRepositoryId: number,
+    branchName: string,
+    deployTriggerRef?: string | null
+  ) => {
+    const autoTrackedBuilds = await this.db.models.Build.query()
+      .where('triggerType', 'api')
+      .where('autoTrack', true)
+      .where('deployEnabled', true)
+      .whereNull('configSha')
+      .where('githubRepositoryId', githubRepositoryId)
+      // Git ref names are case-sensitive; a push to feature/x must never advance an
+      // environment configured for the distinct Feature/X ref.
+      .where('branchName', branchName)
+      .whereNotIn('status', ['torn_down', 'tearing_down'])
+      .whereNull('deletedAt');
+
+    for (const build of autoTrackedBuilds) {
+      getLogger().info(`Push: deploying api environment uuid=${build.uuid} branch=${branchName}`);
+      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+        buildId: build.id,
+        ...(deployTriggerRef ? { triggerRef: deployTriggerRef } : {}),
+        ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
+        sourceGithubRepositoryId: githubRepositoryId,
+        sourceBranch: branchName,
+        ...extractContextForQueue(),
+      });
     }
   };
 

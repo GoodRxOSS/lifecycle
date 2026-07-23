@@ -1,6 +1,8 @@
 import { nanoid } from 'nanoid';
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import BuildService from 'server/services/build';
@@ -92,6 +94,9 @@ function validateBuildConfigPatch(body: unknown): BuildConfigPatchInput | Error 
  * /api/v2/builds/{uuid}:
  *   get:
  *     summary: Get a build by UUID
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Returns a build object corresponding to the provided UUID.
  *     tags:
  *       - Builds
@@ -123,7 +128,11 @@ function validateBuildConfigPatch(body: unknown): BuildConfigPatchInput | Error 
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const getHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const buildService = new BuildService();
 
@@ -132,6 +141,7 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   if (!build) {
     return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
+  await assertBuildRepositoryAllowed(principal, build);
 
   return successResponse(
     build,
@@ -147,6 +157,9 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
  * /api/v2/builds/{uuid}:
  *   patch:
  *     summary: Update build config
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: Patches build-table config such as UUID, static mode, default-branch tracking, and comment environment overrides.
  *     tags:
  *       - Builds
@@ -190,7 +203,11 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const patchHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const body = (await req.json().catch(() => null)) as UpdateBuildConfigPatchRequest | null;
   const patch = validateBuildConfigPatch(body);
@@ -203,11 +220,13 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   const buildService = new BuildService();
   const build = await override.db.models.Build.query()
     .findOne({ uuid: routeParams.uuid })
+    .whereNull('deletedAt')
     .withGraphFetched('pullRequest');
 
   if (!build) {
     return errorResponse(new Error(`Build with UUID ${routeParams.uuid} not found`), { status: 404 }, req);
   }
+  await assertBuildRepositoryAllowed(principal, build);
 
   try {
     const updatedBuild = await override.applyBuildConfigPatch({
@@ -217,7 +236,10 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
       runUuid: nanoid(),
     });
 
-    const hydratedBuild = await buildService.getBuildByUUID(updatedBuild.uuid);
+    const hydratedBuild = await buildService.getBuildByUUID(updatedBuild.uuid, {
+      liveOnly: true,
+      expectedBuildId: updatedBuild.id,
+    });
 
     if (!hydratedBuild) {
       return errorResponse(new Error(`Build with UUID ${updatedBuild.uuid} not found`), { status: 404 }, req);
@@ -233,5 +255,5 @@ const patchHandler = async (req: NextRequest, { params }: { params: Promise<{ uu
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const PATCH = createApiHandler(patchHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);
+export const PATCH = createPrincipalApiHandler({ scope: 'env:write' }, patchHandler);

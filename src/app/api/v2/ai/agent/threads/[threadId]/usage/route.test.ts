@@ -56,6 +56,7 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/usage', () => {
     mockGetRequestUserIdentity.mockReturnValue({
       userId: 'sample-user',
       githubUsername: 'sample-user',
+      roles: ['user'],
     });
     mockGetOwnedThreadUsage.mockResolvedValue({
       threadId: 'thread-1',

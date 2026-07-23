@@ -15,15 +15,37 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import type { Middleware } from './chain';
+import type { Middleware, NextMiddleware } from './chain';
 import { verifyAuth } from 'server/lib/auth';
+import { bearerChallenge } from 'server/lib/appError';
+import { bearerApiKey } from 'server/lib/apiTokenShape';
 import { ErrorResponse } from 'server/lib/response';
 
 const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj ?? {}), 'utf8').toString('base64url');
 const MCP_OAUTH_CALLBACK_PATH = /^\/api\/v2\/ai\/agent\/mcp-connections\/[^/]+\/oauth\/callback$/;
+const MAX_AUTHORIZATION_HEADER_LENGTH = 16384;
 
-function isBearerAuthExemptPath(request: NextRequest): boolean {
-  return MCP_OAUTH_CALLBACK_PATH.test(request.nextUrl.pathname);
+function authFailure(request: NextRequest, status: 401 | 500, message: string, code?: string): NextResponse {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (status === 401) {
+    headers['WWW-Authenticate'] = bearerChallenge(code);
+  }
+  return new NextResponse(
+    JSON.stringify({
+      request_id: request.headers.get('x-request-id'),
+      error: { message, ...(code ? { code } : {}) },
+      data: null,
+    } satisfies ErrorResponse),
+    { status, headers }
+  );
+}
+
+/* eslint-disable-next-line no-unused-vars */
+function forwardWithoutUser(request: NextRequest, next: NextMiddleware, mutate?: (headers: Headers) => void) {
+  const headers = new Headers(request.headers);
+  headers.delete('x-user'); // prevent spoofing
+  mutate?.(headers);
+  return next(new NextRequest(request.url, { ...request, headers }));
 }
 
 export const authMiddleware: Middleware = async (request, next) => {
@@ -31,34 +53,33 @@ export const authMiddleware: Middleware = async (request, next) => {
     return next(request);
   }
 
-  if (process.env.ENABLE_AUTH !== 'true') {
-    return next(request);
+  const authorization = request.headers.get('authorization');
+  if (authorization && (authorization.includes(',') || authorization.length > MAX_AUTHORIZATION_HEADER_LENGTH)) {
+    return authFailure(request, 401, 'Invalid Authorization header.', 'invalid_credential');
   }
 
-  if (isBearerAuthExemptPath(request)) {
-    return next(request);
+  if (process.env.ENABLE_AUTH !== 'true') {
+    return forwardWithoutUser(request, next);
+  }
+
+  if (MCP_OAUTH_CALLBACK_PATH.test(request.nextUrl.pathname)) {
+    return forwardWithoutUser(request, next);
+  }
+
+  // Edge runtime cannot reach Postgres, so key-shaped bearers are forwarded and verified in the route wrapper.
+  if (bearerApiKey(authorization)) {
+    return forwardWithoutUser(request, next);
   }
 
   const authResult = await verifyAuth(request);
 
   if (!authResult.success) {
-    return new NextResponse(
-      JSON.stringify({
-        request_id: request.headers.get('x-request-id'),
-        error: { message: authResult.error?.message || 'Unauthorized' },
-        data: null,
-      } satisfies ErrorResponse),
-      {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    if (authResult.error?.status === 500) {
+      return authFailure(request, 500, authResult.error.message);
+    }
+    const code = authorization ? 'invalid_credential' : 'authentication_required';
+    return authFailure(request, 401, authResult.error?.message || 'Authentication is required.', code);
   }
 
-  const headers = new Headers(request.headers);
-  headers.delete('x-user'); // prevent spoofing
-  headers.set('x-user', encode(authResult.payload));
-
-  const newRequest = new NextRequest(request.url, { ...request, headers });
-  return next(newRequest);
+  return forwardWithoutUser(request, next, (headers) => headers.set('x-user', encode(authResult.payload)));
 };

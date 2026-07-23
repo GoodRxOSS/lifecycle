@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import { assertNamedRepositoryAllowed } from 'server/lib/repositoryAuthorization';
+import type { Principal } from 'server/lib/principal';
 import { errorResponse, successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
@@ -8,7 +10,12 @@ import BuildService from 'server/services/build';
  * /api/v2/schema/validate:
  *   get:
  *     summary: Validate lifecycle schema
- *     description: Validates the lifecycle schema from a specified GitHub repository and branch.
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
+ *     description: >
+ *       Validates the lifecycle schema from a specified GitHub repository and branch.
+ *       Requires repos:read and enforces the API key repository constraint.
  *     tags:
  *       - Schema
  *     operationId: validateLifecycleSchema
@@ -27,13 +34,19 @@ import BuildService from 'server/services/build';
  *         description: The branch name in the repository.
  *     responses:
  *       '200':
- *         description: A paginated list of builds.
+ *         description: Lifecycle schema validation result.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ValidateLifecycleSchemaSuccessResponse'
  *       '400':
  *         description: Bad request
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '403':
+ *         description: Missing repos:read scope or repository access.
  *         content:
  *           application/json:
  *             schema:
@@ -45,16 +58,18 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest) => {
+const getHandler = async (req: NextRequest, principal: Principal) => {
   const { searchParams } = req.nextUrl;
   const buildService = new BuildService();
 
   const repo = searchParams.get('repo');
   const branch = searchParams.get('branch');
 
-  if (![repo, branch].every((val) => typeof val === 'string' && val.trim() !== '')) {
+  if (typeof repo !== 'string' || repo.trim() === '' || typeof branch !== 'string' || branch.trim() === '') {
     return errorResponse('Invalid repo or branch in request body', { status: 400 }, req);
   }
+
+  await assertNamedRepositoryAllowed(principal, repo);
 
   const schemaValidation = await buildService.validateLifecycleSchema(repo, branch);
 
@@ -67,4 +82,4 @@ const getHandler = async (req: NextRequest) => {
   );
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'repos:read' }, getHandler);

@@ -127,6 +127,7 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
       },
     });
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-admin',
       githubUsername: 'sample-admin',
     });

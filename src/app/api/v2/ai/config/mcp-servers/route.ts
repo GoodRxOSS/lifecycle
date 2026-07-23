@@ -169,6 +169,6 @@ const postHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
 // Org-wide control-plane mutation (registers global MCP servers w/ secrets) — admin only.
-export const POST = createApiHandler(postHandler, { roles: ['admin'] });
+export const POST = createApiHandler(postHandler, { auth: 'session', roles: ['admin'] });

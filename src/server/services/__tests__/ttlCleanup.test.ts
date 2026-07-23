@@ -19,9 +19,8 @@ const mockGetAllConfigs = jest.fn();
 const mockGetPullRequestLabels = jest.fn();
 const mockUpdatePullRequestLabels = jest.fn();
 const mockCreateOrUpdatePullRequestComment = jest.fn();
-const mockDeleteQueueAdd = jest.fn();
+const mockEnqueueBuildDeletion = jest.fn();
 const mockBuildQuery = jest.fn();
-const mockExtractContextForQueue = jest.fn();
 const mockMetricsIncrement = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => ({
@@ -52,7 +51,7 @@ jest.mock('server/lib/logger', () => ({
     debug: jest.fn(),
   })),
   withLogContext: jest.fn((_ctx, fn) => fn()),
-  extractContextForQueue: (...args: any[]) => mockExtractContextForQueue(...args),
+  extractContextForQueue: jest.fn(() => ({})),
   updateLogContext: jest.fn(),
   LogStage: {},
 }));
@@ -110,9 +109,7 @@ describe('TTLCleanupService', () => {
         },
         services: {
           BuildService: {
-            deleteQueue: {
-              add: mockDeleteQueueAdd,
-            },
+            enqueueBuildDeletion: (...args: any[]) => mockEnqueueBuildDeletion(...args),
           },
         },
       } as any,
@@ -155,7 +152,6 @@ describe('TTLCleanupService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockExtractContextForQueue.mockReturnValue({ correlationId: 'ttl-test-correlation' });
     mockGetAllConfigs.mockResolvedValue({
       ttl_cleanup: {
         enabled: true,
@@ -168,7 +164,7 @@ describe('TTLCleanupService', () => {
 
   it('enqueues existing delete queue cleanup for expired namespaces tied to closed pull requests', async () => {
     mockExpiredNamespace();
-    mockBuildLookup({
+    const build = {
       id: 123,
       uuid: 'sample-123456',
       status: 'error',
@@ -182,15 +178,12 @@ describe('TTLCleanupService', () => {
           githubInstallationId: 1001,
         },
       },
-    });
+    };
+    mockBuildLookup(build);
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
-    expect(mockDeleteQueueAdd).toHaveBeenCalledWith('delete', {
-      buildId: 123,
-      buildUuid: 'sample-123456',
-      correlationId: 'ttl-test-correlation',
-    });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'ttl_closed_pull_request');
     expect(mockGetPullRequestLabels).not.toHaveBeenCalled();
     expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
@@ -223,7 +216,7 @@ describe('TTLCleanupService', () => {
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
-    expect(mockDeleteQueueAdd).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
     expect(mockUpdatePullRequestLabels).toHaveBeenCalledWith({
       installationId: 2002,
       pullRequestNumber: 77,

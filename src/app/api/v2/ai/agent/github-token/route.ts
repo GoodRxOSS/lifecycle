@@ -93,4 +93,4 @@ const getHandler = async (req: NextRequest) => {
 };
 
 // Per-user self-check: requires user identity (enforced in-handler), NOT admin.
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

@@ -194,5 +194,5 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ thre
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const PUT = createApiHandler(putHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const PUT = createApiHandler(putHandler, { auth: 'session' });

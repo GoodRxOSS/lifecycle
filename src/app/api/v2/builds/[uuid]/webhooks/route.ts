@@ -15,7 +15,9 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
 import BuildService from 'server/services/build';
 
@@ -24,6 +26,9 @@ import BuildService from 'server/services/build';
  * /api/v2/builds/{uuid}/webhooks:
  *   get:
  *     summary: Retrieve webhook invocations for a build
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Retrieves all webhook invocations for a specific build,
  *       ordered by creation date in descending order.
@@ -58,6 +63,9 @@ import BuildService from 'server/services/build';
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   put:
  *     summary: Invoke webhooks for a build
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Triggers the execution of configured webhooks for a specific build.
  *       The webhooks must be defined in the build's webhooksYaml configuration.
@@ -96,13 +104,22 @@ import BuildService from 'server/services/build';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const getHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const { uuid: buildUuid } = routeParams;
 
   const buildService = new BuildService();
+  const build = await buildService.getBuildByUUID(buildUuid);
+  if (!build) {
+    return errorResponse(`Build not found for ${buildUuid}.`, { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
 
-  const response = await buildService.getWebhooksForBuild(buildUuid);
+  const response = await buildService.getWebhooksForBuild(buildUuid, build.id);
 
   if (response.status === 'not_found') {
     return errorResponse(response.message, { status: 404 }, req);
@@ -111,13 +128,22 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   return successResponse(response.data, { status: 200 }, req);
 };
 
-const putHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string }> }) => {
+const putHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string }> }
+) => {
   const routeParams = await params;
   const { uuid: buildUuid } = routeParams;
 
   const buildService = new BuildService();
+  const build = await buildService.getBuildByUUID(buildUuid);
+  if (!build) {
+    return errorResponse(`Build not found for ${buildUuid}.`, { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
 
-  const response = await buildService.invokeWebhooksForBuild(buildUuid);
+  const response = await buildService.invokeWebhooksForBuild(buildUuid, build.id);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);
@@ -130,5 +156,5 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const PUT = createApiHandler(putHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);
+export const PUT = createPrincipalApiHandler({ scope: 'env:write' }, putHandler);

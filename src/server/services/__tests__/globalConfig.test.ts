@@ -114,6 +114,35 @@ describe('GlobalConfigService', () => {
       expect(service.memoryCache).toBeNull();
       expect(service.memoryCacheExpiry).toBe(0);
     });
+
+    it('defers cache invalidation when the write belongs to a caller-owned transaction', async () => {
+      const merge = jest.fn().mockResolvedValue(undefined);
+      const transaction = jest.fn().mockReturnValue({
+        insert: jest.fn().mockReturnValue({
+          onConflict: jest.fn().mockReturnValue({ merge }),
+        }),
+      });
+      service.memoryCache = { api_keys: { personalAuthEnabled: true } };
+      service.memoryCacheExpiry = Date.now() + 10000;
+
+      await service.setConfig('api_keys', { personalAuthEnabled: false }, transaction);
+
+      expect(transaction).toHaveBeenCalledWith('global_config');
+      expect(merge).toHaveBeenCalled();
+      expect(service.redis.del).not.toHaveBeenCalled();
+      expect(service.memoryCache).toEqual({ api_keys: { personalAuthEnabled: true } });
+    });
+
+    it('exposes a strict invalidation path that propagates Redis failures', async () => {
+      service.memoryCache = { api_keys: { serviceAuthEnabled: true } };
+      service.memoryCacheExpiry = Date.now() + 10000;
+      service.redis.del.mockRejectedValueOnce(new Error('redis unavailable'));
+
+      await expect(service.invalidateCache()).rejects.toThrow('redis unavailable');
+
+      expect(service.memoryCache).toBeNull();
+      expect(service.memoryCacheExpiry).toBe(0);
+    });
   });
 
   describe('setupCacheRefreshJob', () => {

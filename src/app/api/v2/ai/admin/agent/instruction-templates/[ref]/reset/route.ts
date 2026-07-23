@@ -86,4 +86,4 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ ref
   }
 };
 
-export const POST = createApiHandler(postHandler, { roles: ['admin'] });
+export const POST = createApiHandler(postHandler, { auth: 'session', roles: ['admin'] });

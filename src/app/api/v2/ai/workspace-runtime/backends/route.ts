@@ -54,4 +54,4 @@ const getHandler = async (req: NextRequest) => {
 };
 
 // Admin only: the catalog exposes backend configuration state.
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });

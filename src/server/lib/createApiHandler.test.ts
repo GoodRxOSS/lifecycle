@@ -21,6 +21,10 @@ import { createApiHandler } from './createApiHandler';
 describe('createApiHandler', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;
 
+  beforeEach(() => {
+    delete process.env.ENABLE_AUTH;
+  });
+
   afterEach(() => {
     if (originalEnableAuth === undefined) {
       delete process.env.ENABLE_AUTH;
@@ -30,9 +34,12 @@ describe('createApiHandler', () => {
   });
 
   it('returns a standard error response for application errors', async () => {
-    const handler = createApiHandler(async () => {
-      throw new Error('sample failure');
-    });
+    const handler = createApiHandler(
+      async () => {
+        throw new Error('sample failure');
+      },
+      { auth: 'session' }
+    );
 
     const response = await handler(new NextRequest('http://localhost/api/v2/sample'));
 
@@ -47,15 +54,20 @@ describe('createApiHandler', () => {
 
   it('rethrows Next dynamic usage errors so Next can mark the route dynamic', async () => {
     const dynamicError = new DynamicServerError('Route /api/v2/sample used request headers.');
-    const handler = createApiHandler(async () => {
-      throw dynamicError;
-    });
+    const handler = createApiHandler(
+      async () => {
+        throw dynamicError;
+      },
+      { auth: 'session' }
+    );
 
     await expect(handler(new NextRequest('http://localhost/api/v2/sample'))).rejects.toBe(dynamicError);
   });
 
   it('returns successful responses unchanged', async () => {
-    const handler = createApiHandler(async () => NextResponse.json({ ok: true }, { status: 201 }));
+    const handler = createApiHandler(async () => NextResponse.json({ ok: true }, { status: 201 }), {
+      auth: 'session',
+    });
 
     const response = await handler(new NextRequest('http://localhost/api/v2/sample'));
 
@@ -66,7 +78,10 @@ describe('createApiHandler', () => {
   it('bypasses role checks when auth is disabled', async () => {
     process.env.ENABLE_AUTH = 'false';
 
-    const handler = createApiHandler(async () => NextResponse.json({ ok: true }), { roles: ['admin'] });
+    const handler = createApiHandler(async () => NextResponse.json({ ok: true }), {
+      auth: 'session',
+      roles: ['admin'],
+    });
 
     const response = await handler(new NextRequest('http://localhost/api/v2/sample'));
 
@@ -77,16 +92,20 @@ describe('createApiHandler', () => {
   it('rejects role checks without a verified user when auth is enabled', async () => {
     process.env.ENABLE_AUTH = 'true';
 
-    const handler = createApiHandler(async () => NextResponse.json({ ok: true }), { roles: ['admin'] });
+    const handler = createApiHandler(async () => NextResponse.json({ ok: true }), {
+      auth: 'session',
+      roles: ['admin'],
+    });
 
     const response = await handler(new NextRequest('http://localhost/api/v2/sample'));
 
     await expect(response.json()).resolves.toMatchObject({
       data: null,
       error: {
-        message: 'Unauthorized',
+        code: 'authentication_required',
       },
     });
     expect(response.status).toBe(401);
+    expect(response.headers.get('WWW-Authenticate')).toBe('Bearer realm="lifecycle"');
   });
 });

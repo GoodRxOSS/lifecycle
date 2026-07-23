@@ -108,6 +108,11 @@ export class BadRequestError extends AppError {
   }
 }
 
+/** RFC 6750 §3: bare challenge when no credential was presented; error="invalid_token" when one was rejected. */
+export function bearerChallenge(code: string | undefined): string {
+  return code === 'invalid_credential' ? 'Bearer realm="lifecycle", error="invalid_token"' : 'Bearer realm="lifecycle"';
+}
+
 export interface SerializedAppError {
   message: string;
   code?: string;

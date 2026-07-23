@@ -23,6 +23,8 @@ export type GlobalConfig = {
   buildDefaults?: BuildDefaults;
   agentSessionDefaults?: AgentSessionDefaults;
   sites?: SitesConfig;
+  api_keys?: ApiKeysConfig;
+  api_environments?: ApiEnvironmentsConfig;
   postgresql: Helm;
   mysql: Helm;
   redis: Helm;
@@ -230,6 +232,21 @@ export type SitesConfig = {
   };
 };
 
+export type ApiKeysConfig = {
+  issuanceEnabled?: boolean;
+  personalAuthEnabled?: boolean;
+  serviceAuthEnabled?: boolean;
+  rateLimitPerMinute?: number;
+  maxActivePersonalKeysPerUser?: number;
+};
+
+export type ApiEnvironmentsConfig = {
+  enabled?: boolean;
+  defaultTtlHours?: number;
+  maxTtlHours?: number;
+  extensionHours?: number;
+};
+
 export type RoleSettings = {
   name?: string;
   /** Annotations applied to service accounts in environment namespaces, e.g. cloud workload identity keys. */
@@ -258,6 +275,7 @@ export type DomainDefaults = {
   grpc: string;
   altHttp?: string[];
   altGrpc?: string[];
+  publicScheme?: 'http' | 'https';
 };
 
 export type LifecycleIgnores = {

@@ -374,13 +374,29 @@ export async function createOrUpdateNamespace({
   try {
     await client.createNamespace(namespace);
     getLogger({ namespace: name }).debug('Namespace created');
-    if (waitForReady) {
-      await waitForNamespaceReady(name);
-    }
   } catch (err) {
-    getLogger({ namespace: name, error: err }).error('Namespace: create failed');
-    throw err;
+    // Deploys in a build create the namespace concurrently; the loser of the race sees AlreadyExists, which is success.
+    if (!isNamespaceAlreadyExistsError(err)) {
+      getLogger({ namespace: name, error: err }).error('Namespace: create failed');
+      throw err;
+    }
+    getLogger({ namespace: name }).info('Namespace: create raced, already exists');
   }
+  if (waitForReady) {
+    await waitForNamespaceReady(name);
+  }
+}
+
+export function isNamespaceAlreadyExistsError(err: unknown): boolean {
+  const candidate = err as {
+    statusCode?: number;
+    code?: number;
+    body?: { reason?: string };
+    response?: { statusCode?: number; body?: { reason?: string } };
+  };
+  const statusCode = candidate?.statusCode ?? candidate?.code ?? candidate?.response?.statusCode;
+  const reason = candidate?.body?.reason ?? candidate?.response?.body?.reason;
+  return statusCode === 409 || reason === 'AlreadyExists';
 }
 
 /**
@@ -522,13 +538,7 @@ export async function waitForPodReady(build: Build) {
  */
 export async function deleteBuild(build: Build) {
   try {
-    await shellPromise(`kubectl delete all,pvc -l lc_uuid=${build.uuid} --namespace ${build.namespace}`).catch((e) => {
-      getLogger({
-        namespace: build.namespace,
-        error: e,
-      }).warn('Resources: base delete failed');
-      return null;
-    });
+    await shellPromise(`kubectl delete all,pvc -l lc_uuid=${build.uuid} --namespace ${build.namespace}`);
 
     await shellPromise(`kubectl delete mapping -l lc_uuid=${build.uuid} --namespace ${build.namespace}`).catch((e) => {
       getLogger({
@@ -539,10 +549,18 @@ export async function deleteBuild(build: Build) {
     });
     getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // Retried teardown is idempotent. If the namespace was already removed (externally or by
+    // a partial prior attempt), there are no scoped resources left to delete.
+    if (message.includes('Error from server (NotFound): namespaces')) {
+      getLogger({ namespace: build.namespace }).info('Deploy: resources skipped reason=namespaceNotFound');
+      return;
+    }
     getLogger({
       namespace: build.namespace,
       error: e,
     }).error('Resources: delete failed');
+    throw e;
   }
 }
 
@@ -583,10 +601,12 @@ export async function deleteNamespace(name: string) {
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
     getLogger({ namespace: name }).info('Deploy: namespace deleted');
   } catch (e) {
-    if (e.includes('Error from server (NotFound): namespaces')) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes('Error from server (NotFound): namespaces')) {
       getLogger({ namespace: name }).info('Deploy: namespace skipped reason=notFound');
     } else {
       getLogger({ namespace: name, error: e }).error('Namespace: delete failed');
+      throw e;
     }
   }
 }

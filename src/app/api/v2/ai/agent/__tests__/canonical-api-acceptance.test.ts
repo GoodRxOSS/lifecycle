@@ -259,6 +259,7 @@ type PendingAction = {
 const sampleUser = {
   userId: 'sample-user',
   githubUsername: 'sample-user',
+  roles: ['user'],
 };
 
 const state = {

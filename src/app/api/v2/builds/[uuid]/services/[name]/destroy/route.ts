@@ -15,8 +15,11 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
+import BuildService from 'server/services/build';
 import DeployCleanupService from 'server/services/deployCleanup';
 
 /**
@@ -24,6 +27,9 @@ import DeployCleanupService from 'server/services/deployCleanup';
  * /api/v2/builds/{uuid}/services/{name}/destroy:
  *   put:
  *     summary: Destroy a service deployment within an environment
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Queues deploy-scoped infrastructure teardown for a service in a build environment. The worker deletes
  *       Kubernetes resources, secrets, Helm releases, and configured CLI/Codefresh destroy steps for the service type.
@@ -69,13 +75,23 @@ import DeployCleanupService from 'server/services/deployCleanup';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const PutHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string; name: string }> }) => {
+const PutHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string; name: string }> }
+) => {
   const routeParams = await params;
   const { uuid: buildUuid, name: serviceName } = routeParams;
 
+  const build = await new BuildService().getBuildByUUID(buildUuid);
+  if (!build) {
+    return errorResponse(`Build not found for ${buildUuid}.`, { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
+
   const deployCleanupService = new DeployCleanupService();
 
-  const response = await deployCleanupService.destroyServiceDeployment(buildUuid, serviceName);
+  const response = await deployCleanupService.destroyServiceDeployment(buildUuid, serviceName, build.id);
 
   if (response.status === 'success') {
     return successResponse(response, { status: 200 }, req);
@@ -86,4 +102,4 @@ const PutHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   }
 };
 
-export const PUT = createApiHandler(PutHandler);
+export const PUT = createPrincipalApiHandler({ scope: 'env:write' }, PutHandler);

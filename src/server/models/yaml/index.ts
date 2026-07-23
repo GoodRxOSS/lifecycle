@@ -15,6 +15,7 @@
  */
 
 export * from 'server/models/yaml/Config';
+export * from 'server/models/yaml/resolveEnvironmentServices';
 export * from 'server/models/yaml/YamlWebhook';
 export * from 'server/models/yaml/YamlEnvironment';
 export * from 'server/models/yaml/YamlService';

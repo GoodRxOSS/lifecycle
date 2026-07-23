@@ -119,10 +119,16 @@ export default class DeployCleanupService extends BaseService {
     });
   };
 
-  async destroyServiceDeployment(buildUuid: string, serviceName: string): Promise<DestroyServiceDeploymentResult> {
+  async destroyServiceDeployment(
+    buildUuid: string,
+    serviceName: string,
+    expectedBuildId?: number
+  ): Promise<DestroyServiceDeploymentResult> {
     return withLogContext({ buildUuid, serviceName }, async () => {
+      const identity = expectedBuildId == null ? { uuid: buildUuid } : { uuid: buildUuid, id: expectedBuildId };
       const build = await this.db.models.Build.query()
-        .findOne({ uuid: buildUuid })
+        .findOne(identity)
+        .whereNull('deletedAt')
         .withGraphFetched('deploys.[build, deployable]');
 
       if (!build) {

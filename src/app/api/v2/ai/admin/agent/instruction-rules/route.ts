@@ -144,5 +144,5 @@ const putHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });

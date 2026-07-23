@@ -125,7 +125,7 @@ describe('API /api/v2/ai/agent/api-keys', () => {
 
     it('returns hasKey false when no key exists', async () => {
       mockGetMaskedKey.mockResolvedValue(null);
-      const res = await GET(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await GET(makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }));
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json.data.hasKey).toBe(false);
@@ -148,7 +148,7 @@ describe('API /api/v2/ai/agent/api-keys', () => {
         maskedKey: 'sk-ant...xyz9',
         updatedAt: '2026-01-01T00:00:00Z',
       });
-      const res = await GET(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await GET(makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }));
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json.data.hasKey).toBe(true);
@@ -159,7 +159,7 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       process.env.ANTHROPIC_API_KEY = 'shared-anthropic-key';
       mockGetMaskedKey.mockResolvedValue(null);
 
-      const res = await GET(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await GET(makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }));
 
       expect(res.status).toBe(200);
       const json = await res.json();
@@ -168,7 +168,9 @@ describe('API /api/v2/ai/agent/api-keys', () => {
     });
 
     it('returns 400 when provider is invalid', async () => {
-      const res = await GET(makeRequest(undefined, { sub: 'user-1' }, { provider: 'sample' }));
+      const res = await GET(
+        makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }, { provider: 'sample' })
+      );
       expect(res.status).toBe(400);
     });
   });
@@ -181,12 +183,14 @@ describe('API /api/v2/ai/agent/api-keys', () => {
     });
 
     it('returns 400 when apiKey is missing', async () => {
-      const res = await POST(makeRequest({ provider: 'anthropic' }, { sub: 'user-1' }));
+      const res = await POST(
+        makeRequest({ provider: 'anthropic' }, { sub: 'user-1', realm_access: { roles: ['user'] } })
+      );
       expect(res.status).toBe(400);
     });
 
     it('returns 400 when provider is missing', async () => {
-      const res = await POST(makeRequest({ apiKey: 'sk-test' }, { sub: 'user-1' }));
+      const res = await POST(makeRequest({ apiKey: 'sk-test' }, { sub: 'user-1', realm_access: { roles: ['user'] } }));
       expect(res.status).toBe(400);
       const json = await res.json();
       expect(json.error.message).toContain('provider must be one of');
@@ -194,7 +198,9 @@ describe('API /api/v2/ai/agent/api-keys', () => {
 
     it('returns 400 when Anthropic validation fails', async () => {
       mockFetch.mockResolvedValue({ status: 401 });
-      const res = await POST(makeRequest({ provider: 'anthropic', apiKey: 'bad-key' }, { sub: 'user-1' }));
+      const res = await POST(
+        makeRequest({ provider: 'anthropic', apiKey: 'bad-key' }, { sub: 'user-1', realm_access: { roles: ['user'] } })
+      );
       expect(res.status).toBe(400);
       const json = await res.json();
       expect(json.error.message).toContain('Invalid API key');
@@ -208,7 +214,12 @@ describe('API /api/v2/ai/agent/api-keys', () => {
         maskedKey: 'sample...abcd',
         updatedAt: '2026-01-01T00:00:00Z',
       });
-      const res = await POST(makeRequest({ provider: 'anthropic', apiKey: 'sample-provider-key' }, { sub: 'user-1' }));
+      const res = await POST(
+        makeRequest(
+          { provider: 'anthropic', apiKey: 'sample-provider-key' },
+          { sub: 'user-1', realm_access: { roles: ['user'] } }
+        )
+      );
       expect(res.status).toBe(201);
       expect(mockStoreKey).toHaveBeenCalledWith('user-1', 'anthropic', 'sample-provider-key', null);
     });
@@ -240,18 +251,22 @@ describe('API /api/v2/ai/agent/api-keys', () => {
 
     it('returns 404 when no key exists', async () => {
       mockDeleteKey.mockResolvedValue(false);
-      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }, { provider: 'anthropic' }));
+      const res = await DELETE(
+        makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }, { provider: 'anthropic' })
+      );
       expect(res.status).toBe(404);
     });
 
     it('returns 400 when provider is missing', async () => {
-      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }));
+      const res = await DELETE(makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }));
       expect(res.status).toBe(400);
     });
 
     it('returns 200 on successful deletion', async () => {
       mockDeleteKey.mockResolvedValue(true);
-      const res = await DELETE(makeRequest(undefined, { sub: 'user-1' }, { provider: 'anthropic' }));
+      const res = await DELETE(
+        makeRequest(undefined, { sub: 'user-1', realm_access: { roles: ['user'] } }, { provider: 'anthropic' })
+      );
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json.data.deleted).toBe(true);

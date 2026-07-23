@@ -111,4 +111,4 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ ref:
   }
 };
 
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });

@@ -22,36 +22,36 @@ jest.mock('jose', () => ({
   jwtVerify: (...args: unknown[]) => mockJwtVerify(...args),
 }));
 
-import { verifyBearerToken } from './auth';
+import { verifyAuth, verifyBearerToken } from './auth';
 
-describe('verifyBearerToken', () => {
-  const originalIssuer = process.env.KEYCLOAK_ISSUER;
-  const originalAudience = process.env.KEYCLOAK_CLIENT_ID;
-  const originalJwksUrl = process.env.KEYCLOAK_JWKS_URL;
+const originalIssuer = process.env.KEYCLOAK_ISSUER;
+const originalAudience = process.env.KEYCLOAK_CLIENT_ID;
+const originalJwksUrl = process.env.KEYCLOAK_JWKS_URL;
 
-  function restoreEnvValue(name: string, value: string | undefined) {
-    if (value === undefined) {
-      delete process.env[name];
-      return;
-    }
-
-    process.env[name] = value;
+function restoreEnvValue(name: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
   }
 
-  beforeEach(() => {
-    jest.clearAllMocks();
-    process.env.KEYCLOAK_ISSUER = 'http://localhost:8081/realms/lifecycle';
-    process.env.KEYCLOAK_CLIENT_ID = 'lifecycle-core';
-    process.env.KEYCLOAK_JWKS_URL = 'http://localhost:8081/realms/lifecycle/protocol/openid-connect/certs';
-    mockCreateRemoteJWKSet.mockReturnValue('jwks');
-  });
+  process.env[name] = value;
+}
 
-  afterAll(() => {
-    restoreEnvValue('KEYCLOAK_ISSUER', originalIssuer);
-    restoreEnvValue('KEYCLOAK_CLIENT_ID', originalAudience);
-    restoreEnvValue('KEYCLOAK_JWKS_URL', originalJwksUrl);
-  });
+beforeEach(() => {
+  jest.clearAllMocks();
+  process.env.KEYCLOAK_ISSUER = 'http://localhost:8081/realms/lifecycle';
+  process.env.KEYCLOAK_CLIENT_ID = 'lifecycle-core';
+  process.env.KEYCLOAK_JWKS_URL = 'http://localhost:8081/realms/lifecycle/protocol/openid-connect/certs';
+  mockCreateRemoteJWKSet.mockReturnValue('jwks');
+});
 
+afterAll(() => {
+  restoreEnvValue('KEYCLOAK_ISSUER', originalIssuer);
+  restoreEnvValue('KEYCLOAK_CLIENT_ID', originalAudience);
+  restoreEnvValue('KEYCLOAK_JWKS_URL', originalJwksUrl);
+});
+
+describe('verifyBearerToken', () => {
   it('logs JWT verification failures without serializing token claims', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const error = Object.assign(new Error('"exp" claim timestamp check failed'), {
@@ -86,5 +86,42 @@ describe('verifyBearerToken', () => {
     expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('sensitive-user');
 
     warnSpy.mockRestore();
+  });
+});
+
+describe('verifyAuth bearer extraction', () => {
+  const requestWith = (authorization: string | null) => ({
+    headers: { get: (name: string) => (name.toLowerCase() === 'authorization' ? authorization : null) },
+  });
+
+  it('extracts the token with a case-insensitive scheme', async () => {
+    mockJwtVerify.mockResolvedValue({ payload: { sub: 'user-1' } });
+
+    const result = await verifyAuth(requestWith('bearer some.jwt.token'));
+
+    expect(result.success).toBe(true);
+    expect(mockJwtVerify).toHaveBeenCalledWith('some.jwt.token', 'jwks', expect.anything());
+  });
+
+  it.each([
+    ['trailing junk after the token', 'Bearer some.jwt.token extra'],
+    ['a non-bearer scheme', 'Basic c2VjcmV0'],
+    ['a scheme without a token', 'Bearer'],
+  ])('rejects %s without attempting verification', async (_label, authorization) => {
+    const result = await verifyAuth(requestWith(authorization));
+
+    expect(result).toEqual({
+      success: false,
+      error: { message: 'Bearer token is missing or malformed', status: 401 },
+    });
+    expect(mockJwtVerify).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes a missing Authorization header from a malformed one', async () => {
+    const result = await verifyAuth(requestWith(null));
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('Authorization header is missing');
+    expect(mockJwtVerify).not.toHaveBeenCalled();
   });
 });

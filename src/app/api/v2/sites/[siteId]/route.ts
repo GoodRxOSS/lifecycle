@@ -15,7 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { successResponse } from 'server/lib/response';
 import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
@@ -31,6 +32,9 @@ type RouteContext = {
  * /api/v2/sites/{siteId}:
  *   get:
  *     summary: Get a hosted static site
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     tags:
  *       - Sites
  *     operationId: getSite
@@ -55,6 +59,9 @@ type RouteContext = {
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *   delete:
  *     summary: Delete a hosted static site
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     tags:
  *       - Sites
  *     operationId: deleteSite
@@ -78,7 +85,7 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: RouteContext) => {
+const getHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
@@ -89,7 +96,7 @@ const getHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
+const deleteHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
@@ -100,5 +107,5 @@ const deleteHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
-export const DELETE = createApiHandler(deleteHandler);
+export const GET = createPrincipalApiHandler({ scope: 'sites:read' }, getHandler);
+export const DELETE = createPrincipalApiHandler({ scope: 'sites:write' }, deleteHandler);

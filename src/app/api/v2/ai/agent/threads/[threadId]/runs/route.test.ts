@@ -222,6 +222,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -497,7 +498,7 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
         thread: expect.objectContaining({ id: 7, uuid: 'thread-1' }),
         session: expect.objectContaining({ id: 17, uuid: 'session-1' }),
         source: expect.objectContaining({ uuid: 'source-1', status: 'ready' }),
-        userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+        userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
         requestedProvider: null,
         requestedModel: null,
         runtimeOptions: { maxIterations: 12 },

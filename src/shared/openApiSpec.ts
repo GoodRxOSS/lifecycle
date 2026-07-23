@@ -112,6 +112,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
       version: '2.0.0',
       description: 'API documentation for lifecycle',
     },
+    // Global default keeps the original scheme name; programmatic routes override per-operation (separate objects = OR).
     security: [{ BearerAuth: [] }],
     components: {
       securitySchemes: {
@@ -124,6 +125,21 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'Pass it in the Authorization header as "Bearer <token>". ' +
             'Authentication is only enforced when the ENABLE_AUTH environment variable is set to "true". ' +
             'When disabled, all requests are allowed without a token.',
+        },
+        KeycloakBearer: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          description:
+            'Descriptive alias of BearerAuth for Keycloak JWTs. BearerAuth remains available for existing clients.',
+        },
+        LifecycleApiKey: {
+          type: 'http',
+          scheme: 'bearer',
+          description:
+            'Lifecycle API key presented as "Bearer <key>". Shapes: personal keys "lfc_pat_<hex>", ' +
+            'service keys "lfc_svc_<hex>", and legacy keys "lfc_<hex>". Authority is the owner authority ' +
+            'intersected with the key scopes and repository constraint. Accepted only on programmatic routes.',
         },
       },
       schemas: {
@@ -341,6 +357,449 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        ApiKeysConfig: {
+          type: 'object',
+          description: 'API key access configuration stored in global_config under the api_keys key.',
+          properties: {
+            issuanceEnabled: {
+              type: 'boolean',
+              description: 'Whether new API keys can be minted. Never blocks listing or revoking existing keys.',
+            },
+            personalAuthEnabled: {
+              type: 'boolean',
+              description: 'Kill switch: whether personal (lfc_pat_) keys authenticate.',
+            },
+            serviceAuthEnabled: {
+              type: 'boolean',
+              description: 'Kill switch: whether service (lfc_svc_) keys authenticate.',
+            },
+            rateLimitPerMinute: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100000,
+              description: 'Owner-aggregated request budget per minute across all of an owner’s keys.',
+            },
+            maxActivePersonalKeysPerUser: { type: 'integer', minimum: 1, maximum: 1000 },
+          },
+          required: [
+            'issuanceEnabled',
+            'personalAuthEnabled',
+            'serviceAuthEnabled',
+            'rateLimitPerMinute',
+            'maxActivePersonalKeysPerUser',
+          ],
+          additionalProperties: false,
+        },
+
+        ApiKeysConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    config: { $ref: '#/components/schemas/ApiKeysConfig' },
+                  },
+                  required: ['config'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ApiEnvironmentsConfig: {
+          type: 'object',
+          description: 'API-created environments configuration stored in global_config under the api_environments key.',
+          properties: {
+            enabled: { type: 'boolean', description: 'Whether environments can be created through the API.' },
+            defaultTtlHours: { type: 'integer', minimum: 1, maximum: 8760 },
+            maxTtlHours: { type: 'integer', minimum: 1, maximum: 8760 },
+            extensionHours: { type: 'integer', minimum: 1, maximum: 8760 },
+          },
+          required: ['enabled', 'defaultTtlHours', 'maxTtlHours', 'extensionHours'],
+          additionalProperties: false,
+        },
+
+        ApiEnvironmentsConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: {
+                    config: { $ref: '#/components/schemas/ApiEnvironmentsConfig' },
+                  },
+                  required: ['config'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentTrigger: {
+          type: 'string',
+          enum: ['api', 'github_pr'],
+        },
+
+        EnvironmentPullRequestSummary: {
+          type: 'object',
+          properties: {
+            number: { type: 'integer' },
+            title: { type: 'string' },
+            author: { type: 'string' },
+            status: { type: 'string' },
+          },
+          required: ['number', 'title', 'author', 'status'],
+          additionalProperties: false,
+        },
+
+        EnvironmentSummary: {
+          type: 'object',
+          properties: {
+            uuid: { type: 'string' },
+            status: { $ref: '#/components/schemas/BuildStatus' },
+            statusMessage: { type: 'string', nullable: true },
+            namespace: { type: 'string' },
+            trigger: { $ref: '#/components/schemas/EnvironmentTrigger' },
+            repository: { type: 'string', nullable: true },
+            branch: { type: 'string', nullable: true },
+            isStatic: { type: 'boolean' },
+            deployEnabled: { type: 'boolean' },
+            autoTrack: { type: 'boolean' },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            deletedAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description:
+                'When the environment was deleted, otherwise null. Deleted summaries are list-only history; UUID resource routes resolve only a live environment and may resolve a newer environment after UUID reuse.',
+            },
+            activeServiceCount: {
+              type: 'integer',
+              minimum: 0,
+              description: 'Number of distinct active services in the environment.',
+            },
+            hasReadyActiveService: {
+              type: 'boolean',
+              description: 'Whether at least one active service is ready.',
+            },
+            author: { type: 'string', nullable: true },
+            createdByUserId: { type: 'string', nullable: true },
+            pullRequest: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/EnvironmentPullRequestSummary' }],
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: [
+            'uuid',
+            'status',
+            'statusMessage',
+            'namespace',
+            'trigger',
+            'repository',
+            'branch',
+            'isStatic',
+            'deployEnabled',
+            'autoTrack',
+            'expiresAt',
+            'deletedAt',
+            'activeServiceCount',
+            'hasReadyActiveService',
+            'author',
+            'createdByUserId',
+            'pullRequest',
+            'createdAt',
+            'updatedAt',
+          ],
+        },
+
+        EnvironmentService: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', nullable: true },
+            status: { $ref: '#/components/schemas/DeployStatus' },
+            statusMessage: { type: 'string', nullable: true },
+            active: { type: 'boolean' },
+            branch: { type: 'string', nullable: true },
+            publicUrl: {
+              type: 'string',
+              nullable: true,
+              description: 'Public service hostname without a scheme.',
+              example: 'myapp.example.com',
+            },
+            publicHref: {
+              type: 'string',
+              format: 'uri',
+              nullable: true,
+              description: 'Scheme-aware absolute URL for opening the public service.',
+              example: 'https://myapp.example.com',
+            },
+            sha: { type: 'string', nullable: true },
+          },
+          required: ['name', 'status', 'statusMessage', 'active', 'branch', 'publicUrl', 'publicHref', 'sha'],
+          additionalProperties: false,
+        },
+
+        EnvironmentDetail: {
+          allOf: [
+            { $ref: '#/components/schemas/EnvironmentSummary' },
+            {
+              type: 'object',
+              properties: {
+                configSha: { type: 'string', nullable: true },
+                trackDefaultBranches: { type: 'boolean' },
+                services: { type: 'array', items: { $ref: '#/components/schemas/EnvironmentService' } },
+                statusUrl: { type: 'string' },
+              },
+              required: ['configSha', 'trackDefaultBranches', 'services', 'statusUrl'],
+            },
+          ],
+        },
+
+        EnvironmentCreateResult: {
+          type: 'object',
+          properties: {
+            uuid: { type: 'string' },
+            status: { $ref: '#/components/schemas/BuildStatus' },
+            namespace: { type: 'string' },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            statusUrl: { type: 'string' },
+            replayed: { type: 'boolean' },
+          },
+          required: ['uuid', 'status', 'namespace', 'expiresAt', 'statusUrl', 'replayed'],
+          additionalProperties: false,
+        },
+
+        EnvironmentQueuedOperation: {
+          type: 'object',
+          properties: {
+            uuid: { type: 'string' },
+            status: { type: 'string', enum: ['deploy_queued', 'tearing_down_queued'] },
+            statusUrl: { type: 'string' },
+          },
+          required: ['uuid', 'status', 'statusUrl'],
+          additionalProperties: false,
+        },
+
+        EnvironmentLeaseExtension: {
+          type: 'object',
+          properties: {
+            uuid: { type: 'string' },
+            expiresAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['uuid', 'expiresAt'],
+          additionalProperties: false,
+        },
+
+        EnvironmentPolicy: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean', description: 'Whether environments can be created through the API.' },
+            defaultTtlHours: { type: 'integer' },
+            maxTtlHours: { type: 'integer' },
+            extensionHours: { type: 'integer' },
+          },
+          required: ['enabled', 'defaultTtlHours', 'maxTtlHours', 'extensionHours'],
+          additionalProperties: false,
+        },
+
+        EnvironmentBranches: {
+          type: 'object',
+          properties: {
+            branches: { type: 'array', items: { type: 'string' } },
+            defaultBranch: { type: 'string', nullable: true },
+          },
+          required: ['branches', 'defaultBranch'],
+          additionalProperties: false,
+        },
+
+        EnvironmentConfigPreviewService: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', nullable: true },
+            defaultActive: { type: 'boolean' },
+            editable: { type: 'boolean' },
+            branchRepository: {
+              type: 'string',
+              nullable: true,
+              description:
+                'Source repository whose branch is overridden for GitHub or Helm service execution. When branchConfigurationRepository differs, the selected branch must also resolve there.',
+            },
+            branchConfigurationRepository: {
+              type: 'string',
+              nullable: true,
+              description:
+                'Repository whose lifecycle.yaml is loaded at the override branch because the environment entry explicitly names a repository; null for an implicit root-local entry, whose root config ref is unchanged by this service override.',
+            },
+            effectiveBranch: {
+              type: 'string',
+              nullable: true,
+              description:
+                'Source branch assigned to a GitHub or Helm service when no per-service branch override is supplied.',
+            },
+            repository: { type: 'string', nullable: true },
+            resolvedFromRepositoryId: { type: 'integer', nullable: true },
+            status: {
+              type: 'string',
+              enum: ['resolved', 'unresolved', 'invalid', 'rate_limited', 'truncated'],
+            },
+            reason: { type: 'string' },
+            previewOnly: { type: 'boolean' },
+          },
+          required: ['name', 'type', 'defaultActive', 'editable'],
+          additionalProperties: false,
+        },
+
+        EnvironmentConfigPreviewPendingService: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            repository: { type: 'string' },
+            branch: { type: 'string' },
+            defaultActive: { type: 'boolean' },
+          },
+          required: ['name', 'repository', 'branch', 'defaultActive'],
+          additionalProperties: false,
+        },
+
+        EnvironmentConfigPreviewUnresolvedService: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            repository: { type: 'string' },
+            branch: { type: 'string' },
+            status: { type: 'string', enum: ['unresolved', 'invalid', 'rate_limited', 'truncated'] },
+            reason: { type: 'string' },
+          },
+          required: ['name', 'repository', 'branch', 'status', 'reason'],
+          additionalProperties: false,
+        },
+
+        EnvironmentConfigPreview: {
+          type: 'object',
+          properties: {
+            valid: { type: 'boolean' },
+            error: { type: 'string' },
+            services: { type: 'array', items: { $ref: '#/components/schemas/EnvironmentConfigPreviewService' } },
+            complete: { type: 'boolean' },
+            pending: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/EnvironmentConfigPreviewPendingService' },
+            },
+            unresolved: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/EnvironmentConfigPreviewUnresolvedService' },
+            },
+            truncated: { type: 'boolean' },
+          },
+          required: ['valid', 'services'],
+          additionalProperties: false,
+        },
+
+        EnvironmentListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/EnvironmentSummary' } },
+                metadata: {
+                  type: 'object',
+                  properties: { pagination: { $ref: '#/components/schemas/PaginationMetadata' } },
+                  required: ['pagination'],
+                },
+              },
+              required: ['data', 'metadata'],
+            },
+          ],
+        },
+
+        EnvironmentCreateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentCreateResult' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentDetailSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentDetail' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentQueuedOperationSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentQueuedOperation' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentLeaseExtensionSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentLeaseExtension' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentPolicySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentPolicy' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentBranchesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentBranches' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentConfigPreviewSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentConfigPreview' } },
+              required: ['data'],
+            },
+          ],
+        },
+
         SiteSuccessResponse: {
           allOf: [
             { $ref: '#/components/schemas/SuccessApiResponse' },
@@ -406,6 +865,320 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             limit: { type: 'integer' },
           },
           required: ['items', 'total', 'current', 'limit'],
+        },
+
+        ApiTokenScope: {
+          type: 'string',
+          enum: ['env:read', 'env:write', 'sites:read', 'sites:write', 'repos:read', 'repos:write', 'env:admin'],
+          description:
+            'resource:write satisfies resource:read for the same resource; scopes never imply across resources. env:read/env:write cover both /environments and /builds. env:admin is reserved to legacy service keys and cannot be requested on new keys.',
+        },
+
+        ApiTokenGrantableScope: {
+          type: 'string',
+          enum: ['env:read', 'env:write', 'sites:read', 'sites:write', 'repos:read', 'repos:write'],
+          description: 'Scopes requestable when issuing a key. Excludes the legacy env:admin scope.',
+        },
+
+        ApiTokenKind: {
+          type: 'string',
+          enum: ['service', 'personal'],
+          description: 'personal keys are identity-bound to their owner; service keys are shared and ownerless.',
+        },
+
+        ApiTokenStatus: {
+          type: 'string',
+          enum: ['active', 'expired', 'revoked'],
+        },
+
+        PersonalApiTokenSummary: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            name: { type: 'string' },
+            tokenPrefix: { type: 'string', example: 'lfc_0123abcd' },
+            kind: { $ref: '#/components/schemas/ApiTokenKind' },
+            status: { $ref: '#/components/schemas/ApiTokenStatus' },
+            scopes: { type: 'array', items: { $ref: '#/components/schemas/ApiTokenScope' } },
+            repositoryAllowlist: { type: 'array', items: { type: 'string' }, nullable: true },
+            ownerGithubUsername: { type: 'string', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            lastUsedAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description:
+                'Approximate (throttled to one write per minute); records token verification, not a successful API action.',
+            },
+            revokedAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'name', 'tokenPrefix', 'kind', 'status', 'scopes', 'repositoryAllowlist'],
+        },
+
+        PersonalApiTokenCreateRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 255 },
+            scopes: {
+              type: 'array',
+              minItems: 1,
+              items: { $ref: '#/components/schemas/ApiTokenGrantableScope' },
+            },
+            repositoryAccess: { $ref: '#/components/schemas/ApiTokenRepositoryAccess' },
+            ttlHours: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 720,
+              description: 'Finite lifetime in hours, computed from the server clock. Maximum 720.',
+            },
+            expiresAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description:
+                'Finite absolute expiry, no more than 720 hours from the server clock. Omit both expiry fields for no expiration.',
+            },
+          },
+          required: ['name', 'scopes', 'repositoryAccess'],
+          additionalProperties: false,
+        },
+
+        PersonalApiTokenCreated: {
+          allOf: [
+            { $ref: '#/components/schemas/PersonalApiTokenSummary' },
+            {
+              type: 'object',
+              properties: {
+                token: {
+                  type: 'string',
+                  description: 'The plaintext key. Returned exactly once; never retrievable again.',
+                },
+              },
+              required: ['token'],
+            },
+          ],
+        },
+
+        PersonalApiTokenPolicy: {
+          type: 'object',
+          properties: {
+            enabled: {
+              type: 'boolean',
+              deprecated: true,
+              description: 'Deprecated alias of issuanceEnabled, retained for backward compatibility.',
+            },
+            issuanceEnabled: { type: 'boolean', description: 'Whether new personal API keys can be created.' },
+            authenticationEnabled: {
+              type: 'boolean',
+              description: 'Whether existing personal API keys can authenticate.',
+            },
+            canCreate: {
+              type: 'boolean',
+              description: 'issuanceEnabled AND the caller holds the user or admin role.',
+            },
+            allowedScopes: { type: 'array', items: { $ref: '#/components/schemas/ApiTokenGrantableScope' } },
+            defaultTtlHours: { type: 'integer' },
+            maxTtlHours: { type: 'integer' },
+            allowNoExpiration: { type: 'boolean' },
+            allowAllRepositories: { type: 'boolean' },
+            repositoryAllowlistRequired: { type: 'boolean' },
+            repositoryAllowlistMaxEntries: { type: 'integer' },
+            serverTime: { type: 'string', format: 'date-time' },
+          },
+          required: [
+            'enabled',
+            'issuanceEnabled',
+            'authenticationEnabled',
+            'canCreate',
+            'allowedScopes',
+            'defaultTtlHours',
+            'maxTtlHours',
+            'allowNoExpiration',
+            'allowAllRepositories',
+            'repositoryAllowlistRequired',
+            'repositoryAllowlistMaxEntries',
+            'serverTime',
+          ],
+        },
+
+        AdminApiTokenSummary: {
+          type: 'object',
+          description: 'Admin oversight view: metadata and lifecycle control only, never the secret.',
+          properties: {
+            id: { type: 'integer' },
+            name: { type: 'string' },
+            tokenPrefix: { type: 'string' },
+            kind: { $ref: '#/components/schemas/ApiTokenKind' },
+            status: { $ref: '#/components/schemas/ApiTokenStatus' },
+            scopes: { type: 'array', items: { $ref: '#/components/schemas/ApiTokenScope' } },
+            repositoryAllowlist: {
+              type: 'array',
+              items: { type: 'string' },
+              nullable: true,
+              description: 'null means all repositories (an explicit choice when the key was issued).',
+            },
+            repositoryAllowlistRepoIds: { type: 'array', items: { type: 'integer' }, nullable: true },
+            ownerUserId: { type: 'string', nullable: true },
+            ownerEmail: { type: 'string', nullable: true },
+            ownerPreferredUsername: { type: 'string', nullable: true },
+            ownerGithubUsername: { type: 'string', nullable: true },
+            ownerRoleAtIssue: { type: 'string', nullable: true },
+            createdBy: { type: 'string', description: 'Keycloak subject of the creator.' },
+            revokedBy: { type: 'string', nullable: true },
+            lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            revokedAt: { type: 'string', format: 'date-time', nullable: true },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'name', 'tokenPrefix', 'kind', 'status', 'scopes', 'createdBy'],
+        },
+
+        ApiTokenRepositoryAccess: {
+          oneOf: [
+            {
+              type: 'object',
+              properties: { mode: { type: 'string', enum: ['all'] } },
+              required: ['mode'],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                mode: { type: 'string', enum: ['selected'] },
+                repositories: { type: 'array', minItems: 1, items: { type: 'string' } },
+              },
+              required: ['mode', 'repositories'],
+              additionalProperties: false,
+            },
+          ],
+          description:
+            'Explicit repository access: an empty selection can never silently mean all repositories. Selected entries are "org/repo" names; repositories not yet onboarded resolve through the GitHub App so the key can onboard them.',
+        },
+
+        ServiceApiTokenCreateRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 255 },
+            scopes: {
+              type: 'array',
+              minItems: 1,
+              items: { $ref: '#/components/schemas/ApiTokenGrantableScope' },
+            },
+            repositoryAccess: { $ref: '#/components/schemas/ApiTokenRepositoryAccess' },
+            ttlHours: { type: 'integer', minimum: 1, nullable: true },
+            expiresAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: 'Omit both ttlHours and expiresAt for a non-expiring key (explicit admin choice).',
+            },
+          },
+          required: ['name', 'scopes', 'repositoryAccess'],
+          additionalProperties: false,
+        },
+
+        ServiceApiTokenCreated: {
+          allOf: [
+            { $ref: '#/components/schemas/AdminApiTokenSummary' },
+            {
+              type: 'object',
+              properties: {
+                token: {
+                  type: 'string',
+                  description: 'The plaintext key. Returned exactly once; never retrievable again.',
+                },
+              },
+              required: ['token'],
+            },
+          ],
+        },
+
+        ApiTokenRevokeResult: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            revokedAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['id', 'revokedAt'],
+        },
+
+        PersonalApiTokenListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/PersonalApiTokenSummary' } },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        PersonalApiTokenCreateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/PersonalApiTokenCreated' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        PersonalApiTokenPolicySuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/PersonalApiTokenPolicy' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        AdminApiTokenListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/AdminApiTokenSummary' } },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ServiceApiTokenCreateSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/ServiceApiTokenCreated' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        ApiTokenRevokeSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/ApiTokenRevokeResult' },
+              },
+              required: ['data'],
+            },
+          ],
         },
 
         AgentApiKeyStatus: {
@@ -3815,7 +4588,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 uuid: { type: 'string' },
               },
             },
-            pullRequest: { $ref: '#/components/schemas/PullRequest' },
+            pullRequest: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/PullRequest' }],
+              description: 'Pull request source metadata; null for API-created environments.',
+            },
             deploys: {
               type: 'array',
               items: { $ref: '#/components/schemas/Deploy' },
@@ -4139,7 +4916,18 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             cname: { type: 'string', example: 'myapp.example.com' },
             devMode: { type: 'boolean', example: false },
             branchName: { type: 'string', example: 'main' },
-            publicUrl: { type: 'string', example: 'http://myapp.example.com' },
+            publicUrl: {
+              type: 'string',
+              description: 'Public service hostname without a scheme.',
+              example: 'myapp.example.com',
+            },
+            publicHref: {
+              type: 'string',
+              format: 'uri',
+              nullable: true,
+              description: 'Scheme-aware absolute URL for opening the public service.',
+              example: 'https://myapp.example.com',
+            },
             deployableId: { type: 'integer' },
             deployPipelineId: { type: 'string', example: 'deploy-pipeline-id' },
             createdAt: { type: 'string', format: 'date-time' },

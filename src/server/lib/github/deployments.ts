@@ -19,6 +19,8 @@ import { cacheRequest } from 'server/lib/github/cacheRequest';
 import { getPullRequest } from 'server/lib/github/index';
 import { DeployStatus } from 'shared/constants';
 import { getLogger } from 'server/lib/logger';
+import { toPublicHref } from 'server/lib/publicHref';
+import GlobalConfigService from 'server/services/globalConfig';
 
 const githubDeploymentStatuses = {
   deployed: 'success',
@@ -57,8 +59,12 @@ export async function createOrUpdateGithubDeployment(deploy: Deploy) {
     const pullRequest = build?.pullRequest;
     const repository = pullRequest?.repository;
     const fullName = repository?.fullName;
+    if (!pullRequest || !fullName) {
+      getLogger().debug('GitHub deployment: skipped reason=no_pull_request');
+      return;
+    }
     const [owner, name] = fullName.split('/');
-    const pullRequestNumber = pullRequest?.pullRequestNumber;
+    const pullRequestNumber = pullRequest.pullRequestNumber;
     const hasDeployment = githubDeploymentId !== null;
     const pullRequestResp = await getPullRequest(owner, name, pullRequestNumber, null);
     const lastCommit = pullRequestResp?.data?.head?.sha;
@@ -92,7 +98,11 @@ export async function deleteGithubDeploymentAndEnvironment(deploy: Deploy) {
 }
 
 async function markDeploymentInactive(deploy: Deploy) {
-  const repository = deploy.build.pullRequest.repository;
+  const repository = deploy.build?.pullRequest?.repository;
+  if (!repository) {
+    getLogger().debug('GitHub deployment: inactive-mark skipped reason=no_pull_request');
+    return;
+  }
   try {
     await cacheRequest(`POST /repos/${repository.fullName}/deployments/${deploy.githubDeploymentId}/statuses`, {
       data: {
@@ -115,6 +125,7 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
   const repository = pullRequest?.repository;
   const fullName = repository?.fullName;
   try {
+    if (!fullName) throw new Error('GitHub deployment requires a pull request repository');
     const resp = await cacheRequest(`POST /repos/${fullName}/deployments`, {
       data: {
         ref,
@@ -138,9 +149,12 @@ export async function createGithubDeployment(deploy: Deploy, ref: string) {
 export async function deleteGithubDeployment(deploy: Deploy) {
   getLogger().debug('GitHub deployment: action=delete');
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
-  const resp = await cacheRequest(
-    `DELETE /repos/${deploy.build.pullRequest.repository.fullName}/deployments/${deploy.githubDeploymentId}`
-  );
+  const repository = deploy.build?.pullRequest?.repository;
+  if (!repository) {
+    getLogger().debug('GitHub deployment: delete skipped reason=no_pull_request');
+    return null;
+  }
+  const resp = await cacheRequest(`DELETE /repos/${repository.fullName}/deployments/${deploy.githubDeploymentId}`);
 
   await deploy.$query().patch({ githubDeploymentId: null });
 
@@ -149,7 +163,11 @@ export async function deleteGithubDeployment(deploy: Deploy) {
 
 export async function deleteGithubEnvironment(deploy: Deploy) {
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
-  const repository = deploy.build.pullRequest.repository;
+  const repository = deploy.build?.pullRequest?.repository;
+  if (!repository) {
+    getLogger().debug('GitHub environment: delete skipped reason=no_pull_request');
+    return;
+  }
   const environmentName = deploy.uuid;
   try {
     await cacheRequest(`DELETE /repos/${repository.fullName}/environments/${environmentName}`);
@@ -171,14 +189,28 @@ export async function deleteGithubEnvironment(deploy: Deploy) {
 
 export async function updateDeploymentStatus(deploy: Deploy, deploymentId: number) {
   getLogger().debug(`GitHub deployment status: action=update deploymentId=${deploymentId}`);
-  const repository = deploy.build.pullRequest.repository;
-  let buildStatus = determineStatus(deploy);
+  const repository = deploy.build?.pullRequest?.repository;
+  if (!repository) {
+    getLogger().debug('GitHub deployment status: skipped reason=no_pull_request');
+    return null;
+  }
+  const buildStatus = determineStatus(deploy);
+  let publicHref: string | null = null;
+  if (buildStatus === githubDeploymentStatuses.deployed && deploy.publicUrl) {
+    let domainDefaults: Parameters<typeof toPublicHref>[1];
+    try {
+      domainDefaults = (await GlobalConfigService.getInstance().getAllConfigs())?.domainDefaults;
+    } catch (error) {
+      getLogger().warn({ error }, 'GitHub deployment link: config lookup failed using=https');
+    }
+    publicHref = toPublicHref(deploy.publicUrl, domainDefaults);
+  }
   const resp = await cacheRequest(`POST /repos/${repository.fullName}/deployments/${deploymentId}/statuses`, {
     data: {
       state: buildStatus,
       environment: deploy.uuid,
       description: deploy.build.statusMessage,
-      ...(buildStatus === githubDeploymentStatuses.deployed && { environment_url: `https://${deploy.publicUrl}` }),
+      ...(publicHref && { environment_url: publicHref }),
     },
   });
   return resp;
@@ -188,8 +220,11 @@ export async function getDeployment(deploy: Deploy) {
   if (!deploy?.build) await deploy.$fetchGraph('build.pullRequest.repository');
 
   const githubDeploymentId = deploy?.githubDeploymentId;
-  const pullRequest = deploy.build.pullRequest;
-  const repository = pullRequest.repository;
+  const repository = deploy.build?.pullRequest?.repository;
+  if (!repository) {
+    getLogger().debug('GitHub deployment: lookup skipped reason=no_pull_request');
+    return null;
+  }
 
   const [owner, repo] = repository.fullName.split('/');
   const resp = await cacheRequest(`GET /repos/${repository.fullName}/deployments/${githubDeploymentId}`, {

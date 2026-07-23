@@ -244,8 +244,21 @@ export function createBannerVars(options: BannerOptions[], deploy: Deploy): stri
 
 export function ingressBannerSnippet(deploy: Deploy) {
   const uuid = deploy?.build?.uuid;
-  const { pullRequest } = deploy.build;
-  const { pullRequestNumber } = pullRequest;
+  const pullRequest = deploy.build?.pullRequest ?? null;
+
+  const prBannerItems = pullRequest
+    ? [
+        {
+          label: 'PR Owner',
+          value: pullRequest.githubLogin || '',
+        },
+        {
+          label: 'PR',
+          value: `${pullRequest.pullRequestNumber}` || '',
+          url: `https://github.com/${pullRequest.fullName}/pull/${pullRequest.pullRequestNumber}`,
+        },
+      ]
+    : [];
 
   const bannerVars: string = createBannerVars(
     [
@@ -254,15 +267,7 @@ export function ingressBannerSnippet(deploy: Deploy) {
         value: uuid || '',
         url: `${LIFECYCLE_UI_URL}/environments/${uuid}`,
       },
-      {
-        label: 'PR Owner',
-        value: deploy.build.pullRequest.githubLogin || '',
-      },
-      {
-        label: 'PR',
-        value: `${pullRequestNumber}` || '',
-        url: `https://github.com/${pullRequest.fullName}/pull/${pullRequestNumber}`,
-      },
+      ...prBannerItems,
       {
         label: 'sha',
         value: deploy.sha || '',

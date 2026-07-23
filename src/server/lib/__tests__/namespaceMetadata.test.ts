@@ -81,7 +81,46 @@ jest.mock('server/lib/shell', () => {
   };
 });
 
-import { createOrUpdateNamespace } from '../kubernetes';
+import { createOrUpdateNamespace, deleteBuild as deleteKubernetesBuild, deleteNamespace } from '../kubernetes';
+
+describe('deleteBuild cleanup contract', () => {
+  beforeEach(() => {
+    mockShellPromise.mockReset();
+  });
+
+  it('treats resources in an already-absent namespace as cleaned up', async () => {
+    mockShellPromise.mockRejectedValueOnce(new Error('Error from server (NotFound): namespaces "env-gone" not found'));
+
+    await expect(deleteKubernetesBuild({ uuid: 'gone', namespace: 'env-gone' } as any)).resolves.toBeUndefined();
+    expect(mockShellPromise).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates other resource-deletion failures so teardown can retry', async () => {
+    const failure = new Error('unable to connect to the server');
+    mockShellPromise.mockRejectedValueOnce(failure);
+
+    await expect(deleteKubernetesBuild({ uuid: 'retry', namespace: 'env-retry' } as any)).rejects.toBe(failure);
+  });
+});
+
+describe('deleteNamespace cleanup contract', () => {
+  beforeEach(() => {
+    mockShellPromise.mockReset();
+  });
+
+  it('treats an already-absent namespace as a successful idempotent cleanup', async () => {
+    mockShellPromise.mockRejectedValueOnce(new Error('Error from server (NotFound): namespaces "env-gone" not found'));
+
+    await expect(deleteNamespace('env-gone')).resolves.toBeUndefined();
+  });
+
+  it('propagates other kubectl failures so the teardown can retry', async () => {
+    const failure = new Error('unable to connect to the server');
+    mockShellPromise.mockRejectedValueOnce(failure);
+
+    await expect(deleteNamespace('env-retry')).rejects.toBe(failure);
+  });
+});
 
 describe('createOrUpdateNamespace metadata', () => {
   beforeEach(() => {

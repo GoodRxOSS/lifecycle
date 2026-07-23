@@ -17,19 +17,24 @@
 import { NextResponse } from 'next/server';
 import type { Middleware } from './chain';
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) => o.trim()) ?? [];
+const allowedOrigins =
+  process.env.ALLOWED_ORIGINS?.split(',')
+    .map((o) => o.trim())
+    .filter(Boolean) ?? [];
 const allowedHeaders = ['Content-Type', 'Authorization', 'Last-Event-ID'];
 
 export const corsMiddleware: Middleware = async (request, next) => {
   const origin = request.headers.get('origin');
-  const isAllowedOrigin = origin && allowedOrigins.includes(origin);
 
   const corsHeaders: Record<string, string> = {
-    'Access-Control-Allow-Origin': isAllowedOrigin ? origin : allowedOrigins[0],
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': allowedHeaders.join(', '),
   };
+  // Disallowed or missing origin: omit the header (the spec-correct deny) rather than emit a bogus value.
+  if (origin && allowedOrigins.includes(origin)) {
+    corsHeaders['Access-Control-Allow-Origin'] = origin;
+  }
 
   if (request.method === 'OPTIONS') {
     return new NextResponse(null, { status: 204, headers: corsHeaders });

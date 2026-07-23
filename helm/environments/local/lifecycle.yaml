@@ -44,6 +44,9 @@ global:
       value: 'lifecycle-logs'
     - name: OBJECT_STORE_USE_SSL
       value: 'false'
+    # Tilt's buildkit service (sysops/tilt/buildkit.yaml); the code fallback expects a chart-named lifecycle-buildkit.
+    - name: BUILDKIT_HOST
+      value: 'tcp://buildkit.lifecycle-app.svc.cluster.local:1234'
     - name: ENABLE_AUTH
       value: 'true'
     - name: APP_HOST
@@ -110,6 +113,9 @@ components:
           value: development
         - name: NODE_OPTIONS
           value: '--max-old-space-size=6144'
+        # The lifecycle-ui dev server browses the API cross-origin; without this every :3000 call fails CORS preflight.
+        - name: ALLOWED_ORIGINS
+          value: 'http://localhost:3000'
         - name: LIFECYCLE_MODE
           value: web
         - name: PORT

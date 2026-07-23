@@ -32,10 +32,12 @@ export class LogStreamingService {
     uuid: string,
     jobName: string,
     serviceName?: string, // Optional for webhooks
-    explicitType?: LogType
+    explicitType?: LogType,
+    expectedBuildId?: number
   ): Promise<LogStreamResponse> {
     // 1. Validate Build Existence
-    const build = await this.buildService.db.models.Build.query().findOne({ uuid });
+    const identity = expectedBuildId == null ? { uuid } : { uuid, id: expectedBuildId };
+    const build = await this.buildService.db.models.Build.query().findOne(identity).whereNull('deletedAt');
     if (!build) {
       throw new Error('Build not found');
     }

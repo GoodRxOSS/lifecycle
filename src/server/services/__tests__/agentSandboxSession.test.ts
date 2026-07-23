@@ -57,7 +57,8 @@ import AgentSandboxSessionService from '../agentSandboxSession';
 import AgentSessionService from '../agentSession';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { fetchLifecycleConfig, getDeployingServicesByName } from 'server/models/yaml';
-import { BuildStatus, BuildKind } from 'shared/constants';
+import { Build, Repository } from 'server/models';
+import { BuildStatus, BuildKind, DeployStatus, DeployTypes } from 'shared/constants';
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -74,9 +75,376 @@ function createDeferred<T>() {
   };
 }
 
+function mockBaseBuildLoad(baseBuild: unknown) {
+  const withGraphFetched = jest.fn().mockResolvedValue(baseBuild);
+  const whereNull = jest.fn(() => ({ withGraphFetched }));
+  const findOne = jest.fn(() => ({ whereNull }));
+  jest.spyOn(Build, 'query').mockReturnValueOnce({ findOne } as any);
+
+  return { findOne, whereNull, withGraphFetched };
+}
+
+function mockLiveRepositoryLookup(repository: unknown) {
+  const whereNull = jest.fn().mockResolvedValue(repository);
+  const findOne = jest.fn(() => ({ whereNull }));
+  jest.spyOn(Repository, 'query').mockReturnValueOnce({ findOne } as any);
+
+  return { findOne, whereNull };
+}
+
+function createSandboxableLifecycleConfig() {
+  return {
+    environment: {
+      defaultServices: [{ name: 'frontend' }],
+      optionalServices: [],
+    },
+  };
+}
+
+function createSandboxableYamlService() {
+  return {
+    name: 'frontend',
+    dev: { image: 'node:20', command: 'pnpm dev' },
+    github: {
+      docker: {
+        app: {
+          dockerfilePath: 'Dockerfile',
+        },
+      },
+    },
+  };
+}
+
+function createApiBaseBuild(configSha = '0123456789abcdef0123456789abcdef01234567') {
+  return {
+    id: 100,
+    uuid: 'api-base-build',
+    kind: BuildKind.ENVIRONMENT,
+    status: BuildStatus.DEPLOYED,
+    triggerType: 'api',
+    githubRepositoryId: 84,
+    branchName: 'feature/api-environment',
+    configSha,
+    pullRequest: null,
+    deploys: [
+      {
+        id: 10,
+        uuid: 'frontend-api-base-build',
+        active: true,
+        status: DeployStatus.READY,
+        branchName: configSha,
+        sha: configSha,
+        githubRepositoryId: 84,
+        repository: { fullName: 'renamed/example-repo', githubRepositoryId: 84 },
+        deployable: { name: 'frontend', type: DeployTypes.GITHUB },
+      },
+    ],
+  } as any;
+}
+
 describe('agentSandboxSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (AgentSessionService.createSession as jest.Mock).mockReset();
+    (fetchLifecycleConfig as jest.Mock).mockReset();
+    (getDeployingServicesByName as jest.Mock).mockReset();
+  });
+
+  it('lists sandbox candidates for a live API-created base using its source branch and pinned config', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const configSha = '0123456789abcdef0123456789abcdef01234567';
+    const baseBuild = createApiBaseBuild(configSha);
+    const buildQuery = mockBaseBuildLoad(baseBuild);
+    const repositoryQuery = mockLiveRepositoryLookup({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+      deletedAt: null,
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue(createSandboxableLifecycleConfig());
+    (getDeployingServicesByName as jest.Mock).mockReturnValue(createSandboxableYamlService());
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).resolves.toEqual([
+      {
+        name: 'frontend',
+        type: DeployTypes.GITHUB,
+        repo: 'example-org/api-repo',
+        branch: 'feature/api-environment',
+      },
+    ]);
+
+    expect(buildQuery.findOne).toHaveBeenCalledWith({ uuid: baseBuild.uuid, kind: BuildKind.ENVIRONMENT });
+    expect(buildQuery.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(repositoryQuery.findOne).toHaveBeenCalledWith({ githubRepositoryId: 84 });
+    expect(repositoryQuery.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(fetchLifecycleConfig).toHaveBeenCalledWith('example-org/api-repo', configSha);
+  });
+
+  it('launches from an API-created base without treating its pinned config ref as the checkout branch', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const configSha = '0123456789abcdef0123456789abcdef01234567';
+    const baseBuild = createApiBaseBuild(configSha);
+    mockBaseBuildLoad(baseBuild);
+    mockLiveRepositoryLookup({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+      deletedAt: null,
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue(createSandboxableLifecycleConfig());
+    (getDeployingServicesByName as jest.Mock).mockReturnValue(createSandboxableYamlService());
+
+    const sandboxBuild = {
+      id: 200,
+      uuid: 'sandbox-build-1',
+      namespace: 'sandbox-namespace',
+      pullRequest: null,
+      $query: jest.fn().mockReturnValue({ patch: jest.fn().mockResolvedValue(undefined) }),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const sandboxDeploy = { id: 99, uuid: 'frontend-sandbox-build-1' } as any;
+    jest.spyOn(service as any, 'createSandboxBuild').mockResolvedValue({
+      build: sandboxBuild,
+      sandboxDeploysByBaseDeployId: new Map([[10, sandboxDeploy]]),
+    });
+    jest.spyOn(BuildEnvironmentVariables.prototype, 'resolve').mockResolvedValue(undefined);
+    (service as any).buildService.updateStatusAndComment = jest.fn().mockResolvedValue(undefined);
+    (service as any).buildService.generateAndApplyManifests = jest.fn().mockResolvedValue(true);
+    (service as any).buildService.deleteBuild = jest.fn().mockResolvedValue(undefined);
+    (AgentSessionService.createSession as jest.Mock).mockResolvedValue({ uuid: 'session-1' });
+
+    await expect(
+      service.launch({
+        userId: 'user-1',
+        baseBuildUuid: baseBuild.uuid,
+        services: ['frontend'],
+        readiness: { timeoutMs: 60000, pollMs: 2000 },
+        resources: {
+          workspace: { requests: {}, limits: {} },
+          editor: { requests: {}, limits: {} },
+          workspaceGateway: { requests: {}, limits: {} },
+        },
+      })
+    ).resolves.toEqual(expect.objectContaining({ status: 'created', buildUuid: sandboxBuild.uuid }));
+
+    expect((service as any).createSandboxBuild).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environmentSource: {
+          repo: 'example-org/api-repo',
+          branch: 'feature/api-environment',
+          configRef: configSha,
+          githubRepositoryId: 84,
+        },
+      })
+    );
+    expect(AgentSessionService.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prNumber: undefined,
+        services: [
+          expect.objectContaining({
+            repo: 'example-org/api-repo',
+            branch: 'feature/api-environment',
+            revision: configSha,
+          }),
+        ],
+      })
+    );
+  });
+
+  it('preserves pull-request repository and branch source resolution', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = {
+      id: 101,
+      uuid: 'pr-base-build',
+      kind: BuildKind.ENVIRONMENT,
+      status: BuildStatus.DEPLOYED,
+      pullRequest: {
+        fullName: 'example-org/pr-repo',
+        branchName: 'feature/pr-environment',
+        pullRequestNumber: 42,
+        repository: { fullName: 'example-org/pr-repo', githubRepositoryId: 42 },
+      },
+      deploys: [
+        {
+          id: 11,
+          uuid: 'frontend-pr-base-build',
+          active: true,
+          status: DeployStatus.READY,
+          branchName: 'feature/pr-environment',
+          sha: 'pr-head-sha',
+          githubRepositoryId: 42,
+          repository: { fullName: 'example-org/pr-repo', githubRepositoryId: 42 },
+          deployable: { name: 'frontend', type: DeployTypes.GITHUB },
+        },
+      ],
+    } as any;
+    const buildQuery = mockBaseBuildLoad(baseBuild);
+    const repositoryQuery = jest.spyOn(Repository, 'query').mockImplementation(() => {
+      throw new Error('PR source resolution must not query the repository table');
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue(createSandboxableLifecycleConfig());
+    (getDeployingServicesByName as jest.Mock).mockReturnValue(createSandboxableYamlService());
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).resolves.toEqual([
+      {
+        name: 'frontend',
+        type: DeployTypes.GITHUB,
+        repo: 'example-org/pr-repo',
+        branch: 'feature/pr-environment',
+      },
+    ]);
+
+    expect(buildQuery.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(repositoryQuery).not.toHaveBeenCalled();
+    expect(fetchLifecycleConfig).toHaveBeenCalledWith('example-org/pr-repo', 'feature/pr-environment');
+  });
+
+  it('fails closed when an API-created base repository is no longer live', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = createApiBaseBuild();
+    mockBaseBuildLoad(baseBuild);
+    mockLiveRepositoryLookup(undefined);
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).rejects.toThrow(
+      'Base environment build is missing source repository/branch'
+    );
+    expect(fetchLifecycleConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects a live environment that is not deployed before resolving its source', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = {
+      ...createApiBaseBuild(),
+      status: BuildStatus.DEPLOYING,
+    };
+    mockBaseBuildLoad(baseBuild);
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).rejects.toThrow(
+      'The environment must be deployed before you can start a sandbox'
+    );
+    expect(fetchLifecycleConfig).not.toHaveBeenCalled();
+  });
+
+  it('does not list a sandboxable service whose active base deploy is not ready', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = createApiBaseBuild();
+    baseBuild.deploys[0].status = DeployStatus.DEPLOY_FAILED;
+    mockBaseBuildLoad(baseBuild);
+    mockLiveRepositoryLookup({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+      deletedAt: null,
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue(createSandboxableLifecycleConfig());
+    (getDeployingServicesByName as jest.Mock).mockReturnValue(createSandboxableYamlService());
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).rejects.toThrow(
+      'This environment has no ready services that can start a sandbox'
+    );
+  });
+
+  it('lists only active ready services when other sandboxable deploys are unavailable', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = createApiBaseBuild();
+    baseBuild.deploys.push(
+      {
+        ...baseBuild.deploys[0],
+        id: 11,
+        uuid: 'worker-api-base-build',
+        status: DeployStatus.DEPLOY_FAILED,
+        deployable: { name: 'worker', type: DeployTypes.GITHUB },
+      },
+      {
+        ...baseBuild.deploys[0],
+        id: 12,
+        uuid: 'jobs-api-base-build',
+        active: false,
+        deployable: { name: 'jobs', type: DeployTypes.GITHUB },
+      }
+    );
+    mockBaseBuildLoad(baseBuild);
+    mockLiveRepositoryLookup({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+      deletedAt: null,
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue({
+      environment: {
+        defaultServices: [{ name: 'frontend' }, { name: 'worker' }, { name: 'jobs' }],
+        optionalServices: [],
+      },
+    });
+    (getDeployingServicesByName as jest.Mock).mockImplementation((_config, name) => ({
+      ...createSandboxableYamlService(),
+      name,
+    }));
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: baseBuild.uuid })).resolves.toEqual([
+      {
+        name: 'frontend',
+        type: DeployTypes.GITHUB,
+        repo: 'example-org/api-repo',
+        branch: 'feature/api-environment',
+      },
+    ]);
+  });
+
+  it('rejects an explicitly requested sandbox service whose active base deploy is not ready', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = createApiBaseBuild();
+    baseBuild.deploys[0].status = DeployStatus.DEPLOY_FAILED;
+    mockBaseBuildLoad(baseBuild);
+    mockLiveRepositoryLookup({
+      fullName: 'example-org/api-repo',
+      githubRepositoryId: 84,
+      deletedAt: null,
+    });
+    (fetchLifecycleConfig as jest.Mock).mockResolvedValue(createSandboxableLifecycleConfig());
+    (getDeployingServicesByName as jest.Mock).mockReturnValue(createSandboxableYamlService());
+
+    await expect(
+      service.launch({
+        userId: 'user-1',
+        baseBuildUuid: baseBuild.uuid,
+        services: ['frontend'],
+        readiness: { timeoutMs: 60000, pollMs: 2000 },
+        resources: {
+          workspace: { requests: {}, limits: {} },
+          editor: { requests: {}, limits: {} },
+          workspaceGateway: { requests: {}, limits: {} },
+        },
+      })
+    ).rejects.toThrow('Service frontend must be ready before you can start a sandbox');
+  });
+
+  it('treats a tombstoned base build as not found', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const buildQuery = mockBaseBuildLoad(undefined);
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: 'deleted-base-build' })).rejects.toThrow(
+      'Base build not found'
+    );
+    expect(buildQuery.findOne).toHaveBeenCalledWith({
+      uuid: 'deleted-base-build',
+      kind: BuildKind.ENVIRONMENT,
+    });
+    expect(buildQuery.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(fetchLifecycleConfig).not.toHaveBeenCalled();
+  });
+
+  it('treats a non-environment base build as not found', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const buildQuery = mockBaseBuildLoad({
+      uuid: 'sandbox-base-build',
+      kind: BuildKind.SANDBOX,
+    });
+
+    await expect(service.getServiceCandidates({ baseBuildUuid: 'sandbox-base-build' })).rejects.toThrow(
+      'Base build not found'
+    );
+    expect(buildQuery.findOne).toHaveBeenCalledWith({
+      uuid: 'sandbox-base-build',
+      kind: BuildKind.ENVIRONMENT,
+    });
+    expect(fetchLifecycleConfig).not.toHaveBeenCalled();
   });
 
   it('keeps repository identity when resolving duplicate dependency names', async () => {
@@ -87,18 +455,21 @@ describe('agentSandboxSession', () => {
         {
           id: 1,
           active: true,
+          status: DeployStatus.READY,
           deployable: { name: 'frontend' },
           repository: { fullName: 'org/frontend' },
         },
         {
           id: 2,
           active: true,
+          status: DeployStatus.READY,
           deployable: { name: 'shared-api' },
           repository: { fullName: 'org/api-a' },
         },
         {
           id: 3,
           active: true,
+          status: DeployStatus.READY,
           deployable: { name: 'shared-api' },
           repository: { fullName: 'org/api-b' },
         },
@@ -139,6 +510,7 @@ describe('agentSandboxSession', () => {
         {
           id: 1,
           active: true,
+          status: DeployStatus.READY,
           branchName: 'main',
           deployable: { name: 'frontend' },
           repository: { fullName: 'org/frontend' },
@@ -146,6 +518,7 @@ describe('agentSandboxSession', () => {
         {
           id: 2,
           active: true,
+          status: DeployStatus.READY,
           branchName: 'main',
           deployable: { name: 'shared-api' },
           repository: { fullName: 'org/api' },
@@ -153,6 +526,7 @@ describe('agentSandboxSession', () => {
         {
           id: 3,
           active: true,
+          status: DeployStatus.READY,
           branchName: 'release',
           deployable: { name: 'shared-api' },
           repository: { fullName: 'org/api' },
@@ -184,6 +558,50 @@ describe('agentSandboxSession', () => {
 
     expect([...includedDeployIds]).toEqual(expect.arrayContaining([1, 3]));
     expect(includedDeployIds.has(2)).toBe(false);
+  });
+
+  it('rejects a selected dependency closure when an active required deploy is not ready', async () => {
+    const service = new AgentSandboxSessionService({} as any, {} as any, {} as any, {} as any);
+    const baseBuild = {
+      uuid: 'base-build',
+      deploys: [
+        {
+          id: 1,
+          active: true,
+          status: DeployStatus.READY,
+          branchName: 'main',
+          deployable: { name: 'frontend' },
+          repository: { fullName: 'org/frontend' },
+        },
+        {
+          id: 2,
+          active: true,
+          status: DeployStatus.DEPLOY_FAILED,
+          branchName: 'main',
+          deployable: { name: 'api' },
+          repository: { fullName: 'org/api' },
+        },
+      ],
+    } as any;
+    const selectedService = {
+      name: 'frontend',
+      devConfig: { image: 'node:20', command: 'pnpm dev' },
+      baseDeploy: baseBuild.deploys[0],
+      serviceRepo: 'org/frontend',
+      serviceBranch: 'main',
+      yamlService: {
+        name: 'frontend',
+        requires: [{ name: 'api', repository: 'org/api' }],
+      },
+    } as any;
+
+    await expect(
+      (service as any).resolveDependencyClosure(baseBuild, [selectedService], {
+        repo: 'env/static-environments',
+        branch: 'main',
+      })
+    ).rejects.toThrow('Service api must be ready before you can start a sandbox');
+    expect(fetchLifecycleConfig).not.toHaveBeenCalled();
   });
 
   it('fails closed when multiple top-level sandbox candidates share the same name', () => {
@@ -360,6 +778,8 @@ describe('agentSandboxSession', () => {
       devConfig: {},
       baseDeploy: {
         id: 10,
+        active: true,
+        status: DeployStatus.READY,
         branchName: 'main',
         sha: 'abc123',
       },
@@ -383,6 +803,7 @@ describe('agentSandboxSession', () => {
         environment: {},
       },
       candidates: [selectedService],
+      resolvedCandidates: [selectedService],
     });
     jest.spyOn(service as any, 'createSandboxBuild').mockResolvedValue({
       build: sandboxBuild,
@@ -457,6 +878,8 @@ describe('agentSandboxSession', () => {
       },
       baseDeploy: {
         id: 10,
+        active: true,
+        status: DeployStatus.READY,
         branchName: 'main',
         sha: 'abc123',
       },
@@ -493,6 +916,7 @@ describe('agentSandboxSession', () => {
         },
       },
       candidates: [selectedService],
+      resolvedCandidates: [selectedService],
     });
     jest.spyOn(service as any, 'createSandboxBuild').mockResolvedValue({
       build: sandboxBuild,

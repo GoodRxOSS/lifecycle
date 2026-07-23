@@ -112,5 +112,5 @@ const putHandler = async (req: NextRequest) => {
 };
 
 // Admin only: carries org-wide runtime settings, including workspace-backend connection details.
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });

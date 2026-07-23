@@ -79,4 +79,4 @@ const postHandler = async (req: NextRequest, context: RouteContext) => {
 };
 
 // Admin only: probes outbound connectivity with stored credentials.
-export const POST = createApiHandler(postHandler, { roles: ['admin'] });
+export const POST = createApiHandler(postHandler, { auth: 'session', roles: ['admin'] });

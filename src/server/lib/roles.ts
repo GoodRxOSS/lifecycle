@@ -20,7 +20,7 @@ import { NextResponse } from 'next/server';
 import type { ErrorResponse } from './response';
 import { getUser } from './get-user';
 
-const LIFECYCLE_ROLES = ['user', 'admin'] as const;
+export const LIFECYCLE_ROLES = ['user', 'admin'] as const;
 
 export type LifecycleRole = (typeof LIFECYCLE_ROLES)[number];
 

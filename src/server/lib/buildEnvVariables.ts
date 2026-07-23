@@ -31,13 +31,19 @@ export class BuildEnvironmentVariables extends EnvironmentVariables {
    * @param githubRepositoryId Optional filter to only resolve env for deploys from a specific repo
    * @returns Map of env variables
    */
-  public async resolve(build: Build, githubRepositoryId?: number): Promise<Record<string, any>> {
+  public async resolve(
+    build: Build,
+    githubRepositoryId?: number,
+    sourceBranch?: string | null
+  ): Promise<Record<string, any>> {
     if (build != null) {
       await build?.$fetchGraph('[services, deploys.[deployable]]');
       const allDeploys = build?.deploys;
-      const deploys = githubRepositoryId
-        ? allDeploys.filter((d) => d.githubRepositoryId === githubRepositoryId)
-        : allDeploys;
+      const deploys = allDeploys.filter(
+        (deploy) =>
+          (!githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId) &&
+          (!githubRepositoryId || !sourceBranch || deploy.branchName === sourceBranch)
+      );
       const availableEnv = this.cleanup(await this.availableEnvironmentVariablesForBuild(build));
 
       const useDeafulttUUID =

@@ -73,7 +73,13 @@ export default class DeployService extends BaseService {
    * @param build the build these deploys will be associated with
    * @param githubRepositoryId optional filter to only update SHA for deploys from this repo
    */
-  async findOrCreateDeploys(_environment: Environment, build: Build, githubRepositoryId?: number): Promise<Deploy[]> {
+  async findOrCreateDeploys(
+    _environment: Environment,
+    build: Build,
+    githubRepositoryId?: number,
+    sourceRef?: string | null,
+    sourceBranch?: string | null
+  ): Promise<Deploy[]> {
     await build?.$fetchGraph('[deployables.[repository]]');
 
     const { deployables } = build;
@@ -92,7 +98,10 @@ export default class DeployService extends BaseService {
         const uuid = `${deployable.name}-${build?.uuid}`;
         const patchFields: Objection.PartialModelObject<Deploy> = {};
         const deployableRepositoryId = Number(deployable.repositoryId);
-        const isTargetRepo = !githubRepositoryId || deployableRepositoryId === githubRepositoryId;
+        const effectiveBranch = deployable.commentBranchName ?? deployable.branchName;
+        const isTargetSource =
+          !githubRepositoryId ||
+          (deployableRepositoryId === githubRepositoryId && (!sourceBranch || effectiveBranch === sourceBranch));
 
         let deploy = existingDeployMap.get(deployable.id) ?? null;
         if (!deploy) {
@@ -109,14 +118,13 @@ export default class DeployService extends BaseService {
         }
 
         if (deploy != null) {
-          if (!isTargetRepo) {
-            return;
-          }
+          // A missing row is always backfilled below, but existing off-target rows stay untouched.
+          if (!isTargetSource) return;
           patchFields.deployableId = deployable?.id ?? null;
           patchFields.publicUrl = this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable);
           patchFields.internalHostname = uuid;
           patchFields.uuid = uuid;
-          patchFields.branchName = deployable.commentBranchName ?? deployable.branchName;
+          patchFields.branchName = effectiveBranch;
           patchFields.tag = deployable.defaultTag;
         } else {
           deploy = await this.db.models.Deploy.create({
@@ -128,7 +136,7 @@ export default class DeployService extends BaseService {
             active: deployable.active,
           });
 
-          patchFields.branchName = deployable.branchName;
+          patchFields.branchName = effectiveBranch;
           patchFields.tag = deployable.defaultTag;
           patchFields.publicUrl = this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable);
 
@@ -136,9 +144,17 @@ export default class DeployService extends BaseService {
           deploy.$setRelated('build', build);
         }
 
-        if (isTargetRepo && [DeployTypes.HELM, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(deployable.type)) {
+        if (isTargetSource && [DeployTypes.HELM, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(deployable.type)) {
           try {
-            const sha = await getShaForDeploy(deploy);
+            const sha =
+              this.getApiBuildSourceRef(
+                build,
+                deployableRepositoryId,
+                effectiveBranch,
+                sourceRef,
+                githubRepositoryId,
+                sourceBranch
+              ) ?? (await getShaForDeploy(deploy));
             patchFields.sha = sha;
           } catch (error) {
             getLogger().debug({ error }, 'Deploy: SHA fetch failed continuing=true');
@@ -295,7 +311,12 @@ export default class DeployService extends BaseService {
     });
   }
 
-  async deployCodefresh(deploy: Deploy): Promise<boolean> {
+  async deployCodefresh(
+    deploy: Deploy,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       let result: boolean = false;
 
@@ -312,7 +333,14 @@ export default class DeployService extends BaseService {
       const repo = source?.repository?.fullName;
 
       try {
-        const fullSha = await this.resolveSourceSha(repo, deploy.branchName);
+        const fullSha = await this.resolveSourceSha(
+          deploy,
+          repo,
+          deploy.branchName,
+          sourceRef,
+          sourceGithubRepositoryId,
+          sourceBranch
+        );
         const shortSha = fullSha.substring(0, 7);
         const envSha = hash(merge(deploy.env || {}, build.commentRuntimeEnv));
         const buildSha = `${shortSha}-${envSha}`;
@@ -337,7 +365,15 @@ export default class DeployService extends BaseService {
               deployOutput: null,
             });
 
-            codefreshBuildId = await cli.codefreshDeploy(deploy, build, deployable).catch((error) => {
+            const pinnedSourceRef = this.getApiBuildSourceRef(
+              build,
+              deploy.githubRepositoryId,
+              deploy.branchName,
+              sourceRef,
+              sourceGithubRepositoryId,
+              sourceBranch
+            );
+            codefreshBuildId = await cli.codefreshDeploy(deploy, build, deployable, pinnedSourceRef).catch((error) => {
               getLogger().error({ error }, 'Codefresh: build id missing');
               return null;
             });
@@ -401,12 +437,17 @@ export default class DeployService extends BaseService {
     });
   }
 
-  async deployCLI(deploy: Deploy): Promise<boolean> {
+  async deployCLI(
+    deploy: Deploy,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ): Promise<boolean> {
     if (deploy.deployable != null) {
       if (deploy.deployable.type === DeployTypes.AURORA_RESTORE) {
         return this.deployAurora(deploy);
       } else if (deploy.deployable.type === DeployTypes.CODEFRESH) {
-        return this.deployCodefresh(deploy);
+        return this.deployCodefresh(deploy, sourceRef, sourceGithubRepositoryId, sourceBranch);
       }
     }
   }
@@ -415,7 +456,13 @@ export default class DeployService extends BaseService {
    * Builds an image for a given deploy
    * @param deploy the deploy to build an image for
    */
-  async buildImage(deploy: Deploy, _index: number): Promise<boolean> {
+  async buildImage(
+    deploy: Deploy,
+    _index: number,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       const runUUID = deploy.runUUID ?? nanoid();
       try {
@@ -429,7 +476,13 @@ export default class DeployService extends BaseService {
 
         switch (deployable.type) {
           case DeployTypes.GITHUB:
-            return await this.buildImageForHelmAndGithub(deploy, runUUID);
+            return await this.buildImageForHelmAndGithub(
+              deploy,
+              runUUID,
+              sourceRef,
+              sourceGithubRepositoryId,
+              sourceBranch
+            );
           case DeployTypes.DOCKER:
             await this.patchAndUpdateActivityFeed(
               deploy,
@@ -446,7 +499,13 @@ export default class DeployService extends BaseService {
               const chartType = await determineChartType(deploy);
 
               if (chartType !== ChartType.PUBLIC) {
-                return await this.buildImageForHelmAndGithub(deploy, runUUID);
+                return await this.buildImageForHelmAndGithub(
+                  deploy,
+                  runUUID,
+                  sourceRef,
+                  sourceGithubRepositoryId,
+                  sourceBranch
+                );
               }
 
               let fullSha = null;
@@ -454,7 +513,14 @@ export default class DeployService extends BaseService {
               await deploy.$fetchGraph('deployable.repository');
               if (deploy.deployable?.repository) {
                 try {
-                  fullSha = await github.getShaForDeploy(deploy);
+                  fullSha = await this.resolveSourceSha(
+                    deploy,
+                    deploy.deployable.repository.fullName,
+                    deploy.branchName,
+                    sourceRef,
+                    sourceGithubRepositoryId,
+                    sourceBranch
+                  );
                 } catch (shaError) {
                   getLogger().debug(
                     { error: shaError },
@@ -462,7 +528,6 @@ export default class DeployService extends BaseService {
                   );
                 }
               }
-
               await this.patchAndUpdateActivityFeed(
                 deploy,
                 {
@@ -525,7 +590,61 @@ export default class DeployService extends BaseService {
     return false;
   }
 
-  private async resolveSourceSha(repo: string | null | undefined, branchName: string | null): Promise<string> {
+  private getApiBuildSourceRef(
+    build: Build | null | undefined,
+    deployGithubRepositoryId: number | null | undefined,
+    deployBranchName: string | null | undefined,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ): string | null {
+    if (
+      build?.triggerType === 'api' &&
+      sourceRef &&
+      sourceGithubRepositoryId != null &&
+      deployGithubRepositoryId != null &&
+      Number(sourceGithubRepositoryId) === Number(deployGithubRepositoryId) &&
+      sourceBranch != null &&
+      deployBranchName === sourceBranch
+    ) {
+      return sourceRef;
+    }
+    if (
+      build?.triggerType !== 'api' ||
+      build.githubRepositoryId == null ||
+      deployGithubRepositoryId == null ||
+      Number(build.githubRepositoryId) !== Number(deployGithubRepositoryId) ||
+      build.branchName == null ||
+      deployBranchName !== build.branchName
+    ) {
+      return null;
+    }
+    const sourceTargetsRoot =
+      sourceRef == null ||
+      (sourceGithubRepositoryId != null &&
+        Number(sourceGithubRepositoryId) === Number(build.githubRepositoryId) &&
+        sourceBranch === build.branchName);
+    return (sourceTargetsRoot ? sourceRef : null) ?? build.configSha ?? null;
+  }
+
+  private async resolveSourceSha(
+    deploy: Deploy,
+    repo: string | null | undefined,
+    branchName: string | null,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ): Promise<string> {
+    const pinned = this.getApiBuildSourceRef(
+      deploy.build,
+      deploy.githubRepositoryId,
+      deploy.branchName,
+      sourceRef,
+      sourceGithubRepositoryId,
+      sourceBranch
+    );
+    if (pinned) return pinned;
+
     const [owner, name] = repo?.split('/') || [];
 
     if (!owner || !name || !branchName) {
@@ -807,7 +926,13 @@ export default class DeployService extends BaseService {
     return deploy?.deployable?.acmARN ?? null;
   }
 
-  async buildImageForHelmAndGithub(deploy: Deploy, runUUID: string) {
+  async buildImageForHelmAndGithub(
+    deploy: Deploy,
+    runUUID: string,
+    sourceRef?: string | null,
+    sourceGithubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ) {
     const { build, deployable } = deploy;
     const uuid = build?.uuid;
     if (deploy.branchName === null) {
@@ -826,7 +951,14 @@ export default class DeployService extends BaseService {
       }
 
       const repo = repository?.fullName;
-      const fullSha = await this.resolveSourceSha(repo, deploy.branchName);
+      const fullSha = await this.resolveSourceSha(
+        deploy,
+        repo,
+        deploy.branchName,
+        sourceRef,
+        sourceGithubRepositoryId,
+        sourceBranch
+      );
 
       const repositoryName: string = deployable.repository.fullName;
       const branchName: string = deploy.branchName;

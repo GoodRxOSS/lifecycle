@@ -41,22 +41,20 @@ function parseRepoFullName(segments: string[]): string {
 /**
  * @openapi
  * /api/v2/ai/config/agent-session/repos/{owner}/{repo}:
- *   parameters:
- *     - in: path
- *       name: owner
- *       required: true
- *       schema:
- *         type: string
- *     - in: path
- *       name: repo
- *       required: true
- *       schema:
- *         type: string
  *   get:
  *     summary: Get repository Agent Session configuration override
  *     tags:
  *       - Agent Session Config
  *     operationId: getRepoAgentSessionConfig
+ *     parameters:
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       '200':
  *         description: Repository Agent Session configuration override
@@ -69,6 +67,15 @@ function parseRepoFullName(segments: string[]): string {
  *     tags:
  *       - Agent Session Config
  *     operationId: putRepoAgentSessionConfig
+ *     parameters:
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema: { type: string }
  *     requestBody:
  *       required: true
  *       content:
@@ -93,6 +100,15 @@ function parseRepoFullName(segments: string[]): string {
  *     tags:
  *       - Agent Session Config
  *     operationId: deleteRepoAgentSessionConfig
+ *     parameters:
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema: { type: string }
  *     responses:
  *       '204':
  *         description: Override deleted
@@ -157,7 +173,7 @@ const deleteHandler = async (req: NextRequest, { params }: { params: Promise<{ f
   return new NextResponse(null, { status: 204 });
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });
 // Repo-level control-plane mutations — admin only (matches runtime-config repo twin).
-export const PUT = createApiHandler(putHandler, { roles: ['admin'] });
-export const DELETE = createApiHandler(deleteHandler, { roles: ['admin'] });
+export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });
+export const DELETE = createApiHandler(deleteHandler, { auth: 'session', roles: ['admin'] });

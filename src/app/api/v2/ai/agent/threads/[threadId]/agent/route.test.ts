@@ -103,6 +103,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -122,7 +123,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
     expect(response.status).toBe(200);
     expect(mockGetThreadAgentState).toHaveBeenCalledWith({
       threadId: 'thread-1',
-      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
     });
     expect(body.data.groups.map((group: { id: string }) => group.id)).toEqual(['built_in', 'my_agents']);
   });
@@ -135,7 +136,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
     expect(response.status).toBe(200);
     expect(mockSwitchThreadAgent).toHaveBeenCalledWith({
       threadId: 'thread-1',
-      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
       agentId: 'custom.sample-agent',
     });
   });

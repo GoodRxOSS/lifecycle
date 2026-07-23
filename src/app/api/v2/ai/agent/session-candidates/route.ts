@@ -143,4 +143,4 @@ const getHandler = async (req: NextRequest) => {
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createApiHandler(getHandler, { auth: 'session' });

@@ -24,6 +24,7 @@ import { SecretProcessor } from 'server/services/secretProcessor';
 mockRedisClient();
 
 const mockCliDeploy = jest.fn();
+const mockCodefreshDeploy = jest.fn();
 const mockCodefreshBuildImage = jest.fn();
 const mockCodefreshGetLogs = jest.fn();
 const mockCodefreshGetRepositoryTag = jest.fn();
@@ -86,7 +87,7 @@ jest.mock('server/lib/github', () => ({
 
 jest.mock('server/lib/cli', () => ({
   cliDeploy: (...args: any[]) => mockCliDeploy(...args),
-  codefreshDeploy: jest.fn(),
+  codefreshDeploy: (...args: any[]) => mockCodefreshDeploy(...args),
   waitForCodefresh: jest.fn(),
 }));
 
@@ -116,6 +117,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCliDeploy.mockReset();
+    mockCodefreshDeploy.mockReset();
     mockCodefreshBuildImage.mockReset();
     mockCodefreshGetLogs.mockReset();
     mockCodefreshGetRepositoryTag.mockReset();
@@ -289,6 +291,273 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
 
       const result = await deployService['shouldTriggerGithubDeployment'](deploy as any);
       expect(result).toBe(false);
+    });
+  });
+
+  describe('API environment source pinning', () => {
+    test('updates only deploys matching the targeted repository and exact effective branch', async () => {
+      const mainPatch = jest.fn().mockResolvedValue(undefined);
+      const stablePatch = jest.fn().mockResolvedValue(undefined);
+      const mainDeploy = {
+        id: 1,
+        deployableId: 11,
+        githubRepositoryId: 42,
+        branchName: 'main',
+        $query: jest.fn(() => ({ patch: mainPatch })),
+      };
+      const stableDeploy = {
+        id: 2,
+        deployableId: 22,
+        githubRepositoryId: 42,
+        branchName: 'stable',
+        $query: jest.fn(() => ({ patch: stablePatch })),
+      };
+      const deployQuery: any = {
+        where: jest.fn().mockReturnThis(),
+        withGraphFetched: jest.fn().mockResolvedValue([mainDeploy, stableDeploy]),
+      };
+      mockDb.models.Deploy = {
+        query: jest.fn(() => deployQuery),
+        findOne: jest.fn(),
+      };
+      mockDb.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'service.example.test') };
+      const build = {
+        id: 7,
+        uuid: 'api-env-123456',
+        triggerType: 'api',
+        githubRepositoryId: 42,
+        branchName: 'main',
+        configSha: null,
+        deployables: [
+          {
+            id: 11,
+            name: 'root',
+            repositoryId: 42,
+            branchName: 'main',
+            commentBranchName: null,
+            type: DeployTypes.GITHUB,
+          },
+          {
+            id: 22,
+            name: 'same-repo-dependency',
+            repositoryId: 42,
+            branchName: 'stable',
+            commentBranchName: null,
+            type: DeployTypes.GITHUB,
+          },
+        ],
+        deploys: [mainDeploy, stableDeploy],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await deployService.findOrCreateDeploys({} as any, build as any, 42, 'main-push-sha', 'main');
+
+      expect(mainPatch).toHaveBeenCalledWith(expect.objectContaining({ branchName: 'main', sha: 'main-push-sha' }));
+      expect(stablePatch).not.toHaveBeenCalled();
+      expect(github.getShaForDeploy).not.toHaveBeenCalled();
+    });
+
+    test('backfills a missing deploy row outside the targeted source without resolving its SHA', async () => {
+      const createdPatch = jest.fn().mockResolvedValue(undefined);
+      const createdDeploy = {
+        id: 3,
+        deployableId: 33,
+        githubRepositoryId: 43,
+        $query: jest.fn(() => ({ patch: createdPatch })),
+        $setRelated: jest.fn(),
+      };
+      const deployQuery: any = {
+        where: jest.fn().mockReturnThis(),
+        withGraphFetched: jest.fn().mockResolvedValue([]),
+      };
+      mockDb.models.Deploy = {
+        query: jest.fn(() => deployQuery),
+        findOne: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(createdDeploy),
+      };
+      mockDb.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'service.example.test') };
+      const build = {
+        id: 7,
+        uuid: 'api-env-123456',
+        triggerType: 'api',
+        githubRepositoryId: 42,
+        branchName: 'main',
+        configSha: null,
+        deployables: [
+          {
+            id: 33,
+            name: 'other-repo-dependency',
+            repositoryId: 43,
+            branchName: 'stable',
+            commentBranchName: null,
+            active: true,
+            type: DeployTypes.GITHUB,
+          },
+        ],
+        deploys: [],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await deployService.findOrCreateDeploys({} as any, build as any, 42, 'main-push-sha', 'main');
+
+      expect(mockDb.models.Deploy.create).toHaveBeenCalledWith(
+        expect.objectContaining({ buildId: 7, deployableId: 33, githubRepositoryId: 43 })
+      );
+      expect(createdPatch).toHaveBeenCalledWith(expect.objectContaining({ branchName: 'stable' }));
+      expect(createdPatch.mock.calls[0][0]).not.toHaveProperty('sha');
+      expect(github.getShaForDeploy).not.toHaveBeenCalled();
+    });
+
+    test('uses the create-time SHA for the root repository without resolving the branch head', async () => {
+      const deploy = {
+        githubRepositoryId: 42,
+        branchName: 'main',
+        build: { triggerType: 'api', githubRepositoryId: 42, branchName: 'main', configSha: 'create-sha' },
+      };
+
+      await expect((deployService as any).resolveSourceSha(deploy, 'org/repo', 'main')).resolves.toBe('create-sha');
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+    });
+
+    test('uses the pushed source ref for an auto-track run', async () => {
+      const deploy = {
+        githubRepositoryId: 42,
+        branchName: 'main',
+        build: { triggerType: 'api', githubRepositoryId: 42, branchName: 'main', configSha: 'create-sha' },
+      };
+
+      await expect(
+        (deployService as any).resolveSourceSha(deploy, 'org/repo', 'main', 'push-sha', 42, 'main')
+      ).resolves.toBe('push-sha');
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+    });
+
+    test('passes the immutable API source ref to the actual Codefresh pipeline invocation', async () => {
+      mockCodefreshDeploy.mockResolvedValue('codefresh-build-1');
+      mockCodefreshGetLogs.mockResolvedValue('build logs');
+      jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deploy = {
+        id: 5,
+        uuid: 'codefresh-deploy',
+        githubRepositoryId: 42,
+        branchName: 'main',
+        sha: null,
+        env: {},
+        runUUID: 'old-run',
+        build: {
+          uuid: 'api-env-123456',
+          triggerType: 'api',
+          githubRepositoryId: 42,
+          branchName: 'main',
+          configSha: null,
+          commentRuntimeEnv: {},
+        },
+        deployable: {
+          name: 'pipeline',
+          type: DeployTypes.CODEFRESH,
+          repository: { fullName: 'org/repo' },
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({ patch: jest.fn().mockResolvedValue(undefined) })),
+      };
+
+      await deployService.deployCodefresh(deploy as any, 'push-sha', 42, 'main');
+
+      expect(mockCodefreshDeploy).toHaveBeenCalledWith(deploy, deploy.build, deploy.deployable, 'push-sha');
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+    });
+
+    test('keeps the PR Codefresh invocation on its branch when a push source ref is present', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('resolved-branch-sha');
+      mockCodefreshDeploy.mockResolvedValue('codefresh-build-2');
+      mockCodefreshGetLogs.mockResolvedValue('build logs');
+      jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const deploy = {
+        id: 6,
+        uuid: 'pr-codefresh-deploy',
+        githubRepositoryId: 42,
+        branchName: 'feature-branch',
+        sha: null,
+        env: {},
+        runUUID: 'old-run',
+        build: {
+          uuid: 'pr-env-123456',
+          triggerType: 'github_pr',
+          githubRepositoryId: 42,
+          configSha: null,
+          commentRuntimeEnv: {},
+        },
+        deployable: {
+          name: 'pipeline',
+          type: DeployTypes.CODEFRESH,
+          repository: { fullName: 'org/repo' },
+        },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn(() => ({ patch: jest.fn().mockResolvedValue(undefined) })),
+      };
+
+      await deployService.deployCodefresh(deploy as any, 'push-sha', 42);
+
+      expect(mockCodefreshDeploy).toHaveBeenCalledWith(deploy, deploy.build, deploy.deployable, null);
+      expect(github.getSHAForBranch).toHaveBeenCalledWith('feature-branch', 'org', 'repo');
+    });
+
+    test('keeps branch resolution for PR builds and dependency repositories', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('branch-sha');
+      const prDeploy = {
+        githubRepositoryId: 42,
+        build: { triggerType: 'github_pr', githubRepositoryId: 42, configSha: null },
+      };
+      const dependencyDeploy = {
+        githubRepositoryId: 99,
+        branchName: 'stable',
+        build: { triggerType: 'api', githubRepositoryId: 42, branchName: 'main', configSha: 'create-sha' },
+      };
+
+      await expect((deployService as any).resolveSourceSha(prDeploy, 'org/repo', 'main', 'push-sha')).resolves.toBe(
+        'branch-sha'
+      );
+      await expect(
+        (deployService as any).resolveSourceSha(dependencyDeploy, 'org/dependency', 'stable', 'push-sha')
+      ).resolves.toBe('branch-sha');
+      expect(github.getSHAForBranch).toHaveBeenNthCalledWith(1, 'main', 'org', 'repo');
+      expect(github.getSHAForBranch).toHaveBeenNthCalledWith(2, 'stable', 'org', 'dependency');
+    });
+
+    test('pins the pushed dependency SHA only for an API dependency-tracking run', async () => {
+      const dependencyDeploy = {
+        githubRepositoryId: 99,
+        branchName: 'main',
+        build: { triggerType: 'api', githubRepositoryId: 42, branchName: 'main', configSha: null },
+      };
+
+      await expect(
+        (deployService as any).resolveSourceSha(
+          dependencyDeploy,
+          'org/dependency',
+          'main',
+          'dependency-sha',
+          99,
+          'main'
+        )
+      ).resolves.toBe('dependency-sha');
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+    });
+
+    test('does not pin same-repository services configured for another branch', async () => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('stable-head-sha');
+      const dependencyDeploy = {
+        githubRepositoryId: 42,
+        branchName: 'stable',
+        build: { triggerType: 'api', githubRepositoryId: 42, branchName: 'main', configSha: 'root-create-sha' },
+      };
+
+      await expect(
+        (deployService as any).resolveSourceSha(dependencyDeploy, 'org/repo', 'stable', 'root-push-sha', 42, 'main')
+      ).resolves.toBe('stable-head-sha');
+      expect(github.getSHAForBranch).toHaveBeenCalledWith('stable', 'org', 'repo');
     });
   });
 

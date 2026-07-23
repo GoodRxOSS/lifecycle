@@ -79,4 +79,4 @@ const getHandler = async (req: NextRequest, context: RouteContext) => {
 };
 
 // Admin only: mirrors the template-build trigger's access.
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });

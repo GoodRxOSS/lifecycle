@@ -17,8 +17,11 @@
 import { NextRequest } from 'next/server';
 import { getLogger } from 'server/lib/logger';
 import { HttpError } from '@kubernetes/client-node';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
+import { assertBuildRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { errorResponse, successResponse } from 'server/lib/response';
+import BuildService from 'server/services/build';
 import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
 
 /**
@@ -26,6 +29,9 @@ import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
  * /api/v2/builds/{uuid}/services/{name}/deploys:
  *   get:
  *     summary: List deployment jobs for a service
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     description: |
  *       Returns a list of all deployment jobs for a specific service within a build.
  *       This includes both Helm deployment jobs and GitHub-type deployment jobs.
@@ -77,7 +83,11 @@ import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
  *           schema:
  *             $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid: string; name: string }> }) => {
+const getHandler = async (
+  req: NextRequest,
+  principal: Principal,
+  { params }: { params: Promise<{ uuid: string; name: string }> }
+) => {
   const routeParams = await params;
   const { uuid, name } = routeParams;
 
@@ -85,6 +95,12 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
     getLogger().warn(`API: invalid params uuid=${uuid} name=${name}`);
     return errorResponse('Missing or invalid uuid or name parameters', { status: 400 }, req);
   }
+
+  const build = await new BuildService().getBuildByUUID(uuid);
+  if (!build) {
+    return errorResponse('Environment or service not found.', { status: 404 }, req);
+  }
+  await assertBuildRepositoryAllowed(principal, build);
 
   try {
     const namespace = `env-${uuid}`;
@@ -107,4 +123,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ uuid
   }
 };
 
-export const GET = createApiHandler(getHandler);
+export const GET = createPrincipalApiHandler({ scope: 'env:read' }, getHandler);

@@ -67,7 +67,7 @@ export async function cliDeploy(deploy: Deploy) {
  * Shells out to run the codefresh deploy
  * @param deploy the deploy to run
  */
-export async function codefreshDeploy(deploy: Deploy, build: Build, deployable: Deployable) {
+export async function codefreshDeploy(deploy: Deploy, build: Build, deployable: Deployable, sourceRef?: string | null) {
   const buildUuid = build?.uuid;
   updateLogContext({ buildUuid });
   getLogger().debug('Invoking the codefresh CLI to deploy this deploy');
@@ -90,11 +90,12 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, deployable: 
   const deployTrigger = deployable.deployTrigger ? `--trigger ${deployable.deployTrigger}` : ``;
   const serviceDeployPipelineId = deployable.deployPipelineId;
 
-  const command = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
-    deploy.branchName
-  )} ${variables.join(' ')} ${deployTrigger} -d`;
+  const revision = sourceRef ?? deploy.branchName;
+  const command = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(revision)} ${variables.join(
+    ' '
+  )} ${deployTrigger} -d`;
   const redactedCommand = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
-    deploy.branchName
+    revision
   )} ${redactedVariables.join(' ')} ${deployTrigger} -d`;
   getLogger().debug(`About to run codefresh command: command=${redactedCommand}`);
   const output = await shellPromise(command, { redactCommand: redactedCommand });
@@ -235,6 +236,7 @@ export async function deleteBuild(build: Build) {
     getLogger().info('CLI: deleted');
   } catch (e) {
     getLogger({ error: e }).error('CLI: delete failed');
+    throw e;
   }
 }
 

@@ -281,4 +281,4 @@ const postHandler = async (req: NextRequest) => {
   return successResponse({ event: { id: inserted.id, createdAt: inserted.createdAt ?? null } }, { status: 201 }, req);
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createApiHandler(postHandler, { auth: 'session' });

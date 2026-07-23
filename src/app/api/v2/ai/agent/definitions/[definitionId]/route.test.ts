@@ -126,6 +126,7 @@ describe('/api/v2/ai/agent/definitions/[definitionId]', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });

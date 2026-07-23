@@ -15,7 +15,8 @@
  */
 
 import { NextRequest } from 'next/server';
-import { createApiHandler } from 'server/lib/createApiHandler';
+import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
+import type { Principal } from 'server/lib/principal';
 import { successResponse } from 'server/lib/response';
 import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
@@ -31,6 +32,9 @@ type RouteContext = {
  * /api/v2/sites/{siteId}/extend:
  *   post:
  *     summary: Extend a hosted static site's expiration
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
  *     tags:
  *       - Sites
  *     operationId: extendSite
@@ -60,7 +64,7 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const postHandler = async (req: NextRequest, { params }: RouteContext) => {
+const postHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
@@ -71,4 +75,4 @@ const postHandler = async (req: NextRequest, { params }: RouteContext) => {
   }
 };
 
-export const POST = createApiHandler(postHandler);
+export const POST = createPrincipalApiHandler({ scope: 'sites:write' }, postHandler);

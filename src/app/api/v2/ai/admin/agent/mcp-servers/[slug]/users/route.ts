@@ -91,4 +91,4 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
   }
 };
 
-export const GET = createApiHandler(getHandler, { roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });

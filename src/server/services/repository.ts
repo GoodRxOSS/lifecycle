@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { AppError } from 'server/lib/appError';
 import { getLogger } from 'server/lib/logger';
 import { normalizeRepoFullName } from 'server/lib/normalizeRepoFullName';
 import { PaginationMetadata } from 'server/lib/paginate';
@@ -24,6 +25,7 @@ import { GITHUB_API_CACHE_EXPIRATION_SECONDS } from 'shared/constants';
 import { GITHUB_APP_INSTALLATION_ID } from 'shared/config';
 import BaseService from './_service';
 import EnvironmentService from './environment';
+import { isRepositoryAllowed, isRepositoryAllowedById } from './apiToken';
 
 const GITHUB_REPOSITORIES_PAGE_SIZE = 100;
 const ONBOARDED_REPOSITORY_CACHE_TTL_SECONDS = GITHUB_API_CACHE_EXPIRATION_SECONDS;
@@ -92,6 +94,10 @@ interface ListRepositoriesOptions {
   installationId?: number | string | null;
   onboarded?: boolean;
   refresh?: boolean;
+  /** Credential repository constraint; null means unrestricted. Applied before count and pagination. */
+  allowedGithubRepositoryIds?: number[] | null;
+  /** Legacy name-bound constraint; used only when no stable-id constraint exists. */
+  allowedRepositoryFullNames?: string[] | null;
 }
 
 interface InstalledRepositoriesCachePayload {
@@ -417,6 +423,8 @@ export default class RepositoryService extends BaseService {
     page = 1,
     limit = 25,
     installationId,
+    allowedGithubRepositoryIds = null,
+    allowedRepositoryFullNames = null,
   }: ListRepositoriesOptions = {}): Promise<RepositoryListResult<RepositoryResponse>> {
     const normalizedQuery = this.normalizeQuery(query);
     const githubInstallationId = installationId == null ? null : this.resolveInstallationId(installationId);
@@ -424,6 +432,14 @@ export default class RepositoryService extends BaseService {
 
     if (githubInstallationId) {
       repositoryQuery.where('githubInstallationId', githubInstallationId);
+    }
+
+    if (allowedGithubRepositoryIds) {
+      repositoryQuery.whereIn('githubRepositoryId', allowedGithubRepositoryIds);
+    } else if (allowedRepositoryFullNames) {
+      repositoryQuery.whereRaw('lower("fullName") = ANY(?)', [
+        allowedRepositoryFullNames.map((fullName) => fullName.toLowerCase()),
+      ]);
     }
 
     if (normalizedQuery) {
@@ -452,12 +468,20 @@ export default class RepositoryService extends BaseService {
     installationId,
     onboarded,
     refresh = false,
+    allowedGithubRepositoryIds = null,
+    allowedRepositoryFullNames = null,
   }: ListRepositoriesOptions = {}): Promise<RepositoryListResult<InstalledRepositoryResponse>> {
     const githubInstallationId = this.resolveInstallationId(installationId);
     const normalizedQuery = this.normalizeQuery(query);
     const installedRepositories = await this.getInstalledRepositories(githubInstallationId, refresh);
     const onboardedRepositories = await this.getActiveOnboardedRepositories(githubInstallationId);
     const onboardedRepositoryIds = new Set(onboardedRepositories.map((repository) => repository.githubRepositoryId));
+    const allowedIds = allowedGithubRepositoryIds ? new Set(allowedGithubRepositoryIds.map(Number)) : null;
+    const allowedNames = allowedIds
+      ? null
+      : allowedRepositoryFullNames
+      ? new Set(allowedRepositoryFullNames.map((fullName) => fullName.toLowerCase()))
+      : null;
 
     const repositories = installedRepositories
       .map((repository) => ({
@@ -465,6 +489,8 @@ export default class RepositoryService extends BaseService {
         onboarded: onboardedRepositoryIds.has(repository.githubRepositoryId),
       }))
       .filter((repository) => {
+        if (allowedIds && !allowedIds.has(Number(repository.githubRepositoryId))) return false;
+        if (allowedNames && !allowedNames.has(repository.fullName.toLowerCase())) return false;
         if (typeof onboarded === 'boolean' && repository.onboarded !== onboarded) return false;
         if (!normalizedQuery) return true;
         return (
@@ -545,13 +571,41 @@ export default class RepositoryService extends BaseService {
     };
   }
 
-  async onboardRepository(fullName: string, installationId?: number | string | null): Promise<OnboardRepositoryResult> {
+  async onboardRepository(
+    fullName: string,
+    installationId?: number | string | null,
+    allowedGithubRepositoryIds?: number[] | null,
+    allowedRepositoryFullNames?: string[] | null
+  ): Promise<OnboardRepositoryResult> {
     const normalizedFullName = this.normalizeAndValidateFullName(fullName);
     const githubInstallationId = this.resolveInstallationId(installationId);
 
     try {
       const repoResponse = await github.getRepositoryByFullName(normalizedFullName, githubInstallationId);
       const repo = repoResponse.data;
+
+      // The target is not onboarded yet, so its stable identity comes from the installation, not our table.
+      if (allowedGithubRepositoryIds && !isRepositoryAllowedById(allowedGithubRepositoryIds, repo.id)) {
+        throw new AppError({
+          httpStatus: 403,
+          code: 'forbidden_repository',
+          message: `API key is not allowed to target repository ${normalizedFullName}.`,
+          details: { repository: normalizedFullName },
+        });
+      }
+      if (
+        !allowedGithubRepositoryIds &&
+        allowedRepositoryFullNames &&
+        (typeof repo.full_name !== 'string' || !isRepositoryAllowed(allowedRepositoryFullNames, repo.full_name))
+      ) {
+        throw new AppError({
+          httpStatus: 403,
+          code: 'forbidden_repository',
+          message: `API key is not allowed to target repository ${normalizedFullName}.`,
+          details: { repository: normalizedFullName },
+        });
+      }
+
       const environment = await this.environmentService.findOrCreateEnvironment(repo.name, repo.name, false);
 
       return await this.upsertRepositoryMetadata({

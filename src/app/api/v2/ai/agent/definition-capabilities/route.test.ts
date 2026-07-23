@@ -76,6 +76,7 @@ describe('/api/v2/ai/agent/definition-capabilities', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -104,12 +105,14 @@ describe('/api/v2/ai/agent/definition-capabilities', () => {
       userIdentity: {
         userId: 'sample-user',
         githubUsername: 'sample-user',
+        roles: ['user'],
       },
     });
     expect(mockListUserSelectableCapabilities).toHaveBeenCalledWith({
       userIdentity: {
         userId: 'sample-user',
         githubUsername: 'sample-user',
+        roles: ['user'],
       },
       resourceBehavior: 'current_workspace_when_available',
     });

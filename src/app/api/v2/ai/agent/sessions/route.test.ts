@@ -27,6 +27,7 @@ const mockResolveRequestGitHubToken = jest.fn();
 const mockBuildQuery = jest.fn();
 const mockFetchLifecycleConfig = jest.fn();
 const mockCreateAgentSession = jest.fn();
+const mockResolveAgentSessionCandidateBuildSource = jest.fn();
 const mockResolveAgentSessionServiceCandidatesForBuild = jest.fn();
 const mockResolveRequestedAgentSessionServices = jest.fn();
 
@@ -100,6 +101,7 @@ jest.mock('server/services/agentSession', () => {
 });
 
 jest.mock('server/services/agentSessionCandidates', () => ({
+  resolveAgentSessionCandidateBuildSource: (...args: unknown[]) => mockResolveAgentSessionCandidateBuildSource(...args),
   resolveAgentSessionServiceCandidatesForBuild: (...args: unknown[]) =>
     mockResolveAgentSessionServiceCandidatesForBuild(...args),
   resolveRequestedAgentSessionServices: (...args: unknown[]) => mockResolveRequestedAgentSessionServices(...args),
@@ -146,6 +148,7 @@ import { AgentThreadRuntimeControlsError } from 'server/services/agent/ThreadRun
 const userIdentity = {
   userId: 'sample-user',
   githubUsername: 'sample-user',
+  roles: ['user'],
   preferredUsername: 'sample-user',
   email: 'sample-user@example.com',
   firstName: 'Sample',
@@ -181,9 +184,10 @@ function makeNonObjectRequest(): NextRequest {
 
 function mockBuildLookup(build: Record<string, unknown> | null) {
   const withGraphFetched = jest.fn().mockResolvedValue(build);
-  const findOne = jest.fn(() => ({ withGraphFetched }));
+  const whereNull = jest.fn(() => ({ withGraphFetched }));
+  const findOne = jest.fn(() => ({ whereNull }));
   mockBuildQuery.mockReturnValueOnce({ findOne });
-  return { findOne, withGraphFetched };
+  return { findOne, whereNull, withGraphFetched };
 }
 
 describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
@@ -209,6 +213,19 @@ describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
     mockFetchLifecycleConfig.mockResolvedValue(null);
     mockCreateAgentSession.mockResolvedValue({ uuid: 'session-env-1' });
     mockCreateChatSession.mockResolvedValue({ uuid: 'session-1' });
+    mockResolveAgentSessionCandidateBuildSource.mockImplementation(async (build) => {
+      const pullRequest = (build as { pullRequest?: Record<string, unknown> | null }).pullRequest;
+      if (!pullRequest) {
+        return null;
+      }
+
+      return {
+        repo: pullRequest.fullName,
+        branch: pullRequest.branchName,
+        configRef: pullRequest.branchName,
+        githubRepositoryId: 42,
+      };
+    });
     mockResolveAgentSessionServiceCandidatesForBuild.mockResolvedValue([]);
     mockResolveRequestedAgentSessionServices.mockReturnValue([]);
     mockSerializeSessionRecord.mockResolvedValue({
@@ -465,7 +482,13 @@ describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
     );
 
     expect(response.status).toBe(201);
-    expect(mockResolveAgentSessionServiceCandidatesForBuild).toHaveBeenCalledWith(buildContext);
+    expect(mockResolveAgentSessionServiceCandidatesForBuild).toHaveBeenCalledWith(
+      buildContext,
+      expect.objectContaining({
+        repo: 'example-org/example-repo',
+        branch: 'feature/sample',
+      })
+    );
     expect(mockResolveRequestedAgentSessionServices).toHaveBeenCalledWith(
       [candidate],
       [{ name: 'sample-service', repo: 'example-org/example-repo', branch: 'feature/sample' }]
@@ -488,7 +511,7 @@ describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
   });
 
   it('keeps normal environment session creation on the generic sessions route', async () => {
-    mockBuildLookup({
+    const lookup = mockBuildLookup({
       uuid: 'sample-build',
       kind: 'environment',
       namespace: 'sample-namespace',
@@ -507,6 +530,11 @@ describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
     );
 
     expect(response.status).toBe(201);
+    expect(lookup.findOne).toHaveBeenCalledWith({ uuid: 'sample-build' });
+    expect(lookup.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(lookup.withGraphFetched).toHaveBeenCalledWith(
+      '[pullRequest.[repository], deploys.[deployable, repository]]'
+    );
     expect(mockCreateAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'sample-user',
@@ -517,5 +545,73 @@ describe('/api/v2/ai/agent/sessions runtimeControlChoices', () => {
         namespace: 'sample-namespace',
       })
     );
+  });
+
+  it('creates sessions for live API environments from their server-resolved source context', async () => {
+    const buildContext = {
+      uuid: 'api-environment',
+      kind: 'environment',
+      namespace: 'env-api-environment',
+      pullRequest: null,
+      triggerType: 'api',
+      githubRepositoryId: 84,
+      branchName: 'main',
+      configSha: '0123456789abcdef0123456789abcdef01234567',
+    };
+    mockBuildLookup(buildContext);
+    mockResolveAgentSessionCandidateBuildSource.mockResolvedValueOnce({
+      repo: 'example-org/api-repo',
+      branch: 'main',
+      configRef: '0123456789abcdef0123456789abcdef01234567',
+      githubRepositoryId: 84,
+    });
+
+    const response = await POST(
+      makeRequest({
+        defaults: { provider: 'openai', model: 'sample-model' },
+        source: {
+          adapter: 'lifecycle_environment',
+          input: {
+            buildUuid: 'api-environment',
+            repoUrl: 'https://github.com/untrusted/override.git',
+            branch: 'untrusted-branch',
+            namespace: 'untrusted-namespace',
+            prNumber: 999,
+          },
+        },
+      })
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockResolveAgentSessionCandidateBuildSource).toHaveBeenCalledWith(buildContext);
+    expect(mockFetchLifecycleConfig).toHaveBeenCalledWith(
+      'example-org/api-repo',
+      '0123456789abcdef0123456789abcdef01234567'
+    );
+    expect(mockCreateAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildUuid: 'api-environment',
+        buildKind: 'environment',
+        repoUrl: 'https://github.com/example-org/api-repo.git',
+        branch: 'main',
+        namespace: 'env-api-environment',
+        prNumber: undefined,
+      })
+    );
+  });
+
+  it('returns 404 when the live-row build lookup excludes a tombstone', async () => {
+    const lookup = mockBuildLookup(null);
+
+    const response = await POST(
+      makeRequest({
+        source: { adapter: 'lifecycle_environment', input: { buildUuid: 'deleted-environment' } },
+      })
+    );
+
+    expect(response.status).toBe(404);
+    expect(lookup.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(mockResolveAgentSessionCandidateBuildSource).not.toHaveBeenCalled();
+    expect(mockCreateAgentSession).not.toHaveBeenCalled();
   });
 });

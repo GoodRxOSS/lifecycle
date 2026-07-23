@@ -168,6 +168,7 @@ local_resource(
         cluster=kind_cluster_name,
     ),
     deps=agent_session_workspace_image_deps,
+    allow_parallel=True,
     labels=['infra'],
 )
 
@@ -272,6 +273,7 @@ if use_local_keycloak_charts:
             '{}/values.yaml'.format(lifecycle_keycloak_chart),
         ],
         resource_deps=['bitnami'],
+        allow_parallel=True,
         labels=['infra'],
     )
 else:
@@ -294,9 +296,10 @@ helm_resource(
 
 local_resource(
     'legacy-keycloak-cleanup',
-    cmd='kubectl -n {namespace} delete deployment/lifecycle-keycloak service/lifecycle-keycloak configmap/lifecycle-keycloak-config deployment/lifecycle-keycloak-postgresql service/lifecycle-keycloak-postgresql --ignore-not-found=true'.format(
+    cmd='cleanup_namespace="$(kubectl get namespace {namespace} --ignore-not-found -o name)" && if [ -n "$cleanup_namespace" ]; then kubectl -n {namespace} delete deployment/lifecycle-keycloak service/lifecycle-keycloak configmap/lifecycle-keycloak-config deployment/lifecycle-keycloak-postgresql service/lifecycle-keycloak-postgresql --ignore-not-found=true; fi'.format(
         namespace=app_namespace,
     ),
+    allow_parallel=True,
     labels=['infra'],
 )
 
@@ -332,6 +335,7 @@ local_resource(
         'sysops/tilt/scripts/sync_keycloak_github_idp.sh',
     ],
     resource_deps=['lifecycle-keycloak'],
+    allow_parallel=True,
     labels=['infra'],
 )
 

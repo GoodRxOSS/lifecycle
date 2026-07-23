@@ -40,7 +40,11 @@ import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/consta
 import DeployService from './deploy';
 import type { SandboxLaunchStage } from 'server/lib/agentSession/sandboxLaunchState';
 import type { RequestUserIdentity } from 'server/lib/get-user';
-import type { RequestedAgentSessionServiceRef } from './agentSessionCandidates';
+import {
+  resolveAgentSessionCandidateBuildSource,
+  type AgentSessionCandidateBuildSource,
+  type RequestedAgentSessionServiceRef,
+} from './agentSessionCandidates';
 
 const randomSha = customAlphabet('1234567890abcdef', 6);
 
@@ -57,13 +61,12 @@ interface ResolvedSandboxService {
   baseDeploy: Deploy;
   serviceRepo: string;
   serviceBranch: string;
+  serviceConfigRef: string;
+  serviceGithubRepositoryId: number | null;
   yamlService: LifecycleService;
 }
 
-interface EnvironmentSource {
-  repo: string;
-  branch: string;
-}
+type EnvironmentSource = AgentSessionCandidateBuildSource;
 
 interface CreatedSandboxBuild {
   build: Build;
@@ -170,17 +173,26 @@ export default class AgentSandboxSessionService extends BaseService {
   async launch(opts: LaunchSandboxSessionOptions): Promise<LaunchSandboxSessionResult> {
     const launchStartedAt = Date.now();
     const resolveCandidatesStartedAt = Date.now();
-    const { baseBuild, environmentSource, lifecycleConfig, candidates } = await this.loadBaseBuildAndCandidates(opts);
+    const { baseBuild, environmentSource, lifecycleConfig, candidates, resolvedCandidates } =
+      await this.loadBaseBuildAndCandidates(opts);
     const candidateResolutionMs = elapsedMs(resolveCandidatesStartedAt);
-    if (candidates.length === 0) {
+    if (resolvedCandidates.length === 0) {
       throw new Error(
         `No dev-mode sandboxable services were found in ${environmentSource.repo}:${environmentSource.branch}`
       );
     }
 
-    const selectedServices = opts.services != null ? this.resolveSelectedServices(opts.services, candidates) : [];
+    const selectedServices =
+      opts.services != null ? this.resolveSelectedServices(opts.services, resolvedCandidates) : [];
+    for (const selectedService of selectedServices) {
+      this.requireReadyDeploy(selectedService.baseDeploy, selectedService.name);
+    }
 
     if (selectedServices.length === 0) {
+      if (candidates.length === 0) {
+        throw new Error('This environment has no ready services that can start a sandbox');
+      }
+
       return {
         status: 'needs_service_selection',
         services: candidates
@@ -269,7 +281,7 @@ export default class AgentSandboxSessionService extends BaseService {
           devConfig: selectedService.devConfig,
           resourceName: sandboxDeploy.uuid || undefined,
           repo: selectedService.serviceRepo,
-          branch: selectedService.baseDeploy.branchName || selectedService.serviceBranch,
+          branch: selectedService.serviceBranch,
           revision: selectedService.baseDeploy.sha || undefined,
         })),
         model: opts.model,
@@ -323,10 +335,14 @@ export default class AgentSandboxSessionService extends BaseService {
     baseBuildUuid,
     onProgress,
   }: Pick<LaunchSandboxSessionOptions, 'baseBuildUuid' | 'onProgress'>) {
-    const { candidates } = await this.loadBaseBuildAndCandidates({
+    const { candidates, resolvedCandidates } = await this.loadBaseBuildAndCandidates({
       baseBuildUuid,
       onProgress,
     });
+
+    if (candidates.length === 0 && resolvedCandidates.length > 0) {
+      throw new Error('This environment has no ready services that can start a sandbox');
+    }
 
     return candidates
       .map((candidate) => ({
@@ -348,32 +364,41 @@ export default class AgentSandboxSessionService extends BaseService {
   }: Pick<LaunchSandboxSessionOptions, 'baseBuildUuid' | 'onProgress'>) {
     await onProgress?.('resolving_base_build', `Loading base build ${baseBuildUuid}`);
     const baseBuild = await Build.query()
-      .findOne({ uuid: baseBuildUuid })
+      .findOne({ uuid: baseBuildUuid, kind: BuildKind.ENVIRONMENT })
+      .whereNull('deletedAt')
       .withGraphFetched('[environment, pullRequest.[repository], deploys.[deployable, repository]]');
 
-    if (!baseBuild) {
+    if (!baseBuild || baseBuild.kind !== BuildKind.ENVIRONMENT) {
       throw new Error('Base build not found');
     }
 
-    if (baseBuild.kind === BuildKind.SANDBOX) {
-      throw new Error('Sandbox builds cannot be used as sandbox bases');
+    if (baseBuild.status !== BuildStatus.DEPLOYED) {
+      throw new Error('The environment must be deployed before you can start a sandbox');
     }
 
-    const environmentSource = this.getEnvironmentSource(baseBuild);
+    const environmentSource = await resolveAgentSessionCandidateBuildSource(baseBuild);
+    if (!environmentSource) {
+      throw new Error('Base environment build is missing source repository/branch');
+    }
     await onProgress?.(
       'resolving_services',
       `Reading environment config for ${environmentSource.repo} on ${environmentSource.branch}`
     );
-    const lifecycleConfig = await fetchLifecycleConfig(environmentSource.repo, environmentSource.branch);
+    const lifecycleConfig = await fetchLifecycleConfig(environmentSource.repo, environmentSource.configRef);
     if (!lifecycleConfig) {
-      throw new Error(`Lifecycle config not found for ${environmentSource.repo}:${environmentSource.branch}`);
+      throw new Error(`Lifecycle config not found for ${environmentSource.repo}:${environmentSource.configRef}`);
     }
+
+    const resolvedCandidates = await this.resolveCandidateServices(baseBuild, lifecycleConfig, environmentSource);
 
     return {
       baseBuild,
       environmentSource,
       lifecycleConfig,
-      candidates: await this.resolveCandidateServices(baseBuild, lifecycleConfig, environmentSource),
+      resolvedCandidates,
+      candidates: resolvedCandidates.filter(
+        (candidate) => candidate.baseDeploy.active && candidate.baseDeploy.status === DeployStatus.READY
+      ),
     };
   }
 
@@ -414,6 +439,8 @@ export default class AgentSandboxSessionService extends BaseService {
             baseDeploy,
             serviceRepo: serviceSource.repo,
             serviceBranch: serviceSource.branch,
+            serviceConfigRef: serviceSource.configRef,
+            serviceGithubRepositoryId: serviceSource.githubRepositoryId,
             yamlService: serviceSource.yamlService,
           };
         } catch (error) {
@@ -708,6 +735,8 @@ export default class AgentSandboxSessionService extends BaseService {
       resolvedSource: {
         repo: selectedService.serviceRepo,
         branch: selectedService.serviceBranch,
+        configRef: selectedService.serviceConfigRef,
+        githubRepositoryId: selectedService.serviceGithubRepositoryId,
         yamlService: selectedService.yamlService,
       },
     }));
@@ -723,6 +752,7 @@ export default class AgentSandboxSessionService extends BaseService {
       if (!baseDeploy?.id || !baseDeploy.deployable) {
         throw new Error(`Active deploy not found for dependency ${serviceName} in base build ${baseBuild.uuid}`);
       }
+      this.requireReadyDeploy(baseDeploy, serviceName);
 
       const serviceSource =
         current.resolvedSource ??
@@ -747,6 +777,7 @@ export default class AgentSandboxSessionService extends BaseService {
               `Active deploy not found for dependency ${requiredService.name} in base build ${baseBuild.uuid}`
             );
           }
+          this.requireReadyDeploy(dependencyDeploy, requiredService.name);
 
           queue.push({
             serviceRef: requiredService,
@@ -757,19 +788,6 @@ export default class AgentSandboxSessionService extends BaseService {
     }
 
     return includedDeployIds;
-  }
-
-  private getEnvironmentSource(baseBuild: Build): EnvironmentSource {
-    const repo = baseBuild.pullRequest?.fullName;
-    const branch = baseBuild.pullRequest?.branchName;
-    if (!repo || !branch) {
-      throw new Error('Base environment build is missing source repository/branch');
-    }
-
-    return {
-      repo,
-      branch,
-    };
   }
 
   private getEnvironmentServiceReferences(lifecycleConfig: LifecycleConfig): DependencyService[] {
@@ -792,6 +810,12 @@ export default class AgentSandboxSessionService extends BaseService {
 
   private getActiveDeploys(baseBuild: Build): Deploy[] {
     return (baseBuild.deploys || []).filter((deploy) => deploy.active && deploy.deployable?.name);
+  }
+
+  private requireReadyDeploy(deploy: Deploy, serviceName: string): void {
+    if (!deploy.active || deploy.status !== DeployStatus.READY) {
+      throw new Error(`Service ${serviceName} must be ready before you can start a sandbox`);
+    }
   }
 
   private getResolvedSandboxServiceKey(
@@ -841,22 +865,49 @@ export default class AgentSandboxSessionService extends BaseService {
     configCache: Map<string, Promise<LifecycleConfig>>;
   }): Promise<ResolvedLifecycleServiceSource> {
     const serviceName = serviceRef.name || baseDeploy.deployable?.name;
-    const repo = serviceRef.repository || baseDeploy.repository?.fullName || fallbackSource.repo;
-    const branch = serviceRef.branch || baseDeploy.branchName || fallbackSource.branch;
+    const requestedRepo = normalizeOptionalString(serviceRef.repository);
+    const deployRepo = normalizeOptionalString(baseDeploy.repository?.fullName);
+    const deployRepositoryId = baseDeploy.repository?.githubRepositoryId ?? baseDeploy.githubRepositoryId;
+    const targetsEnvironmentSource =
+      fallbackSource.githubRepositoryId != null && deployRepositoryId != null
+        ? Number(fallbackSource.githubRepositoryId) === Number(deployRepositoryId)
+        : requestedRepo
+        ? normalizeRepoKey(requestedRepo) === normalizeRepoKey(fallbackSource.repo)
+        : deployRepo
+        ? normalizeRepoKey(deployRepo) === normalizeRepoKey(fallbackSource.repo)
+        : true;
+    const repo = targetsEnvironmentSource ? fallbackSource.repo : requestedRepo || deployRepo;
+    const requestedBranch = normalizeOptionalString(serviceRef.branch);
+    const deployBranch = normalizeOptionalString(baseDeploy.branchName);
+    const branch =
+      requestedBranch ||
+      (targetsEnvironmentSource && deployBranch === fallbackSource.configRef ? fallbackSource.branch : deployBranch) ||
+      fallbackSource.branch;
+    const configRef =
+      targetsEnvironmentSource && fallbackSource.configRef !== fallbackSource.branch
+        ? fallbackSource.configRef
+        : branch;
+    const githubRepositoryId = targetsEnvironmentSource
+      ? fallbackSource.githubRepositoryId
+      : deployRepositoryId != null
+      ? Number(deployRepositoryId)
+      : null;
 
-    if (!serviceName || !repo || !branch) {
+    if (!serviceName || !repo || !branch || !configRef) {
       throw new Error(`Unable to resolve sandbox service source for ${serviceName ?? 'unknown service'}`);
     }
 
-    const lifecycleConfig = await this.fetchCachedLifecycleConfig(repo, branch, configCache);
+    const lifecycleConfig = await this.fetchCachedLifecycleConfig(repo, configRef, configCache);
     const yamlService = getDeployingServicesByName(lifecycleConfig, serviceName);
     if (!yamlService) {
-      throw new Error(`Service ${serviceName} not found in ${repo}:${branch}`);
+      throw new Error(`Service ${serviceName} not found in ${repo}:${configRef}`);
     }
 
     return {
       repo,
       branch,
+      configRef,
+      githubRepositoryId,
       yamlService,
     };
   }

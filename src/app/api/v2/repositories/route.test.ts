@@ -73,6 +73,8 @@ describe('/api/v2/repositories', () => {
         page: 2,
         limit: 10,
         installationId: undefined,
+        allowedGithubRepositoryIds: null,
+        allowedRepositoryFullNames: null,
       });
       expect(body.data.repositories).toEqual([{ id: 1, fullName: 'example-org/api', onboarded: true }]);
       expect(body.metadata.pagination).toEqual({ current: 1, total: 1, items: 1, limit: 25 });
@@ -92,6 +94,8 @@ describe('/api/v2/repositories', () => {
         installationId: undefined,
         onboarded: false,
         refresh: true,
+        allowedGithubRepositoryIds: null,
+        allowedRepositoryFullNames: null,
       });
     });
 
@@ -114,7 +118,7 @@ describe('/api/v2/repositories', () => {
       const body = await response.json();
 
       expect(response.status).toBe(201);
-      expect(mockOnboardRepository).toHaveBeenCalledWith('example-org/api', undefined);
+      expect(mockOnboardRepository).toHaveBeenCalledWith('example-org/api', undefined, null, null);
       expect(body.data).toEqual({
         repository: { id: 1, fullName: 'example-org/api', onboarded: true },
         created: true,

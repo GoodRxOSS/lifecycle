@@ -73,9 +73,7 @@ function makeStream(text: string): ReadableStream<Uint8Array> {
 describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetRequestUserIdentity.mockReturnValue({
-      userId: 'sample-user',
-    });
+    mockGetRequestUserIdentity.mockReturnValue({ roles: ['user'], userId: 'sample-user' });
     mockGetOwnedRun.mockResolvedValue({
       uuid: 'run-1',
       status: 'running',
@@ -150,7 +148,7 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     const body = await response.json();
 
     expect(response.status).toBe(401);
-    expect(body.error.message).toBe('Unauthorized');
+    expect(body.error.message).toBe('Authentication is required.');
     expect(mockGetOwnedRun).not.toHaveBeenCalled();
   });
 });

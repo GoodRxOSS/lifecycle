@@ -121,6 +121,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
       userId: 'sample-user',
       githubUsername: 'sample-user',
     });
@@ -135,7 +136,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
     expect(response.status).toBe(200);
     expect(mockGetState).toHaveBeenCalledWith({
       threadId: 'thread-1',
-      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
     });
     expect(body.data).toEqual(runtimeControlsState);
     expect(JSON.stringify(body.data)).not.toContain('workspace_files');
@@ -154,7 +155,7 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
     expect(response.status).toBe(200);
     expect(mockPatchChoices).toHaveBeenCalledWith({
       threadId: 'thread-1',
-      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user' },
+      userIdentity: { userId: 'sample-user', githubUsername: 'sample-user', roles: ['user'] },
       toolChoiceIds: ['rtc_optional'],
       mcpChoiceIds: ['rtc_mcp'],
     });

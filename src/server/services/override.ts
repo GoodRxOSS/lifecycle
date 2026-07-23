@@ -16,12 +16,14 @@
 
 import BaseService from './_service';
 import { extractContextForQueue, getLogger, updateLogContext } from 'server/lib/logger';
+import { isDeployEnabled } from 'server/lib/buildSource';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { Build, Deploy, PullRequest } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
 import * as psl from 'psl';
 import { DeployTypes } from 'shared/constants';
+import type { Transaction } from 'objection';
 
 export interface ValidationResult {
   valid: boolean;
@@ -67,6 +69,8 @@ export interface ApplyBuildConfigPatchArgs {
   pullRequest?: PullRequest | null;
   patch: BuildConfigPatchInput;
   runUuid: string;
+  enqueueRedeploy?: boolean;
+  trx?: Transaction;
 }
 
 export interface ServiceOverridePatchInput {
@@ -81,6 +85,8 @@ export interface ApplyServiceOverridesArgs {
   pullRequest?: PullRequest | null;
   serviceOverrides: ServiceOverridePatchInput[];
   runUuid: string;
+  enqueueRedeploy?: boolean;
+  trx?: Transaction;
 }
 
 export interface OverrideApplyResult {
@@ -125,7 +131,7 @@ function hasOwn(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function isBranchOrExternalUrlEditable(deployType?: DeployTypes): boolean {
+export function isBranchOrExternalUrlEditable(deployType?: DeployTypes): boolean {
   if (!deployType) {
     return false;
   }
@@ -210,7 +216,14 @@ export default class OverrideService extends BaseService {
     await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid);
   }
 
-  async applyBuildConfigPatch({ build, pullRequest, patch, runUuid }: ApplyBuildConfigPatchArgs): Promise<Build> {
+  async applyBuildConfigPatch({
+    build,
+    pullRequest,
+    patch,
+    runUuid,
+    enqueueRedeploy = true,
+    trx,
+  }: ApplyBuildConfigPatchArgs): Promise<Build> {
     if (!build.id) {
       getLogger().error('Build: missing for build config patch');
       throw new Error('Build id is required');
@@ -243,7 +256,7 @@ export default class OverrideService extends BaseService {
     }
 
     if (Object.keys(buildPatch).length > 0) {
-      await build.$query().patch(buildPatch);
+      await build.$query(trx).patch(buildPatch);
       Object.assign(build, buildPatch);
     }
 
@@ -253,7 +266,9 @@ export default class OverrideService extends BaseService {
       updatedBuild = result.build;
     }
 
-    await this.enqueueRedeployIfEnabled(updatedBuild, pullRequest, runUuid);
+    if (enqueueRedeploy) {
+      await this.enqueueRedeployIfEnabled(updatedBuild, pullRequest, runUuid);
+    }
     return updatedBuild;
   }
 
@@ -263,12 +278,56 @@ export default class OverrideService extends BaseService {
     pullRequest,
     serviceOverrides,
     runUuid,
+    enqueueRedeploy = true,
+    trx,
   }: ApplyServiceOverridesArgs): Promise<OverrideApplyResult> {
     if (!build.id) {
       getLogger().error('Build: missing for service override');
       throw new Error('Build id is required');
     }
 
+    if (!serviceOverrides.length) {
+      throw new Error('serviceOverrides is required');
+    }
+
+    const sanitizedServiceOverrides = await this.validateServiceOverrides(build, deploys, serviceOverrides);
+
+    if (sanitizedServiceOverrides.length === 0) {
+      return {
+        buildUuid: build.uuid,
+        queued: false,
+        status: 'success',
+      };
+    }
+
+    await Promise.all(
+      sanitizedServiceOverrides.map((serviceOverride) =>
+        this.patchServiceOverride(
+          deploys,
+          {
+            ...serviceOverride,
+            serviceName: serviceOverride.name,
+          },
+          true,
+          true,
+          trx
+        )
+      )
+    );
+
+    const queued = enqueueRedeploy ? await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid) : false;
+    return {
+      buildUuid: build.uuid,
+      queued,
+      status: 'success',
+    };
+  }
+
+  async validateServiceOverrides(
+    _build: Build,
+    deploys: Deploy[],
+    serviceOverrides: ServiceOverridePatchInput[]
+  ): Promise<ServiceOverridePatchInput[]> {
     if (!serviceOverrides.length) {
       throw new Error('serviceOverrides is required');
     }
@@ -305,34 +364,7 @@ export default class OverrideService extends BaseService {
       }
     }
 
-    if (sanitizedServiceOverrides.length === 0) {
-      return {
-        buildUuid: build.uuid,
-        queued: false,
-        status: 'success',
-      };
-    }
-
-    await Promise.all(
-      sanitizedServiceOverrides.map((serviceOverride) =>
-        this.patchServiceOverride(
-          deploys,
-          {
-            ...serviceOverride,
-            serviceName: serviceOverride.name,
-          },
-          true,
-          true
-        )
-      )
-    );
-
-    const queued = await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid);
-    return {
-      buildUuid: build.uuid,
-      queued,
-      status: 'success',
-    };
+    return sanitizedServiceOverrides;
   }
 
   async getServiceOverrideStates(deploys: Deploy[]): Promise<BuildServiceOverrideState[]> {
@@ -354,7 +386,8 @@ export default class OverrideService extends BaseService {
       branchOrExternalUrl?: string;
     },
     throwOnMissing = false,
-    throwOnPatchFailure = false
+    throwOnPatchFailure = false,
+    trx?: Transaction
   ) {
     getLogger().debug(`Patching service: ${serviceName} active=${active} branch/url=${branchOrExternalUrl}`);
 
@@ -372,7 +405,7 @@ export default class OverrideService extends BaseService {
 
     if (branchOrExternalUrl != null && psl.isValid(branchOrExternalUrl)) {
       await this.patchWithFailureMode(
-        deploy.$query().patch({
+        deploy.$query(trx).patch({
           publicUrl: branchOrExternalUrl,
           branchName: null,
           dockerImage: null,
@@ -387,13 +420,13 @@ export default class OverrideService extends BaseService {
         this.db.services?.Deploy ?? new DeployService(this.db, this.redis, this.redlock, this.queueManager);
 
       await this.patchWithFailureMode(
-        deployable.$query().patch({ commentBranchName: branchOrExternalUrl }),
+        deployable.$query(trx).patch({ commentBranchName: branchOrExternalUrl }),
         `Deployable: patch failed service=${serviceName} field=branch`,
         throwOnPatchFailure
       );
 
       await this.patchWithFailureMode(
-        deploy.$query().patch({
+        deploy.$query(trx).patch({
           branchName: branchOrExternalUrl,
           publicUrl: deployService.hostForDeployableDeploy(deploy, deployable),
           ...(active != null ? { active } : {}),
@@ -403,7 +436,7 @@ export default class OverrideService extends BaseService {
       );
     } else if (active != null) {
       await this.patchWithFailureMode(
-        deploy.$query().patch({ active }),
+        deploy.$query(trx).patch({ active }),
         `Deploy: patch failed service=${serviceName} field=active`,
         throwOnPatchFailure
       );
@@ -419,7 +452,7 @@ export default class OverrideService extends BaseService {
         d.deployable!.buildUUID === deployable.buildUUID &&
         d.deployable!.buildId === deployable.buildId
     );
-    await Promise.all(dependents.map((d) => d.$query().patch({ active })));
+    await Promise.all(dependents.map((d) => d.$query(trx).patch({ active })));
   }
 
   private async patchWithFailureMode(
@@ -481,7 +514,10 @@ export default class OverrideService extends BaseService {
     pullRequest: PullRequest | null | undefined,
     runUuid: string
   ): Promise<boolean> {
-    if (!pullRequest?.deployOnUpdate) {
+    if (pullRequest && !build.pullRequest) {
+      build.pullRequest = pullRequest;
+    }
+    if (!isDeployEnabled(build)) {
       return false;
     }
 
@@ -511,7 +547,8 @@ export default class OverrideService extends BaseService {
     }
 
     try {
-      const existingBuild = await this.db.models.Build.query().findOne({ uuid });
+      // Soft-deleted builds release their uuid (builds_uuid_live_unique is partial over live rows).
+      const existingBuild = await this.db.models.Build.query().findOne({ uuid }).whereNull('deletedAt');
 
       if (existingBuild && existingBuild.id !== currentBuildId) {
         return { valid: false, error: 'UUID is not available' };
