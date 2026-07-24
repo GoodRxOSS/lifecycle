@@ -1,0 +1,244 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
+import type { AgentDefinitionOwnerKind } from './agentDefinitionTypes';
+import type { CapabilityPolicyConfig, CustomAgentCreationPolicyConfig } from 'server/services/types/agentRuntimeConfig';
+import {
+  getAgentCapabilityCatalogEntry,
+  isAgentCapabilityCatalogId,
+  type AgentCapabilityAvailability,
+  type AgentCapabilityCatalogEntry,
+  type AgentCapabilitySourceKind,
+} from './capabilityCatalog';
+import type { AgentApprovalMode, AgentApprovalPolicy, AgentCapabilityKey } from './types';
+import { AGENT_CAPABILITY_KEYS, DEFAULT_AGENT_APPROVAL_POLICY } from './types';
+
+type McpAnnotations = {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  openWorldHint?: boolean;
+};
+
+type ApprovalPolicyConfig = Partial<AgentApprovalPolicy> & {
+  defaultMode?: AgentApprovalMode;
+  rules?: Partial<Record<AgentCapabilityKey, AgentApprovalMode>>;
+};
+
+export type AgentCapabilityAccessReason =
+  | 'admin_only'
+  | 'system_only'
+  | 'disabled'
+  | 'unknown_capability'
+  | 'source_incompatible'
+  | 'creator_capability_reserved';
+
+export type ResolveCapabilityAccessInput = {
+  capabilityId: string;
+  capabilityPolicy?: CapabilityPolicyConfig;
+  customAgentCreationPolicy?: CustomAgentCreationPolicyConfig;
+  approvalPolicy?: AgentApprovalPolicy;
+  definitionOwnerKind: AgentDefinitionOwnerKind;
+  requesterIsAdmin?: boolean;
+  sourceKind?: AgentCapabilitySourceKind;
+};
+
+export type ResolvedAgentCapabilityAccess = {
+  capabilityId: string;
+  entry?: AgentCapabilityCatalogEntry;
+  configuredAvailability?: AgentCapabilityAvailability;
+  effectiveAvailability?: AgentCapabilityAvailability;
+  allowed: boolean;
+  reason?: AgentCapabilityAccessReason;
+  approvalMode?: AgentApprovalMode;
+};
+
+export default class AgentPolicyService {
+  static async getEffectivePolicy(repoFullName?: string): Promise<AgentApprovalPolicy> {
+    const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
+    const configured = (config as { approvalPolicy?: ApprovalPolicyConfig }).approvalPolicy;
+    const configuredDefaultMode = configured?.defaultMode;
+    const defaultMode = configuredDefaultMode || DEFAULT_AGENT_APPROVAL_POLICY.defaultMode;
+    const baseRules = configuredDefaultMode
+      ? AGENT_CAPABILITY_KEYS.reduce<Record<AgentCapabilityKey, AgentApprovalMode>>((acc, capabilityKey) => {
+          acc[capabilityKey] = configuredDefaultMode;
+          return acc;
+        }, {} as Record<AgentCapabilityKey, AgentApprovalMode>)
+      : DEFAULT_AGENT_APPROVAL_POLICY.rules;
+
+    return {
+      defaultMode,
+      rules: {
+        ...baseRules,
+        ...(configured?.rules || {}),
+      },
+    };
+  }
+
+  static capabilityForSessionWorkspaceTool(toolName: string, annotations?: McpAnnotations): AgentCapabilityKey {
+    if (annotations?.readOnlyHint) {
+      return 'read';
+    }
+
+    const lowerName = toolName.toLowerCase();
+    if (
+      lowerName.includes('read') ||
+      lowerName.includes('list') ||
+      lowerName.includes('status') ||
+      lowerName.includes('logs') ||
+      lowerName.includes('operation_wait') ||
+      lowerName.includes('grep') ||
+      lowerName.includes('diff')
+    ) {
+      return 'read';
+    }
+
+    if (lowerName.includes('write') || lowerName.includes('edit')) {
+      return 'workspace_write';
+    }
+
+    if (
+      lowerName.includes('exec') ||
+      lowerName.includes('bash') ||
+      lowerName.includes('command') ||
+      lowerName.includes('cancel') ||
+      lowerName.includes('service_start') ||
+      lowerName.includes('service_stop')
+    ) {
+      return 'shell_exec';
+    }
+
+    if (lowerName.startsWith('git.') || lowerName.startsWith('git_') || lowerName.includes('git')) {
+      return 'git_write';
+    }
+
+    if (annotations?.openWorldHint) {
+      return 'network_access';
+    }
+
+    return 'workspace_write';
+  }
+
+  static capabilityForExternalMcpTool(_toolName: string, annotations?: McpAnnotations): AgentCapabilityKey {
+    if (annotations?.readOnlyHint) {
+      return 'external_mcp_read';
+    }
+
+    return 'external_mcp_write';
+  }
+
+  static modeForCapability(policy: AgentApprovalPolicy, capabilityKey: AgentCapabilityKey): AgentApprovalMode {
+    return policy.rules[capabilityKey] || policy.defaultMode;
+  }
+
+  static resolveCapabilityAccess(input: ResolveCapabilityAccessInput): ResolvedAgentCapabilityAccess {
+    const { capabilityId } = input;
+    if (!isAgentCapabilityCatalogId(capabilityId)) {
+      return {
+        capabilityId,
+        allowed: false,
+        reason: 'unknown_capability',
+      };
+    }
+
+    const entry = getAgentCapabilityCatalogEntry(capabilityId);
+    const configuredAvailability = input.capabilityPolicy?.availability?.[capabilityId];
+    const effectiveAvailability = configuredAvailability || entry.defaultAvailability;
+    const approvalPolicy = input.approvalPolicy || DEFAULT_AGENT_APPROVAL_POLICY;
+    const approvalMode = entry.runtimeCapabilityKey
+      ? AgentPolicyService.modeForCapability(approvalPolicy, entry.runtimeCapabilityKey)
+      : entry.defaultApprovalMode;
+
+    if (input.sourceKind && entry.sourceKinds && !entry.sourceKinds.includes(input.sourceKind)) {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'source_incompatible',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'disabled') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'disabled',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'system_only' && input.definitionOwnerKind !== 'system') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'system_only',
+        approvalMode,
+      };
+    }
+
+    if (effectiveAvailability === 'admin_only' && input.definitionOwnerKind === 'user') {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'admin_only',
+        approvalMode,
+      };
+    }
+
+    if (
+      input.definitionOwnerKind === 'user' &&
+      input.customAgentCreationPolicy?.capabilityAvailability?.[capabilityId] === 'reserved'
+    ) {
+      return {
+        capabilityId,
+        entry,
+        configuredAvailability,
+        effectiveAvailability,
+        allowed: false,
+        reason: 'creator_capability_reserved',
+        approvalMode,
+      };
+    }
+
+    return {
+      capabilityId,
+      entry,
+      configuredAvailability,
+      effectiveAvailability,
+      allowed: true,
+      approvalMode,
+    };
+  }
+
+  static resolveCapabilitySetAccess(
+    capabilityIds: readonly string[],
+    input: Omit<ResolveCapabilityAccessInput, 'capabilityId'>
+  ): ResolvedAgentCapabilityAccess[] {
+    return capabilityIds.map((capabilityId) => AgentPolicyService.resolveCapabilityAccess({ ...input, capabilityId }));
+  }
+}

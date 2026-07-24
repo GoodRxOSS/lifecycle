@@ -1,0 +1,221 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import * as k8s from '@kubernetes/client-node';
+import { HttpError } from '@kubernetes/client-node';
+import { Deploy } from 'server/models';
+import { getLogger } from 'server/lib/logger';
+import GlobalConfigService from 'server/services/globalConfig';
+import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
+import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+
+export interface KubernetesApplyJobConfig {
+  deploy: Deploy;
+  namespace: string;
+  jobId: string;
+}
+
+export function getKubernetesApplyJobName(deploy: Deploy, jobId: string): string {
+  const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
+  return buildDeployJobName({
+    deployUuid: deploy.uuid,
+    jobId,
+    shortSha,
+  });
+}
+
+export async function createKubernetesApplyJob({
+  deploy,
+  namespace,
+  jobId,
+}: KubernetesApplyJobConfig): Promise<k8s.V1Job> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const batchApi = kc.makeApiClient(k8s.BatchV1Api);
+  const jobName = getKubernetesApplyJobName(deploy, jobId);
+  const serviceName = deploy.deployable?.name || '';
+
+  getLogger().info(`Job: creating name=${jobName} service=${serviceName}`);
+
+  const configMapName = `${jobName}-manifest`;
+  await createManifestConfigMap(deploy, configMapName, namespace);
+
+  const job: k8s.V1Job = {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace,
+      labels: {
+        ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
+        app: 'lifecycle-deploy',
+        type: 'kubernetes-apply',
+        ...(serviceName ? { service: serviceName } : {}),
+      },
+      annotations: {
+        'lifecycle/deploy-id': deploy.id.toString(),
+        'lifecycle/job-type': 'kubernetes-apply',
+        'lifecycle/service-name': deploy.deployable?.name || '',
+      },
+    },
+    spec: {
+      ttlSecondsAfterFinished: 86400,
+      backoffLimit: 0,
+      template: {
+        metadata: {
+          labels: {
+            ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
+            'job-name': jobName,
+            ...(serviceName ? { service: serviceName } : {}),
+          },
+        },
+        spec: {
+          restartPolicy: 'Never',
+          serviceAccountName: await getServiceAccountName(),
+          containers: [
+            {
+              name: 'kubectl-apply',
+              image: 'bitnamilegacy/kubectl:1.30',
+              command: ['/bin/bash', '-c'],
+              args: [
+                `
+              set -e
+              echo "Applying manifest for ${deploy.uuid}..."
+              kubectl apply -f /manifests/manifest.yaml
+              
+              if kubectl get deployment ${deploy.uuid} -n ${namespace} &>/dev/null; then
+                kubectl rollout restart deployment/${deploy.uuid} -n ${namespace}
+                kubectl rollout status deployment/${deploy.uuid} -n ${namespace} --timeout=300s
+              fi
+            `,
+              ],
+              volumeMounts: [
+                {
+                  name: 'manifest',
+                  mountPath: '/manifests',
+                  readOnly: true,
+                },
+              ],
+              resources: {
+                requests: {
+                  memory: '128Mi',
+                  cpu: '100m',
+                },
+                limits: {
+                  memory: '256Mi',
+                  cpu: '200m',
+                },
+              },
+            },
+          ],
+          volumes: [
+            {
+              name: 'manifest',
+              configMap: {
+                name: configMapName,
+                items: [
+                  {
+                    key: 'manifest.yaml',
+                    path: 'manifest.yaml',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const createdJob = await batchApi.createNamespacedJob(namespace, job);
+  getLogger().info(`Job: created name=${jobName} jobId=${jobId}`);
+
+  return createdJob.body;
+}
+
+async function createManifestConfigMap(deploy: Deploy, configMapName: string, namespace: string): Promise<void> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+  if (!deploy.manifest) {
+    throw new Error(`Deploy ${deploy.uuid} has no manifest`);
+  }
+
+  const configMap: k8s.V1ConfigMap = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: configMapName,
+      namespace,
+      labels: {
+        ...buildLifecycleLabels({ buildUuid: deploy.build.uuid, deployUuid: deploy.uuid }),
+        app: 'lifecycle-deploy',
+      },
+    },
+    data: {
+      'manifest.yaml': deploy.manifest,
+    },
+  };
+
+  try {
+    await coreApi.createNamespacedConfigMap(namespace, configMap);
+  } catch (error) {
+    if (error instanceof HttpError) {
+      getLogger({ error }).error(
+        `Failed to create ConfigMap: configMapName=${configMapName} statusCode=${error.statusCode}`
+      );
+    }
+    throw error;
+  }
+}
+
+async function getServiceAccountName(): Promise<string> {
+  const { serviceAccount } = await GlobalConfigService.getInstance().getAllConfigs();
+  return serviceAccount?.name || 'default';
+}
+
+export async function monitorKubernetesJob(
+  jobName: string,
+  namespace: string,
+  maxAttempts = 120
+): Promise<{
+  success: boolean;
+  message: string;
+  logs: string;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
+}> {
+  try {
+    const timeoutSeconds = maxAttempts * 5;
+    const result = await JobMonitor.waitForJobAndGetLogs(jobName, namespace, timeoutSeconds, ['kubectl-apply']);
+
+    return {
+      success: result.success,
+      message: result.success ? 'Kubernetes resources applied successfully' : 'Kubernetes apply job failed',
+      logs: result.logs,
+      status: result.status,
+      startedAt: result.startedAt,
+      completedAt: result.completedAt,
+      duration: result.duration,
+    };
+  } catch (error) {
+    getLogger({ error }).error(`Job: monitor failed name=${jobName}`);
+    throw error;
+  }
+}

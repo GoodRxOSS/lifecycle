@@ -1,0 +1,51 @@
+# Copyright 2025 GoodRx, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+redis:
+  # Set to true to install Redis alongside your app
+  enabled: true
+
+  # Values passed directly to the bitnami/redis subchart.
+  # Refer to Bitnami Redis chart docs for all options:
+  # https://github.com/bitnami/charts/tree/main/bitnami/redis
+
+  # Use 'auth' section for password.
+  # auth:
+  #   enabled: true # Default is often false, enable for password protection
+  # !! Strongly recommend using existingSecret or auto-generating password !!
+  # password: "change-me-redis-too!"
+  # --- OR use existingSecret (Recommended) ---
+  # existingSecret: "my-redis-secret" # K8s secret name containing redis-password key
+  # existingSecretPasswordKey: "redis-password"
+
+  # Architecture: 'replication' (master+replicas) or 'standalone'
+  architecture: standalone # Use 'replication' for HA setups
+  auth:
+    enabled: false
+  # Persistence settings (example for standalone/master)
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi # Adjust storage size as needed
+    # resources: # Example resource limits
+    #   requests:
+    #     cpu: 100m
+    #     memory: 128Mi
+    #   limits:
+    #     cpu: 200m
+    #     memory: 256Mi
+  # replica: # Settings if architecture is 'replication'
+  #   persistence:
+  #     enabled: true
+  #     size: 8Gi

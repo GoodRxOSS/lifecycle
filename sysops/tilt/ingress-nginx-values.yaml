@@ -1,0 +1,17 @@
+controller:
+  kind: DaemonSet
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+  ingressClass: nginx
+  ingressClassResource:
+    name: nginx
+  watchIngressWithoutClass: true
+  extraArgs:
+    publish-status-address: 127.0.0.1
+  publishService:
+    enabled: false
+  service:
+    type: ClusterIP

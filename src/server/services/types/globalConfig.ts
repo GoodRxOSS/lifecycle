@@ -1,0 +1,395 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Helm } from 'server/models/yaml';
+import { BuilderEngine } from 'server/lib/buildEngines';
+
+export type GlobalConfig = {
+  lifecycleDefaults: LifecycleDefaults;
+  helmDefaults: HelmDefaults;
+  buildDefaults?: BuildDefaults;
+  agentSessionDefaults?: AgentSessionDefaults;
+  sites?: SitesConfig;
+  api_keys?: ApiKeysConfig;
+  api_environments?: ApiEnvironmentsConfig;
+  postgresql: Helm;
+  mysql: Helm;
+  redis: Helm;
+  elasticsearch: Helm;
+  publicChart: PublicChart;
+  lifecycleIgnores: LifecycleIgnores;
+  deletePendingHelmReleaseStep: DeletePendingHelmReleaseStep;
+  serviceDefaults: Record<string, any>;
+  domainDefaults: DomainDefaults;
+  orgChart: OrgChart;
+  auroraRestoreSettings: DatabaseSettings;
+  rdsRestoreSettings: DatabaseSettings;
+  serviceAccount: RoleSettings;
+  features: Record<string, boolean>;
+  app_setup: AppSetup;
+  labels: LabelsConfig;
+  ttl_cleanup?: TTLCleanupConfig;
+  secretProviders?: SecretProvidersConfig;
+  logArchival?: LogArchivalConfig;
+  metadata?: BuildMetadataConfig;
+};
+
+export type BuildMetadataLink = {
+  id: string;
+  text: string;
+  icon: string;
+  link: string;
+  position: number;
+};
+
+export type BuildMetadataConfig = {
+  links: BuildMetadataLink[];
+};
+
+export type AppSetup = {
+  created: boolean;
+  installed: boolean;
+  restarted: boolean;
+  url: string;
+  state: string;
+  name?: string;
+  org?: string;
+};
+
+export type AgentSessionControlPlaneConfig = {
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  maxIterations?: number;
+  maxRunInputTokens?: number;
+  workspaceToolDiscoveryTimeoutMs?: number;
+  workspaceToolExecutionTimeoutMs?: number;
+  autoProvisionWorkspace?: boolean;
+  toolRules?: import('./agentSessionConfig').AgentSessionToolRule[];
+};
+
+export type AgentSessionSchedulingConfig = {
+  nodeSelector?: Record<string, string> | null;
+  keepAttachedServicesOnSessionNode?: boolean | null;
+};
+
+export type AgentSessionReadinessConfig = {
+  timeoutMs?: number | string | null;
+  pollMs?: number | string | null;
+};
+
+export type ResourceRequirements = {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+};
+
+export type AgentSessionResourcesConfig = {
+  workspace?: ResourceRequirements | null;
+  editor?: ResourceRequirements | null;
+  workspaceGateway?: ResourceRequirements | null;
+};
+
+export type AgentSessionWorkspaceStorageAccessMode = 'ReadWriteOnce' | 'ReadWriteMany';
+
+export type AgentSessionWorkspaceStorageConfig = {
+  defaultSize?: string | null;
+  allowedSizes?: string[] | null;
+  allowClientOverride?: boolean | null;
+  accessMode?: AgentSessionWorkspaceStorageAccessMode | null;
+};
+
+export type AgentSessionWorkspaceBackendProvider = 'lifecycle_kubernetes' | 'opensandbox' | 'e2b' | 'daytona' | 'modal';
+
+export type AgentSessionOpenSandboxBackendConfig = {
+  domain?: string | null;
+  protocol?: 'http' | 'https' | null;
+  apiKey?: string | null;
+  image?: string | null;
+  poolRef?: string | null;
+  timeoutSeconds?: number | string | null;
+  useServerProxy?: boolean | null;
+  secureAccess?: boolean | null;
+  resourceLimits?: Record<string, string> | null;
+  execdPort?: number | string | null;
+  gatewayPort?: number | string | null;
+  editorPort?: number | string | null;
+};
+
+export type AgentSessionE2bBackendConfig = {
+  apiKey?: string | null;
+  templateId?: string | null;
+  domain?: string | null;
+  timeoutSeconds?: number | string | null;
+  autoPause?: boolean | null;
+};
+
+export type AgentSessionDaytonaBackendConfig = {
+  apiKey?: string | null;
+  snapshot?: string | null;
+  apiUrl?: string | null;
+  target?: string | null;
+  autoArchiveInterval?: number | string | null;
+};
+
+export type AgentSessionModalBackendConfig = {
+  tokenId?: string | null;
+  tokenSecret?: string | null;
+  environment?: string | null;
+  appName?: string | null;
+  image?: string | null;
+  /** Name of a Modal Secret holding REGISTRY_USERNAME/REGISTRY_PASSWORD (a reference, not a secret value). */
+  imageRegistrySecret?: string | null;
+  timeoutSeconds?: number | string | null;
+  cpu?: number | string | null;
+  memoryMiB?: number | string | null;
+  inboundCidrAllowlist?: string[] | null;
+};
+
+export type AgentSessionWorkspaceBackendConfig = {
+  provider?: AgentSessionWorkspaceBackendProvider | null;
+  opensandbox?: AgentSessionOpenSandboxBackendConfig | null;
+  e2b?: AgentSessionE2bBackendConfig | null;
+  daytona?: AgentSessionDaytonaBackendConfig | null;
+  modal?: AgentSessionModalBackendConfig | null;
+};
+
+export type AgentSessionCleanupConfig = {
+  activeIdleSuspendMs?: number | string | null;
+  startingTimeoutMs?: number | string | null;
+  hibernatedRetentionMs?: number | string | null;
+  idleArchiveMs?: number | string | null;
+  intervalMs?: number | string | null;
+  redisTtlSeconds?: number | string | null;
+};
+
+export type AgentSessionDurabilityConfig = {
+  runExecutionLeaseMs?: number | string | null;
+  queuedRunDispatchStaleMs?: number | string | null;
+  dispatchRecoveryLimit?: number | string | null;
+  maxDurablePayloadBytes?: number | string | null;
+  payloadPreviewBytes?: number | string | null;
+  fileChangePreviewChars?: number | string | null;
+};
+
+export type AgentSessionDefaults = {
+  workspaceImage?: string | null;
+  workspaceEditorImage?: string | null;
+  workspaceGatewayImage?: string | null;
+  scheduling?: AgentSessionSchedulingConfig;
+  readiness?: AgentSessionReadinessConfig;
+  resources?: AgentSessionResourcesConfig;
+  workspaceStorage?: AgentSessionWorkspaceStorageConfig;
+  workspaceBackend?: AgentSessionWorkspaceBackendConfig;
+  cleanup?: AgentSessionCleanupConfig;
+  durability?: AgentSessionDurabilityConfig;
+  controlPlane?: AgentSessionControlPlaneConfig;
+};
+
+export type SitesStorageBackend = 's3' | 'minio';
+
+export type SitesStorageConfig = {
+  backend?: SitesStorageBackend;
+  bucket?: string;
+  prefix?: string;
+  region?: string;
+  endpoint?: string | null;
+  forcePathStyle?: boolean | null;
+};
+
+export type SitesConfig = {
+  enabled?: boolean;
+  domain?: string;
+  port?: number | string | null;
+  hostPrefix?: string | null;
+  ttl?: {
+    enabled?: boolean;
+    defaultDays?: number;
+    extensionDays?: number;
+  };
+  upload?: {
+    maxUploadBytes?: number;
+    maxExtractedBytes?: number;
+    maxFiles?: number;
+    allowedExtensions?: string[];
+    allowedTypes?: string[];
+  };
+  storage?: SitesStorageConfig;
+  cleanup?: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+  };
+};
+
+export type ApiKeysConfig = {
+  issuanceEnabled?: boolean;
+  personalAuthEnabled?: boolean;
+  serviceAuthEnabled?: boolean;
+  rateLimitPerMinute?: number;
+  maxActivePersonalKeysPerUser?: number;
+};
+
+export type ApiEnvironmentsConfig = {
+  enabled?: boolean;
+  defaultTtlHours?: number;
+  maxTtlHours?: number;
+  extensionHours?: number;
+};
+
+export type RoleSettings = {
+  name?: string;
+  /** Annotations applied to service accounts in environment namespaces, e.g. cloud workload identity keys. */
+  annotations?: Record<string, string>;
+  /** @deprecated AWS-only: emitted as eks.amazonaws.com/role-arn. Use annotations instead. */
+  role?: string;
+};
+
+export type DatabaseSettings = {
+  vpcId: string;
+  accountId: string;
+  region: string;
+  securityGroupIds: string[];
+  subnetGroupName: string;
+  engine: string;
+  engineVersion: string;
+  tagMatch: {
+    key: string;
+  };
+  instanceSize: string;
+  restoreSize: string;
+};
+
+export type DomainDefaults = {
+  http: string;
+  grpc: string;
+  altHttp?: string[];
+  altGrpc?: string[];
+  publicScheme?: 'http' | 'https';
+};
+
+export type LifecycleIgnores = {
+  github?: {
+    branches?: string[];
+    events?: string[];
+    organizations?: string[];
+  };
+};
+
+export type LifecycleDefaults = {
+  defaultUUID: string;
+  defaultPublicUrl: string;
+  cfStepType: string;
+  ecrDomain: string;
+  ecrRegistry: string;
+  buildPipeline: string;
+  deployNamespace: string;
+  deployCluster: string;
+  helmDeployPipeline: string;
+  ingressClassName?: string;
+};
+
+export type PublicChart = {
+  block: boolean;
+};
+
+export type OrgChart = {
+  name: string;
+};
+
+export type DeletePendingHelmReleaseStep = {
+  delete: boolean;
+  static_delete?: boolean;
+};
+
+export type HelmDefaults = {
+  nativeHelm?: NativeHelmConfig;
+};
+
+export type NativeHelmPostRendererConfig = {
+  enabled?: boolean;
+  command?: string;
+  args?: string[];
+};
+
+export type NativeHelmConfig = {
+  enabled: boolean;
+  defaultHelmVersion?: string;
+  jobTimeout?: number;
+  serviceAccount?: string;
+  defaultArgs?: string;
+  image?: string;
+  postRenderer?: NativeHelmPostRendererConfig;
+};
+
+export type NativeBuildRegistryAuth = {
+  type: 'gar';
+  registry: string;
+};
+
+export type BuildDefaults = {
+  engine?: BuilderEngine;
+  jobTimeout?: number;
+  serviceAccount?: string;
+  cacheRegistry?: string;
+  registryAuth?: NativeBuildRegistryAuth[];
+  podAnnotations?: Record<string, string>;
+  resources?: {
+    buildkit?: ResourceRequirements;
+    kaniko?: ResourceRequirements;
+  };
+  buildkit?: {
+    endpoint?: string;
+    healthCheckTimeout?: number;
+    insecure?: boolean;
+  };
+};
+
+export type CommentToggleConfig = {
+  enabled: boolean;
+  overrides?: Record<string, boolean>;
+};
+
+export type LabelsConfig = {
+  deploy: string[];
+  disabled: string[];
+  keep: string[];
+  statusComments: string[];
+  defaultStatusComments: CommentToggleConfig;
+  defaultControlComments: CommentToggleConfig;
+};
+
+export type TTLCleanupConfig = {
+  enabled: boolean;
+  dryRun: boolean;
+  inactivityDays: number;
+  checkIntervalMinutes: number;
+  commentTemplate?: string;
+  excludedRepositories: string[];
+};
+
+export type SecretProviderConfig = {
+  enabled: boolean;
+  clusterSecretStore: string;
+  refreshInterval: string;
+  allowedPrefixes?: string[];
+  secretSyncTimeout?: number;
+};
+
+export type SecretProvidersConfig = {
+  [provider: string]: SecretProviderConfig;
+};
+
+export type LogArchivalConfig = {
+  enabled: boolean;
+};

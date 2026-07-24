@@ -1,0 +1,302 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Deploy } from 'server/models';
+import { deployHelm } from '../helm';
+import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
+import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
+import { nanoid, customAlphabet } from 'nanoid';
+import DeployService from 'server/services/deploy';
+import { getLogger, withLogContext } from 'server/lib/logger';
+import { ensureServiceAccountForJob } from '../kubernetes/common/serviceAccount';
+import { waitForDeployPodReady } from '../kubernetes';
+import { buildDeployJobName } from '../kubernetes/jobNames';
+import GlobalConfigService from 'server/services/globalConfig';
+import { getLogArchivalService } from 'server/services/logArchival';
+
+const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
+
+export class DeploymentManager {
+  private deploys: Map<string, Deploy> = new Map();
+  private deploymentLevels: Map<number, Deploy[]> = new Map();
+  // Deploys never placed in a level: members of a dependency cycle, or dependents of one.
+  private unresolvedDeploys: Deploy[] = [];
+  private dependencyCycleDescription = '';
+
+  constructor(deploys: Deploy[]) {
+    deploys.forEach((deploy) => {
+      this.deploys.set(deploy.deployable.name, deploy);
+    });
+
+    this.calculateDeploymentOrder();
+  }
+
+  private calculateDeploymentOrder(): void {
+    this.removeInvalidDependencies();
+    let level = 0;
+
+    // Remove self-dependencies
+    this.deploys.forEach((deploy, deployableName) => {
+      const selfDependencyIndex = deploy.deployable.deploymentDependsOn.indexOf(deployableName);
+      if (selfDependencyIndex > -1) {
+        deploy.deployable.deploymentDependsOn.splice(selfDependencyIndex, 1);
+      }
+    });
+
+    let deploysWithoutDependencies = Array.from(this.deploys.values()).filter(
+      (d) => d.deployable.deploymentDependsOn.length === 0
+    );
+
+    while (deploysWithoutDependencies.length > 0) {
+      this.deploymentLevels.set(
+        level,
+        deploysWithoutDependencies.map((d) => d)
+      );
+      const nextToDeploy: Deploy[] = [];
+
+      deploysWithoutDependencies.forEach((deploy) => {
+        Array.from(this.deploys.values()).forEach((d) => {
+          if (d.deployable.deploymentDependsOn.includes(deploy.deployable.name)) {
+            const index = d.deployable.deploymentDependsOn.indexOf(deploy.deployable.name);
+            d.deployable.deploymentDependsOn.splice(index, 1);
+            if (d.deployable.deploymentDependsOn.length === 0) {
+              nextToDeploy.push(d);
+            }
+          }
+        });
+      });
+
+      deploysWithoutDependencies = nextToDeploy;
+      level++;
+    }
+
+    const placed = new Set<string>();
+    this.deploymentLevels.forEach((levelDeploys) => levelDeploys.forEach((d) => placed.add(d.deployable.name)));
+    this.unresolvedDeploys = Array.from(this.deploys.values()).filter((d) => !placed.has(d.deployable.name));
+    if (this.unresolvedDeploys.length > 0) {
+      this.dependencyCycleDescription = this.describeDependencyCycle();
+      const unresolvedNames = this.unresolvedDeploys.map((d) => d.deployable.name).join(',');
+      getLogger().warn(
+        `Deploy: dependency cycle ${this.dependencyCycleDescription} leaves [${unresolvedNames}] unschedulable`
+      );
+    }
+
+    const orderSummary = Array.from({ length: this.deploymentLevels.size }, (_, i) => {
+      const services =
+        this.deploymentLevels
+          .get(i)
+          ?.map((d) => d.deployable.name)
+          .join(',') || '';
+      return `L${i}=[${services}]`;
+    }).join(' ');
+
+    getLogger().info(`Deploy: ${this.deploymentLevels.size} levels ${orderSummary}`);
+  }
+
+  // After leveling, unresolved deploys only retain deps on other unresolved deploys; walking them finds the cycle.
+  private describeDependencyCycle(): string {
+    const unresolved = new Map(this.unresolvedDeploys.map((d) => [d.deployable.name, d]));
+    const start = Array.from(unresolved.keys()).sort()[0];
+    const path: string[] = [];
+    let current: string | undefined = start;
+
+    while (current && !path.includes(current)) {
+      path.push(current);
+      current = unresolved.get(current)?.deployable.deploymentDependsOn.find((dep) => unresolved.has(dep));
+    }
+
+    if (!current) {
+      return path.join(' -> ');
+    }
+
+    return [...path.slice(path.indexOf(current)), current].join(' -> ');
+  }
+
+  private removeInvalidDependencies(): void {
+    const validDeployNames = new Set(this.deploys.keys());
+
+    this.deploys.forEach((deploy) => {
+      deploy.deployable.deploymentDependsOn = deploy.deployable.deploymentDependsOn.filter((dependencyName) => {
+        return validDeployNames.has(dependencyName);
+      });
+    });
+  }
+
+  public async deploy(): Promise<void> {
+    const unresolved = new Set(this.unresolvedDeploys);
+    for (const value of this.deploys.values()) {
+      if (!unresolved.has(value)) {
+        await value.$query().patch({ status: DeployStatus.QUEUED });
+      }
+    }
+
+    if (this.unresolvedDeploys.length > 0) {
+      const statusMessage = `Dependency cycle detected: ${this.dependencyCycleDescription}; deploy order cannot be resolved`;
+      for (const deploy of this.unresolvedDeploys) {
+        getLogger().error(`Deploy: ${deploy.deployable.name} failed — ${statusMessage}`);
+        await deploy.$query().patch({ status: DeployStatus.DEPLOY_FAILED, statusMessage });
+      }
+    }
+
+    for (let level = 0; level < this.deploymentLevels.size; level++) {
+      const deploysAtLevel = this.deploymentLevels.get(level);
+      if (deploysAtLevel) {
+        const helmDeploys = deploysAtLevel.filter((d) => this.shouldDeployWithHelm(d));
+        const githubDeploys = deploysAtLevel.filter((d) => this.shouldDeployWithKubernetes(d));
+
+        const helmServices = helmDeploys.map((d) => d.deployable.name).join(',');
+        const k8sServices = githubDeploys.map((d) => d.deployable.name).join(',');
+        getLogger().info(`Deploy: level ${level} helm=[${helmServices}] k8s=[${k8sServices}]`);
+
+        await Promise.all([
+          helmDeploys.length > 0 ? deployHelm(helmDeploys) : Promise.resolve(),
+          ...githubDeploys.map((deploy) => this.deployManifests(deploy)),
+        ]);
+      }
+    }
+  }
+
+  private shouldDeployWithHelm(deploy: Deploy): boolean {
+    const deployType = deploy.deployable?.type;
+    return deployType === DeployTypes.HELM;
+  }
+
+  private shouldDeployWithKubernetes(deploy: Deploy): boolean {
+    const deployType = deploy.deployable?.type;
+    // Note: only the below types have Kubernetes manifests
+    return (
+      deployType != null && [DeployTypes.GITHUB, DeployTypes.DOCKER, DeployTypes.AURORA_RESTORE].includes(deployType)
+    );
+  }
+
+  private async archiveDeployLogs(
+    deploy: Deploy,
+    jobName: string,
+    result: {
+      success: boolean;
+      logs?: string;
+      startedAt?: string;
+      completedAt?: string;
+      duration?: number;
+    }
+  ): Promise<void> {
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    if (!globalConfig.logArchival?.enabled || !result.logs) {
+      return;
+    }
+
+    await getLogArchivalService().archiveLogs(
+      {
+        jobName,
+        jobType: 'deploy',
+        serviceName: deploy.deployable?.name || '',
+        namespace: deploy.build.namespace,
+        status: result.success ? 'Complete' : 'Failed',
+        sha: deploy.sha || '',
+        deployUuid: deploy.uuid,
+        deploymentType: 'github',
+        startedAt: result.startedAt,
+        completedAt: result.completedAt,
+        duration: result.duration,
+        archivedAt: new Date().toISOString(),
+      },
+      result.logs
+    );
+  }
+
+  private async deployManifests(deploy: Deploy): Promise<void> {
+    return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
+      const jobId = generateJobId();
+      const deployService = new DeployService();
+      const runUUID = deploy.runUUID || nanoid();
+      if (deploy.runUUID !== runUUID) {
+        await deploy.$query().patch({ runUUID });
+        deploy.runUUID = runUUID;
+      }
+
+      try {
+        await deployService.patchAndUpdateActivityFeed(
+          deploy,
+          {
+            status: DeployStatus.DEPLOYING,
+            statusMessage: 'Creating Kubernetes apply job',
+          },
+          runUUID
+        );
+
+        await deploy.$fetchGraph('[build, deployable]');
+
+        if (!deploy.manifest) {
+          throw new Error(`Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`);
+        }
+
+        await ensureServiceAccountForJob(deploy.build.namespace, 'deploy');
+
+        await createKubernetesApplyJob({
+          deploy,
+          namespace: deploy.build.namespace,
+          jobId,
+        });
+
+        const shortSha = deploy.sha?.substring(0, 7) || 'unknown';
+        const jobName = buildDeployJobName({
+          deployUuid: deploy.uuid,
+          jobId,
+          shortSha,
+        });
+        const result = await monitorKubernetesJob(jobName, deploy.build.namespace);
+        await this.archiveDeployLogs(deploy, jobName, result);
+
+        if (!result.success) {
+          throw new Error(result.message);
+        }
+
+        await deployService.patchAndUpdateActivityFeed(
+          deploy,
+          {
+            status: DeployStatus.DEPLOYING,
+            statusMessage: 'Waiting for pods to be ready',
+          },
+          runUUID
+        );
+
+        const cliDeploy = CLIDeployTypes.has(deploy.deployable.type);
+        const readiness = cliDeploy ? { ready: true } : await waitForDeployPodReady(deploy);
+
+        if (readiness.ready) {
+          await deployService.patchAndUpdateActivityFeed(
+            deploy,
+            {
+              status: DeployStatus.READY,
+              statusMessage: cliDeploy ? 'CLI Deploy completed' : 'Kubernetes pods are ready',
+            },
+            runUUID
+          );
+        } else {
+          const cause = readiness.causeSummary ? `: ${readiness.causeSummary.slice(0, 350)}` : '';
+          throw new Error(`Pods failed to become ready within timeout${cause}`);
+        }
+      } catch (error) {
+        await deployService.recordDeployFailure(deploy, runUUID, {
+          status: DeployStatus.DEPLOY_FAILED,
+          error,
+          fallbackMessage: `Deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
+        });
+        throw error;
+      }
+    });
+  }
+}

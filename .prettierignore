@@ -1,0 +1,3 @@
+# Ignore Helm templates
+helm/**/templates/*.yaml
+helm/**/templates/*.yml

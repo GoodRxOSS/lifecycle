@@ -1,0 +1,113 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { GetFileTool } from '../getFile';
+
+const mockOctokit = { request: jest.fn() };
+const mockGithubClient = {
+  getOctokit: jest.fn().mockResolvedValue(mockOctokit),
+  getOctokitWithAuth: jest.fn().mockResolvedValue({
+    octokit: mockOctokit,
+    auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+  }),
+  isFilePathAllowed: jest.fn().mockReturnValue(true),
+  isFileExcluded: jest.fn().mockReturnValue(false),
+  isRepoAllowed: jest.fn().mockReturnValue(true),
+  getDefaultRepo: jest.fn().mockReturnValue(null),
+  getAllowedBranch: jest.fn().mockReturnValue(null),
+  validateBranch: jest.fn().mockReturnValue({ valid: true }),
+} as any;
+
+describe('GetFileTool', () => {
+  let tool: GetFileTool;
+
+  const baseArgs = {
+    repository_owner: 'org',
+    repository_name: 'repo',
+    branch: 'main',
+    file_path: 'src/index.ts',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGithubClient.getOctokit.mockResolvedValue(mockOctokit);
+    mockGithubClient.getOctokitWithAuth.mockResolvedValue({
+      octokit: mockOctokit,
+      auth: { provider: 'github', source: 'app', required: false, githubUsername: null },
+    });
+    mockGithubClient.isFilePathAllowed.mockReturnValue(true);
+    mockGithubClient.isRepoAllowed.mockReturnValue(true);
+    tool = new GetFileTool(mockGithubClient);
+  });
+
+  it('reads file successfully', async () => {
+    const fileContent = 'hello world\nsecond line';
+    mockOctokit.request.mockResolvedValue({
+      data: {
+        type: 'file',
+        content: Buffer.from(fileContent).toString('base64'),
+        sha: 'abc123',
+      },
+    });
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(true);
+    expect(result.agentContent).toContain('File src/index.ts (2 lines, sha abc123)');
+    expect(result.agentContent).toContain('```\nhello world\nsecond line\n```');
+  });
+
+  it('returns error for access denied', async () => {
+    mockGithubClient.isFilePathAllowed.mockReturnValue(false);
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FILE_ACCESS_DENIED');
+  });
+
+  it('rejects repositories outside the build scope', async () => {
+    mockGithubClient.isRepoAllowed.mockReturnValue(false);
+
+    const result = await tool.execute({ ...baseArgs, repository_owner: 'other-org', repository_name: 'other-repo' });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FILE_ACCESS_DENIED');
+    expect(result.agentContent).toContain('other-org/other-repo');
+    expect(mockOctokit.request).not.toHaveBeenCalled();
+  });
+
+  it('returns error for non-file path', async () => {
+    mockOctokit.request.mockResolvedValue({
+      data: { type: 'dir' },
+    });
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.agentContent).toContain('not a file');
+  });
+
+  it('handles API error', async () => {
+    mockOctokit.request.mockRejectedValue(new Error('Not Found'));
+
+    const result = await tool.execute(baseArgs);
+    expect(result.success).toBe(false);
+    expect(result.agentContent).toContain('Not Found');
+  });
+
+  it('handles aborted signal', async () => {
+    const result = await tool.execute(baseArgs, { aborted: true } as any);
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('CANCELLED');
+  });
+});

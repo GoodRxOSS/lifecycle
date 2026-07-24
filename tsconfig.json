@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "noEmitOnError": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "lib": ["es2020", "dom"],
+    "outDir": "build",
+    "baseUrl": ".",
+    "paths": {
+      "server/*": ["src/server/*"],
+      "shared/*": ["src/shared/*"],
+      "src/*": ["src/*"],
+      "scripts/*": ["scripts/*"],
+      "root/*": ["./*"]
+    },
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "strictNullChecks": true
+  },
+  "include": ["src/**/*", "scripts/**/*", "package.json", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", "**/node_modules/*"],
+  "ts-node": {
+    "compilerOptions": {
+      "module": "commonjs"
+    }
+  }
+}

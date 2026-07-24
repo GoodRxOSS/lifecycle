@@ -1,0 +1,49 @@
+# Copyright 2025 GoodRx, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+postgresql:
+  # Set to true to install PostgreSQL alongside your app
+  enabled: true
+
+  # Values passed directly to the bitnami/postgresql subchart.
+  # Refer to Bitnami PostgreSQL chart docs for all options:
+  # https://github.com/bitnami/charts/tree/main/bitnami/postgresql
+
+  # Use 'auth' section for credentials. Default user is 'postgres'.
+  auth:
+    # Database name to create
+    database: lifecycle
+    username: lifecycle
+    # Password for the default 'postgres' user.
+    # !! Strongly recommend using existingSecret or auto-generating password !!
+    password: lifecycle
+    # --- OR use existingSecret (Recommended) ---
+    # existingSecret: "my-postgres-secret" # K8s secret name containing postgresql-password key
+    # secretKeys:
+    #   adminPasswordKey: ""  # Optional: key for system user password in existing secret
+    #   userPasswordKey: "postgresql-password" # Optional: key for default user password in existing secret
+    #   replicationPasswordKey: "" # Optional: key for replication user password in existing secret
+
+  # Persistence settings (example)
+  primary:
+    persistence:
+      enabled: true
+      size: 11Gi # Adjust storage size as needed
+    # resources: # Example resource limits
+    #   requests:
+    #     cpu: 100m
+    #     memory: 256Mi
+    #   limits:
+    #     cpu: 200m
+    #     memory: 512Mi

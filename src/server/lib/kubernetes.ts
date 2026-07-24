@@ -1,0 +1,2148 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { getLogger } from './logger';
+import yaml from 'js-yaml';
+import _ from 'lodash';
+import { Build, Deploy, Deployable } from 'server/models';
+import { CLIDeployTypes, KubernetesDeployTypes, MEDIUM_TYPE, DEFAULT_TTL_INACTIVITY_DAYS } from 'shared/constants';
+import { shellPromise } from './shell';
+import { flattenObject, getKeepLabel, parsePullRequestLabels } from 'server/lib/utils';
+import { ServiceDiskConfig } from 'server/models/yaml';
+import * as k8s from '@kubernetes/client-node';
+import { HttpError, V1Status, CoreV1Api, KubeConfig } from '@kubernetes/client-node';
+import { IncomingMessage } from 'http';
+import { APP_ENV, TMP_PATH } from 'shared/config';
+import fs from 'fs';
+import GlobalConfigService from 'server/services/globalConfig';
+import { staticEnvTolerations } from './helm/constants';
+import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
+import { generateSecretName } from './kubernetes/externalSecret';
+import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import { normalizeKubernetesLabelValue } from 'server/lib/kubernetes/utils';
+
+interface VOLUME {
+  name: string;
+  emptyDir?: {};
+  persistentVolumeClaim?: {
+    claimName: string;
+  };
+}
+
+type NamedKubernetesObject = k8s.KubernetesObject & {
+  metadata: k8s.V1ObjectMeta & { name: string; namespace?: string };
+};
+
+function hasMetadataName(spec: k8s.KubernetesObject | undefined): spec is NamedKubernetesObject {
+  return Boolean(spec?.kind && spec?.metadata?.name);
+}
+
+async function namespaceExists(client: k8s.CoreV1Api, name: string): Promise<boolean> {
+  try {
+    await client.readNamespace(name);
+    return true;
+  } catch (err) {
+    if (err?.response?.statusCode === 404) {
+      return false;
+    }
+    getLogger({ namespace: name, error: err }).error('Namespace: read failed');
+    throw err;
+  }
+}
+
+/**
+ * Gets TTL configuration from global config with fallback to defaults
+ */
+async function getTTLConfig(_buildUUID: string): Promise<{ daysToExpire: number }> {
+  let daysToExpire = DEFAULT_TTL_INACTIVITY_DAYS;
+  try {
+    const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
+    daysToExpire = globalConfig.ttl_cleanup?.inactivityDays ?? DEFAULT_TTL_INACTIVITY_DAYS;
+  } catch (error) {
+    getLogger({ error }).warn(`TTL: config fetch failed default=${DEFAULT_TTL_INACTIVITY_DAYS}days`);
+  }
+  return { daysToExpire };
+}
+
+type NamespaceMetadata = {
+  labels: Record<string, string>;
+};
+
+type NamespacePullRequestMetadata = {
+  fullName?: string | null;
+  pullRequestNumber?: number | null;
+  githubLogin?: string | null;
+  labels?: string[] | string | null;
+};
+
+export type CreateOrUpdateNamespaceOptions = {
+  name: string;
+  buildUUID: string;
+  staticEnv: boolean;
+  ttl?: boolean;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+  pullRequest?: NamespacePullRequestMetadata | null;
+  waitForReady?: boolean;
+};
+
+async function waitForNamespaceReady(namespace: string, timeout: number = 30000): Promise<void> {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const result = await shellPromise(`kubectl get namespace ${namespace} -o jsonpath='{.status.phase}'`);
+      if (result.trim() === 'Active') {
+        return;
+      }
+    } catch (error) {
+      // Namespace not ready yet, will retry
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`Namespace ${namespace} did not become ready within ${timeout}ms`);
+}
+
+function buildNamespacePrMetadata({
+  repo,
+  pullRequestNumber,
+  author,
+}: {
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+} = {}): NamespaceMetadata {
+  const labels: Record<string, string> = {};
+
+  if (repo) {
+    const [org, repoName] = repo.split('/');
+    if (org) {
+      labels['lfc/org'] = normalizeKubernetesLabelValue(org);
+    }
+    if (repoName) {
+      labels['lfc/repo'] = normalizeKubernetesLabelValue(repoName);
+    }
+  }
+
+  if (pullRequestNumber != null) {
+    labels['lfc/pull-request'] = String(pullRequestNumber);
+  }
+
+  if (author) {
+    labels['lfc/author'] = normalizeKubernetesLabelValue(author);
+  }
+
+  return { labels };
+}
+
+async function shouldEnableNamespaceTTL(
+  staticEnv: boolean,
+  pullRequest?: NamespacePullRequestMetadata | null
+): Promise<boolean> {
+  if (staticEnv) {
+    return false;
+  }
+
+  const keepLabel = await getKeepLabel();
+  return !parsePullRequestLabels(pullRequest?.labels).includes(keepLabel);
+}
+
+/**
+ * Generates TTL-related labels for namespace creation
+ */
+async function generateTTLLabels({
+  uuid,
+  staticEnv,
+  ttl,
+  buildUUID,
+  repo,
+  pullRequestNumber,
+  author,
+}: {
+  uuid: string;
+  staticEnv: boolean;
+  ttl: boolean;
+  buildUUID: string;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+}): Promise<NamespaceMetadata & { logMessage: string }> {
+  const metadata = buildNamespacePrMetadata({ repo, pullRequestNumber, author });
+  const baseLabels: Record<string, string> = {
+    'lfc/uuid': uuid,
+    'lfc/type': staticEnv ? 'static' : 'ephemeral',
+    'app.kubernetes.io/managed-by': 'lifecycle',
+    ...metadata.labels,
+  };
+
+  // Static or TTL disabled - only set enable flag
+  if (staticEnv || !ttl) {
+    const reason = staticEnv ? 'static env' : 'lifecycle-keep! label present';
+    return {
+      labels: {
+        ...baseLabels,
+        'lfc/ttl-enable': 'false',
+      },
+      logMessage: `with TTL disabled (${reason})`,
+    };
+  }
+
+  // TTL enabled - set enable flag + expiration timestamps
+  const { daysToExpire } = await getTTLConfig(buildUUID);
+  const timeToExpire = Date.now() + daysToExpire * 24 * 60 * 60 * 1000;
+
+  return {
+    labels: {
+      ...baseLabels,
+      'lfc/ttl-enable': 'true',
+      'lfc/ttl-createdAtUnix': Date.now().toString(),
+      'lfc/ttl-createdAt': new Date().toISOString().split('T')[0],
+      'lfc/ttl-expireAtUnix': timeToExpire.toString(),
+      'lfc/ttl-expireAt': new Date(timeToExpire).toISOString().split('T')[0],
+    },
+    logMessage: `with TTL enabled (${daysToExpire} day expiration)`,
+  };
+}
+
+/**
+ * Generates patch operations for updating TTL labels on existing namespace
+ */
+async function generateTTLPatch({
+  uuid,
+  staticEnv,
+  ttl,
+  buildUUID,
+  repo,
+  pullRequestNumber,
+  author,
+}: {
+  uuid: string;
+  staticEnv: boolean;
+  ttl: boolean;
+  buildUUID: string;
+  repo?: string | null;
+  pullRequestNumber?: number | null;
+  author?: string | null;
+}): Promise<{ patch: any[]; logMessage: string }> {
+  const metadata = buildNamespacePrMetadata({ repo, pullRequestNumber, author });
+  const basePatch = [
+    { op: 'add', path: '/metadata/labels/lfc~1uuid', value: uuid },
+    { op: 'add', path: '/metadata/labels/lfc~1type', value: staticEnv ? 'static' : 'ephemeral' },
+    { op: 'add', path: '/metadata/labels/app.kubernetes.io~1managed-by', value: 'lifecycle' },
+    ...Object.entries(metadata.labels).map(([key, value]) => ({
+      op: 'add',
+      path: `/metadata/labels/${key.replace(/\//g, '~1')}`,
+      value,
+    })),
+  ];
+
+  // TTL disabled - only update enable flag
+  if (!ttl) {
+    return {
+      patch: [
+        ...basePatch,
+        {
+          op: 'add',
+          path: '/metadata/labels/lfc~1ttl-enable',
+          value: 'false',
+        },
+      ],
+      logMessage: 'to disable TTL (lifecycle-keep! present)',
+    };
+  }
+
+  // TTL enabled - update enable flag + all expiration timestamps
+  const { daysToExpire } = await getTTLConfig(buildUUID);
+  const timeToExpire = Date.now() + daysToExpire * 24 * 60 * 60 * 1000;
+
+  return {
+    patch: [
+      ...basePatch,
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-enable',
+        value: 'true',
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-createdAtUnix',
+        value: Date.now().toString(),
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-createdAt',
+        value: new Date().toISOString().split('T')[0],
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-expireAtUnix',
+        value: timeToExpire.toString(),
+      },
+      {
+        op: 'add',
+        path: '/metadata/labels/lfc~1ttl-expireAt',
+        value: new Date(timeToExpire).toISOString().split('T')[0],
+      },
+    ],
+    logMessage: `with new TTL expiration (${daysToExpire} days)`,
+  };
+}
+
+/**
+ *
+ */
+export async function createOrUpdateNamespace({
+  name,
+  buildUUID,
+  staticEnv,
+  ttl,
+  repo,
+  pullRequestNumber,
+  author,
+  pullRequest,
+  waitForReady = false,
+}: CreateOrUpdateNamespaceOptions) {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const client = kc.makeApiClient(k8s.CoreV1Api);
+
+  const uuid = name.replace('env-', '');
+  const ttlEnabled = ttl ?? (pullRequest ? await shouldEnableNamespaceTTL(staticEnv, pullRequest) : !staticEnv);
+  const namespaceRepo = repo ?? pullRequest?.fullName;
+  const namespacePullRequestNumber = pullRequestNumber ?? pullRequest?.pullRequestNumber;
+  const namespaceAuthor = author ?? pullRequest?.githubLogin;
+
+  // Generate TTL labels using helper function
+  const { labels, logMessage } = await generateTTLLabels({
+    uuid,
+    staticEnv,
+    ttl: ttlEnabled,
+    buildUUID,
+    repo: namespaceRepo,
+    pullRequestNumber: namespacePullRequestNumber,
+    author: namespaceAuthor,
+  });
+
+  getLogger({ namespace: name }).info(`Deploy: creating namespace ${logMessage}`);
+
+  const namespace = {
+    apiVersion: 'v1',
+    kind: 'Namespace',
+    metadata: {
+      name,
+      labels,
+    },
+  };
+
+  if (await namespaceExists(client, name)) {
+    const { patch, logMessage: patchMessage } = await generateTTLPatch({
+      uuid,
+      staticEnv,
+      ttl: staticEnv ? false : ttlEnabled,
+      buildUUID,
+      repo: namespaceRepo,
+      pullRequestNumber: namespacePullRequestNumber,
+      author: namespaceAuthor,
+    });
+
+    await client.patchNamespace(name, patch, undefined, undefined, undefined, undefined, undefined, {
+      headers: { 'Content-Type': 'application/json-patch+json' },
+    });
+    getLogger({ namespace: name }).info(`Deploy: updated namespace ${patchMessage}`);
+    if (waitForReady) {
+      await waitForNamespaceReady(name);
+    }
+    return;
+  }
+
+  try {
+    await client.createNamespace(namespace);
+    getLogger({ namespace: name }).debug('Namespace created');
+  } catch (err) {
+    // Deploys in a build create the namespace concurrently; the loser of the race sees AlreadyExists, which is success.
+    if (!isNamespaceAlreadyExistsError(err)) {
+      getLogger({ namespace: name, error: err }).error('Namespace: create failed');
+      throw err;
+    }
+    getLogger({ namespace: name }).info('Namespace: create raced, already exists');
+  }
+  if (waitForReady) {
+    await waitForNamespaceReady(name);
+  }
+}
+
+export function isNamespaceAlreadyExistsError(err: unknown): boolean {
+  const candidate = err as {
+    statusCode?: number;
+    code?: number;
+    body?: { reason?: string };
+    response?: { statusCode?: number; body?: { reason?: string } };
+  };
+  const statusCode = candidate?.statusCode ?? candidate?.code ?? candidate?.response?.statusCode;
+  const reason = candidate?.body?.reason ?? candidate?.response?.body?.reason;
+  return statusCode === 409 || reason === 'AlreadyExists';
+}
+
+/**
+ *
+ * @param build
+ */
+export async function applyManifests(build: Build): Promise<k8s.KubernetesObject[]> {
+  if (!build.manifest || build.manifest.trim().length === 0) {
+    getLogger().info('Deploy: starting method=deploymentManager');
+    return [];
+  }
+
+  getLogger().info('Deploy: starting method=legacyManifest');
+
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const client = k8s.KubernetesObjectApi.makeApiClient(kc);
+
+  const specs: k8s.KubernetesObject[] = yaml.loadAll(build.manifest);
+  const validSpecs = specs.filter(hasMetadataName);
+  const created: k8s.KubernetesObject[] = [];
+  for (const spec of validSpecs) {
+    try {
+      // try to get the resource, if it does not exist an error will be thrown and we will end up in the catch
+      await client.read(spec);
+      let response: { body: V1Status; response?: IncomingMessage };
+      try {
+        response = await client.patch(spec, undefined, undefined, undefined, true);
+      } catch (e) {
+        if (e instanceof HttpError) {
+          const options = {
+            headers: {
+              'Content-type': k8s.PatchUtils.PATCH_FORMAT_JSON_MERGE_PATCH,
+            },
+          };
+          response = await client.patch(spec, undefined, undefined, undefined, undefined, options);
+        }
+      }
+      created.push(response.body);
+    } catch (e) {
+      try {
+        const response = await client.create(spec);
+        created.push(response.body);
+      } catch (e) {
+        getLogger({
+          specName: spec?.metadata?.name,
+          error: e,
+        }).error('kubectl apply unsuccessful');
+      }
+    }
+  }
+  return created;
+}
+
+export const getK8sApi = () => {
+  const kc = new KubeConfig();
+  kc.loadFromDefault();
+  return kc.makeApiClient(CoreV1Api);
+};
+
+export const getPods = async ({ uuid, namespace }: { uuid: string; namespace: string }): Promise<k8s.V1Pod[]> => {
+  const k8sApi = getK8sApi();
+  const resp = await k8sApi?.listNamespacedPod(
+    namespace,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    `lc_uuid=${uuid}`
+  );
+  const items = resp?.body?.items || [];
+  return items.filter((pod) => pod?.metadata?.name?.includes(uuid));
+};
+
+export async function waitForPodReady(build: Build) {
+  const { pullRequest, sha, uuid, namespace } = build;
+  const { branchName, fullName } = pullRequest || {};
+
+  const logCtx = { namespace, repo: fullName, branch: branchName, sha };
+
+  let retries = 0;
+  getLogger(logCtx).info('Deploy: waiting for pods state=creation');
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const pods = await getPods({ uuid, namespace });
+
+    if (pods.length > 0) {
+      getLogger(logCtx).info('Deploy: pods created');
+      break;
+    } else if (retries < 60) {
+      retries += 1;
+      await new Promise((r) => setTimeout(r, 5000));
+    } else {
+      getLogger(logCtx).warn('Pod: not found timeout=5m');
+      break;
+    }
+  }
+
+  retries = 0;
+
+  getLogger(logCtx).info('Deploy: waiting for pods state=ready');
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let isReady = false;
+    try {
+      const pods = await getPods({ uuid, namespace });
+      const matches =
+        pods?.filter(
+          (pod) =>
+            pod?.metadata?.name?.includes(uuid) && pod?.metadata?.labels['app.kubernetes.io/managed-by'] !== 'Helm'
+        ) || [];
+      isReady = matches.every((pod) => {
+        const conditions = pod?.status?.conditions || [];
+        if (conditions?.length === 0) return false;
+        return conditions.some((condition) => condition?.type === 'Ready' && condition?.status === 'True');
+      });
+    } catch (error) {
+      getLogger({ ...logCtx, error, isReady }).warn('Pod: readiness check failed');
+    }
+
+    if (isReady) {
+      getLogger(logCtx).info('Deploy: pods ready');
+      return true;
+    }
+    if (retries < 180) {
+      retries += 1;
+      await new Promise((r) => setTimeout(r, 5000));
+    } else {
+      throw new Error(
+        `Pods for build not ready after 15 minutes buildUuid=${uuid} repo=${fullName} branch=${branchName}`
+      );
+    }
+  }
+}
+
+/**
+ * Deletes pods, services, and deployments, that are related to the given build.
+ * @param build the build we want to delete
+ */
+export async function deleteBuild(build: Build) {
+  try {
+    await shellPromise(`kubectl delete all,pvc -l lc_uuid=${build.uuid} --namespace ${build.namespace}`);
+
+    await shellPromise(`kubectl delete mapping -l lc_uuid=${build.uuid} --namespace ${build.namespace}`).catch((e) => {
+      getLogger({
+        namespace: build.namespace,
+        error: e,
+      }).debug('Resources: mapping delete skipped');
+      return null;
+    });
+    getLogger({ namespace: build.namespace }).info('Deploy: resources deleted');
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // Retried teardown is idempotent. If the namespace was already removed (externally or by
+    // a partial prior attempt), there are no scoped resources left to delete.
+    if (message.includes('Error from server (NotFound): namespaces')) {
+      getLogger({ namespace: build.namespace }).info('Deploy: resources skipped reason=namespaceNotFound');
+      return;
+    }
+    getLogger({
+      namespace: build.namespace,
+      error: e,
+    }).error('Resources: delete failed');
+    throw e;
+  }
+}
+
+export type WorkspacePodPresence = 'present' | 'pod_missing' | 'namespace_missing';
+
+/**
+ * Existence probe for workspace-loss reconciliation. Only a definitive 404 reports an absence;
+ * any other API failure rethrows so callers treat the state as unknown, never as gone.
+ */
+export async function probeWorkspacePodPresence(namespace: string, podName: string): Promise<WorkspacePodPresence> {
+  const client = getK8sApi();
+  if (!(await namespaceExists(client, namespace))) {
+    return 'namespace_missing';
+  }
+
+  try {
+    await client.readNamespacedPod(podName, namespace);
+    return 'present';
+  } catch (err) {
+    if (err?.response?.statusCode === 404) {
+      return 'pod_missing';
+    }
+    getLogger({ namespace, error: err }).error('Pod: read failed');
+    throw err;
+  }
+}
+
+/**
+ * Deletes the given namespace
+ * @param name namespace to delete
+ */
+export async function deleteNamespace(name: string) {
+  if (!name.startsWith('env-') && !name.startsWith('sbx-') && !name.startsWith('prj-') && !name.startsWith('chat-')) {
+    return;
+  }
+
+  try {
+    await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
+    getLogger({ namespace: name }).info('Deploy: namespace deleted');
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes('Error from server (NotFound): namespaces')) {
+      getLogger({ namespace: name }).info('Deploy: namespace skipped reason=notFound');
+    } else {
+      getLogger({ namespace: name, error: e }).error('Namespace: delete failed');
+      throw e;
+    }
+  }
+}
+
+/**
+ * Generates a manifest file that defines how a build should be deployment to a kubernetes cluster
+ * @param build the build we are generating a manifest for
+ */
+export function generateManifest({
+  build,
+  deploys,
+  uuid,
+  namespace,
+  serviceAccountName,
+}: {
+  build: Build;
+  deploys: Deploy[];
+  uuid: string;
+  namespace: string;
+  serviceAccountName: string;
+}) {
+  // External Service only deployment
+
+  const cliDeploys = deploys.filter((deploy) => {
+    return CLIDeployTypes.has(deploy.deployable.type);
+  });
+
+  const kubernetesDeploys = deploys.filter((deploy) => {
+    return KubernetesDeployTypes.has(deploy.deployable.type) && deploy.dockerImage !== null;
+  });
+
+  const externalNameServices = generateExternalNameManifests(cliDeploys, uuid, namespace);
+  // General Deployment
+
+  const disks = generatePersistentDisks(kubernetesDeploys, uuid, namespace);
+  const builds = generateDeployManifests(build, kubernetesDeploys, uuid, namespace, serviceAccountName);
+  const nodePorts = generateNodePortManifests(kubernetesDeploys, uuid, namespace);
+  const grpcMappings = generateGRPCMappings(kubernetesDeploys, uuid, namespace);
+  const loadBalancers = generateLoadBalancerManifests(kubernetesDeploys, uuid, namespace);
+  const manifest = `${disks}---\n${builds}---\n${nodePorts}---\n${grpcMappings}---\n${loadBalancers}---\n${externalNameServices}`;
+  const isDev = APP_ENV?.includes('dev') ?? false;
+  if (!isDev) {
+    getLogger({ manifest }).info('Manifest: generated');
+  }
+  return manifest;
+}
+
+export function generatePersistentDisks(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      return deploy.active && deploy.deployable.serviceDisksYaml != null;
+    })
+    .map((deploy) => {
+      const { uuid: name } = deploy;
+      const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
+
+      return serviceDisks
+        .filter((disk) => disk.medium == null || disk.medium === MEDIUM_TYPE.EBS || disk.medium === MEDIUM_TYPE.DISK)
+        .map((disk) => {
+          return yaml.dump({
+            apiVersion: 'v1',
+            kind: 'PersistentVolumeClaim',
+            metadata: {
+              namespace,
+              name: `${name}-${disk.name}-claim`,
+              labels: {
+                ...buildLifecycleLabels({ buildUuid: buildUUID }),
+                name: buildUUID,
+              },
+            },
+            spec: {
+              accessModes: [disk.accessModes ?? 'ReadWriteOnce'],
+              resources: {
+                requests: {
+                  storage: disk.storageSize,
+                },
+              },
+            },
+          });
+        });
+    })
+    .join('\n---\n');
+}
+
+/**
+ * Generates an affinity block based on the capacity type definition
+ * @param capacityType can either be ON_DEMAND or SPOT
+ * @param isStatic whether this is a static environment
+ * @param customNodeAffinity optional custom node affinity from schema (overrides default)
+ * @returns an affinity block using either requirements or preferences
+ */
+function generateAffinity(capacityType: string, isStatic: boolean, customNodeAffinity?: Record<string, unknown>) {
+  // If custom node affinity is provided, use it instead of default
+  if (customNodeAffinity) {
+    return { nodeAffinity: customNodeAffinity };
+  }
+
+  // Existing logic for capacity-type based affinity
+  if (capacityType === 'SPOT') {
+    return {
+      nodeAffinity: {
+        preferredDuringSchedulingIgnoredDuringExecution: [
+          {
+            weight: 1,
+            preference: {
+              matchExpressions: [
+                {
+                  key: 'eks.amazonaws.com/capacityType',
+                  operator: 'In',
+                  values: [capacityType],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+  }
+  return {
+    nodeAffinity: {
+      requiredDuringSchedulingIgnoredDuringExecution: {
+        nodeSelectorTerms: [
+          {
+            matchExpressions: [
+              {
+                key: 'eks.amazonaws.com/capacityType',
+                operator: 'In',
+                values: [capacityType],
+              },
+              ...(isStatic
+                ? [
+                    {
+                      key: 'app-long',
+                      operator: 'In',
+                      values: ['lifecycle-static-env'],
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+/**
+ * Generates a deployment manifest for each of the given deploys, and ties them to a build via the buildUUID.
+ * @param deploys the deploys to generate deployment manifests for
+ * @param buildUUID a string we will use to tie each of these deployments back to a single build
+ */
+export function generateDeployManifests(
+  build: Build,
+  deploys: Deploy[],
+  buildUUID: string,
+  namespace: string,
+  serviceAccountName: string
+) {
+  return deploys
+    .filter((deploy) => {
+      return deploy.active;
+    })
+    .map((deploy) => {
+      const capacityType = build.capacityType ? build.capacityType : deploy.deployable.capacityType;
+      const isStatic = build?.isStatic ?? false;
+
+      // Extract custom node affinity from schema
+      const customNodeAffinity = deploy.deployable.nodeAffinity;
+      const affinity = generateAffinity(capacityType, isStatic, customNodeAffinity);
+      // Extract node selector from schema
+      const nodeSelector = deploy.deployable.nodeSelector;
+
+      const { uuid: name, deployable } = deploy;
+      const ports = [];
+
+      if (deploy?.deployable.port) {
+        // eslint-disable-next-line no-unsafe-optional-chaining
+        for (const port of deploy?.deployable.port.split(',')) {
+          ports.push({
+            name: `port-${port}`,
+            containerPort: Number(port),
+          });
+        }
+      }
+      const containers = [];
+      const initContainers = [];
+      /**
+       * This chunk of code is hard to read. So here's what it does.
+       * 1. It merges the deploy environment with the comment based environment.
+       * 2. It then filters out any nested values, which aren't supported in Kubernetes.
+       * 3. It then flattens out any nulls
+       * 4. Handles cloud secret references ({{aws:path:key}} or {{gcp:path:key}})
+       */
+      const mergedEnv = _.merge(
+        { __NAMESPACE__: 'lifecycle' },
+        deploy.env || '{}',
+        flattenObject(build.commentRuntimeEnv)
+      );
+      const secretRefs = parseSecretRefsFromEnv(mergedEnv as Record<string, string>);
+      const secretRefMap = new Map<string, SecretRefWithEnvKey>();
+      for (const ref of secretRefs) {
+        secretRefMap.set(ref.envKey, ref);
+      }
+      const envServiceName = deploy.deployable?.name;
+
+      const env: Array<Record<string, any>> = _.compact(
+        _.flatten(
+          Object.entries(mergedEnv).map(([key, value]) => {
+            // Filter out nested objects which aren't supported
+            if (_.isObject(value) === false) {
+              const secretRef = secretRefMap.get(key);
+              if (secretRef && envServiceName) {
+                const secretName = generateSecretName(envServiceName, secretRef.provider);
+                return {
+                  name: key,
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: secretName,
+                      key: key,
+                    },
+                  },
+                };
+              }
+              return {
+                name: key,
+                value,
+              };
+            } else {
+              return null;
+            }
+          })
+        )
+      );
+
+      env.push(
+        {
+          name: 'POD_IP',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'status.podIP',
+            },
+          },
+        },
+        {
+          name: 'DD_AGENT_HOST',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: 'status.hostIP',
+            },
+          },
+        }
+      );
+
+      // Grab all of the environment keys being injected into this deployments
+      const keys = new Set(
+        env.map((entry) => {
+          return entry.name;
+        })
+      );
+
+      // Only add DD_ENV if it's not being hand set
+      if (!keys.has('DD_ENV')) {
+        env.push({
+          name: 'DD_ENV',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: "metadata.labels['tags.datadoghq.com/env']",
+            },
+          },
+        });
+      }
+
+      // Only add DD_SERVICE if it's not being hand set
+      if (!keys.has('DD_SERVICE')) {
+        env.push({
+          name: 'DD_SERVICE',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: "metadata.labels['tags.datadoghq.com/service']",
+            },
+          },
+        });
+      }
+
+      // Only add DD_VERSION if it's not being hand set
+      if (!keys.has('DD_VERSION')) {
+        env.push({
+          name: 'DD_VERSION',
+          valueFrom: {
+            fieldRef: {
+              fieldPath: "metadata.labels['tags.datadoghq.com/version']",
+            },
+          },
+        });
+      }
+
+      if (!keys.has('LC_UUID')) {
+        env.push({
+          name: 'LC_UUID',
+          value: build.uuid,
+        });
+      }
+
+      const applicationContainer: { [key: string]: any } = {
+        name,
+        image: deploy.dockerImage,
+        resources: {
+          requests: generateResourceRequestsForDeployable(deployable),
+          limits: generateResourceLimitsForDeployable(deployable),
+        },
+        ports,
+        env,
+      };
+
+      if (deployable.readinessHttpGetPort || deployable.readinessTcpSocketPort) {
+        applicationContainer.readinessProbe = generateReadinessProbeForDeployable(deployable);
+        applicationContainer.livenessProbe = generateReadinessProbeForDeployable(deployable);
+        // Restarts a pod only after 10 minutes of being granted readiness time
+        applicationContainer.livenessProbe.initialDelaySeconds = 600;
+      }
+
+      if (deployable.command) {
+        applicationContainer.command = [deployable.command];
+      }
+
+      if (deployable.arguments) {
+        applicationContainer.args = deployable.arguments.split('%%SPLIT%%');
+      }
+
+      /* Code specifically for any init container */
+      applicationContainer.volumeMounts = [
+        {
+          mountPath: '/config',
+          name: 'config-volume',
+        },
+      ];
+
+      if (deploy.initDockerImage) {
+        const initEnvMerged = _.merge(
+          { __NAMESPACE__: 'lifecycle' },
+          deploy.initEnv || '{}',
+          flattenObject(build.commentInitEnv)
+        );
+        const initSecretRefs = parseSecretRefsFromEnv(initEnvMerged as Record<string, string>);
+        const initSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+        for (const ref of initSecretRefs) {
+          initSecretRefMap.set(ref.envKey, ref);
+        }
+
+        const initEnv: Array<Record<string, any>> = Object.entries(initEnvMerged).map(([key, value]) => {
+          const initSecretRef = initSecretRefMap.get(key);
+          if (initSecretRef) {
+            const initSecretName = generateSecretName(envServiceName, initSecretRef.provider);
+            return {
+              name: key,
+              valueFrom: {
+                secretKeyRef: {
+                  name: initSecretName,
+                  key: key,
+                },
+              },
+            };
+          }
+          return {
+            name: key,
+            value,
+          };
+        });
+        initEnv.push(
+          {
+            name: 'POD_IP',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.podIP',
+              },
+            },
+          },
+          {
+            name: 'DD_AGENT_HOST',
+            valueFrom: {
+              fieldRef: {
+                fieldPath: 'status.hostIP',
+              },
+            },
+          }
+        );
+        const initContainer: { [key: string]: any } = {
+          name: `init-${name}`,
+          image: deploy.initDockerImage,
+          resources: {
+            requests: generateResourceRequestsForDeployable(deployable),
+            limits: generateResourceLimitsForDeployable(deployable),
+          },
+          ports,
+          env: initEnv,
+        };
+
+        if (deployable.initCommand) {
+          initContainer.command = [deployable.initCommand];
+        }
+        if (deployable.initArguments) {
+          initContainer.args = deployable.initArguments.split('%%SPLIT%%');
+        }
+
+        initContainer.volumeMounts = [
+          {
+            mountPath: '/config',
+            name: 'config-volume',
+          },
+        ];
+        initContainers.push(initContainer);
+      }
+      /* End of code for init container */
+
+      const volumes: VOLUME[] = [
+        {
+          emptyDir: {},
+          name: 'config-volume',
+        },
+      ];
+
+      let strategy = {
+        rollingUpdate: {
+          maxUnavailable: '0%',
+        },
+      };
+
+      if (deployable?.serviceDisksYaml != null) {
+        const serviceDisks: ServiceDiskConfig[] = JSON.parse(deployable.serviceDisksYaml);
+        if (serviceDisks != null && serviceDisks.length > 0) {
+          strategy = {
+            // @ts-ignore
+            type: 'Recreate',
+          };
+
+          serviceDisks.forEach((disk) => {
+            applicationContainer.volumeMounts.push({
+              name: `${name}-${disk.name}`,
+              mountPath: disk.mountPath,
+            });
+
+            // By default, any services disk is EBS type.
+            const diskMedium: string = disk.medium != null ? disk.medium : MEDIUM_TYPE.EBS;
+            switch (diskMedium) {
+              case MEDIUM_TYPE.EBS:
+              case MEDIUM_TYPE.DISK:
+                volumes.push({
+                  name: `${name}-${disk.name}`,
+                  persistentVolumeClaim: {
+                    claimName: `${name}-${disk.name}-claim`,
+                  },
+                });
+                break;
+              case MEDIUM_TYPE.MEMORY:
+                volumes.push({
+                  name: `${name}-${disk.name}`,
+                  emptyDir: {
+                    medium: 'Memory',
+                    sizeLimit: `${disk.storageSize}`,
+                  },
+                });
+                break;
+              default:
+                getLogger({ medium: disk.medium }).warn(`Disk: unknown medium medium=${disk.medium}`);
+            }
+          });
+        }
+      }
+
+      containers.push(applicationContainer);
+
+      const annotations = {
+        'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+      };
+
+      const serviceName: string = deploy.deployable.name;
+
+      /**
+       * Labels for the Kubernetes deployment
+       */
+      const labels = {
+        ...buildLifecycleLabels({ buildUuid: buildUUID }),
+        name: buildUUID,
+        'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
+        'tags.datadoghq.com/service': serviceName,
+        'tags.datadoghq.com/version': buildUUID,
+      };
+
+      /**
+       * Labels to be injected into the metadata block inside the
+       * spec template
+       */
+      const metaDataLabels = {
+        ...buildLifecycleLabels({ buildUuid: buildUUID }),
+        name,
+        dd_name: `lifecycle-${buildUUID}`,
+        'tags.datadoghq.com/env': `lifecycle-${buildUUID}`,
+        'tags.datadoghq.com/service': serviceName,
+        'tags.datadoghq.com/version': buildUUID,
+      };
+
+      if (build.isStatic) getLogger().info('Build: static environment=true');
+
+      const yamlManifest = yaml.dump(
+        {
+          apiVersion: 'apps/v1',
+          kind: 'Deployment',
+          metadata: {
+            namespace,
+            name,
+            annotations,
+            labels,
+          },
+          spec: {
+            selector: {
+              matchLabels: {
+                name,
+              },
+            },
+            revisionHistoryLimit: 5,
+            strategy,
+            replicas: deploy.replicaCount,
+            rollingUpdate: {
+              maxSurge: '1',
+              maxUnavailable: 0,
+            },
+            template: {
+              metadata: {
+                annotations,
+                labels: metaDataLabels,
+              },
+              spec: {
+                affinity,
+                ...(nodeSelector && { nodeSelector }),
+                securityContext: {
+                  fsGroup: 2000,
+                },
+                serviceAccount: serviceAccountName,
+                serviceAccountName,
+                containers,
+                initContainers,
+                volumes,
+                ...(build?.isStatic && {
+                  tolerations: staticEnvTolerations,
+                }),
+                enableServiceLinks: false,
+              },
+            },
+          },
+        },
+        { lineWidth: -1, forceQuotes: true }
+      );
+
+      return yamlManifest;
+    })
+    .join('\n---\n');
+}
+
+function generateResourceRequestsForDeployable(deployable: Deployable): Record<string, string> {
+  return _.pickBy(
+    {
+      memory: deployable.memoryRequest,
+      cpu: deployable.cpuRequest,
+    },
+    _.identity
+  );
+}
+
+function generateResourceLimitsForDeployable(deployable: Deployable): Record<string, string> {
+  return _.pickBy(
+    {
+      memory: deployable.memoryLimit,
+      cpu: deployable.cpuLimit,
+    },
+    _.identity
+  );
+}
+
+export function generateReadinessProbeForDeployable({
+  readinessInitialDelaySeconds: initialDelaySeconds,
+  readinessPeriodSeconds: periodSeconds,
+  readinessTimeoutSeconds: timeoutSeconds,
+  readinessSuccessThreshold: successThreshold,
+  readinessFailureThreshold: failureThreshold,
+  readinessHttpGetPath: httpGetPath,
+  readinessHttpGetPort: httpGetPort,
+  readinessTcpSocketPort,
+}: Deployable) {
+  const probe = {
+    initialDelaySeconds,
+    periodSeconds,
+    timeoutSeconds,
+    successThreshold,
+    failureThreshold,
+  };
+  if (readinessTcpSocketPort) {
+    // TCP Check
+
+    probe['tcpSocket'] = {
+      port: readinessTcpSocketPort,
+    };
+  } else if (httpGetPath && httpGetPort) {
+    probe['httpGet'] = {
+      path: httpGetPath,
+      port: httpGetPort,
+    };
+  } else {
+    return {};
+  }
+  return probe;
+}
+
+/**
+ * Generates a local nodeport in the namespace for the given deployment. This is primarily used for private services, like a database, which we aren't exposing via a public DNS via argo.
+ * @param deploys the deploys to generate manifests for
+ * @param buildUUID the associated buildUUID, which we use for deleting a build
+ */
+export function generateNodePortManifests(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      return deploy.active;
+    })
+    .map((deploy) => {
+      const name = deploy.uuid;
+      const ports = [];
+
+      const servicePort: string = deploy.deployable.port;
+      if (servicePort) {
+        for (const port of servicePort.split(',')) {
+          ports.push({
+            name: `provided-${port}`,
+            port: Number(port),
+            targetPort: Number(port),
+            protocol: 'TCP',
+          });
+        }
+      }
+
+      const annotations = {};
+
+      return yaml.dump(
+        {
+          apiVersion: 'v1',
+          kind: 'Service',
+          metadata: {
+            namespace,
+            name,
+            labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
+              name,
+              dd_name: `lifecycle-${buildUUID}`,
+              'tags.datadoghq.com/env': 'lifecycle',
+              'tags.datadoghq.com/service': name,
+              'tags.datadoghq.com/version': buildUUID,
+            },
+            annotations,
+          },
+          spec: {
+            type: 'NodePort',
+            selector: {
+              name,
+            },
+            ports,
+          },
+        },
+        { lineWidth: -1 }
+      );
+    })
+    .join('\n---\n');
+}
+
+/**
+ * Generates a GRPC mapping for active GRPC services
+ * @param deploys the deploys to generate manifests for
+ * @param buildUUID the associated buildUUID, which we use for deleting a build
+ */
+export function generateGRPCMappings(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      const enableGrpc: boolean = deploy.deployable.grpc;
+
+      return deploy.active && enableGrpc;
+    })
+    .map((deploy) => {
+      const serviceGrpcHost: string = deploy.deployable.grpcHost;
+      const servicePort: string = deploy.deployable.port;
+
+      const name = deploy.uuid;
+      return yaml.dump(
+        {
+          apiVersion: 'getambassador.io/v3alpha1',
+          kind: 'Mapping',
+          metadata: {
+            namespace,
+            name,
+            labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
+              name,
+              dd_name: `lifecycle-${buildUUID}`,
+              'tags.datadoghq.com/env': 'lifecycle',
+              'tags.datadoghq.com/service': name,
+              'tags.datadoghq.com/version': buildUUID,
+            },
+          },
+          spec: {
+            grpc: true,
+            hostname: `${deploy.uuid}.${serviceGrpcHost}:443`,
+            prefix: '/',
+            service: `${deploy.uuid}:${servicePort}`,
+            timeout_ms: 20000,
+          },
+        },
+        { lineWidth: -1 }
+      );
+    })
+    .join('\n---\n');
+}
+
+/**
+ * Generates a local nodeport in the namespace for the given deployment. This is primarily used for private services, like a database, which we aren't exposing via a public DNS via argo.
+ * @param deploys the deploys to generate manifests for
+ * @param buildUUID the associated buildUUID, which we use for deleting a build
+ */
+export function generateExternalNameManifests(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      if (deploy.active) {
+        getLogger({ deployId: deploy.id, cname: deploy.cname }).debug('Checking deploy for external service');
+        return deploy.cname !== undefined && deploy.cname !== null;
+      }
+    })
+    .map((deploy) => {
+      const name = deploy.uuid;
+      getLogger().debug('Creating external service');
+      return yaml.dump(
+        {
+          apiVersion: 'v1',
+          kind: 'Service',
+          metadata: {
+            namespace,
+            name,
+            labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
+              name: buildUUID,
+            },
+          },
+          spec: {
+            type: 'ExternalName',
+            externalName: deploy.cname,
+          },
+        },
+        { lineWidth: -1 }
+      );
+    })
+    .join('\n---\n');
+}
+
+/**
+ * Generates a local nodeport in the namespace for the given deployment. This is primarily used for private services, like a database, which we aren't exposing via a public DNS via argo.
+ * @param deploys the deploys to generate manifests for
+ * @param buildUUID the associated buildUUID, which we use for deleting a build
+ */
+export function generateLoadBalancerManifests(deploys: Deploy[], buildUUID: string, namespace: string) {
+  return deploys
+    .filter((deploy) => {
+      return deploy.active;
+    })
+    .map((deploy) => {
+      const name = deploy.uuid;
+      const servicePort = deploy.deployable.port;
+
+      const ports = [];
+      if (servicePort) {
+        for (const port of servicePort.split(',')) {
+          ports.push({
+            name: `http-port-${port}`,
+            port: Number(port),
+            targetPort: Number(port),
+            protocol: 'TCP',
+          });
+        }
+      }
+
+      return yaml.dump(
+        {
+          apiVersion: 'v1',
+          kind: 'Service',
+          metadata: {
+            namespace,
+            name: `internal-lb-${name}`,
+            labels: {
+              ...buildLifecycleLabels({ buildUuid: buildUUID }),
+              name: buildUUID,
+            },
+          },
+          spec: {
+            selector: {
+              name,
+            },
+            ports,
+          },
+        },
+        { lineWidth: -1 }
+      );
+    })
+    .join('\n---\n');
+}
+export async function checkKubernetesStatus(build: Build) {
+  const command: string = `kubectl --namespace ${build.namespace} get pods | grep ${build.uuid}`;
+  let status: string = '';
+  try {
+    status += (await shellPromise(command)) + '\n';
+  } catch (err) {
+    getLogger({ command, error: err }).debug('Error executing kubectl command');
+  }
+
+  return status;
+}
+
+interface IngressData {
+  metadata?: {
+    annotations?: {
+      'nginx.ingress.kubernetes.io/configuration-snippet'?: string;
+    };
+  };
+}
+
+async function getExistingIngress(ingressName: string, namespace: string): Promise<IngressData | null> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const k8sApi = kc.makeApiClient(k8s.NetworkingV1Api);
+
+  try {
+    const response = await k8sApi.readNamespacedIngress(ingressName, namespace);
+    return response.body;
+  } catch (error) {
+    getLogger({ ingressName, namespace, error }).warn('Ingress: fetch failed');
+    return null;
+  }
+}
+
+export async function patchIngress(ingressName: string, bannerSnippet: any, namespace: string): Promise<void> {
+  try {
+    const existingIngress = await getExistingIngress(ingressName, namespace);
+    const existingSnippet =
+      existingIngress?.metadata?.annotations?.['nginx.ingress.kubernetes.io/configuration-snippet'];
+
+    const newSnippet =
+      (bannerSnippet.metadata?.annotations?.['nginx.ingress.kubernetes.io/configuration-snippet'] as string) || '';
+
+    let finalSnippet: string;
+    if (existingSnippet) {
+      const cleanExistingSnippet = existingSnippet.trim().replace(/;*$/, '');
+      const cleanNewSnippet = newSnippet.trim().replace(/;*$/, '');
+
+      finalSnippet = `${cleanExistingSnippet};\n${cleanNewSnippet}`;
+    } else {
+      finalSnippet = newSnippet;
+    }
+
+    if (!finalSnippet.trim().endsWith(';')) {
+      finalSnippet = `${finalSnippet.trim()};`;
+    }
+
+    const finalPatch = {
+      metadata: {
+        annotations: {
+          'nginx.ingress.kubernetes.io/configuration-snippet': finalSnippet,
+        },
+      },
+    };
+
+    const bannerPatch = yaml.dump(finalPatch, { skipInvalid: true });
+    const localPath = `${TMP_PATH}/banner/${ingressName}-banner.yaml`;
+
+    await fs.promises.mkdir(`${TMP_PATH}/banner/`, {
+      recursive: true,
+    });
+
+    await fs.promises.writeFile(localPath, bannerPatch, 'utf8');
+
+    await shellPromise(
+      `kubectl patch ingress ${ingressName} --namespace ${namespace} --type merge --patch-file ${localPath}`
+    );
+
+    getLogger({ ingressName, namespace }).info('Deploy: ingress patched');
+  } catch (error) {
+    getLogger({ ingressName, namespace, error }).warn('Ingress: patch failed (banner may not work)');
+    throw error;
+  }
+}
+
+/**
+ * Updates a secret
+ * @param secretName the name of the secret
+ * @param secretData the data to update the secret with
+ * @param namespace the namespace to update the secret in
+ */
+export async function updateSecret(secretName: string, secretData: Record<string, string>, namespace: string) {
+  try {
+    const kc = new k8s.KubeConfig();
+    kc.loadFromDefault();
+    const k8sApi = kc.makeApiClient(k8s.CoreV1Api);
+
+    const secret = await k8sApi.readNamespacedSecret(secretName, namespace);
+    const secretObject = secret.body;
+
+    const existing = secretObject.data;
+    const updated = { ...existing };
+    for (const [key, value] of Object.entries(secretData)) {
+      updated[key] = Buffer.from(String(value), 'utf8').toString('base64');
+    }
+    secretObject.data = updated;
+    await k8sApi.replaceNamespacedSecret(secretName, namespace, secretObject);
+  } catch (error) {
+    getLogger({ secretName, namespace, error }).error('Secret: update failed');
+    throw error;
+  }
+}
+
+/**
+ * Gets the current namespace from the file system
+ * This is used to get the namespace of the pod that is running the code
+ * @returns the current namespace
+ */
+export function getCurrentNamespaceFromFile(): string {
+  try {
+    return fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'utf8').trim();
+  } catch (err) {
+    getLogger({ error: err }).error('Namespace: file read failed');
+    return 'default';
+  }
+}
+
+export function generateDeployManifest({
+  deploy,
+  build,
+  namespace,
+  serviceAccountName,
+}: {
+  deploy: Deploy;
+  build: Build;
+  namespace: string;
+  serviceAccountName: string;
+}): string {
+  const manifests: string[] = [];
+
+  // ExternalName service for CLI deploys
+  // return the ExternalName service if we have a cname
+  if (CLIDeployTypes.has(deploy.deployable?.type)) {
+    const externalHost = deploy.cname;
+    if (externalHost) {
+      return yaml.dump({
+        apiVersion: 'v1',
+        kind: 'Service',
+        metadata: {
+          namespace,
+          name: deploy.uuid,
+          labels: {
+            ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
+            name: build.uuid,
+          },
+        },
+        spec: {
+          type: 'ExternalName',
+          externalName: externalHost,
+        },
+      });
+    } else {
+      getLogger().info('Manifest: skipped reason=empty');
+      return '';
+    }
+  }
+
+  // Reuse existing PVC generation logic
+  const pvcManifests = generatePersistentDisks([deploy], build.uuid, namespace);
+  if (pvcManifests) manifests.push(pvcManifests);
+
+  // Generate deployment with custom node affinity
+  const capacityType = build.capacityType || deploy.deployable?.capacityType;
+
+  // Extract custom node affinity from schema
+  const customNodeAffinity = deploy.deployable?.nodeAffinity;
+
+  const affinity = generateAffinity(capacityType, build?.isStatic ?? false, customNodeAffinity);
+
+  const deploymentManifest = generateSingleDeploymentManifest({
+    deploy,
+    build,
+    name: deploy.uuid,
+    namespace,
+    serviceAccountName,
+    affinity,
+  });
+  manifests.push(deploymentManifest);
+
+  // Reuse existing service generation logic
+  const serviceManifests = generateNodePortManifests([deploy], build.uuid, namespace);
+  if (serviceManifests) manifests.push(serviceManifests);
+
+  const lbManifests = generateLoadBalancerManifests([deploy], build.uuid, namespace);
+  if (lbManifests) manifests.push(lbManifests);
+
+  const grpcManifests = generateGRPCMappings([deploy], build.uuid, namespace);
+  if (grpcManifests) manifests.push(grpcManifests);
+
+  return manifests.filter((m) => m).join('---\n');
+}
+
+function generateSingleDeploymentManifest({
+  deploy,
+  build,
+  name,
+  namespace,
+  serviceAccountName,
+  affinity,
+}: {
+  deploy: Deploy;
+  build: Build;
+  name: string;
+  namespace: string;
+  serviceAccountName: string;
+  affinity: any;
+}): string {
+  const serviceName = deploy.deployable?.name;
+  const serviceMemory = deploy.deployable?.memoryLimit;
+  const serviceCPU = deploy.deployable?.cpuLimit;
+  const servicePort = deploy.deployable?.port;
+  const replicaCount = deploy.replicaCount ?? 1;
+
+  // Extract node selector from schema
+  const nodeSelector = deploy.deployable?.nodeSelector;
+
+  const envToUse = deploy.env || {};
+  const containers: Array<Record<string, any>> = [];
+  const initContainers: Array<Record<string, any>> = [];
+
+  const volumes: VOLUME[] = [
+    {
+      emptyDir: {},
+      name: 'config-volume',
+    },
+  ];
+  const volumeMounts: Array<{ name: string; mountPath: string }> = [];
+
+  const datadogLabels = {
+    'tags.datadoghq.com/env': `lifecycle-${build.uuid}`,
+    'tags.datadoghq.com/service': serviceName || name,
+    'tags.datadoghq.com/version': build.uuid,
+  };
+
+  // Handle init container if present
+  if (deploy.initDockerImage) {
+    const initEnvObj = _.merge(
+      { __NAMESPACE__: 'lifecycle' },
+      deploy.initEnv || {},
+      flattenObject(build.commentInitEnv)
+    );
+
+    const initSecretRefs = parseSecretRefsFromEnv(initEnvObj as Record<string, string>);
+    const initSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+    for (const ref of initSecretRefs) {
+      initSecretRefMap.set(ref.envKey, ref);
+    }
+
+    const initEnvArray: Array<Record<string, any>> = Object.entries(initEnvObj)
+      .filter(([, value]) => !_.isObject(value))
+      .map(([key, value]) => {
+        const secretRef = initSecretRefMap.get(key);
+        if (secretRef) {
+          const secretRefName = generateSecretName(serviceName || 'service', secretRef.provider);
+          return {
+            name: key,
+            valueFrom: {
+              secretKeyRef: {
+                name: secretRefName,
+                key: key,
+              },
+            },
+          };
+        }
+        return {
+          name: key,
+          value: String(value),
+        };
+      });
+
+    initEnvArray.push(
+      {
+        name: 'POD_IP',
+        valueFrom: {
+          fieldRef: {
+            fieldPath: 'status.podIP',
+          },
+        },
+      },
+      {
+        name: 'DD_AGENT_HOST',
+        valueFrom: {
+          fieldRef: {
+            fieldPath: 'status.hostIP',
+          },
+        },
+      }
+    );
+
+    const initContainer: Record<string, any> = {
+      name: `init-${serviceName || 'container'}`,
+      image: deploy.initDockerImage,
+      imagePullPolicy: 'IfNotPresent',
+      env: initEnvArray,
+      volumeMounts: [
+        {
+          mountPath: '/config',
+          name: 'config-volume',
+        },
+      ],
+    };
+
+    if (serviceCPU || serviceMemory) {
+      initContainer.resources = {
+        limits: {},
+        requests: {},
+      };
+      if (serviceCPU) {
+        initContainer.resources.limits.cpu = serviceCPU;
+        initContainer.resources.requests.cpu = serviceCPU;
+      }
+      if (serviceMemory) {
+        initContainer.resources.limits.memory = serviceMemory;
+        initContainer.resources.requests.memory = serviceMemory;
+      }
+    }
+
+    if (servicePort) {
+      initContainer.ports = [];
+      for (const port of servicePort.split(',')) {
+        initContainer.ports.push({
+          name: `port-${port}`,
+          containerPort: Number(port),
+        });
+      }
+    }
+
+    if (deploy.deployable?.initCommand) {
+      initContainer.command = [deploy.deployable.initCommand];
+    }
+    if (deploy.deployable?.initArguments) {
+      initContainer.args = deploy.deployable.initArguments.split('%%SPLIT%%');
+    }
+
+    initContainers.push(initContainer);
+  }
+
+  // Handle main container
+  const mainEnvObj = _.merge({ __NAMESPACE__: 'lifecycle' }, envToUse, flattenObject(build.commentRuntimeEnv));
+  const mainSecretRefs = parseSecretRefsFromEnv(mainEnvObj as Record<string, string>);
+  const mainSecretRefMap = new Map<string, SecretRefWithEnvKey>();
+  for (const ref of mainSecretRefs) {
+    mainSecretRefMap.set(ref.envKey, ref);
+  }
+
+  const mainEnvArray: Array<Record<string, any>> = Object.entries(mainEnvObj)
+    .filter(([, value]) => !_.isObject(value))
+    .map(([key, value]) => {
+      const secretRef = mainSecretRefMap.get(key);
+      if (secretRef) {
+        const secretRefName = generateSecretName(serviceName || 'service', secretRef.provider);
+        return {
+          name: key,
+          valueFrom: {
+            secretKeyRef: {
+              name: secretRefName,
+              key: key,
+            },
+          },
+        };
+      }
+      return {
+        name: key,
+        value: String(value),
+      };
+    });
+
+  // Add Kubernetes field references for pod metadata
+  mainEnvArray.push(
+    {
+      name: 'POD_IP',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: 'status.podIP',
+        },
+      },
+    },
+    {
+      name: 'DD_AGENT_HOST',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: 'status.hostIP',
+        },
+      },
+    }
+  );
+
+  // Add Datadog env vars from labels (only if not already set)
+  const existingEnvKeys = new Set(mainEnvArray.map((e) => e.name));
+  if (!existingEnvKeys.has('DD_ENV')) {
+    mainEnvArray.push({
+      name: 'DD_ENV',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/env']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('DD_SERVICE')) {
+    mainEnvArray.push({
+      name: 'DD_SERVICE',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/service']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('DD_VERSION')) {
+    mainEnvArray.push({
+      name: 'DD_VERSION',
+      valueFrom: {
+        fieldRef: {
+          fieldPath: "metadata.labels['tags.datadoghq.com/version']",
+        },
+      },
+    });
+  }
+  if (!existingEnvKeys.has('LC_UUID')) {
+    mainEnvArray.push({
+      name: 'LC_UUID',
+      value: build.uuid,
+    });
+  }
+
+  const mainContainer: any = {
+    name: serviceName || 'main',
+    image: deploy.dockerImage,
+    imagePullPolicy: 'IfNotPresent',
+    env: mainEnvArray,
+    volumeMounts: [
+      {
+        mountPath: '/config',
+        name: 'config-volume',
+      },
+    ],
+  };
+
+  // Only add resources if they are defined
+  if (serviceCPU || serviceMemory) {
+    mainContainer.resources = {
+      limits: {},
+      requests: {},
+    };
+
+    if (serviceCPU) {
+      mainContainer.resources.limits.cpu = serviceCPU;
+      mainContainer.resources.requests.cpu = serviceCPU;
+    }
+
+    if (serviceMemory) {
+      mainContainer.resources.limits.memory = serviceMemory;
+      mainContainer.resources.requests.memory = serviceMemory;
+    }
+  }
+
+  // Add ports if defined
+  if (servicePort) {
+    mainContainer.ports = [];
+    for (const port of servicePort.split(',')) {
+      mainContainer.ports.push({
+        name: `port-${port}`,
+        containerPort: Number(port),
+      });
+    }
+  }
+
+  // Handle additional volumes (service disks)
+  let hasPersistentVolumeClaims = false;
+
+  if (deploy.deployable?.serviceDisksYaml) {
+    const serviceDisks: ServiceDiskConfig[] = JSON.parse(deploy.deployable.serviceDisksYaml);
+    serviceDisks.forEach((disk) => {
+      if (disk.medium === MEDIUM_TYPE.MEMORY) {
+        volumes.push({
+          name: disk.name,
+          emptyDir: {},
+        });
+      } else {
+        // EBS or other persistent disk - requires Recreate strategy
+        hasPersistentVolumeClaims = true;
+        volumes.push({
+          name: disk.name,
+          persistentVolumeClaim: {
+            claimName: `${name}-${disk.name}-claim`,
+          },
+        });
+      }
+      volumeMounts.push({
+        name: disk.name,
+        mountPath: disk.mountPath,
+      });
+    });
+  }
+
+  // Add additional volume mounts to main container
+  if (volumeMounts.length > 0) {
+    mainContainer.volumeMounts = [...mainContainer.volumeMounts, ...volumeMounts];
+  }
+
+  // Add probes
+  if (deploy.deployable?.readinessHttpGetPort || deploy.deployable?.readinessTcpSocketPort) {
+    mainContainer.readinessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+    mainContainer.livenessProbe = generateReadinessProbeForDeployable(deploy.deployable);
+    // Restarts a pod only after 10 minutes of being granted readiness time
+    mainContainer.livenessProbe.initialDelaySeconds = 600;
+  }
+
+  // Add command/args if specified
+  if (deploy.deployable?.command) {
+    mainContainer.command = [deploy.deployable.command];
+  }
+  if (deploy.deployable?.arguments) {
+    mainContainer.args = deploy.deployable.arguments.split('%%SPLIT%%');
+  }
+
+  containers.push(mainContainer);
+
+  const deploymentSpec: any = {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      namespace,
+      name,
+      annotations: {
+        'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+      },
+      labels: {
+        ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
+        name,
+        dd_name: `lifecycle-${build.uuid}`,
+        'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
+        ...datadogLabels,
+      },
+    },
+    spec: {
+      replicas: replicaCount,
+      revisionHistoryLimit: 5,
+      selector: {
+        matchLabels: {
+          name,
+        },
+      },
+      // Use Recreate strategy for deployments with PVCs (EBS volumes can only attach to one pod)
+      // Use RollingUpdate for all other deployments
+      strategy: hasPersistentVolumeClaims ? { type: 'Recreate' } : { rollingUpdate: { maxUnavailable: '0%' } },
+      template: {
+        metadata: {
+          annotations: {
+            'cluster-autoscaler.kubernetes.io/safe-to-evict': 'true',
+          },
+          labels: {
+            ...buildLifecycleLabels({ buildUuid: build.uuid, deployUuid: deploy.uuid }),
+            name,
+            dd_name: `lifecycle-${build.uuid}`,
+            'app.kubernetes.io/instance': `${serviceName}-${build.uuid}`,
+            ...datadogLabels,
+          },
+        },
+        spec: {
+          serviceAccountName,
+          affinity,
+          ...(nodeSelector && { nodeSelector }),
+          securityContext: {
+            fsGroup: 2000,
+          },
+          ...(initContainers.length > 0 && { initContainers }),
+          containers,
+          volumes,
+          ...(build?.isStatic && {
+            tolerations: staticEnvTolerations,
+          }),
+          enableServiceLinks: false,
+        },
+      },
+    },
+  };
+
+  return yaml.dump(deploymentSpec, { lineWidth: -1 });
+}
+
+export interface DeployPodReadiness {
+  ready: boolean;
+  causeSummary?: string;
+}
+
+function truncateCause(value: string | undefined | null, max = 160): string {
+  const compact = (value || '').replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max)}…` : compact;
+}
+
+function summarizeContainerState(status: k8s.V1ContainerStatus, initContainer: boolean): string | undefined {
+  const prefix = initContainer ? 'init ' : '';
+  const restarts = status.restartCount ? ` restarts=${status.restartCount}` : '';
+  const waiting = status.state?.waiting;
+  const terminated = status.state?.terminated || status.lastState?.terminated;
+
+  if (waiting && waiting.reason !== 'ContainerCreating') {
+    const message = truncateCause(waiting.message || terminated?.message);
+    return `${prefix}${status.name} waiting=${waiting.reason || 'unknown'}${message ? ` (${message})` : ''}${restarts}`;
+  }
+
+  if (terminated && (terminated.reason !== 'Completed' || initContainer)) {
+    const message = truncateCause(terminated.message);
+    const exitCode = terminated.exitCode !== undefined ? ` exit=${terminated.exitCode}` : '';
+    return `${prefix}${status.name} terminated=${terminated.reason || 'unknown'}${exitCode}${
+      message ? ` (${message})` : ''
+    }${restarts}`;
+  }
+
+  if (status.restartCount) {
+    return `${prefix}${status.name}${restarts}`;
+  }
+
+  return undefined;
+}
+
+// Compact per-pod failure causes (container waiting/terminated reasons, restarts, init states) from the last poll.
+export function summarizeDeployPodFailures(pods: k8s.V1Pod[]): string | undefined {
+  const podSummaries: string[] = [];
+
+  for (const pod of pods) {
+    const readyCondition = pod.status?.conditions?.find((c) => c.type === 'Ready');
+    if (readyCondition?.status === 'True') {
+      continue;
+    }
+
+    const containerCauses = [
+      ...(pod.status?.initContainerStatuses || []).map((status) => summarizeContainerState(status, true)),
+      ...(pod.status?.containerStatuses || []).map((status) => summarizeContainerState(status, false)),
+    ].filter((cause): cause is string => Boolean(cause));
+
+    const detail = containerCauses.length
+      ? containerCauses.join('; ')
+      : truncateCause(readyCondition?.message) || `phase=${pod.status?.phase || 'unknown'}`;
+    podSummaries.push(`pod ${pod.metadata?.name || 'unknown'}: ${detail}`);
+  }
+
+  return podSummaries.length ? podSummaries.join(' | ') : undefined;
+}
+
+export async function waitForDeployPodReady(deploy: Deploy): Promise<DeployPodReadiness> {
+  const { uuid, build } = deploy;
+  const { namespace } = build;
+  const deployableName = deploy.deployable?.name || 'unknown';
+
+  const logCtx = { deployUuid: uuid, service: deployableName, namespace };
+
+  let retries = 0;
+  getLogger(logCtx).info('Deploy: waiting for pods');
+
+  while (retries < 60) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+
+    if (pods.length > 0) {
+      break;
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  if (retries >= 60) {
+    getLogger(logCtx).warn('Pod: not found timeout=5m');
+    return {
+      ready: false,
+      causeSummary: `no application pods appeared within 5m (label deploy_uuid=${uuid} in namespace ${namespace})`,
+    };
+  }
+
+  retries = 0;
+  let lastPods: k8s.V1Pod[] = [];
+
+  while (retries < 180) {
+    const k8sApi = getK8sApi();
+    const resp = await k8sApi?.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      `deploy_uuid=${uuid}`
+    );
+    const allPods = resp?.body?.items || [];
+    const pods = allPods.filter((pod) => !pod.metadata?.name?.includes('-deploy-'));
+    lastPods = pods;
+
+    if (pods.length === 0) {
+      getLogger(logCtx).warn('Pod: deployment pods not found');
+      return { ready: false, causeSummary: 'deployment pods disappeared while waiting for readiness' };
+    }
+
+    const allReady = pods.every((pod) => {
+      const conditions = pod.status?.conditions || [];
+      const readyCondition = conditions.find((c) => c.type === 'Ready');
+      return readyCondition?.status === 'True';
+    });
+
+    if (allReady) {
+      getLogger({ ...logCtx, podCount: pods.length }).info('Deploy: pods ready');
+      return { ready: true };
+    }
+
+    retries += 1;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  const causeSummary = summarizeDeployPodFailures(lastPods);
+  getLogger({ ...logCtx, causeSummary }).warn('Pod: not ready timeout=15m');
+  return { ready: false, causeSummary };
+}

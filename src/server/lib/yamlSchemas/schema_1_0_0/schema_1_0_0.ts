@@ -1,0 +1,417 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { deployment } from './deployment';
+import { docker } from './docker';
+import { webhooks } from './webhooks';
+
+const resourceRequirements = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    requests: { type: 'object', additionalProperties: { type: 'string' } },
+    limits: { type: 'object', additionalProperties: { type: 'string' } },
+  },
+};
+
+const agentSessionResources = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    agent: resourceRequirements,
+    editor: resourceRequirements,
+  },
+};
+
+const agentSessionPrewarm = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    services: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+};
+
+const agentSessionReadiness = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    timeoutMs: { type: 'integer', minimum: 0 },
+    pollMs: { type: 'integer', minimum: 0 },
+  },
+};
+
+const agentSessionSkillRef = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    repo: { type: 'string', minLength: 1 },
+    branch: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+  },
+  required: ['repo', 'branch', 'path'],
+};
+
+const agentSessionSkills = {
+  type: 'array',
+  items: agentSessionSkillRef,
+};
+
+const ignoreFiles = {
+  type: 'array',
+  items: { type: 'string' },
+};
+
+const schema_1_0_0 = {
+  id: 'schema-1.0.0',
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    version: { type: 'string', format: 'schema100Version' },
+    environment: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        enabledFeatures: { type: 'array' },
+        ignoreFiles,
+        autoDeploy: { type: 'boolean' },
+        githubDeployments: { type: 'boolean' },
+        useGithubStatusComment: { type: 'boolean' },
+        agentSession: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            resources: agentSessionResources,
+            prewarm: agentSessionPrewarm,
+            skills: agentSessionSkills,
+          },
+        },
+        defaultServices: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              repository: { type: 'string' },
+              branch: { type: 'string' },
+              serviceId: { type: 'number' },
+            },
+            required: ['name'],
+          },
+        },
+        optionalServices: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              repository: { type: 'string' },
+              branch: { type: 'string' },
+              serviceId: { type: 'number' },
+            },
+            required: ['name'],
+          },
+        },
+        webhooks,
+      },
+    },
+    services: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          ignoreFiles,
+          appShort: { type: 'string' },
+          defaultUUID: { type: 'string' },
+          requires: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                name: { type: 'string' },
+              },
+              required: ['name'],
+            },
+          },
+          deploymentDependsOn: {
+            type: 'array',
+            minItems: 0,
+            items: {
+              type: 'string',
+            },
+          },
+          helm: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              cfStepType: { type: 'string' },
+              type: { type: 'string' },
+              args: { type: 'string' },
+              version: { type: 'string' },
+              action: { type: 'string' },
+              repository: { type: 'string' },
+              branchName: { type: 'string' },
+              deploymentMethod: { type: 'string', enum: ['native', 'ci'] },
+              chart: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string' },
+                  repoUrl: { type: 'string' },
+                  version: { type: 'string' },
+                  values: { type: 'array', items: { type: 'string' } },
+                  valueFiles: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['name'],
+              },
+              nativeHelm: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  enabled: { type: 'boolean' },
+                  defaultHelmVersion: { type: 'string' },
+                  jobTimeout: { type: 'number' },
+                  serviceAccount: { type: 'string' },
+                  defaultArgs: { type: 'string' },
+                  image: { type: 'string' },
+                  postRenderer: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      enabled: { type: 'boolean' },
+                      command: { type: 'string' },
+                      args: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+              envLens: { type: 'boolean' },
+              grpc: { type: 'boolean' },
+              gatewayApi: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  enabled: { type: 'boolean' },
+                  protocol: { type: 'string', enum: ['http', 'grpc'] },
+                  gateway: { type: 'string', enum: ['internal', 'external'] },
+                  gatewayName: { type: 'string' },
+                  gatewayNamespace: { type: 'string' },
+                  port: { type: 'number' },
+                  hostnames: { type: 'array', items: { type: 'string' } },
+                  rules: {
+                    type: 'array',
+                    items: { type: 'object', additionalProperties: true },
+                  },
+                  gateways: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      http: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          internal: { type: 'string' },
+                          external: { type: 'string' },
+                        },
+                      },
+                      grpc: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          internal: { type: 'string' },
+                          external: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                  annotations: {
+                    type: 'object',
+                    additionalProperties: { type: 'string' },
+                  },
+                  routes: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        name: { type: 'string' },
+                        gateway: { type: 'string', enum: ['internal', 'external'] },
+                        gatewayName: { type: 'string' },
+                        hostnames: { type: 'array', items: { type: 'string' } },
+                        annotations: {
+                          type: 'object',
+                          additionalProperties: { type: 'string' },
+                        },
+                        port: { type: 'number' },
+                        rules: {
+                          type: 'array',
+                          items: { type: 'object', additionalProperties: true },
+                        },
+                        securityPolicy: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: {
+                            annotations: {
+                              type: 'object',
+                              additionalProperties: { type: 'string' },
+                            },
+                            allowedCIDRs: { type: 'array', items: { type: 'string' } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  securityPolicy: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      enabled: { type: 'boolean' },
+                      annotations: {
+                        type: 'object',
+                        additionalProperties: { type: 'string' },
+                      },
+                      allowedCIDRs: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+                required: ['enabled'],
+              },
+              disableIngressHost: { type: 'boolean' },
+              overrideDefaultIpWhitelist: { type: 'boolean' },
+              docker,
+            },
+          },
+          codefresh: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              repository: { type: 'string' },
+              branchName: { type: 'string' },
+              env: { type: 'object' },
+              deploy: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  pipelineId: { type: 'string' },
+                  trigger: { type: 'string' },
+                },
+              },
+              destroy: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  pipelineId: { type: 'string' },
+                  trigger: { type: 'string' },
+                },
+              },
+              deployment,
+            },
+            required: ['repository', 'branchName'],
+          },
+          github: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              repository: { type: 'string' },
+              branchName: { type: 'string' },
+              docker,
+              deployment,
+              envLens: { type: 'boolean' },
+            },
+            required: ['repository', 'branchName', 'docker'],
+          },
+          docker: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              dockerImage: { type: 'string' },
+              defaultTag: { type: 'string' },
+              command: { type: 'string' },
+              arguments: { type: 'string' },
+              env: { type: 'object' },
+              ports: { type: 'array' },
+              deployment,
+              envLens: { type: 'boolean' },
+            },
+            required: ['dockerImage', 'defaultTag'],
+          },
+          externalHttp: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              defaultInternalHostname: { type: 'string' },
+              defaultPublicUrl: { type: 'string' },
+            },
+            required: ['defaultInternalHostname', 'defaultPublicUrl'],
+          },
+          auroraRestore: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              command: { type: 'string' },
+              arguments: { type: 'string' },
+            },
+            required: ['command', 'arguments'],
+          },
+          configuration: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              data: { type: 'object', additionalProperties: { type: 'string' } },
+              branchName: { type: 'string' },
+            },
+            required: ['data'],
+          },
+          dev: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              image: { type: 'string' },
+              command: { type: 'string' },
+              installCommand: { type: 'string' },
+              workDir: { type: 'string' },
+              ports: { type: 'array', items: { type: 'number' } },
+              env: { type: 'object' },
+              forwardEnvVarsToAgent: { type: 'array', items: { type: 'string' } },
+              agentSession: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  readiness: agentSessionReadiness,
+                  skills: agentSessionSkills,
+                },
+              },
+            },
+            required: ['image', 'command'],
+          },
+        },
+        required: ['name'],
+      },
+    },
+  },
+};
+export { schema_1_0_0 };

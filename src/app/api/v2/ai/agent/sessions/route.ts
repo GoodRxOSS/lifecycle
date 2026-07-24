@@ -1,0 +1,653 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { NextRequest } from 'next/server';
+import 'server/lib/dependencies';
+import { createApiHandler } from 'server/lib/createApiHandler';
+import { successResponse, errorResponse } from 'server/lib/response';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import type { DevConfig } from 'server/models/yaml/YamlService';
+import type { LifecycleConfig } from 'server/models/yaml';
+import AgentChatSessionService from 'server/services/agent/ChatSessionService';
+import AgentSessionReadService from 'server/services/agent/SessionReadService';
+import {
+  DEFAULT_AGENT_SESSION_LIST_LIMIT,
+  MAX_AGENT_SESSION_LIST_LIMIT,
+} from 'server/services/agent/SessionReadService';
+import { type AgentThreadRuntimeControlChoiceInput } from 'server/services/agent/ThreadRuntimeControlsService';
+import { AgentSessionKind, BuildKind } from 'shared/constants';
+import type { AgentSessionCandidateBuildSource } from 'server/services/agentSessionCandidates';
+
+interface RequestedAgentSessionServiceRef {
+  name: string;
+  repo?: string | null;
+  branch?: string | null;
+}
+
+interface ResolvedSessionService {
+  name: string;
+  deployId: number;
+  devConfig: DevConfig;
+  resourceName?: string;
+  repo?: string | null;
+  branch?: string | null;
+  revision?: string | null;
+  workspacePath?: string;
+  workDir?: string | null;
+}
+
+interface CreateSessionBody {
+  defaults?: {
+    provider?: string;
+    model?: string;
+    harness?: string;
+  };
+  source?: {
+    adapter?: string;
+    input?: Record<string, unknown>;
+  };
+  workspace?: {
+    storageSize?: string;
+  };
+  runtimeControlChoices?: AgentThreadRuntimeControlChoiceInput;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function repoNameFromRepoUrl(repoUrl?: string | null) {
+  if (!repoUrl) {
+    return null;
+  }
+
+  const normalized = repoUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+  return normalized || null;
+}
+
+function parseRequestedWorkspaceStorageSize(body: CreateSessionBody): string | undefined {
+  const workspace = body.workspace;
+  if (workspace === undefined) {
+    return undefined;
+  }
+
+  if (!workspace || typeof workspace !== 'object' || Array.isArray(workspace)) {
+    throw new Error('workspace must be an object');
+  }
+
+  if (workspace.storageSize === undefined) {
+    return undefined;
+  }
+
+  if (typeof workspace.storageSize !== 'string' || !workspace.storageSize.trim()) {
+    throw new Error('workspace.storageSize must be a non-empty string');
+  }
+
+  return workspace.storageSize.trim();
+}
+
+function parseRuntimeControlChoiceIds(value: unknown, fieldName: string): string[] | undefined | Error {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    return new Error(`${fieldName} must be an array of choice ids.`);
+  }
+
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) {
+      return new Error(`${fieldName} must contain only choice ids.`);
+    }
+  }
+
+  return value.map((item) => item.trim());
+}
+
+function parseRuntimeControlChoices(value: unknown): AgentThreadRuntimeControlChoiceInput | undefined | Error {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!isPlainObject(value)) {
+    return new Error('runtimeControlChoices must be an object');
+  }
+
+  const unknownKeys = Object.keys(value).filter(
+    (key) => key !== 'agentId' && key !== 'toolChoiceIds' && key !== 'mcpChoiceIds'
+  );
+  if (unknownKeys.length > 0) {
+    return new Error(`Unsupported runtime-control fields: ${unknownKeys.join(', ')}`);
+  }
+
+  const agentId =
+    value.agentId === undefined || value.agentId === null
+      ? undefined
+      : typeof value.agentId === 'string' && value.agentId.trim()
+      ? value.agentId.trim()
+      : new Error('runtimeControlChoices.agentId must be a non-empty string');
+  if (agentId instanceof Error) {
+    return agentId;
+  }
+
+  const toolChoiceIds = parseRuntimeControlChoiceIds(value.toolChoiceIds, 'runtimeControlChoices.toolChoiceIds');
+  if (toolChoiceIds instanceof Error) {
+    return toolChoiceIds;
+  }
+
+  const mcpChoiceIds = parseRuntimeControlChoiceIds(value.mcpChoiceIds, 'runtimeControlChoices.mcpChoiceIds');
+  if (mcpChoiceIds instanceof Error) {
+    return mcpChoiceIds;
+  }
+
+  return { agentId, toolChoiceIds, mcpChoiceIds };
+}
+
+async function resolveLifecycleConfigForSession({
+  buildSource,
+  repoUrl,
+  branch,
+}: {
+  buildSource: AgentSessionCandidateBuildSource | null;
+  repoUrl?: string | null;
+  branch?: string | null;
+}): Promise<LifecycleConfig | null> {
+  const { fetchLifecycleConfig } = await import('server/models/yaml');
+
+  if (buildSource) {
+    return fetchLifecycleConfig(buildSource.repo, buildSource.configRef);
+  }
+
+  const repositoryName = repoNameFromRepoUrl(repoUrl);
+  if (!repositoryName || !branch) {
+    return null;
+  }
+
+  return fetchLifecycleConfig(repositoryName, branch);
+}
+
+function isRequestedSessionServiceRef(value: unknown): value is RequestedAgentSessionServiceRef {
+  const allowedKeys = new Set(['name', 'repo', 'branch']);
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => allowedKeys.has(key)) &&
+    typeof (value as RequestedAgentSessionServiceRef).name === 'string' &&
+    ((value as RequestedAgentSessionServiceRef).repo == null ||
+      typeof (value as RequestedAgentSessionServiceRef).repo === 'string') &&
+    ((value as RequestedAgentSessionServiceRef).branch == null ||
+      typeof (value as RequestedAgentSessionServiceRef).branch === 'string')
+  );
+}
+
+async function resolveBuildContext(buildUuid: string) {
+  const { default: Build } = await import('server/models/Build');
+  return Build.query()
+    .findOne({ uuid: buildUuid })
+    .whereNull('deletedAt')
+    .withGraphFetched('[pullRequest.[repository], deploys.[deployable, repository]]');
+}
+
+async function resolveRequestedServices(
+  buildUuid: string | undefined,
+  requestedServices: unknown[] | undefined,
+  buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null,
+  buildSource: AgentSessionCandidateBuildSource | null
+): Promise<ResolvedSessionService[]> {
+  if (!Array.isArray(requestedServices) || requestedServices.length === 0) {
+    return [];
+  }
+
+  if (!buildUuid || !buildContext) {
+    throw new Error('buildUuid is required when services are specified');
+  }
+
+  const { resolveAgentSessionServiceCandidatesForBuild, resolveRequestedAgentSessionServices } = await import(
+    'server/services/agentSessionCandidates'
+  );
+
+  const requestedRefs = requestedServices.map((service) => {
+    if (typeof service === 'string') {
+      return service;
+    }
+
+    if (isRequestedSessionServiceRef(service)) {
+      return service;
+    }
+
+    throw new Error('services must be an array of service names or repo-qualified service references');
+  });
+
+  return resolveRequestedAgentSessionServices(
+    await resolveAgentSessionServiceCandidatesForBuild(buildContext, buildSource),
+    requestedRefs
+  ).map(({ name, deployId, devConfig, baseDeploy, repo, branch, revision }) => ({
+    name,
+    deployId,
+    devConfig,
+    resourceName: baseDeploy.uuid || undefined,
+    repo,
+    branch,
+    revision: revision || null,
+  }));
+}
+
+/**
+ * @openapi
+ * /api/v2/ai/agent/sessions:
+ *   get:
+ *     summary: List agent sessions for the authenticated user
+ *     tags:
+ *       - Agent Platform
+ *     operationId: getAgentSessions
+ *     parameters:
+ *       - in: query
+ *         name: includeArchived
+ *         schema:
+ *           type: boolean
+ *         description: When true, include archived and errored sessions in the response.
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *           minimum: 1
+ *         description: Page number for pagination.
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 25
+ *           minimum: 1
+ *           maximum: 100
+ *         description: Number of sessions per page.
+ *     responses:
+ *       '200':
+ *         description: Agent sessions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [request_id, data, error]
+ *               properties:
+ *                 request_id:
+ *                   type: string
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/AgentSessionSummary'
+ *                 metadata:
+ *                   $ref: '#/components/schemas/ResponseMetadata'
+ *                 error:
+ *                   nullable: true
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   post:
+ *     summary: Create a new agent session
+ *     description: Creates an agent session and accepts optional runtimeControlChoices for the first run's runtime-control choices.
+ *     tags:
+ *       - Agent Platform
+ *     operationId: createAgentSession
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [source]
+ *             properties:
+ *               defaults:
+ *                 type: object
+ *                 properties:
+ *                   model:
+ *                     type: string
+ *                   provider:
+ *                     type: string
+ *                   harness:
+ *                     type: string
+ *               source:
+ *                 type: object
+ *                 required: [adapter]
+ *                 properties:
+ *                   adapter:
+ *                     type: string
+ *                   input:
+ *                     type: object
+ *                     additionalProperties: true
+ *               workspace:
+ *                 type: object
+ *                 properties:
+ *                   storageSize:
+ *                     type: string
+ *                     description: Optional workspace PVC size. Accepted only when admin runtime settings allow client overrides.
+ *               runtimeControlChoices:
+ *                 $ref: '#/components/schemas/AgentRuntimeControlChoicesInput'
+ *               sandbox:
+ *                 type: object
+ *                 properties:
+ *                   providerHint:
+ *                     type: string
+ *                   requirements:
+ *                     type: object
+ *                     additionalProperties: true
+ *               thread:
+ *                 type: object
+ *                 properties:
+ *                   createDefault:
+ *                     type: boolean
+ *     responses:
+ *       '201':
+ *         description: Agent session created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [request_id, data, error]
+ *               properties:
+ *                 request_id:
+ *                   type: string
+ *                 data:
+ *                   $ref: '#/components/schemas/AgentSessionSummary'
+ *                 error:
+ *                   nullable: true
+ *       '400':
+ *         description: Invalid request
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Build not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '409':
+ *         description: An active environment session already exists for the requested environment
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '401':
+ *         description: Unauthorized
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
+const getHandler = async (req: NextRequest) => {
+  const userIdentity = requireRequestUserIdentity(req);
+
+  const includeArchived =
+    req.nextUrl.searchParams.get('includeArchived') === 'true' ||
+    // Legacy param name, kept so pre-rename clients keep working.
+    req.nextUrl.searchParams.get('includeEnded') === 'true';
+  const page = parseInt(req.nextUrl.searchParams.get('page') || '1', 10);
+  const requestedLimit = parseInt(
+    req.nextUrl.searchParams.get('limit') || String(DEFAULT_AGENT_SESSION_LIST_LIMIT),
+    10
+  );
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(requestedLimit, MAX_AGENT_SESSION_LIST_LIMIT)
+    : DEFAULT_AGENT_SESSION_LIST_LIMIT;
+  const result = await AgentSessionReadService.listOwnedSessionRecords(userIdentity.userId, {
+    includeArchived,
+    page,
+    limit,
+  });
+
+  return successResponse(
+    result.records,
+    {
+      status: 200,
+      metadata: result.metadata,
+    },
+    req
+  );
+};
+
+const postHandler = async (req: NextRequest) => {
+  const userIdentity = requireRequestUserIdentity(req);
+
+  let body: CreateSessionBody;
+  try {
+    const parsedBody = await req.json();
+    if (!isPlainObject(parsedBody)) {
+      return errorResponse(new Error('Request body must be an object'), { status: 400 }, req);
+    }
+    body = parsedBody as CreateSessionBody;
+  } catch {
+    return errorResponse(new Error('Invalid JSON body'), { status: 400 }, req);
+  }
+
+  let requestedWorkspaceStorageSize: string | undefined;
+  let runtimeControlChoices: AgentThreadRuntimeControlChoiceInput | undefined;
+  try {
+    requestedWorkspaceStorageSize = parseRequestedWorkspaceStorageSize(body);
+    const parsedRuntimeControlChoices = parseRuntimeControlChoices(body.runtimeControlChoices);
+    if (parsedRuntimeControlChoices instanceof Error) {
+      throw parsedRuntimeControlChoices;
+    }
+    runtimeControlChoices = parsedRuntimeControlChoices;
+  } catch (err) {
+    return errorResponse(err, { status: 400 }, req);
+  }
+  const sourceInput =
+    body.source?.input && typeof body.source.input === 'object' && !Array.isArray(body.source.input)
+      ? body.source.input
+      : {};
+  if (body.source?.adapter === 'lifecycle_fork') {
+    return errorResponse(
+      new Error('Forked sandbox sessions must be created through /api/v2/ai/agent/sandbox-sessions'),
+      { status: 400 },
+      req
+    );
+  }
+
+  const buildUuid =
+    typeof (sourceInput as { buildUuid?: unknown }).buildUuid === 'string'
+      ? (sourceInput as { buildUuid: string }).buildUuid
+      : undefined;
+  const services = Array.isArray((sourceInput as { services?: unknown[] }).services)
+    ? (sourceInput as { services: unknown[] }).services
+    : undefined;
+  const requestedModel = body.defaults?.model;
+  const requestedProvider =
+    typeof body.defaults?.provider === 'string' ? body.defaults.provider.trim() || undefined : undefined;
+  const sessionKind = body.source?.adapter === 'blank_workspace' ? AgentSessionKind.CHAT : AgentSessionKind.ENVIRONMENT;
+
+  if (sessionKind === AgentSessionKind.CHAT) {
+    if (buildUuid || (Array.isArray(services) && services.length > 0)) {
+      return errorResponse(
+        new Error('Chat sessions cannot be created with buildUuid or attached services'),
+        { status: 400 },
+        req
+      );
+    }
+
+    try {
+      const { resolveAgentSessionRuntimeConfig, resolveAgentSessionWorkspaceStorageIntent } = await import(
+        'server/lib/agentSession/runtimeConfig'
+      );
+      const workspaceStorage = requestedWorkspaceStorageSize
+        ? resolveAgentSessionWorkspaceStorageIntent({
+            requestedSize: requestedWorkspaceStorageSize,
+            storage: (await resolveAgentSessionRuntimeConfig()).workspaceStorage,
+          })
+        : undefined;
+      const session = await AgentChatSessionService.createChatSession({
+        userId: userIdentity.userId,
+        userIdentity,
+        provider: requestedProvider,
+        model: requestedModel,
+        workspaceStorage,
+        runtimeControlChoices,
+      });
+
+      return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 201 }, req);
+    } catch (err) {
+      const { AgentSessionRuntimeConfigError, AgentSessionWorkspaceStorageConfigError } = await import(
+        'server/lib/agentSession/runtimeConfig'
+      );
+      // Config errors aren't AppErrors yet, so map them here; the AppErrors self-map via createApiHandler.
+      if (err instanceof AgentSessionRuntimeConfigError || err instanceof AgentSessionWorkspaceStorageConfigError) {
+        return errorResponse(err, { status: 400 }, req);
+      }
+
+      throw err;
+    }
+  }
+
+  let repoUrl =
+    typeof (sourceInput as { repoUrl?: unknown }).repoUrl === 'string'
+      ? (sourceInput as { repoUrl: string }).repoUrl
+      : undefined;
+  let branch =
+    typeof (sourceInput as { branch?: unknown }).branch === 'string'
+      ? (sourceInput as { branch: string }).branch
+      : undefined;
+  let prNumber =
+    typeof (sourceInput as { prNumber?: unknown }).prNumber === 'number'
+      ? (sourceInput as { prNumber: number }).prNumber
+      : undefined;
+  let namespace =
+    typeof (sourceInput as { namespace?: unknown }).namespace === 'string'
+      ? (sourceInput as { namespace: string }).namespace
+      : undefined;
+  let buildKind = BuildKind.ENVIRONMENT;
+  let buildContext: Awaited<ReturnType<typeof resolveBuildContext>> | null = null;
+  let buildSource: AgentSessionCandidateBuildSource | null = null;
+  let lifecycleConfig: LifecycleConfig | null = null;
+
+  if (buildUuid) {
+    buildContext = await resolveBuildContext(buildUuid);
+    if (!buildContext) {
+      return errorResponse(new Error('Build not found'), { status: 404 }, req);
+    }
+
+    const { resolveAgentSessionCandidateBuildSource } = await import('server/services/agentSessionCandidates');
+    buildSource = await resolveAgentSessionCandidateBuildSource(buildContext);
+    if (!buildSource) {
+      return errorResponse(new Error('Build not found'), { status: 404 }, req);
+    }
+
+    buildKind = buildContext.kind || BuildKind.ENVIRONMENT;
+    if (buildKind === BuildKind.SANDBOX) {
+      return errorResponse(
+        new Error('Forked sandbox sessions must be created through /api/v2/ai/agent/sandbox-sessions'),
+        { status: 400 },
+        req
+      );
+    }
+
+    repoUrl = `https://github.com/${buildSource.repo}.git`;
+    branch = buildSource.branch;
+    prNumber = buildContext.pullRequest?.pullRequestNumber ?? undefined;
+    namespace = buildContext.namespace;
+  }
+
+  try {
+    lifecycleConfig = await resolveLifecycleConfigForSession({
+      buildSource,
+      repoUrl,
+      branch,
+    });
+  } catch {
+    lifecycleConfig = null;
+  }
+
+  let resolvedServices: ResolvedSessionService[];
+  try {
+    resolvedServices = await resolveRequestedServices(buildUuid, services, buildContext, buildSource);
+  } catch (err) {
+    return errorResponse(err, { status: 400 }, req);
+  }
+
+  if (!repoUrl || !branch || !namespace) {
+    return errorResponse(new Error('repoUrl, branch, and namespace are required'), { status: 400 }, req);
+  }
+
+  try {
+    const [
+      { resolveRequestGitHubToken },
+      { mergeAgentSessionReadinessForServices, mergeAgentSessionResources, resolveAgentSessionRuntimeConfig },
+      { default: AgentSessionService },
+    ] = await Promise.all([
+      import('server/lib/agentSession/githubToken'),
+      import('server/lib/agentSession/runtimeConfig'),
+      import('server/services/agentSession'),
+    ]);
+    const runtimeConfig = await resolveAgentSessionRuntimeConfig();
+    const githubToken = await resolveRequestGitHubToken(req);
+    const session = await AgentSessionService.createSession({
+      userId: userIdentity.userId,
+      userIdentity,
+      githubToken,
+      buildUuid,
+      buildKind,
+      services: resolvedServices,
+      provider: requestedProvider,
+      model: requestedModel,
+      environmentSkillRefs: lifecycleConfig?.environment?.agentSession?.skills,
+      repoUrl,
+      branch,
+      prNumber,
+      namespace,
+      workspaceImage: runtimeConfig.workspaceImage,
+      workspaceEditorImage: runtimeConfig.workspaceEditorImage,
+      workspaceGatewayImage: runtimeConfig.workspaceGatewayImage,
+      nodeSelector: runtimeConfig.nodeSelector,
+      keepAttachedServicesOnSessionNode: runtimeConfig.keepAttachedServicesOnSessionNode,
+      readiness: mergeAgentSessionReadinessForServices(
+        runtimeConfig.readiness,
+        resolvedServices.map((service) => service.devConfig.agentSession?.readiness)
+      ),
+      resources: mergeAgentSessionResources(
+        runtimeConfig.resources,
+        lifecycleConfig?.environment?.agentSession?.resources
+      ),
+      workspaceStorageSize: requestedWorkspaceStorageSize,
+      redisTtlSeconds: runtimeConfig.cleanup.redisTtlSeconds,
+    });
+
+    return successResponse(await AgentSessionReadService.serializeSessionRecord(session), { status: 201 }, req);
+  } catch (err) {
+    const { ActiveEnvironmentSessionError } = await import('server/services/agentSession');
+    const { AgentSessionRuntimeConfigError, AgentSessionWorkspaceStorageConfigError } = await import(
+      'server/lib/agentSession/runtimeConfig'
+    );
+
+    if (err instanceof ActiveEnvironmentSessionError) {
+      return errorResponse(err, { status: 409 }, req);
+    }
+    // MissingAgentProviderApiKeyError is an AppError (400) and self-maps via createApiHandler.
+    if (err instanceof AgentSessionRuntimeConfigError) {
+      return errorResponse(err, { status: 503 }, req);
+    }
+    if (err instanceof AgentSessionWorkspaceStorageConfigError) {
+      return errorResponse(err, { status: 400 }, req);
+    }
+    throw err;
+  }
+};
+
+export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const POST = createApiHandler(postHandler, { auth: 'session' });

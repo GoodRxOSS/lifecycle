@@ -1,0 +1,166 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import 'dotenv/config';
+
+const getServerRuntimeConfig = (key: string, fallback?: any): any => {
+  return getProp(process.env, key, fallback);
+};
+
+const getProp = (config: Record<string, any>, key: string, fallback?: any): any => {
+  const value = config[key];
+  if (value !== undefined && value !== null) {
+    return value;
+  }
+  if (fallback !== undefined) {
+    return fallback;
+  }
+
+  if ('yes' === process.env.BUILD_MODE) return '';
+
+  throw new Error(`Required config missing: '${key}'`);
+};
+
+export const APP_ENV = getServerRuntimeConfig('APP_ENV', 'development');
+export const IS_PROD = APP_ENV === 'production';
+export const IS_STG = APP_ENV === 'staging';
+export const IS_DEV = APP_ENV !== 'production';
+export const TMP_PATH = `/tmp/lifecycle`;
+
+/**
+ * @deprecated Use individual APP_DB_* environment variables instead (APP_DB_HOST, APP_DB_USER, APP_DB_PASSWORD, APP_DB_NAME). This will be removed in future releases.
+ */
+export const DATABASE_URL = getServerRuntimeConfig('DATABASE_URL');
+
+export const APP_DB_HOST = getServerRuntimeConfig('APP_DB_HOST', '');
+export const APP_DB_PORT = getServerRuntimeConfig('APP_DB_PORT', 5432);
+export const APP_DB_USER = getServerRuntimeConfig('APP_DB_USER', 'lifecycle');
+export const APP_DB_PASSWORD = getServerRuntimeConfig('APP_DB_PASSWORD', 'lifecycle');
+export const APP_DB_NAME = getServerRuntimeConfig('APP_DB_NAME', '');
+export const APP_DB_SSL = getServerRuntimeConfig('APP_DB_SSL', '');
+
+export const LIFECYCLE_UI_URL = getServerRuntimeConfig('LIFECYCLE_UI_URL', '');
+export const CHAT_PREVIEW_DOMAIN = getServerRuntimeConfig('CHAT_PREVIEW_DOMAIN', '');
+
+export const GITHUB_APP_ID = getServerRuntimeConfig('GITHUB_APP_ID', 'YOUR_VALUE_HERE');
+export const GITHUB_CLIENT_ID = getServerRuntimeConfig('GITHUB_CLIENT_ID', 'YOUR_VALUE_HERE');
+export const GITHUB_CLIENT_SECRET = getServerRuntimeConfig('GITHUB_CLIENT_SECRET', 'YOUR_VALUE_HERE');
+
+export const LIFECYCLE_MODE = getServerRuntimeConfig('LIFECYCLE_MODE');
+
+/**
+ * @deprecated Use individual APP_REDIS_* environment variables instead (APP_REDIS_HOST, APP_REDIS_PORT, APP_REDIS_PASSWORD). This will be removed in future releases.
+ */
+export const REDIS_URL = getServerRuntimeConfig('REDIS_URL', '');
+
+export const APP_REDIS_HOST = getServerRuntimeConfig('APP_REDIS_HOST', 'changeme');
+export const APP_REDIS_PORT = getServerRuntimeConfig('APP_REDIS_PORT', 6379);
+export const APP_REDIS_PASSWORD = getServerRuntimeConfig('APP_REDIS_PASSWORD', '');
+export const APP_REDIS_TLS = getServerRuntimeConfig('APP_REDIS_TLS', 'false');
+
+export const GITHUB_PRIVATE_KEY = getServerRuntimeConfig('GITHUB_PRIVATE_KEY', 'YOUR_VALUE_HERE')
+  .replace(/\\n/g, '\n')
+  .replace(/\\k/g, '\n');
+export const GITHUB_WEBHOOK_SECRET = getServerRuntimeConfig('GITHUB_WEBHOOK_SECRET', 'YOUR_VALUE_HERE');
+
+export const JOB_VERSION = getServerRuntimeConfig('JOB_VERSION', 'default');
+
+export const LOG_LEVEL = getServerRuntimeConfig('LOG_LEVEL', 'info');
+
+export const FASTLY_TOKEN = getServerRuntimeConfig('FASTLY_TOKEN', 'changeme');
+
+export const CODEFRESH_API_KEY = getServerRuntimeConfig('CODEFRESH_API_KEY', 'changeme');
+
+export const MAX_GITHUB_API_REQUEST = getServerRuntimeConfig('MAX_GITHUB_API_REQUEST', 40);
+
+export const SECRET_BOOTSTRAP_NAME = getServerRuntimeConfig('SECRET_BOOTSTRAP_NAME', 'app-secrets');
+
+export const GITHUB_API_REQUEST_INTERVAL = getServerRuntimeConfig('GITHUB_API_REQUEST_INTERVAL', 10000);
+
+export const QUEUE_NAMES = {
+  WEBHOOK_PROCESSING: `webhook_processing_${JOB_VERSION}`,
+  COMMENT_QUEUE: `comment_queue_${JOB_VERSION}`,
+  CLEANUP: `cleanup_${JOB_VERSION}`,
+  // NOTE: No version suffix - singleton queue shared across app instances
+  TTL_CLEANUP: 'ttl_cleanup',
+  SITES_CLEANUP: 'sites_cleanup',
+  GLOBAL_CONFIG_CACHE_REFRESH: 'global_config_cache_refresh',
+  GITHUB_CLIENT_TOKEN_CACHE_REFRESH: 'github_client_token_cache_refresh',
+  INGRESS_MANIFEST: `ingress_manifest_${JOB_VERSION}`,
+  INGRESS_CLEANUP: `ingress_cleanup_${JOB_VERSION}`,
+  DELETE_QUEUE: `delete_queue_${JOB_VERSION}`,
+  WEBHOOK_QUEUE: `webhook_queue_${JOB_VERSION}`,
+  API_ENV_CREATE: `api_env_create_${JOB_VERSION}`,
+  // NOTE: No version suffix - singleton repeat job shared across app instances
+  API_ENV_EXPIRY: 'api_env_expiry',
+  API_TOKEN_OWNER_SWEEP: 'api_token_owner_sweep',
+  RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
+  BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
+  GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
+  DEPLOY_CLEANUP: `deploy_cleanup_${JOB_VERSION}`,
+  LABEL: `label_${JOB_VERSION}`,
+  AGENT_SESSION_CLEANUP: 'agent_session_cleanup',
+  AGENT_SESSION_PREWARM: 'agent_session_prewarm',
+  AGENT_SANDBOX_SESSION_LAUNCH: 'agent_sandbox_session_launch',
+  AGENT_RUN_EXECUTE: 'agent_run_execute',
+  AGENT_RUN_RECOVERY: 'agent_run_recovery',
+  WORKSPACE_TEMPLATE_BUILD: 'workspace_template_build',
+} as const;
+
+export const GITHUB_APP_INSTALLATION_ID = getServerRuntimeConfig('GITHUB_APP_INSTALLATION_ID', 'YOUR_VALUE_HERE');
+
+// The Keycloak GitHub-broker callback is the issuer + /broker/github/endpoint. Derive it from the
+// configured issuer so /setup never bakes the localhost default into the GitHub App manifest on a
+// real deployment; an explicit GITHUB_APP_AUTH_CALLBACK still wins, and localhost only remains when
+// no Keycloak issuer is configured (i.e. auth is off and there is no broker anyway).
+const KEYCLOAK_ISSUER = getServerRuntimeConfig('KEYCLOAK_ISSUER', '');
+
+export const GITHUB_APP_AUTH_CALLBACK = getServerRuntimeConfig(
+  'GITHUB_APP_AUTH_CALLBACK',
+  KEYCLOAK_ISSUER
+    ? `${String(KEYCLOAK_ISSUER).replace(/\/+$/, '')}/broker/github/endpoint`
+    : 'http://localhost/realms/lifecycle/broker/github/endpoint'
+);
+
+export const APP_AUTH = {
+  appId: Number(GITHUB_APP_ID),
+  privateKey: GITHUB_PRIVATE_KEY,
+  clientId: GITHUB_CLIENT_ID,
+  clientSecret: GITHUB_CLIENT_SECRET,
+};
+
+/**
+ * @description datadog env vars
+ */
+export const DD_ENV = getServerRuntimeConfig('DD_ENV', 'prd');
+export const DD_SERVICE = getServerRuntimeConfig('DD_SERVICE', 'lifecycle-job');
+export const DD_VERSION = getServerRuntimeConfig('DD_VERSION', 'lifecycle');
+export const DD_ENVS = {
+  ENV: DD_ENV,
+  SERVICE: DD_SERVICE,
+  VERSION: DD_VERSION,
+};
+export const ENVIRONMENT = getServerRuntimeConfig('ENVIRONMENT', 'production');
+export const APP_HOST = getServerRuntimeConfig('APP_HOST', 'http://localhost:5001');
+
+export const OBJECT_STORE_TYPE = getServerRuntimeConfig('OBJECT_STORE_TYPE', 'minio');
+export const OBJECT_STORE_ENDPOINT = getServerRuntimeConfig('OBJECT_STORE_ENDPOINT', 'lifecycle-minio');
+export const OBJECT_STORE_PORT = getServerRuntimeConfig('OBJECT_STORE_PORT', 9000);
+export const OBJECT_STORE_ACCESS_KEY = getServerRuntimeConfig('OBJECT_STORE_ACCESS_KEY', 'minioadmin');
+export const OBJECT_STORE_SECRET_KEY = getServerRuntimeConfig('OBJECT_STORE_SECRET_KEY', 'minioadmin');
+export const OBJECT_STORE_BUCKET = getServerRuntimeConfig('OBJECT_STORE_BUCKET', 'lifecycle-logs');
+export const OBJECT_STORE_USE_SSL = getServerRuntimeConfig('OBJECT_STORE_USE_SSL', 'false');
+export const OBJECT_STORE_REGION = getServerRuntimeConfig('OBJECT_STORE_REGION', 'us-east-1');

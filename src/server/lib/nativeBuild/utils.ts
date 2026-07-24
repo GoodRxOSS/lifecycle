@@ -1,0 +1,271 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { V1Job } from '@kubernetes/client-node';
+import GlobalConfigService from '../../services/globalConfig';
+import { createBuildJob } from '../kubernetes/jobFactory';
+import { JobMonitor } from '../kubernetes/JobMonitor';
+
+export function createJob(
+  name: string,
+  namespace: string,
+  serviceAccount: string,
+  image: string,
+  command: string[],
+  args: string[],
+  envVars: Record<string, string>,
+  labels: Record<string, string>,
+  annotations: Record<string, string>,
+  resources?: {
+    requests?: Record<string, string>;
+    limits?: Record<string, string>;
+  },
+  ttlSecondsAfterFinished?: number
+): V1Job {
+  const env = Object.entries(envVars).map(([name, value]) => ({ name, value: String(value) }));
+
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name,
+      namespace,
+      labels: {
+        'app.kubernetes.io/name': 'native-build',
+        'app.kubernetes.io/component': 'build',
+        ...labels,
+      },
+      annotations,
+    },
+    spec: {
+      ttlSecondsAfterFinished,
+      backoffLimit: 0, // No automatic retries
+      template: {
+        metadata: {
+          labels: {
+            'app.kubernetes.io/name': 'native-build',
+            'app.kubernetes.io/component': 'build',
+            ...labels,
+          },
+          annotations,
+        },
+        spec: {
+          serviceAccountName: serviceAccount,
+          restartPolicy: 'Never',
+          containers: [
+            {
+              name: 'build',
+              image,
+              command,
+              args,
+              env,
+              resources: resources || {
+                requests: {
+                  cpu: '500m',
+                  memory: '1Gi',
+                },
+                limits: {
+                  cpu: '2',
+                  memory: '4Gi',
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+export async function waitForJobAndGetLogs(
+  jobName: string,
+  namespace: string,
+  logPrefix?: string | number
+): Promise<{
+  logs: string;
+  success: boolean;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  duration?: number;
+}> {
+  return JobMonitor.waitForJobAndGetLogs(jobName, namespace, logPrefix);
+}
+
+export const DEFAULT_BUILD_RESOURCES = {
+  buildkit: {
+    requests: {
+      cpu: '500m',
+      memory: '1Gi',
+    },
+    limits: {
+      cpu: '2',
+      memory: '4Gi',
+    },
+  },
+  kaniko: {
+    requests: {
+      cpu: '300m',
+      memory: '750Mi',
+    },
+    limits: {
+      cpu: '1',
+      memory: '2Gi',
+    },
+  },
+};
+
+export function getBuildLabels(
+  serviceName: string,
+  uuid: string,
+  buildId: string,
+  sha: string,
+  branch: string,
+  engine: string
+): Record<string, string> {
+  return {
+    'lc-service': serviceName,
+    'lc-uuid': uuid,
+    'lc-build-id': String(buildId), // Ensure it's a string
+    'git-sha': sha,
+    'git-branch': branch,
+    'builder-engine': engine,
+    'build-method': 'native',
+  };
+}
+
+export function getBuildAnnotations(dockerfilePath: string, ecrRepo: string): Record<string, string> {
+  return {
+    'lfc/dockerfile': dockerfilePath,
+    'lfc/ecr-repo': ecrRepo,
+    'lfc/triggered-at': new Date().toISOString(),
+  };
+}
+
+export async function getGitHubToken(): Promise<string> {
+  return await GlobalConfigService.getInstance().getGithubClientToken();
+}
+
+export const GIT_USERNAME = 'x-access-token';
+export const MANIFEST_PATH = '/tmp/manifests';
+
+export function createCloneScript(repo: string, branch: string, sha?: string): string {
+  const cloneCmd = `git clone --depth 1 --single-branch --progress -b ${branch} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
+  const checkoutCmd = sha
+    ? ` && cd /workspace && git fetch --depth 1 --progress origin ${sha} && git checkout ${sha}`
+    : '';
+  return `${cloneCmd}${checkoutCmd}`;
+}
+
+export function createGitCloneContainer(repo: string, revision: string, gitUsername: string, gitToken: string): any {
+  return {
+    name: 'git-clone',
+    image: 'alpine/git:latest',
+    command: ['sh', '-c'],
+    args: [
+      `git config --global --add safe.directory /workspace && \
+       git init /workspace && cd /workspace && \
+       git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
+       git fetch --depth 1 --progress origin ${revision} && \
+       git checkout FETCH_HEAD`,
+    ],
+    env: [
+      {
+        name: 'GIT_USERNAME',
+        value: gitUsername,
+      },
+      {
+        name: 'GIT_PASSWORD',
+        value: gitToken,
+      },
+    ],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
+}
+
+export function createRepoSpecificGitCloneContainer(
+  repo: string,
+  revision: string,
+  targetDir: string,
+  gitUsername: string,
+  gitToken: string
+): any {
+  return {
+    name: 'git-clone',
+    image: 'alpine/git:latest',
+    command: ['sh', '-c'],
+    args: [
+      `git config --global --add safe.directory ${targetDir} && \
+       git init ${targetDir} && cd ${targetDir} && \
+       git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
+       git fetch --depth 1 --progress origin ${revision} && \
+       git checkout FETCH_HEAD`,
+    ],
+    env: [
+      {
+        name: 'GIT_USERNAME',
+        value: gitUsername,
+      },
+      {
+        name: 'GIT_PASSWORD',
+        value: gitToken,
+      },
+    ],
+    volumeMounts: [
+      {
+        name: 'workspace',
+        mountPath: '/workspace',
+      },
+    ],
+  };
+}
+
+export interface BuildJobManifestOptions {
+  jobName: string;
+  namespace: string;
+  serviceAccount: string;
+  serviceName: string;
+  deployUuid: string;
+  buildId: string;
+  shortSha: string;
+  branch: string;
+  engine: 'buildkit' | 'kaniko';
+  dockerfilePath: string;
+  ecrRepo: string;
+  jobTimeout: number;
+  ttlSecondsAfterFinished?: number;
+  isStatic?: boolean;
+  gitCloneContainer: any;
+  buildContainer: any;
+  volumes: any[];
+}
+
+export function createBuildJobManifest(options: BuildJobManifestOptions): any {
+  const { buildContainer, gitCloneContainer, volumes, isStatic = false, ...config } = options;
+
+  return createBuildJob({
+    ...config,
+    isStatic,
+    initContainers: gitCloneContainer ? [gitCloneContainer] : [],
+    containers: [buildContainer],
+    volumes: volumes || [{ name: 'workspace', emptyDir: {} }],
+  });
+}

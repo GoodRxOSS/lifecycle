@@ -1,0 +1,2123 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy, generateHelmManifest } from '../helm';
+import * as nativeHelmUtils from '../utils';
+import yaml from 'js-yaml';
+import {
+  determineChartType,
+  constructHelmCommand,
+  ChartType,
+  constructHelmCustomValues,
+  constructHelmCustomValueConfiguration,
+  mergeHelmConfigWithGlobal,
+  validateHelmConfiguration,
+} from '../utils';
+import { RegistryAuthConfig } from '../registryAuth';
+import Deploy from 'server/models/Deploy';
+import GlobalConfigService from 'server/services/globalConfig';
+import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
+import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
+import { shellPromise } from 'server/lib/shell';
+import { getLogArchivalService } from 'server/services/logArchival';
+import { YamlConfigParser } from 'server/lib/yamlConfigParser';
+import * as YamlService from 'server/models/yaml';
+
+jest.mock('server/services/globalConfig');
+jest.mock('../utils', () => {
+  const originalModule = jest.requireActual('../utils');
+  return {
+    ...originalModule,
+    determineChartType: jest.fn(originalModule.determineChartType),
+    getHelmConfiguration: jest.fn(originalModule.getHelmConfiguration),
+    mergeHelmConfigWithGlobal: jest.fn(originalModule.mergeHelmConfigWithGlobal),
+  };
+});
+jest.mock('server/lib/kubernetes');
+jest.mock('server/lib/random', () => ({
+  randomAlphanumeric: jest.fn().mockReturnValue('k4hlde'),
+}));
+jest.mock('server/lib/shell', () => ({
+  shellPromise: jest.fn(),
+}));
+jest.mock('server/lib/nativeBuild/utils', () => {
+  const originalModule = jest.requireActual('server/lib/nativeBuild/utils');
+  return {
+    ...originalModule,
+    waitForJobAndGetLogs: jest.fn(),
+  };
+});
+jest.mock('server/services/logArchival', () => ({
+  getLogArchivalService: jest.fn(),
+}));
+jest.mock('server/lib/kubernetes/common/serviceAccount', () => ({
+  ensureServiceAccountForJob: jest.fn().mockResolvedValue('deploy-sa'),
+}));
+jest.mock('server/lib/helm/utils', () => {
+  const originalModule = jest.requireActual('server/lib/helm/utils');
+  return {
+    ...originalModule,
+    renderTemplate: jest.fn().mockImplementation(async (_build, values) => values),
+  };
+});
+
+const mockGetAllConfigs = jest.fn();
+const mockGetOrgChartName = jest.fn();
+
+(GlobalConfigService.getInstance as jest.Mock) = jest.fn().mockReturnValue({
+  getAllConfigs: mockGetAllConfigs,
+  getOrgChartName: mockGetOrgChartName,
+});
+
+describe('Native Helm', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe('shouldUseNativeHelm', () => {
+    it('should return true when deploymentMethod is explicitly set to native', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            deploymentMethod: 'native',
+          },
+        },
+      } as Deploy;
+
+      const result = await shouldUseNativeHelm(deploy);
+      expect(result).toBe(true);
+    });
+
+    it('should return false when deploymentMethod is explicitly set to ci', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            deploymentMethod: 'ci',
+          },
+        },
+      } as Deploy;
+
+      const result = await shouldUseNativeHelm(deploy);
+      expect(result).toBe(false);
+    });
+
+    it('should return true when global nativeHelm is enabled via deployable helm config', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            nativeHelm: {
+              enabled: true,
+            },
+          },
+        },
+      } as Deploy;
+
+      const result = await shouldUseNativeHelm(deploy);
+      expect(result).toBe(true);
+    });
+
+    it('should return false by default', async () => {
+      const deploy = {
+        deployable: {
+          helm: {},
+        },
+      } as Deploy;
+
+      const result = await shouldUseNativeHelm(deploy);
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('determineChartType', () => {
+    beforeEach(() => {
+      mockGetOrgChartName.mockResolvedValue('my-org-chart');
+    });
+
+    it('should return ORG_CHART for org chart with docker config', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'my-org-chart' },
+            docker: { defaultTag: 'latest' },
+          },
+        },
+      } as Deploy;
+
+      const result = await determineChartType(deploy);
+      expect(result).toBe(ChartType.ORG_CHART);
+    });
+
+    it('should return LOCAL for local chart', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'local' },
+          },
+        },
+      } as Deploy;
+
+      const result = await determineChartType(deploy);
+      expect(result).toBe(ChartType.LOCAL);
+    });
+
+    it('should return LOCAL for relative path chart', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: './my-chart' },
+          },
+        },
+      } as Deploy;
+
+      const result = await determineChartType(deploy);
+      expect(result).toBe(ChartType.LOCAL);
+    });
+
+    it('should return PUBLIC for external chart', async () => {
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'prometheus-community/prometheus' },
+          },
+        },
+      } as Deploy;
+
+      const result = await determineChartType(deploy);
+      expect(result).toBe(ChartType.PUBLIC);
+    });
+  });
+
+  describe('constructHelmCommand', () => {
+    it('should construct basic helm command', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        undefined, // args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain('helm upgrade --install my-release my-chart');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--set "key=value"');
+      expect(result).toContain('-f values.yaml');
+      // Should not have any default args when none provided
+      expect(result).not.toContain('--wait');
+      expect(result).not.toContain('--timeout');
+    });
+
+    it('should handle local chart paths', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.LOCAL,
+        undefined, // args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain('./my-chart');
+    });
+
+    it('should not double prefix local chart paths starting with ./', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        './helm/lc-apps',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.LOCAL,
+        undefined, // args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain(' ./helm/lc-apps');
+      expect(result).not.toContain('././helm/lc-apps');
+    });
+
+    it('should not double prefix value files starting with ./', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        './helm/lc-apps',
+        'my-release',
+        'my-namespace',
+        [],
+        ['./values/prod.yaml', 'values/dev.yaml'],
+        ChartType.LOCAL,
+        undefined, // args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain('-f ./values/prod.yaml');
+      expect(result).toContain('-f ./values/dev.yaml');
+      expect(result).not.toContain('-f ././values/prod.yaml');
+    });
+
+    it('should handle multiple custom values and value files', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key1=value1', 'key2=value2'],
+        ['values1.yaml', 'values2.yaml'],
+        ChartType.PUBLIC,
+        undefined, // args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain('--set "key1=value1"');
+      expect(result).toContain('--set "key2=value2"');
+      expect(result).toContain('-f values1.yaml');
+      expect(result).toContain('-f values2.yaml');
+    });
+
+    it('should render secret-backed values with --set-file', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['auth.database=app_db'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            helmKey: 'auth.password',
+            secretName: 'example-db-aws-secrets',
+            secretKey: 'helm.auth.password.abc123',
+            provider: 'aws',
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123',
+          },
+        ]
+      );
+
+      expect(result).toContain('--set "auth.database=app_db"');
+      expect(result).toContain(
+        '--set-file "auth.password=/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123"'
+      );
+      expect(result).not.toContain('{{aws:');
+    });
+
+    it('should use custom args from global_config when provided', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--force --timeout 60m0s --wait', // explicit args
+        undefined // chartRepoUrl
+        // defaultArgs not needed when args is provided
+      );
+
+      expect(result).toContain('helm upgrade --install my-release my-chart');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--set "key=value"');
+      expect(result).toContain('-f values.yaml');
+      expect(result).toContain('--force --timeout 60m0s --wait');
+      expect(result).not.toContain('--wait --timeout 30m');
+    });
+
+    it('should use defaultArgs from helmDefaults when no custom args provided', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        undefined, // args
+        undefined, // chartRepoUrl
+        '--wait --timeout 45m' // defaultArgs from helmDefaults
+      );
+
+      expect(result).toContain('--wait --timeout 45m');
+      expect(result).not.toContain('--wait --timeout 30m');
+    });
+
+    it('should combine defaultArgs with explicit args', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--timeout 60m', // explicit args (overrides default timeout)
+        undefined, // chartRepoUrl
+        '--wait --timeout 30m' // defaultArgs
+      );
+
+      // Should have both defaultArgs and args, with args coming last
+      expect(result).toContain('--wait --timeout 30m --timeout 60m');
+      // The effective timeout will be 60m (last one wins)
+    });
+
+    it('should use only defaultArgs when no explicit args provided', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        undefined, // args
+        undefined, // chartRepoUrl
+        '--wait --timeout 45m' // defaultArgs from helmDefaults
+      );
+
+      expect(result).toContain('--wait --timeout 45m');
+    });
+
+    it('should work with no args at all', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC
+        // no args, no chartRepoUrl, no defaultArgs
+      );
+
+      // Should not have any helm args
+      expect(result).not.toContain('--wait');
+      expect(result).not.toContain('--timeout');
+    });
+
+    it('should use only explicit args when no defaultArgs provided', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--force --timeout 60m0s --wait', // explicit args
+        undefined // chartRepoUrl
+        // no defaultArgs
+      );
+
+      expect(result).toContain('--force --timeout 60m0s --wait');
+      expect(result).not.toContain('--timeout 30m');
+    });
+
+    it('should include a post-renderer command and args when configured', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        '--force --timeout 60m0s --wait',
+        undefined,
+        '--wait --timeout 30m',
+        '1.2.3',
+        {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--mode=prod', '--flag'],
+        }
+      );
+
+      expect(result).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(result).toContain("--post-renderer-args '--mode=prod'");
+      expect(result).toContain("--post-renderer-args '--flag'");
+      expect(result).toContain('--version 1.2.3');
+    });
+
+    it('should handle OCI chart URLs correctly', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'postgresql',
+        'my-release',
+        'my-namespace',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        undefined,
+        'oci://ghcr.io/prometheus-community/helm-charts/prometheus'
+      );
+
+      expect(result).toContain(
+        'helm upgrade --install my-release oci://ghcr.io/prometheus-community/helm-charts/prometheus'
+      );
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--set "key=value"');
+      expect(result).toContain('-f values.yaml');
+    });
+
+    it('should handle OCI charts with custom args', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'postgresql',
+        'my-release',
+        'my-namespace',
+        ['auth.username=admin', 'auth.password=secret'],
+        [],
+        ChartType.PUBLIC,
+        '--wait',
+        'oci://ghcr.io/myorg/charts/postgresql',
+        undefined,
+        '12.9.0'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release oci://ghcr.io/myorg/charts/postgresql');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 12.9.0');
+      expect(result).toContain('--set "auth.username=admin"');
+      expect(result).toContain('--set "auth.password=secret"');
+      expect(result).toContain('--wait');
+    });
+
+    it('should add chart version for PUBLIC charts when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'prometheus-community/prometheus',
+        'my-release',
+        'my-namespace',
+        ['server.replicaCount=2'],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://prometheus-community.github.io/helm-charts',
+        undefined,
+        '25.11.0'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release prometheus-community/prometheus');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 25.11.0');
+      expect(result).toContain('--set "server.replicaCount=2"');
+    });
+
+    it('should not add chart version for LOCAL charts even when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        './my-local-chart',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.LOCAL,
+        undefined,
+        undefined,
+        undefined,
+        '1.0.0'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release ./my-local-chart');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
+    });
+
+    it('should not add chart version for PUBLIC charts when version is not specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'prometheus-community/prometheus',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.PUBLIC,
+        undefined,
+        'https://prometheus-community.github.io/helm-charts'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release prometheus-community/prometheus');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
+    });
+
+    it('should add chart version for ORG_CHART when version is specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'helm-app',
+        'my-release',
+        'my-namespace',
+        ['deployment.appImage=myapp:latest'],
+        [],
+        ChartType.ORG_CHART,
+        undefined,
+        'cm://h.cfcr.io/helm/default',
+        undefined,
+        '2.0.9'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release helm-app');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).toContain('--version 2.0.9');
+      expect(result).toContain('--set "deployment.appImage=myapp:latest"');
+    });
+
+    it('should not add chart version for ORG_CHART when version is not specified', () => {
+      const result = constructHelmCommand(
+        'upgrade --install',
+        'helm-app',
+        'my-release',
+        'my-namespace',
+        [],
+        [],
+        ChartType.ORG_CHART,
+        undefined,
+        'cm://h.cfcr.io/helm/default'
+      );
+
+      expect(result).toContain('helm upgrade --install my-release helm-app');
+      expect(result).toContain('--namespace my-namespace');
+      expect(result).not.toContain('--version');
+    });
+  });
+
+  describe('createHelmContainer', () => {
+    it('should create helm container with correct configuration', async () => {
+      const result = await createHelmContainer(
+        'example-org/example-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        '--force --timeout 60m0s --wait',
+        'https://charts.example.com',
+        '--wait --timeout 30m',
+        '1.2.3'
+      );
+
+      expect(result.name).toBe('helm-deploy');
+      expect(result.image).toBe('alpine/helm:3.12.0');
+      expect(result.env).toEqual([
+        { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
+        { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
+        { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
+        { name: 'LC_SERVICE_NAME', value: 'my-service' },
+        { name: 'LC_JOB_NAME', value: 'my-job-name' },
+      ]);
+      expect(result.command).toEqual(['/bin/sh', '-c']);
+      expect(result.args).toHaveLength(1);
+      expect(result.args[0]).toContain('helm upgrade --install');
+      expect(result.args[0]).toContain('--force --timeout 60m0s --wait');
+    });
+
+    it('should use a configured custom helm image and post-renderer config', async () => {
+      const result = await createHelmContainer(
+        'org/repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        ['key=value'],
+        ['values.yaml'],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        '--force --timeout 60m0s --wait',
+        'https://charts.example.com',
+        '--wait --timeout 30m',
+        '1.2.3',
+        undefined,
+        'registry.example.com/custom-helm-runner:1.2.3',
+        {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--mode=prod'],
+        }
+      );
+
+      expect(result.image).toBe('registry.example.com/custom-helm-runner:1.2.3');
+      expect(result.args[0]).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(result.args[0]).toContain("--post-renderer-args '--mode=prod'");
+    });
+
+    it('should mount Helm secret set-file volumes when configured', async () => {
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            helmKey: 'auth.password',
+            secretName: 'example-db-aws-secrets',
+            secretKey: 'helm.auth.password.abc123',
+            provider: 'aws',
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets/helm.auth.password.abc123',
+          },
+        ]
+      );
+
+      expect(result.volumeMounts).toEqual(
+        expect.arrayContaining([
+          {
+            name: expect.stringMatching(/^helm-secret-example-db-aws-secrets-[a-f0-9]{8}$/),
+            mountPath: '/var/run/lifecycle/helm-secrets/example-db-aws-secrets',
+            readOnly: true,
+          },
+        ])
+      );
+      expect(result.args[0]).toContain('--set-file "auth.password=');
+    });
+  });
+
+  describe('mergeHelmConfigWithGlobal', () => {
+    it('applies helmDefaults nativeHelm config when no service override is provided', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+            repoUrl: 'https://charts.bitnami.com/bitnami',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/default-helm-runner:1.0.0',
+        postRenderer: {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--global'],
+        },
+      });
+    });
+
+    it('allows service config to override global image and renderer args', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          nativeHelm: {
+            postRenderer: {
+              args: ['--chart'],
+            },
+          },
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+            nativeHelm: {
+              image: 'registry.example.com/service-helm-runner:2.0.0',
+              postRenderer: {
+                args: ['--service'],
+              },
+            },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/service-helm-runner:2.0.0',
+        postRenderer: {
+          enabled: true,
+          command: '/opt/bin/post-renderer',
+          args: ['--service'],
+        },
+      });
+    });
+
+    it('allows service config to disable an inherited global renderer', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+            nativeHelm: {
+              postRenderer: {
+                enabled: false,
+              },
+            },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.nativeHelm?.postRenderer?.enabled).toBe(false);
+    });
+
+    it('deep merges gatewayApi defaults with service overrides', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          gatewayApi: {
+            enabled: true,
+            gatewayNamespace: 'envoy-gateway-system',
+          },
+        },
+        'lifecycle-app': {
+          gatewayApi: {
+            gateway: 'external',
+          },
+          chart: {
+            name: 'lifecycle-app',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'lifecycle-app' },
+            gatewayApi: {
+              protocol: 'http',
+            },
+          },
+        },
+      } as any;
+
+      const result = await mergeHelmConfigWithGlobal(deploy);
+
+      expect(result.gatewayApi).toEqual({
+        enabled: true,
+        gatewayNamespace: 'envoy-gateway-system',
+        gateway: 'external',
+        protocol: 'http',
+      });
+    });
+  });
+
+  describe('constructHelmCustomValues for ORG_CHART ingress', () => {
+    beforeEach(() => {
+      mockGetOrgChartName.mockResolvedValue('lifecycle-app');
+      mockGetAllConfigs.mockResolvedValue({
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+          altHttp: ['preview-alt.lifecycle.com'],
+          grpc: 'grpc.preview.lifecycle.com',
+          altGrpc: ['grpc-alt.preview.lifecycle.com'],
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+      });
+    });
+
+    it('adds ingress host values for deployment-based org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
+      expect(customValues).toContain('ingress.ipAllowlist[0]=1.1.1.1/32');
+      expect(customValues).toContain('ingress.ipAllowlist[1]=2.2.2.2/32');
+    });
+
+    it('adds static node affinity and tolerations for static org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {},
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: true,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=eks.amazonaws.com/capacityType'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=ON_DEMAND'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].key=app-long'
+      );
+      expect(customValues).toContain(
+        'deployment.customNodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[1].values[0]=lifecycle-static-env'
+      );
+      expect(customValues).toContain('deployment.tolerations[0].key=static_env');
+      expect(customValues).toContain('deployment.tolerations[0].value=yes');
+    });
+
+    it('extracts secret-backed chart values after final value precedence is applied', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        postgresql: {
+          chart: {
+            values: ['auth.password=global-password', 'auth.database=app_db'],
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'postgresql',
+              values: ['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.PUBLIC);
+
+      expect(result.customValues).toContain('auth.database=app_db');
+      expect(result.customValues).not.toContain('auth.password=global-password');
+      expect(result.customValues).not.toEqual(
+        expect.arrayContaining(['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'])
+      );
+      expect(result.helmSecretRefs).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          provider: 'aws',
+          path: 'repo/example/database',
+          key: 'POSTGRES_PASSWORD',
+        }),
+      ]);
+      expect(result.secretSetFiles).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          secretName: 'example-db-aws-secrets',
+          provider: 'aws',
+        }),
+      ]);
+    });
+
+    it('lets later generated env values override earlier secret-backed chart values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          FOO: 'plain-from-lifecycle',
+        },
+        deployable: {
+          name: 'sample-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            disableIngressHost: true,
+            chart: {
+              name: 'lifecycle-app',
+              values: ['deployment.env.FOO={{aws:repo/example/app:FOO}}'],
+            },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.ORG_CHART);
+
+      expect(result.customValues).toContain('deployment.env.FOO="plain-from-lifecycle"');
+      expect(result.customValues).not.toContain('deployment.env.FOO={{aws:repo/example/app:FOO}}');
+      expect(result.helmSecretRefs).toEqual([]);
+      expect(result.secretSetFiles).toEqual([]);
+    });
+
+    it('lets later secret-backed chart values override earlier plain values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'local',
+              values: ['auth.password=dev-password', 'auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.LOCAL);
+
+      expect(result.customValues).not.toContain('auth.password=dev-password');
+      expect(result.helmSecretRefs).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          provider: 'aws',
+          path: 'repo/example/database',
+          key: 'POSTGRES_PASSWORD',
+        }),
+      ]);
+      expect(result.secretSetFiles).toEqual([
+        expect.objectContaining({
+          helmKey: 'auth.password',
+          secretName: 'example-db-aws-secrets',
+          provider: 'aws',
+        }),
+      ]);
+    });
+
+    it('ignores losing partial secret interpolation when a later plain value wins', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'local',
+              values: [
+                'auth.url=postgres://user:{{aws:repo/example/database:POSTGRES_PASSWORD}}@host/db',
+                'auth.url=postgres://user:password@host/db',
+              ],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const result = await constructHelmCustomValueConfiguration(deploy, ChartType.LOCAL);
+
+      expect(result.customValues).toContain('auth.url=postgres://user:password@host/db');
+      expect(result.secretSetFiles).toEqual([]);
+    });
+
+    it('respects disableIngressHost for org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          APP_ENV: 'test',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+            disableIngressHost: true,
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).not.toContain('ingress.host=test-uuid.preview.lifecycle.com');
+      expect(customValues).not.toContain('ingress.altHosts[0]=test-uuid.preview-alt.lifecycle.com');
+      expect(customValues.some((value) => value.startsWith('ingress.ipAllowlist['))).toBe(false);
+    });
+
+    it('emits gatewayApi values and suppresses legacy routing for opted-in services', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        serviceDefaults: {
+          defaultIPWhiteList: '[1.1.1.1/32, 2.2.2.2/32]',
+        },
+        domainDefaults: {
+          http: 'preview.lifecycle.com',
+          altHttp: ['preview-alt.lifecycle.com'],
+          grpc: 'grpc.preview.lifecycle.com',
+          altGrpc: ['grpc-alt.preview.lifecycle.com'],
+        },
+        'lifecycle-app': {
+          chart: {
+            values: [],
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {},
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            grpc: true,
+            gatewayApi: {
+              enabled: true,
+              gateway: 'external',
+              gateways: {
+                grpc: {
+                  external: 'community-gateway-grpc',
+                },
+              },
+            },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('gatewayApi.enabled=true');
+      expect(customValues).toContain('gatewayApi.protocol=grpc');
+      expect(customValues).toContain('gatewayApi.gateway=external');
+      expect(customValues).toContain('gatewayApi.gateways.grpc.external=community-gateway-grpc');
+      expect(customValues).toContain('gatewayApi.port=8080');
+      expect(customValues).toContain('gatewayApi.hostnames[0]=test-uuid.grpc.preview.lifecycle.com');
+      expect(customValues).toContain('gatewayApi.hostnames[1]=test-uuid.grpc-alt.preview.lifecycle.com');
+      expect(customValues).toContain('gatewayApi.securityPolicy.enabled=true');
+      expect(customValues).toContain('gatewayApi.securityPolicy.allowedCIDRs[0]=1.1.1.1/32');
+      expect(customValues).toContain('gatewayApi.securityPolicy.allowedCIDRs[1]=2.2.2.2/32');
+      expect(customValues.some((value) => value.startsWith('ambassadorMappings['))).toBe(false);
+      expect(customValues.some((value) => value.startsWith('ingress.'))).toBe(false);
+    });
+
+    it('keeps underscore env keys intact for direct helm values', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_HOST: 'postgres.internal',
+        },
+        initEnv: {
+          INIT_DB_HOST: 'init-postgres.internal',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          port: 8080,
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('deployment.env.DB_HOST="postgres.internal"');
+      expect(customValues).toContain('deployment.initEnv.INIT_DB_HOST=init-postgres.internal');
+      expect(customValues).toContain('deployment.initImage=repo/init:tag');
+      expect(customValues).not.toContain('deployment.env.DB__HOST="postgres.internal"');
+      expect(customValues).not.toContain('deployment.initEnv.INIT__DB__HOST=init-postgres.internal');
+      expect(customValues.some((value) => value.startsWith('deployment.version='))).toBe(false);
+    });
+
+    it('converts secret shorthand env entries for native-build org charts', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        initDockerImage: 'repo/init:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        initEnv: {
+          INIT_TOKEN: '{{aws:myapp/rds-credentials:init_token}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'buildkit',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+              init: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain(
+        'deployment.env.DB_URL.valueFrom.secretKeyRef.name="mail-delivery-backend-aws-secrets"'
+      );
+      expect(customValues).toContain('deployment.env.DB_URL.valueFrom.secretKeyRef.key="DB_URL"');
+      expect(customValues).toContain(
+        'deployment.initEnv.INIT_TOKEN.valueFrom.secretKeyRef.name=mail-delivery-backend-aws-secrets'
+      );
+      expect(customValues).toContain('deployment.initEnv.INIT_TOKEN.valueFrom.secretKeyRef.key=INIT_TOKEN');
+    });
+
+    it('keeps secret shorthand as a plain env value for non-native builders', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'repo/app:tag',
+        env: {
+          DB_URL: '{{aws:myapp/rds-credentials:url}}',
+        },
+        deployable: {
+          name: 'mail-delivery-backend',
+          buildUUID: 'build-123',
+          port: 8080,
+          builder: {
+            engine: 'ci',
+          },
+          helm: {
+            chart: { name: 'lifecycle-app', values: [] },
+            docker: {
+              app: {},
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.ORG_CHART);
+
+      expect(customValues).toContain('deployment.env.DB_URL="{{aws:myapp/rds-credentials:url}}"');
+    });
+  });
+
+  describe('envMapping for LOCAL charts', () => {
+    beforeEach(() => {
+      mockGetAllConfigs.mockResolvedValue({});
+    });
+
+    it('should transform env vars to array format when envMapping.app.format is array', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {
+          CLIENT_HOST: 'grpc-echo:8080',
+          TEST_TEST: 'test',
+          WHAT: 'is-this',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              app: {},
+            },
+            envMapping: {
+              app: {
+                format: 'array',
+                path: 'deployment.env',
+              },
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).toContain('deployment.env[0].name=CLIENT_HOST');
+      expect(customValues).toContain('deployment.env[0].value=grpc-echo:8080');
+      expect(customValues).toContain('deployment.env[1].name=TEST_TEST');
+      expect(customValues).toContain('deployment.env[1].value=test');
+      expect(customValues).toContain('deployment.env[2].name=WHAT');
+      expect(customValues).toContain('deployment.env[2].value=is-this');
+    });
+
+    it('should transform env vars to map format when envMapping.app.format is map', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {
+          CLIENT_HOST: 'grpc-echo:8080',
+          TEST_TEST: 'test',
+          WHAT_IS_THIS: 'value',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              app: {},
+            },
+            envMapping: {
+              app: {
+                format: 'map',
+                path: 'deployment.envVars',
+              },
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).toContain('deployment.envVars.CLIENT__HOST="grpc-echo:8080"');
+      expect(customValues).toContain('deployment.envVars.TEST__TEST="test"');
+      expect(customValues).toContain('deployment.envVars.WHAT__IS__THIS="value"');
+    });
+
+    it('should handle init env vars with array format', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {},
+        initEnv: {
+          INIT_DB: 'true',
+          MIGRATION_PATH: '/migrations',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              init: {},
+            },
+            envMapping: {
+              init: {
+                format: 'array',
+                path: 'deployment.initContainers[0].env',
+              },
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).toContain('deployment.initContainers[0].env[0].name=INIT_DB');
+      expect(customValues).toContain('deployment.initContainers[0].env[0].value=true');
+      expect(customValues).toContain('deployment.initContainers[0].env[1].name=MIGRATION_PATH');
+      expect(customValues).toContain('deployment.initContainers[0].env[1].value=/migrations');
+    });
+
+    it('should handle both app and init env vars', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {
+          APP_ENV: 'production',
+        },
+        initEnv: {
+          INIT_ENV: 'setup',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              app: {},
+              init: {},
+            },
+            envMapping: {
+              app: {
+                format: 'map',
+                path: 'app.env',
+              },
+              init: {
+                format: 'array',
+                path: 'init.env',
+              },
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).toContain('app.env.APP__ENV="production"');
+      expect(customValues).toContain('init.env[0].name=INIT_ENV');
+      expect(customValues).toContain('init.env[0].value=setup');
+    });
+
+    it('should merge runtime env vars with precedence', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {
+          ENV_FROM_DB: 'db-value',
+          OVERRIDE_ME: 'db-value',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              app: {},
+            },
+            envMapping: {
+              app: {
+                format: 'map',
+                path: 'env',
+              },
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {
+            OVERRIDE_ME: 'yaml-value',
+            NEW_ENV: 'yaml-only',
+          },
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).toContain('env.ENV__FROM__DB="db-value"');
+      expect(customValues).toContain('env.OVERRIDE__ME="yaml-value"'); // yaml takes precedence
+      expect(customValues).toContain('env.NEW__ENV="yaml-only"');
+    });
+
+    it('should not add env vars if envMapping is not specified', async () => {
+      const deploy = {
+        uuid: 'test-uuid',
+        env: {
+          SHOULD_NOT_APPEAR: 'value',
+        },
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: './helm/lc-apps' },
+            docker: {
+              app: {},
+            },
+            // No envMapping specified
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const customValues = await constructHelmCustomValues(deploy, ChartType.LOCAL);
+
+      expect(customValues).not.toContain('SHOULD_NOT_APPEAR');
+      expect(customValues).toContain('fullnameOverride=test-uuid');
+      expect(customValues).toContain('commonLabels.name=build-123');
+    });
+  });
+
+  describe('createHelmContainer with ECR registry auth', () => {
+    it('should prepend registry login script for ECR OCI charts', async () => {
+      const registryAuth: RegistryAuthConfig = {
+        type: 'ecr',
+        registry: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+        region: 'us-west-2',
+      };
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        undefined,
+        'oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/my-chart',
+        undefined,
+        undefined,
+        registryAuth
+      );
+
+      expect(result.args[0]).toContain(
+        'cat /workspace/.helm/ecr-token | helm registry login "123456789012.dkr.ecr.us-west-2.amazonaws.com" --username AWS --password-stdin'
+      );
+      expect(result.args[0]).toContain('helm upgrade --install');
+    });
+
+    it('should not include registry login script when registryAuth is absent', async () => {
+      const result = await createHelmContainer(
+        'no-repo',
+        'my-chart',
+        'my-release',
+        'my-namespace',
+        '3.12.0',
+        [],
+        [],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        undefined,
+        'oci://ghcr.io/prometheus-community/helm-charts/prometheus'
+      );
+
+      expect(result.args[0]).not.toContain('helm registry login');
+      expect(result.args[0]).toContain('helm upgrade --install');
+    });
+  });
+
+  describe('Chart Version Integration', () => {
+    it('should include chart version from global config for PUBLIC charts', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        prometheus: {
+          version: '3.7.2',
+          chart: {
+            name: 'prometheus',
+            repoUrl: 'https://prometheus-community.github.io/helm-charts',
+            version: '25.11.0',
+            values: ['server.replicaCount=2'],
+          },
+        },
+      });
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'prometheus',
+        'test-release',
+        'test-namespace',
+        '3.12.0',
+        ['server.replicaCount=2'],
+        [],
+        ChartType.PUBLIC,
+        'my-service',
+        'my-job-name',
+        undefined,
+        'https://prometheus-community.github.io/helm-charts',
+        undefined,
+        '25.11.0'
+      );
+
+      expect(result.args[0]).toContain('--version 25.11.0');
+      expect(result.args[0]).toContain('helm-charts/prometheus');
+    });
+
+    it('should include chart version from global config for ORG_CHART', async () => {
+      mockGetOrgChartName.mockResolvedValue('helm-app');
+      mockGetAllConfigs.mockResolvedValue({
+        'helm-app': {
+          version: '3.7.2',
+          chart: {
+            name: 'helm-app',
+            repoUrl: 'cm://h.cfcr.io/helm/default',
+            version: '2.0.9',
+            values: ['deployment.customNodeAffinity.enabled=true'],
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        dockerImage: 'myapp:v1.2.3',
+        env: {},
+        deployable: {
+          buildUUID: 'build-123',
+          helm: {
+            chart: { name: 'helm-app' },
+            docker: { app: {} },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+        },
+      } as any;
+
+      const chartType = await determineChartType(deploy);
+      expect(chartType).toBe(ChartType.ORG_CHART);
+
+      const result = await createHelmContainer(
+        'no-repo',
+        'helm-app',
+        'test-release',
+        'test-namespace',
+        '3.7.2',
+        ['deployment.appImage=myapp:v1.2.3', 'version=v1.2.3'],
+        [],
+        ChartType.ORG_CHART,
+        'my-service',
+        'my-job-name',
+        undefined,
+        'cm://h.cfcr.io/helm/default',
+        undefined,
+        '2.0.9'
+      );
+
+      expect(result.args[0]).toContain('--version 2.0.9');
+      expect(result.args[0]).toContain('helm-app');
+    });
+  });
+
+  describe('validateHelmConfiguration', () => {
+    it('accepts a globally configured custom image without a service-level helm version', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toEqual([]);
+    });
+
+    it('requires a post-renderer command when renderer is enabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+          },
+        },
+      });
+
+      const deploy = {
+        deployable: {
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toContain('Native Helm post-renderer command is required when post-renderer is enabled');
+    });
+
+    it('rejects debug and dry-run args when Helm secret set-files are present', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            defaultArgs: '--debug',
+          },
+        },
+      });
+
+      const deploy = {
+        uuid: 'test-uuid',
+        deployable: {
+          name: 'example-db',
+          buildUUID: 'build-123',
+          helm: {
+            chart: {
+              name: 'postgresql',
+              values: ['auth.password={{aws:repo/example/database:POSTGRES_PASSWORD}}'],
+            },
+          },
+        },
+        build: {
+          commentRuntimeEnv: {},
+          isStatic: false,
+        },
+      } as any;
+
+      const errors = await validateHelmConfiguration(deploy);
+
+      expect(errors).toContain('Helm args --debug and --dry-run cannot be used with secret-backed Helm custom values');
+    });
+  });
+
+  describe('nativeHelmDeploy', () => {
+    it('uses the canonical deploy job name for monitoring and archival', async () => {
+      const deploy = {
+        uuid: 'sample-cosmos-emulator-preview-build-123456',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'sample-cosmos-emulator',
+          repository: { fullName: 'example-org/example-chart' },
+        },
+        build: {
+          uuid: 'preview-build-123456',
+          namespace: 'testns',
+          isStatic: false,
+          pullRequest: { repository: { fullName: 'example-org/example-chart' } },
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        $query: jest.fn().mockReturnValue({
+          patch: jest.fn().mockResolvedValue(undefined),
+        }),
+      } as unknown as Deploy;
+
+      const archiveLogs = jest.fn().mockResolvedValue(undefined);
+
+      mockGetAllConfigs.mockResolvedValue({
+        logArchival: { enabled: true },
+      });
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: 'prometheus-community/prometheus',
+        releaseName: deploy.uuid,
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockResolvedValue({
+        chart: { name: 'prometheus-community/prometheus' },
+        nativeHelm: {},
+      });
+
+      (shellPromise as jest.Mock).mockResolvedValue('');
+      (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+        logs: 'helm logs',
+        success: true,
+        status: 'succeeded',
+        startedAt: '2026-03-17T00:00:00.000Z',
+        completedAt: '2026-03-17T00:01:00.000Z',
+        duration: 60,
+      });
+      (getLogArchivalService as jest.Mock).mockReturnValue({
+        archiveLogs,
+      });
+
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((fn: TimerHandler) => {
+        if (typeof fn === 'function') {
+          fn();
+        }
+        return 0 as any;
+      }) as typeof setTimeout);
+
+      const result = await nativeHelmDeploy(deploy, { namespace: 'testns' });
+      const expectedJobName = buildDeployJobName({
+        deployUuid: deploy.uuid,
+        jobId: 'k4hlde',
+        shortSha: 'abcdef1',
+      });
+
+      expect(waitForJobAndGetLogs).toHaveBeenCalledWith(expectedJobName, 'testns', `[HELM ${deploy.uuid}]`);
+      expect(archiveLogs).toHaveBeenCalledWith(expect.objectContaining({ jobName: expectedJobName }), 'helm logs');
+      expect(result).toEqual({
+        completed: true,
+        logs: 'helm logs',
+        status: 'succeeded',
+      });
+
+      setTimeoutSpy.mockRestore();
+    });
+  });
+
+  describe('generateHelmManifest', () => {
+    it('builds the expected manifest for plain native Helm without a renderer', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        publicChart: { block: false },
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            defaultArgs: '--wait --timeout 30m',
+            defaultHelmVersion: '3.12.0',
+          },
+        },
+        'sample-chart': {
+          chart: {
+            name: 'sample-chart',
+            repoUrl: 'https://charts.example.com',
+            version: '2.5.1',
+          },
+        },
+      });
+
+      const parser = new YamlConfigParser();
+      const lifecycleYaml = `---
+version: '1.0.0'
+services:
+  - name: sample-service
+    helm:
+      deploymentMethod: native
+      chart:
+        name: sample-chart
+`;
+
+      const config = parser.parseYamlConfigFromString(lifecycleYaml);
+      const service = YamlService.getDeployingServicesByName(config, 'sample-service');
+      const helmConfig = await YamlService.getHelmConfigFromYaml(service);
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: helmConfig.chart?.name || 'sample-chart',
+        releaseName: 'sample-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'sample-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'sample-service',
+          repository: {
+            fullName: 'example-org/example-repo',
+          },
+          helm: helmConfig,
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+
+      expect(manifest).toContain('image: alpine/helm:3.12.0');
+      expect(manifest).not.toContain('--post-renderer');
+      expect(manifest).not.toContain('--post-renderer-args');
+      expect(manifest).toContain('--wait --timeout 30m');
+    });
+
+    it('uses merged global nativeHelm image and post-renderer config', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/custom-helm-runner:1.2.3',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--mode=prod'],
+            },
+          },
+        },
+        redis: {
+          chart: {
+            name: 'redis',
+            repoUrl: 'https://charts.bitnami.com/bitnami',
+          },
+        },
+      });
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: [],
+        chartPath: 'redis',
+        releaseName: 'test-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'test-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'redis',
+          helm: {
+            chart: { name: 'redis' },
+          },
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+
+      expect(manifest).toContain('image: registry.example.com/custom-helm-runner:1.2.3');
+      expect(manifest).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(manifest).toContain("--post-renderer-args '--mode=prod'");
+    });
+
+    it('builds the expected manifest from global config plus lifecycle yaml', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        publicChart: { block: false },
+        helmDefaults: {
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/default-helm-runner:1.0.0',
+            postRenderer: {
+              enabled: true,
+              command: '/opt/bin/post-renderer',
+              args: ['--global'],
+            },
+          },
+        },
+        'sample-chart': {
+          chart: {
+            name: 'sample-chart',
+            repoUrl: 'oci://123456789012.dkr.ecr.us-west-2.amazonaws.com/sample-chart',
+            version: '2.5.1',
+            valueFiles: ['global-values.yaml'],
+          },
+        },
+      });
+
+      const parser = new YamlConfigParser();
+      const lifecycleYaml = `---
+version: '1.0.0'
+services:
+  - name: sample-service
+    helm:
+      deploymentMethod: native
+      chart:
+        name: sample-chart
+        valueFiles:
+          - service-values.yaml
+      nativeHelm:
+        image: registry.example.com/service-helm-runner:2.0.0
+        postRenderer:
+          enabled: true
+          args:
+            - --service-override
+`;
+
+      const config = parser.parseYamlConfigFromString(lifecycleYaml);
+      const service = YamlService.getDeployingServicesByName(config, 'sample-service');
+      const helmConfig = await YamlService.getHelmConfigFromYaml(service);
+
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
+        chartType: ChartType.PUBLIC,
+        customValues: [],
+        valuesFiles: helmConfig.chart?.valueFiles || [],
+        chartPath: helmConfig.chart?.name || 'sample-chart',
+        releaseName: 'sample-release',
+        helmVersion: '3.12.0',
+      });
+      (nativeHelmUtils.determineChartType as jest.Mock).mockResolvedValue(ChartType.PUBLIC);
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+
+      const deploy = {
+        uuid: 'sample-release',
+        sha: 'abcdef1234567890',
+        branchName: 'main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'sample-service',
+          helm: helmConfig,
+        },
+        build: {
+          uuid: 'build-123',
+          namespace: 'testns',
+          isStatic: false,
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(deploy, 'test-job', { namespace: 'testns' });
+      const parsed = yaml.load(manifest) as any;
+      const initContainerNames = parsed.spec.template.spec.initContainers.map((container: any) => container.name);
+      const helmContainer = parsed.spec.template.spec.containers.find(
+        (container: any) => container.name === 'helm-deploy'
+      );
+
+      expect(manifest).toContain('image: registry.example.com/service-helm-runner:2.0.0');
+      expect(manifest).toContain('-f service-values.yaml');
+      expect(manifest).not.toContain('-f global-values.yaml');
+      expect(helmContainer.args[0]).toContain("--post-renderer '/opt/bin/post-renderer'");
+      expect(helmContainer.args[0]).toContain("--post-renderer-args '--service-override'");
+      expect(helmContainer.args[0]).not.toContain("--post-renderer-args '--global'");
+      expect(initContainerNames[initContainerNames.length - 1]).toBe('wait-for-prior-deploys');
+      expect(initContainerNames).toContain('ecr-auth');
+      expect(initContainerNames.indexOf('ecr-auth')).toBeLessThan(initContainerNames.indexOf('wait-for-prior-deploys'));
+    });
+  });
+});

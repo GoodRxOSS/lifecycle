@@ -1,0 +1,14 @@
+node_modules
+.git
+docs
+codefresh
+packages
+.next
+**/__fixtures__/**
+**/__snapshots__/**
+**/__tests__/**
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+**/*.snap

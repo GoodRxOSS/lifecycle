@@ -1,0 +1,13 @@
+{
+  "name": "lifecycle-workspace-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs",
+    "check": "node --check index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "zod": "^4.3.6"
+  }
+}

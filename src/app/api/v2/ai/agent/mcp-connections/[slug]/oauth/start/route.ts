@@ -1,0 +1,293 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { auth } from '@ai-sdk/mcp';
+import { NextRequest, NextResponse } from 'next/server';
+import { createApiHandler } from 'server/lib/createApiHandler';
+import { requireRequestUserIdentity } from 'server/lib/get-user';
+import { errorResponse, successResponse } from 'server/lib/response';
+import {
+  applyCompiledConnectionConfigToTransport,
+  buildMcpDefinitionFingerprint,
+  buildMcpOAuthCallbackUrl,
+  mergeCompiledConnectionConfig,
+  normalizeAuthConfig,
+} from 'server/services/agentRuntime/mcp/connectionConfig';
+import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
+import McpOAuthFlowService from 'server/services/agentRuntime/mcp/oauthFlow';
+import { PersistentOAuthClientProvider } from 'server/services/agentRuntime/mcp/oauthProvider';
+import type { McpDiscoveredTool, McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
+import UserMcpConnectionService from 'server/services/userMcpConnection';
+
+type OAuthConnectionState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
+type OAuthClientInformationWithRedirectUris = NonNullable<OAuthConnectionState['clientInformation']> & {
+  redirect_uris?: string[];
+};
+
+function hasCompatibleRedirectUri(state: OAuthConnectionState, redirectUrl: string): boolean {
+  const redirectUris = (state.clientInformation as OAuthClientInformationWithRedirectUris | undefined)?.redirect_uris;
+  if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
+    return true;
+  }
+
+  return redirectUris.includes(redirectUrl);
+}
+
+function sanitizeInitialOAuthState(
+  state: OAuthConnectionState | null | undefined,
+  redirectUrl: string
+): OAuthConnectionState | null {
+  if (!state) {
+    return null;
+  }
+
+  if (hasCompatibleRedirectUri(state, redirectUrl)) {
+    return state;
+  }
+
+  if (state.tokens) {
+    return {
+      type: 'oauth',
+      tokens: state.tokens,
+    };
+  }
+
+  return { type: 'oauth' };
+}
+
+function resolveAppOrigin(req: NextRequest): string | null {
+  const originHeader = req.headers.get('origin');
+  if (originHeader) {
+    try {
+      return new URL(originHeader).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  const refererHeader = req.headers.get('referer');
+  if (!refererHeader) {
+    return null;
+  }
+
+  try {
+    return new URL(refererHeader).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @openapi
+ * /api/v2/ai/agent/mcp-connections/{slug}/oauth/start:
+ *   post:
+ *     summary: Start an OAuth flow for a per-user MCP connection
+ *     tags:
+ *       - Agent Sessions
+ *     operationId: startAgentMcpConnectionOAuth
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           default: global
+ *     responses:
+ *       '200':
+ *         description: OAuth start result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/StartAgentMcpConnectionOAuthSuccessResponse'
+ */
+const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
+  const userIdentity = requireRequestUserIdentity(req);
+
+  const { slug } = await params;
+  const scope = req.nextUrl.searchParams.get('scope') || 'global';
+  const configService = new McpConfigService();
+  const config = await configService.getBySlugAndScope(slug, scope);
+  if (!config || !config.enabled) {
+    return NextResponse.json(
+      {
+        request_id: req.headers.get('x-request-id'),
+        data: null,
+        error: { message: `Enabled MCP connection '${slug}' not found in scope '${scope}'` },
+      },
+      { status: 404 }
+    );
+  }
+
+  const authConfig = normalizeAuthConfig(config.authConfig);
+  if (authConfig.mode !== 'oauth') {
+    return NextResponse.json(
+      {
+        request_id: req.headers.get('x-request-id'),
+        data: null,
+        error: { message: `MCP connection '${slug}' does not use OAuth` },
+      },
+      { status: 400 }
+    );
+  }
+
+  if (config.transport.type !== 'http' && config.transport.type !== 'sse') {
+    return NextResponse.json(
+      {
+        request_id: req.headers.get('x-request-id'),
+        data: null,
+        error: { message: `OAuth MCP connection '${slug}' must use an HTTP or SSE transport` },
+      },
+      { status: 400 }
+    );
+  }
+
+  const definitionFingerprint = buildMcpDefinitionFingerprint({
+    preset: config.preset,
+    transport: config.transport,
+    sharedConfig: config.sharedConfig,
+    authConfig,
+  });
+  const callbackUrl = buildMcpOAuthCallbackUrl(slug);
+  const existing = await UserMcpConnectionService.getDecryptedConnection(
+    userIdentity.userId,
+    scope,
+    slug,
+    userIdentity.githubUsername,
+    definitionFingerprint
+  );
+  const initialState =
+    existing?.state?.type === 'oauth' ? sanitizeInitialOAuthState(existing.state, callbackUrl) : null;
+  const flow = await McpOAuthFlowService.create({
+    userId: userIdentity.userId,
+    ownerGithubUsername: userIdentity.githubUsername,
+    slug,
+    scope,
+    definitionFingerprint,
+    appOrigin: resolveAppOrigin(req),
+  });
+
+  const provider = new PersistentOAuthClientProvider({
+    userId: userIdentity.userId,
+    ownerGithubUsername: userIdentity.githubUsername,
+    scope,
+    slug,
+    definitionFingerprint,
+    authConfig,
+    redirectUrl: callbackUrl,
+    statePrefix: flow.flowId,
+    initialState,
+    discoveredTools: existing?.discoveredTools,
+    validatedAt: existing?.validatedAt,
+    validationError: existing?.validationError,
+    interactive: true,
+  });
+  const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
+  const transport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig, {
+    authProvider: provider,
+  });
+  if (transport.type === 'stdio') {
+    return NextResponse.json(
+      {
+        request_id: req.headers.get('x-request-id'),
+        data: null,
+        error: { message: `OAuth MCP connection '${slug}' must use an HTTP or SSE transport` },
+      },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const result = await auth(provider, {
+      serverUrl: transport.url,
+      scope: authConfig.scope,
+    });
+
+    if (result !== 'REDIRECT') {
+      await McpOAuthFlowService.invalidate(flow.flowId);
+    }
+
+    // A silent-refresh AUTHORIZED skips the callback's discovery; a row that failed with 0 tools
+    // must re-validate here or it stays broken until delete + reconnect.
+    if (result === 'AUTHORIZED' && (existing?.discoveredTools?.length ?? 0) === 0) {
+      const validatedAt = new Date().toISOString();
+      let discoveredTools: McpDiscoveredTool[] = [];
+      let validationError: string | null = null;
+      try {
+        discoveredTools = await configService.discoverTools(transport, config.timeout);
+        if (discoveredTools.length === 0) {
+          validationError = `MCP validation failed for ${slug}: server returned 0 tools`;
+        }
+      } catch (discoveryError) {
+        validationError = sanitizeMcpErrorMessage(discoveryError, [
+          {
+            values: {
+              oauthState: provider.currentState.oauthState,
+              codeVerifier: provider.currentState.codeVerifier,
+            },
+            compiledConfig,
+            transport,
+            extraSecrets: [provider.currentState.tokens, provider.currentState.clientInformation],
+          },
+        ]);
+      }
+
+      await UserMcpConnectionService.upsertConnection({
+        userId: userIdentity.userId,
+        ownerGithubUsername: userIdentity.githubUsername,
+        scope,
+        slug,
+        state: provider.currentState,
+        definitionFingerprint,
+        discoveredTools: validationError ? [] : discoveredTools,
+        validationError,
+        validatedAt,
+      });
+
+      if (validationError) {
+        return errorResponse(new Error(validationError), { status: 422 }, req);
+      }
+    }
+
+    return successResponse(
+      {
+        status: result,
+        authorizationUrl: provider.authorizationUrl?.toString() || null,
+      },
+      { status: 200 },
+      req
+    );
+  } catch (error) {
+    await McpOAuthFlowService.invalidate(flow.flowId);
+    const message = sanitizeMcpErrorMessage(error, [
+      {
+        values: {
+          oauthState: provider.currentState.oauthState,
+          codeVerifier: provider.currentState.codeVerifier,
+        },
+        compiledConfig,
+        transport,
+        extraSecrets: [provider.currentState.tokens, provider.currentState.clientInformation],
+      },
+    ]);
+    return errorResponse(new Error(message), { status: 422 }, req);
+  }
+};
+
+export const POST = createApiHandler(postHandler, { auth: 'session' });

@@ -1,0 +1,30 @@
+node_modules
+pnpm-workspace.yaml
+build
+scratchpad
+docker-compose*
+Dockerfile*
+README.md
+LICENSE
+.dockerignore
+.git
+.gitignore
+.circleci
+.github
+.serverless
+.vscode
+.eslintrc.js
+.aws.json
+.codeclimate.yml
+.editorconfig
+cdk-services
+tmp
+test
+.next
+
+# This disable Docker build triggering for CI/CD related stuff (this increase speed a lot for CI/CD debugging)
+codefresh
+helm
+
+# Ignore devspace.yaml file to prevent image rebuilding after config changes
+devspace.yaml

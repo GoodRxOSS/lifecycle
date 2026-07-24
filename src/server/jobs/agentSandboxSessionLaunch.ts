@@ -1,0 +1,160 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Job } from 'bullmq';
+
+import RedisClient from 'server/lib/redisClient';
+import { getLogger } from 'server/lib/logger';
+import { decrypt } from 'server/lib/encryption';
+import {
+  buildSandboxFocusUrl,
+  getSandboxLaunchState,
+  patchSandboxLaunchState,
+  SandboxLaunchStage,
+  setSandboxLaunchState,
+} from 'server/lib/agentSession/sandboxLaunchState';
+import AgentSandboxSessionService, {
+  formatRequestedSandboxServicesLabel,
+  LaunchSandboxSessionOptions,
+} from 'server/services/agentSandboxSession';
+import { AgentSessionStartupError } from 'server/services/agentSession';
+
+const logger = () => getLogger();
+
+export interface SandboxSessionLaunchJob extends Omit<LaunchSandboxSessionOptions, 'onProgress' | 'githubToken'> {
+  launchId: string;
+  encryptedGithubToken?: string | null;
+}
+
+export async function processAgentSandboxSessionLaunch(job: Job<SandboxSessionLaunchJob>): Promise<void> {
+  const redis = RedisClient.getInstance().getRedis();
+  const {
+    launchId,
+    userId,
+    userIdentity,
+    encryptedGithubToken,
+    baseBuildUuid,
+    services,
+    model,
+    workspaceImage,
+    workspaceEditorImage,
+    workspaceGatewayImage,
+    nodeSelector,
+    keepAttachedServicesOnSessionNode,
+    readiness,
+    resources,
+    workspaceStorage,
+    redisTtlSeconds,
+  } = job.data;
+
+  const reportProgress = async (stage: SandboxLaunchStage, message: string): Promise<void> => {
+    await patchSandboxLaunchState(redis, launchId, {
+      status: stage === 'queued' ? 'queued' : 'running',
+      stage,
+      message,
+    });
+  };
+  const requestedServiceLabel = formatRequestedSandboxServicesLabel(services);
+
+  try {
+    const result = await new AgentSandboxSessionService().launch({
+      userId,
+      userIdentity,
+      githubToken: encryptedGithubToken ? decrypt(encryptedGithubToken) : null,
+      baseBuildUuid,
+      services,
+      model,
+      workspaceImage,
+      workspaceEditorImage,
+      workspaceGatewayImage,
+      nodeSelector,
+      keepAttachedServicesOnSessionNode,
+      readiness,
+      resources,
+      workspaceStorage,
+      redisTtlSeconds,
+      onProgress: reportProgress,
+    });
+
+    if (result.status !== 'created') {
+      throw new Error('Sandbox launch job completed without creating a session');
+    }
+
+    const existingState = await getSandboxLaunchState(redis, launchId);
+    await setSandboxLaunchState(redis, {
+      launchId,
+      userId,
+      status: 'created',
+      stage: 'ready',
+      message: 'Sandbox session is ready',
+      createdAt: existingState?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      baseBuildUuid,
+      service: result.service,
+      buildUuid: result.buildUuid,
+      namespace: result.namespace,
+      sessionId: result.session.uuid,
+      focusUrl: buildSandboxFocusUrl({
+        buildUuid: result.buildUuid,
+        sessionId: result.session.uuid,
+        baseBuildUuid,
+      }),
+      error: null,
+      workspaceFailure: null,
+    });
+  } catch (error) {
+    logger().error(
+      {
+        error,
+        launchId,
+        baseBuildUuid,
+        services,
+      },
+      `Sandbox: launch failed launchId=${launchId} baseBuildUuid=${baseBuildUuid} service=${requestedServiceLabel}`
+    );
+    const existingState = await getSandboxLaunchState(redis, launchId);
+    const linkedFailurePatch =
+      error instanceof AgentSessionStartupError
+        ? (() => {
+            const failedBuildUuid = error.buildUuid ?? existingState?.buildUuid ?? null;
+            const failedBaseBuildUuid = existingState?.baseBuildUuid ?? baseBuildUuid;
+            return {
+              buildUuid: failedBuildUuid,
+              namespace: error.namespace ?? existingState?.namespace ?? null,
+              sessionId: error.sessionId,
+              focusUrl: failedBuildUuid
+                ? buildSandboxFocusUrl({
+                    buildUuid: failedBuildUuid,
+                    sessionId: error.sessionId,
+                    baseBuildUuid: failedBaseBuildUuid,
+                  })
+                : null,
+              workspaceFailure: error.failure,
+            };
+          })()
+        : {
+            workspaceFailure: null,
+          };
+    await patchSandboxLaunchState(redis, launchId, {
+      status: 'error',
+      stage: 'error',
+      message: error instanceof Error ? error.message : 'Sandbox launch failed unexpectedly',
+      error: error instanceof Error ? error.message : 'Sandbox launch failed unexpectedly',
+      ...linkedFailurePatch,
+    });
+    throw error;
+  }
+}

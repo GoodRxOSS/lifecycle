@@ -1,0 +1,908 @@
+/**
+ * Copyright 2026 Lifecycle contributors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import BaseService from './_service';
+import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
+import { Build, PullRequest, Deploy, Repository } from 'server/models';
+import * as github from 'server/lib/github';
+import { QUEUE_NAMES, LIFECYCLE_UI_URL } from 'shared/config';
+import { Metrics } from 'server/lib/metrics';
+import { CommentHelper } from 'server/lib/comment';
+import OverrideService, { type BuildOverrideInput } from './override';
+import {
+  BuildKind,
+  BuildStatus,
+  DeployStatus,
+  CommentParser,
+  DeployTypes,
+  CLIDeployTypes,
+  PullRequestStatus,
+} from 'shared/constants';
+import {
+  flattenObject,
+  enableKillSwitch,
+  isStaging,
+  hasStatusCommentLabel,
+  hasDeployLabel,
+  getDeployLabel,
+  getDisabledLabel,
+  getStatusCommentLabel,
+  isDefaultStatusCommentsEnabled,
+  isControlCommentsEnabled,
+} from 'server/lib/utils';
+import Fastly from 'server/lib/fastly';
+import { nanoid } from 'nanoid';
+import { redisClient } from 'server/lib/dependencies';
+import GlobalConfigService from './globalConfig';
+import { ChartType, determineChartType } from 'server/lib/nativeHelm';
+import BuildMetadataService from './buildMetadata';
+import { toPublicHref } from 'server/lib/publicHref';
+
+const createDeployMessage = async () => {
+  const deployLabel = await getDeployLabel();
+  const disabledLabel = await getDisabledLabel();
+  return `To deploy this environment, just add a \`${deployLabel}\` label. Add a \`${disabledLabel}\` to do the opposite. ↗️\n\n`;
+};
+const COMMENT_EDIT_DESCRIPTION = `You can use the section below to redeploy and update the dev environment for this pull request.\n\n\n`;
+const GIT_SERVICE_URL = 'https://github.com';
+
+export default class ActivityStream extends BaseService {
+  fastly = new Fastly(this.redis);
+  commentQueue = this.queueManager.registerQueue(QUEUE_NAMES.COMMENT_QUEUE, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    },
+  });
+
+  processComments = async (job) => {
+    const { id, sender, correlationId, _ddTraceContext, targetGithubRepositoryId } = job.data;
+
+    return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
+      try {
+        getLogger({ stage: LogStage.COMMENT_PROCESSING }).debug(`Processing comment update for PR ${id}`);
+
+        const pullRequest: PullRequest = await this.db.models.PullRequest.findOne({
+          id,
+        });
+        await pullRequest.$fetchGraph('[build.[deploys.[deployable]], repository]');
+        const { build } = pullRequest;
+        if (!build) {
+          getLogger({ stage: LogStage.COMMENT_FAILED }).warn(`Build: id not found pullRequestId=${id}`);
+          return;
+        }
+
+        const { repository } = pullRequest;
+        await this.db.services.ActivityStream.updatePullRequestActivityStream(
+          build,
+          build.deploys || [],
+          pullRequest,
+          repository,
+          true,
+          true,
+          null,
+          false,
+          targetGithubRepositoryId
+        );
+
+        getLogger({ stage: LogStage.COMMENT_COMPLETE }).debug(`Comment updated for PR ${id}`);
+      } catch (error) {
+        getLogger({ stage: LogStage.COMMENT_FAILED }).error(
+          { error },
+          `Comment: processing failed pullRequestId=${id}`
+        );
+      }
+    });
+  };
+
+  /**
+   * Figure out if the build contains any fastly related service deployment
+   * @param build
+   * @returns
+   */
+  private async containsFastlyDeployment(deploys: Deploy[]): Promise<boolean> {
+    const fastlyServices: Deploy[] = deploys.filter((deploy) => deploy.active && deploy.uuid.includes('fastly'));
+
+    return fastlyServices.length > 0;
+  }
+
+  /**
+   * Handle the comment edit event
+   * @param pullRequest
+   * @param body
+   */
+  async updateBuildsAndDeploysFromCommentEdit(pullRequest: PullRequest, commentBody: string) {
+    await pullRequest.$fetchGraph('[build.[deploys.[deployable]], repository]');
+    const { build, repository } = pullRequest;
+    const { id: buildId } = build;
+    const deploys = build.deploys || [];
+    const buildUuid = build?.uuid;
+
+    return withLogContext({ buildUuid }, async () => {
+      let shouldUpdateStatus = true;
+      const runUuid = nanoid();
+
+      const REDEPLOY_FLAG = '#REDEPLOY';
+      const REDEPLOY_CHECKBOX = '[x] Redeploy Environment';
+      const PURGE_FASTLY_CHECKBOX = '[x] Purge Fastly Service Cache';
+
+      const isRedeployRequested = [REDEPLOY_FLAG, REDEPLOY_CHECKBOX].some((flag) => commentBody.includes(flag));
+      const isFastlyPurgeRequested = commentBody.includes(PURGE_FASTLY_CHECKBOX);
+
+      try {
+        if (isRedeployRequested) {
+          getLogger().info('Deploy: redeploy reason=commentEdit');
+          await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+            buildId,
+            runUUID: runUuid,
+            // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
+            triggerRef: runUuid,
+            ...extractContextForQueue(),
+          });
+          return;
+        }
+
+        if (isFastlyPurgeRequested) {
+          // if fastly purge is requested from comment, we do not have to update the status
+          await this.purgeFastlyServiceCache(buildUuid);
+          shouldUpdateStatus = false;
+          return;
+        }
+
+        // handle all environment/service overrides
+        await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid });
+      } finally {
+        // after everything update the pr comment
+        await this.updatePullRequestActivityStream(
+          build,
+          deploys,
+          pullRequest,
+          repository,
+          true,
+          shouldUpdateStatus,
+          null,
+          true
+        ).catch((error) => {
+          getLogger().warn({ error }, 'ActivityFeed: comment edit update failed');
+        });
+      }
+    });
+  }
+
+  private async applyCommentOverrides({
+    build,
+    deploys,
+    pullRequest,
+    commentBody,
+    runUuid,
+  }: {
+    build: Build;
+    deploys: Deploy[];
+    pullRequest: PullRequest;
+    commentBody: string;
+    runUuid: string;
+  }) {
+    if (!build.id) {
+      getLogger().error('Build: missing for comment edit overrides');
+      return;
+    }
+
+    const overrides: BuildOverrideInput = {
+      serviceOverrides: CommentHelper.parseServiceBranches(commentBody),
+      vanityUrl: CommentHelper.parseVanityUrl(commentBody),
+      envOverrides: CommentHelper.parseEnvironmentOverrides(commentBody),
+      redeployOnPush: CommentHelper.parseRedeployOnPushes(commentBody),
+    };
+    const override = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
+
+    await override.applyBuildOverrides({ build, deploys, pullRequest, overrides, runUuid });
+  }
+
+  private async updateMissionControlComment(
+    build: Build,
+    deploys: Deploy[],
+    pullRequest: PullRequest,
+    repository: Repository
+  ) {
+    const fullName = pullRequest?.fullName;
+    const pullRequestNumber = pullRequest?.pullRequestNumber;
+    const branchName = pullRequest?.branchName;
+    try {
+      const hasGithubMissionControlComment = await github.checkIfCommentExists({
+        fullName,
+        pullRequestNumber,
+        commentIdentifier: `mission control ${isStaging() ? 'stg ' : ''}comment: enabled`,
+      });
+
+      if (hasGithubMissionControlComment && !pullRequest?.commentId) {
+        getLogger().warn('Comment: mission control id missing, recovering from GitHub');
+        const recoveredCommentId = hasGithubMissionControlComment.id;
+        await pullRequest.$query().patch({ commentId: recoveredCommentId });
+        pullRequest.commentId = recoveredCommentId;
+      }
+
+      const isBot = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
+      // get the environment for it's name
+      await build.$fetchGraph('environment');
+      const message = await this.generateMissionControlComment(build, deploys, repository, pullRequest, isBot);
+      const response = await github.createOrUpdatePullRequestComment({
+        installationId: repository.githubInstallationId,
+        pullRequestNumber: pullRequest.pullRequestNumber,
+        fullName: pullRequest.fullName,
+        message,
+        commentId: pullRequest.commentId,
+        etag: pullRequest.etag,
+      });
+      const etag = response?.headers?.etag;
+      const commentId = response?.data?.id;
+      await pullRequest.$query().patch({ commentId, etag });
+    } catch (error) {
+      getLogger().error({ error }, `GitHub: mission control update failed repo=${fullName}/${branchName}`);
+    }
+  }
+
+  private async updateStatusComment(build: Build, deploys: Deploy[], pullRequest: PullRequest, repository: Repository) {
+    const fullName = pullRequest?.fullName;
+    let commentId = pullRequest?.statusCommentId;
+    const etag = pullRequest?.etag;
+    const pullRequestNumber = pullRequest?.pullRequestNumber;
+    const installationId = repository?.githubInstallationId;
+
+    const hasStatusComment = await github.checkIfCommentExists({
+      fullName,
+      pullRequestNumber,
+      commentIdentifier: `${isStaging() ? 'stg ' : ''}status comment: enabled`,
+    });
+
+    if (hasStatusComment && !commentId) {
+      getLogger().warn('Comment: status id missing, recovering from GitHub');
+      const recoveredCommentId = hasStatusComment.id;
+      await pullRequest.$query().patch({ statusCommentId: recoveredCommentId });
+      pullRequest.statusCommentId = recoveredCommentId;
+      commentId = recoveredCommentId;
+    }
+    const message = await this.generateStatusCommentForBuild(build, deploys, pullRequest);
+    const response = await github.createOrUpdatePullRequestComment({
+      installationId,
+      pullRequestNumber,
+      fullName,
+      message,
+      commentId,
+      etag,
+    });
+    await pullRequest.$query().patch({
+      statusCommentId: response.data.id,
+      etag: response.headers.etag,
+    });
+  }
+
+  /**
+   * Updating all the Lifcycle comment blocks within the Pull Request.
+   * @param build The correpsonding build of the pull request
+   * @param error Rendering the internal LC error if there is any.
+   */
+  async updatePullRequestActivityStream(
+    build: Build,
+    deploys: Deploy[],
+    pullRequest: PullRequest,
+    repository: Repository,
+    updateMissionControl: boolean,
+    updateStatus: boolean,
+    error: Error | null = null,
+    queue: boolean = true,
+    targetGithubRepositoryId?: number
+  ) {
+    if (build?.kind === BuildKind.SANDBOX) {
+      return;
+    }
+
+    const buildId = build?.id;
+    const uuid = build?.uuid;
+    const fullName = pullRequest?.fullName;
+    const branchName = pullRequest?.branchName;
+    const isStatic = build?.isStatic ?? false;
+    const labels = pullRequest?.labels || [];
+    const hasStatusComment = await hasStatusCommentLabel(labels);
+    const isDefaultStatusEnabled = await isDefaultStatusCommentsEnabled(fullName);
+    const isShowingStatusComment = isStatic || hasStatusComment || isDefaultStatusEnabled;
+    if (!buildId) {
+      getLogger().error(`Build: id not found repo=${fullName}/${branchName}`);
+      throw new Error('No build ID found for this build!');
+    }
+    const resource = `build.${buildId}`;
+    const queued = queue ? 'queued' : '';
+    let lock;
+    try {
+      lock = await this.redlock.lock(resource, 9000);
+      if (queue && !error) {
+        await this.commentQueue.add(
+          'comment',
+          { id: pullRequest.id, targetGithubRepositoryId, ...extractContextForQueue() },
+          {
+            jobId: `pr-${pullRequest.id}`,
+            removeOnComplete: true,
+            removeOnFail: true,
+          }
+        );
+        return;
+      }
+
+      if (updateStatus || updateMissionControl) {
+        const isControlEnabled = await isControlCommentsEnabled(fullName);
+        if (isControlEnabled) {
+          await this.updateMissionControlComment(build, deploys, pullRequest, repository).catch((error) => {
+            getLogger().warn(
+              { error },
+              `Comment: mission control update failed repo=${fullName}/${branchName} queued=${queued}`
+            );
+          });
+        } else {
+          getLogger().debug('Mission control comments are disabled');
+        }
+      }
+
+      if (updateStatus && isShowingStatusComment) {
+        await this.updateStatusComment(build, deploys, pullRequest, repository).catch((error) => {
+          getLogger().warn({ error }, `Comment: status update failed repo=${fullName}/${branchName} queued=${queued}`);
+        });
+      }
+    } catch (error) {
+      getLogger().error({ error }, `ActivityFeed: update failed repo=${fullName}/${branchName}`);
+    } finally {
+      if (lock) {
+        try {
+          await lock.unlock();
+        } catch (error) {
+          await this.forceUnlock(resource, uuid, fullName, branchName);
+        }
+      }
+    }
+  }
+
+  private async forceUnlock(resource: string, _buildUuid: string, fullName: string, branchName: string) {
+    try {
+      await this.redis.del(resource);
+    } catch (error) {
+      getLogger().error({ error }, `Lock: force unlock failed resource=${resource} repo=${fullName}/${branchName}`);
+    }
+  }
+
+  /**
+   * PR kickoff message
+   */
+  private async editCommentForBuild(build: Build, deploys: Deploy[]) {
+    let message = ``;
+    const statusCommentLabel = await getStatusCommentLabel();
+    const enableLifecycleStatusComments = `Add \`${statusCommentLabel}\``;
+    message += `## ✏️ Environment Overrides\n`;
+    message += '<details>\n';
+    message += '<summary>Usage</summary>\n\n';
+
+    const enabledFeatures = build?.enabledFeatures || [];
+    const hasEnabledFeatures = enabledFeatures?.length > 0;
+    if (hasEnabledFeatures) message += `* LC testing features: ${enabledFeatures.join(', ')}\n`;
+    message += `* To enable status comments, add the ${enableLifecycleStatusComments} label.\n`;
+    message += `* You can enable/disable individual service by clicking the Checkboxes below, OR\nEditing this comment to Enable/Disable multiple services at the same time by changing between \`[]\` and \`[X]\`.\n`;
+    message += `* You can also edit the branch name or URL of an external service, to further customize your deployment.\n\n`;
+    message += '</details>\n\n';
+    message += COMMENT_EDIT_DESCRIPTION;
+    message += `\n\n${CommentParser.HEADER}\n\n`;
+
+    await build?.$fetchGraph('[deploys.[deployable]]');
+    deploys = build?.deploys;
+
+    message += '\n// **Default Services**\n';
+    const filters = [(deploy: Deploy) => deploy.deployable.active, (deploy: Deploy) => !deploy.deployable.active];
+
+    for (const [idx, filter] of filters.entries()) {
+      deploys
+        .filter(filter)
+        .sort((a, b) => (a.deployable.name > b.deployable.name ? 1 : -1))
+        .forEach((deploy) => {
+          const checked = deploy.active ? 'x' : ' ';
+
+          // Only internal parent services should appear in the list
+          if (deploy.deployable.dependsOnServiceId == null) {
+            switch (deploy.deployable.type) {
+              case DeployTypes.GITHUB:
+                message += `- [${checked}] ${deploy.deployable.name}: ${
+                  deploy.branchName ? deploy.branchName : deploy.publicUrl
+                }\n`;
+                break;
+              case DeployTypes.EXTERNAL_HTTP:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.publicUrl}\n`;
+                break;
+              case DeployTypes.CONFIGURATION:
+              case DeployTypes.CODEFRESH:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
+                break;
+              case DeployTypes.DOCKER:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.deployable.dockerImage}@${deploy.deployable.defaultTag}\n`;
+                break;
+              case DeployTypes.HELM:
+                message += `- [${checked}] ${deploy.deployable.name}: ${deploy.branchName}\n`;
+                break;
+            }
+          } else {
+            getLogger().debug(`Skipping ${deploy.deployable.name} because it is an internal dependency`);
+          }
+        });
+
+      if (idx === 0) {
+        message += '\n\n\n// **Optional Services**\n';
+      }
+    }
+
+    message += '\n\n// **UUID** *(Pick your own custom subdomain)*\n';
+    message += `url: ${build.uuid}\n`;
+
+    message += '\n\n// **Override Environment Variables (add one override per line below)**\n';
+    message += '// ENV:FEATURE_ENABLED:true\n';
+    message += '// ENV:LIFECYCLE_API_URL:https://app.lifecycle.com/api\n';
+    message += this.generateEnvBlockForBuild(build);
+
+    message += `\n\n${CommentParser.FOOTER}\n\n`;
+
+    if (build.status !== BuildStatus.TORN_DOWN) {
+      message += '## 🛠 Actions\n*(Trigger actions by clicking the checkboxes)*\n';
+      if (!build.isStatic) message += `- [ ] Redeploy Environment\n`;
+      if (await this.containsFastlyDeployment(deploys)) {
+        if ((await this.fastly.getServiceDashboardUrl(build.uuid, 'fastly')) != null) {
+          message += `- [ ] Purge Fastly Service Cache\n`;
+        }
+      }
+    }
+
+    if (build.trackDefaultBranches) {
+      message += '### Options\n*(Toggle options by clicking the checkboxes)*\n';
+      message += `- [x] Redeploy on pushes to default branches\n\n`;
+    }
+
+    return message;
+  }
+
+  private generateEnvBlockForBuild(build: Build) {
+    let message = '';
+    Object.entries(flattenObject(build.commentRuntimeEnv)).forEach((el) => {
+      message += `ENV:${el[0]}:${el[1]}\n`;
+    });
+    return message;
+  }
+
+  /**
+   * Generating Mission Control comment block message. It should be always available in any build status.
+   * @param build
+   * @returns
+   */
+  private async generateMissionControlComment(
+    build: Build,
+    deploys: Deploy[],
+    _repository: Repository,
+    pullRequest: PullRequest,
+    isBot?: boolean
+  ) {
+    const uuid = build?.uuid;
+    const branchName = pullRequest?.branchName;
+    const fullName = pullRequest?.fullName;
+    const status = pullRequest?.status;
+    const isOpen = status === PullRequestStatus.OPEN;
+    const sha = build?.sha;
+    const labels = pullRequest?.labels || [];
+    const buildStatus = build?.status;
+    let message = '';
+    try {
+      const repositoryName = fullName?.length && fullName?.includes('/') ? fullName.split('/')[1] : '';
+      const isBuilding = [BuildStatus.BUILDING, BuildStatus.BUILT].includes(buildStatus as BuildStatus);
+      const isDeploying = buildStatus === BuildStatus.DEPLOYING;
+      const isAutoDeployingBuild = pullRequest.deployOnUpdate && buildStatus === BuildStatus.BUILT;
+      const isReadyToDeployBuild = !pullRequest.deployOnUpdate && buildStatus === BuildStatus.BUILT;
+      const isPending = [
+        BuildStatus.QUEUED,
+        BuildStatus.TORN_DOWN,
+        BuildStatus.PENDING,
+        BuildStatus.TEARING_DOWN,
+      ].includes(buildStatus as BuildStatus);
+      const isDeployed = buildStatus === BuildStatus.DEPLOYED;
+      let deployStatus;
+      const hasDeployLabelPresent = await hasDeployLabel(labels);
+      const tags = { uuid, repositoryName, branchName, env: 'prd', service: 'lifecycle-job', statsEvent: 'deployment' };
+      const eventDetails = {
+        title: 'Deployment Finished',
+        description: `deployment ${uuid} has finished for ${repositoryName} on branch ${branchName}`,
+      };
+      const isBotUser = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
+      // will disable metrics if true
+      const isKillSwitch = await enableKillSwitch({
+        fullName,
+        branch: branchName,
+        isBotUser,
+        status,
+      });
+      const statOptions = { sha, uuid, branchName, repositoryName, tags, eventDetails, disable: isKillSwitch };
+      const metrics = new Metrics('deployment', statOptions);
+      const hasErroringActiveDeploys = deploys.some(
+        (deploy) => deploy?.status === DeployStatus.ERROR && deploy?.active
+      );
+      const isDeployedWithActiveErrors = isDeployed && hasErroringActiveDeploys;
+      if (isDeployedWithActiveErrors) {
+        const deployStatuses = deploys.map(({ branchName, uuid, status }) => ({ branchName, uuid, status }));
+        getLogger().info(`Build: deployedWithErrors status=${buildStatus} deploys=${JSON.stringify(deployStatuses)}`);
+        metrics
+          .increment('deployWithErrors')
+          .event('Deploy Finished with Erroring Deploys', `${eventDetails.description} with erroring deploys`);
+      }
+      if (isPending || !isOpen) deployStatus = 'is pending ⏳';
+      else if (isBuilding) {
+        deployStatus = 'is building 🏗️';
+      } else if (isAutoDeployingBuild || isDeploying) {
+        deployStatus = 'is deploying 🚀';
+      } else if (isReadyToDeployBuild) deployStatus = 'is ready to deploy 🚀';
+      else if ((buildStatus === BuildStatus.ERROR && pullRequest.deployOnUpdate) || isDeployedWithActiveErrors) {
+        deployStatus = 'deployed with an Error ⚠️';
+        const tags = { error: 'error_during_deploy', result: 'error' };
+        metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
+      } else if (buildStatus === BuildStatus.CONFIG_ERROR) {
+        deployStatus = 'has a configuration error ⚠️';
+        const tags = { error: 'config_error', result: 'complete' };
+        metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
+      } else if (isDeployed) {
+        deployStatus = 'is deployed ✅';
+        const tags = { result: 'complete', error: '' };
+        metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
+      } else {
+        deployStatus = 'has an uncaptured Status ⚠️';
+        const tags = { error: 'uncaptured_status', result: 'error' };
+        metrics.increment('total', tags).event(eventDetails.title, eventDetails.description);
+      }
+      message = `### 💻✨ Your environment ${deployStatus}.\n`;
+      if (LIFECYCLE_UI_URL) {
+        message += `View details [here](${LIFECYCLE_UI_URL}/environments/${uuid})\n`;
+      }
+      if (!hasDeployLabelPresent && !isBot && isPending && isOpen) {
+        message += await createDeployMessage();
+      }
+
+      message += await this.editCommentForBuild(build, deploys).catch((error) => {
+        getLogger().error({ error }, `Comment: mission control generation failed`);
+        return '';
+      });
+
+      if (isDeployed) {
+        message += '\n---\n\n';
+        message += `## 📦 Deployments\n\n`;
+        message += await this.environmentBlock(build).catch((error) => {
+          getLogger().error({ error }, `Comment: env block generation failed`);
+          return '';
+        });
+      }
+
+      message += `\n\nmission control ${isStaging() ? 'stg ' : ''}comment: enabled \n`;
+      return message;
+    } catch (error) {
+      getLogger().error({ error }, `Comment: mission control generation failed repo=${fullName}/${branchName}`);
+      return message;
+    }
+  }
+
+  private getStatusText(deploy: Deploy) {
+    switch (deploy.status) {
+      case DeployStatus.BUILDING:
+        return `🏗️ BUILDING`;
+      case DeployStatus.BUILT:
+        return `👍 BUILT`;
+      case DeployStatus.ERROR:
+        return `⚠️ ERROR`;
+      case DeployStatus.CLONING:
+        return `⬇️ CLONING`;
+      case DeployStatus.READY:
+        return `✅ READY`;
+      case DeployStatus.DEPLOYING:
+        return `🚀 DEPLOYING`;
+      case DeployStatus.DEPLOY_FAILED:
+        return `⚠️ FAILED`;
+      case DeployStatus.QUEUED:
+        return `⏳ QUEUED`;
+      case DeployStatus.WAITING:
+        return `⏳ WAITING`;
+      case DeployStatus.BUILD_FAILED:
+        return `❌ BUILD FAILED`;
+      default:
+        return deploy.status;
+    }
+  }
+
+  /**
+   * Generating comment message for status comment for the PR. This comment block should be dynamic change based on build status.
+   * @param build
+   * @returns
+   */
+  private async generateStatusCommentForBuild(build: Build, deploys: Deploy[], pullRequest: PullRequest) {
+    let message = '';
+
+    const nextStepsList = LIFECYCLE_UI_URL
+      ? `### Next steps:\n\n- Review the [Lifecycle UI](${LIFECYCLE_UI_URL}/environments/${build.uuid})\n`
+      : '';
+    const isBot = await this.db.services.BotUser.isBotUser(pullRequest?.githubLogin);
+    const isBuilding = [BuildStatus.BUILDING, BuildStatus.BUILT].includes(build.status as BuildStatus);
+    const isDeploying = build.status === BuildStatus.DEPLOYING;
+    const isAutoDeployingBuild = pullRequest.deployOnUpdate && build.status === BuildStatus.BUILT;
+    const isReadyToDeployBuild = !pullRequest.deployOnUpdate && build.status === BuildStatus.BUILT;
+    const isPending = [BuildStatus.QUEUED, BuildStatus.TORN_DOWN].includes(build.status as BuildStatus);
+    if (isPending) {
+      message += '## ⏳ Pending\n';
+      message += `Lifecycle Environment either has been torn down or does not exist.`;
+      if (isBot) {
+        const deployLabel = await getDeployLabel();
+        message += `\n\n**This PR is created by a bot user, add ${deployLabel} to build environment**`;
+      } else {
+        const disabledLabel = await getDisabledLabel();
+        message += `\n\n*Note: If ${disabledLabel} label present, remove to build environment*`;
+      }
+    } else if (isBuilding) {
+      message += '## 🏗️ Building\n';
+      message += 'We are busy building your code...\n';
+      message += '## Build Status\n';
+      message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+        getLogger().error({ error }, `Comment: build status generation failed`);
+        return '';
+      });
+
+      message += `\nHere's where you can find your services after they're deployed:\n`;
+      message += await this.environmentBlock(build).catch((error) => {
+        getLogger().error({ error }, `Comment: env block generation failed`);
+        return '';
+      });
+
+      if (pullRequest.deployOnUpdate === false) {
+        message += await createDeployMessage();
+      } else {
+        message += `\nWe'll deploy your code once we've finished this build step.`;
+      }
+    } else if (isAutoDeployingBuild || isDeploying) {
+      message += '## 🚀 Deploying\n';
+      message += `We're deploying your code. Please stand by....\n\n`;
+      message += '## Build Status\n';
+      message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+        getLogger().error({ error }, `Comment: build status generation failed`);
+        return '';
+      });
+      message += `\nHere's where you can find your services after they're deployed:\n`;
+      message += await this.environmentBlock(build).catch((e) => {
+        getLogger().error({ error: e }, `Comment: env block generation failed`);
+        return '';
+      });
+      message += await this.dashboardBlock(build).catch((e) => {
+        getLogger().error({ error: e }, `Comment: dashboard generation failed`);
+        return '';
+      });
+    } else if (isReadyToDeployBuild) {
+      message += '## 🚀 Ready to deploy\n';
+      message += `Your code is built. We're ready to deploy whenever you are.\n`;
+      message += await this.deployingBlock(build).catch((e) => {
+        getLogger().error({ error: e }, `Comment: deployment status generation failed`);
+        return '';
+      });
+      message += await createDeployMessage();
+    } else if (pullRequest.deployOnUpdate) {
+      message = '';
+      if (build.status === BuildStatus.ERROR) {
+        message += `## ⚠️ Deployed with Error\n`;
+        message += `There was a problem deploying your code. Some services may have not rolled out successfully. Here are the URLs for your services:\n\n`;
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          getLogger().error({ error }, `Comment: build status generation failed`);
+          return '';
+        });
+        message += await this.environmentBlock(build).catch((e) => {
+          getLogger().error({ error: e }, `Comment: env block generation failed`);
+          return '';
+        });
+        message += await this.dashboardBlock(build).catch((e) => {
+          getLogger().error({ error: e }, `Comment: dashboard generation failed`);
+          return '';
+        });
+      } else if (build.status === BuildStatus.CONFIG_ERROR) {
+        message += `## ⚠️ Configuration Error\n`;
+        message += `Lifecycle configuration file is found but there is a problem with the file.\n\n`;
+      } else if (build.status === BuildStatus.DEPLOYED) {
+        message += '## ✅ Deployed\n';
+        message += '## Build Status\n';
+        message += await this.buildStatusBlock(build, deploys, null).catch((error) => {
+          getLogger().error({ error }, `Comment: build status generation failed`);
+          return '';
+        });
+        message += `\nWe've deployed your code. Here's where you can find your services:\n`;
+        message += await this.environmentBlock(build).catch((e) => {
+          getLogger().error({ error: e }, `Comment: env block generation failed`);
+          return '';
+        });
+        message += await this.dashboardBlock(build).catch((e) => {
+          getLogger().error({ error: e }, `Comment: dashboard generation failed`);
+          return '';
+        });
+      } else {
+        message += `## ⚠️ Unexpected Build Status\n`;
+        message += `The build status is ${build?.status || 'undefined'}.\n\n`;
+        message += nextStepsList;
+      }
+    }
+
+    message += `\n\n${
+      isStaging() ? 'stg ' : ''
+    }status comment: enabled. Mission control statuses may be slightly out of sync.\n`;
+
+    return message;
+  }
+
+  private async buildStatusBlock(
+    build: Build,
+    deploys: Deploy[],
+    // eslint-disable-next-line no-unused-vars
+    isSelectedDeployType: ((deploy: Deploy, orgChart: string) => boolean) | null
+  ): Promise<string> {
+    let message = '';
+
+    message += '| Service | Branch | Status |\n';
+    message += '|---|---|---|\n';
+
+    await build?.$fetchGraph('[deploys.[deployable.repository]]');
+    deploys = build.deploys;
+
+    const orgChartName = await GlobalConfigService.getInstance().getOrgChartName();
+    if (deploys.length > 1) {
+      deploys = deploys.sort((a, b) => a.id - b.id);
+    }
+
+    // Convert forEach to for...of to handle async/await properly
+    for (const deploy of deploys) {
+      const serviceName: string = deploy.deployable.name;
+      const serviceType: DeployTypes = deploy.deployable.type;
+      const serviceNameWithUrl = deploy.deployable.repositoryId
+        ? `[${serviceName}](${GIT_SERVICE_URL}/${deploy.deployable?.repository?.fullName}/tree/${deploy.branchName})`
+        : serviceName;
+
+      if (isSelectedDeployType == null || isSelectedDeployType(deploy, orgChartName)) {
+        if ([DeployTypes.GITHUB, DeployTypes.HELM].includes(serviceType) && deploy.active) {
+          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(deploy)}_ |\n`;
+        } else if (CLIDeployTypes.has(serviceType) && deploy.active) {
+          if (serviceType === DeployTypes.CODEFRESH) {
+            message += `| ${serviceNameWithUrl} | ${deploy.branchName} | _${this.getStatusText(deploy)}_ |\n`;
+          } else {
+            message += `| ${serviceNameWithUrl} || _${this.getStatusText(deploy)}_ |\n`;
+          }
+        }
+      }
+    }
+
+    return message;
+  }
+
+  private async deployingBlock(build: Build): Promise<string> {
+    let message = '';
+    message += '| Service | Branch | Status |\n';
+    message += '|---|---|---|\n';
+
+    await build?.$fetchGraph('[deploys.[deployable]]');
+
+    let { deploys } = build;
+    if (deploys.length > 1) {
+      deploys = deploys.sort((a, b) => a.id - b.id);
+    }
+
+    deploys
+      .sort((a, b) => a.id - b.id)
+      .forEach((deploy) => {
+        const serviceName: string = deploy.deployable.name;
+
+        const serviceType: DeployTypes = deploy.deployable.type;
+
+        if (serviceType === DeployTypes.GITHUB) {
+          message += `|${serviceName}|${deploy.branchName}|${deploy.status}|\n`;
+        }
+      });
+
+    return message;
+  }
+
+  private async environmentBlock(build: Build): Promise<string> {
+    let message = '';
+    message += '### Lifecycle Environments\n';
+    message += '| Service | Branch | Link |\n';
+    message += '|---|---|---|\n';
+
+    await build?.$fetchGraph('[deploys.[deployable.repository]]');
+    let domainDefaults: Parameters<typeof toPublicHref>[1];
+    try {
+      domainDefaults = (await GlobalConfigService.getInstance().getAllConfigs())?.domainDefaults;
+    } catch (error) {
+      getLogger().warn({ error }, 'PR environment links: config lookup failed using=https');
+    }
+
+    let { deploys } = build;
+    if (deploys.length > 1) {
+      deploys = deploys.sort((a, b) => a.id - b.id);
+    }
+    for (const deploy of deploys) {
+      const { deployable } = deploy;
+      const chartType = await determineChartType(deploy);
+      const isPublicChart = chartType === ChartType.PUBLIC;
+
+      const servicePublic: boolean = deployable.public || !isPublicChart;
+      const serviceName: string = deployable.name;
+      const serviceType: DeployTypes = deployable.type;
+      const serviceHostPortMapping: Record<string, any> = deployable.hostPortMapping;
+      const serviceNameWithUrl = deploy.deployable.repositoryId
+        ? `[${serviceName}](${GIT_SERVICE_URL}/${deploy.deployable?.repository?.fullName}/tree/${deploy.branchName})`
+        : serviceName;
+
+      if (
+        servicePublic &&
+        deploy.active &&
+        (serviceType === DeployTypes.DOCKER ||
+          serviceType === DeployTypes.GITHUB ||
+          serviceType === DeployTypes.CODEFRESH ||
+          !isPublicChart)
+      ) {
+        if (serviceHostPortMapping && Object.keys(serviceHostPortMapping).length > 0) {
+          Object.keys(serviceHostPortMapping).forEach((key) => {
+            const publicHref = deploy.publicUrl ? toPublicHref(`${key}-${deploy.publicUrl}`, domainDefaults) : null;
+            message += `| ${key}-${serviceNameWithUrl} | ${deploy.branchName} | ${publicHref ?? ''}|\n`;
+          });
+        } else {
+          const publicHref = toPublicHref(deploy.publicUrl, domainDefaults);
+          message += `| ${serviceNameWithUrl} | ${deploy.branchName} | ${publicHref ?? ''}|\n`;
+        }
+      }
+    }
+
+    return message + '\n';
+  }
+
+  private async dashboardBlock(build: Build) {
+    return new BuildMetadataService(this.db, this.redis, this.redlock, this.queueManager).renderDashboardMarkdown(
+      build
+    );
+  }
+
+  private async purgeFastlyServiceCache(uuid: string) {
+    return withLogContext({ buildUuid: uuid }, async () => {
+      try {
+        const computeShieldServiceId = await this.fastly.getFastlyServiceId(uuid, 'compute-shield');
+        getLogger().debug(`Fastly computeShieldServiceId=${computeShieldServiceId}`);
+        if (computeShieldServiceId) {
+          await this.fastly.purgeAllServiceCache(computeShieldServiceId, uuid, 'fastly');
+        }
+
+        const optimizelyServiceId = await this.fastly.getFastlyServiceId(uuid, 'optimizely');
+        getLogger().debug(`Fastly optimizelyServiceId=${optimizelyServiceId}`);
+        if (optimizelyServiceId) {
+          await this.fastly.purgeAllServiceCache(optimizelyServiceId, uuid, 'optimizely');
+        }
+
+        const fastlyServiceId = await this.fastly.getFastlyServiceId(uuid, 'fastly');
+        getLogger().debug(`Fastly fastlyServiceId=${fastlyServiceId}`);
+        if (fastlyServiceId) {
+          await this.fastly.purgeAllServiceCache(fastlyServiceId, uuid, 'fastly');
+        }
+        getLogger().info(`Fastly: purged serviceId=${fastlyServiceId}`);
+      } catch (error) {
+        getLogger().error({ error }, 'Fastly: cache purge failed');
+      }
+    });
+  }
+}

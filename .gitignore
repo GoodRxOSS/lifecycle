@@ -1,0 +1,38 @@
+.env
+build
+node_modules
+yarn-error.log
+.DS_STORE
+tmp
+.next
+.cache
+dist
+.terraform
+ssl
+**/terraform.gcp.json
+**/*.tfstate*
+.vscode
+*.hidden
+kube/secrets/*.yml
+# User dev config
+.ngrok.yaml
+
+# Ignore DevSpace cache and log folder
+.devspace*
+devspace.yaml
+coverage
+
+dist
+
+helm/environments/**/secrets.yaml
+
+# Claude Code files
+CLAUDE.md
+llm-docs/
+llm-specs/
+
+# GSD planning docs
+.planning/
+
+# Promptfoo evaluation directory
+eval/

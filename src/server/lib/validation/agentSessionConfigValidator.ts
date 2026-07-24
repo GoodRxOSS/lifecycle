@@ -1,0 +1,316 @@
+/**
+ * Copyright 2026 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import type {
+  AgentSessionControlPlaneConfigValue,
+  AgentSessionRuntimeSettingsValue,
+} from 'server/services/types/agentSessionConfig';
+
+export class AgentSessionConfigValidationError extends Error {}
+
+function validatePromptField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'string') {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a string.`);
+  }
+
+  if (value.length > 50000) {
+    throw new AgentSessionConfigValidationError(`${fieldName} exceeds maximum length of 50000 characters.`);
+  }
+}
+
+function validatePositiveIntegerField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a positive integer.`);
+  }
+}
+
+function validateNonNegativeIntegerField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a non-negative integer.`);
+  }
+}
+
+function validateStringRecord(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be an object.`);
+  }
+
+  for (const [key, recordValue] of Object.entries(value)) {
+    if (!key.trim()) {
+      throw new AgentSessionConfigValidationError(`${fieldName} contains an empty key.`);
+    }
+    if (typeof recordValue !== 'string' || !recordValue.trim()) {
+      throw new AgentSessionConfigValidationError(`${fieldName}.${key} must be a non-empty string.`);
+    }
+  }
+}
+
+function validateBooleanField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'boolean') {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a boolean.`);
+  }
+}
+
+function validateOptionalStringField(value: unknown, fieldName: string, maxLength = 2048): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a non-empty string.`);
+  }
+
+  if (value.length > maxLength) {
+    throw new AgentSessionConfigValidationError(`${fieldName} exceeds maximum length of ${maxLength} characters.`);
+  }
+}
+
+function validateStringArrayField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be an array.`);
+  }
+
+  const seen = new Set<string>();
+  for (const item of value) {
+    validateOptionalStringField(item, `${fieldName} entry`, 64);
+    const normalized = item.trim();
+    if (seen.has(normalized)) {
+      throw new AgentSessionConfigValidationError(`${fieldName} contains duplicate value "${normalized}".`);
+    }
+    seen.add(normalized);
+  }
+}
+
+function validateAccessModeField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (value !== 'ReadWriteOnce' && value !== 'ReadWriteMany') {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be ReadWriteOnce or ReadWriteMany.`);
+  }
+}
+
+function validateWorkspaceBackendProviderField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (
+    value !== 'lifecycle_kubernetes' &&
+    value !== 'opensandbox' &&
+    value !== 'e2b' &&
+    value !== 'daytona' &&
+    value !== 'modal'
+  ) {
+    throw new AgentSessionConfigValidationError(
+      `${fieldName} must be lifecycle_kubernetes, opensandbox, e2b, daytona, or modal.`
+    );
+  }
+}
+
+function validateOpenSandboxProtocolField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (value !== 'http' && value !== 'https') {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be http or https.`);
+  }
+}
+
+function validatePositiveNumberField(value: unknown, fieldName: string): void {
+  if (value === undefined) {
+    return;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new AgentSessionConfigValidationError(`${fieldName} must be a positive number.`);
+  }
+}
+
+function validateNullablePositiveIntegerField(value: unknown, fieldName: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  validatePositiveIntegerField(value, fieldName);
+}
+
+export function validateAgentSessionControlPlaneConfig(config: Partial<AgentSessionControlPlaneConfigValue>): void {
+  validatePromptField(config.systemPrompt, 'systemPrompt');
+  validatePromptField(config.appendSystemPrompt, 'appendSystemPrompt');
+  validatePositiveIntegerField(config.maxIterations, 'maxIterations');
+  validatePositiveIntegerField(config.maxRunInputTokens, 'maxRunInputTokens');
+  validatePositiveIntegerField(config.workspaceToolDiscoveryTimeoutMs, 'workspaceToolDiscoveryTimeoutMs');
+  validatePositiveIntegerField(config.workspaceToolExecutionTimeoutMs, 'workspaceToolExecutionTimeoutMs');
+
+  if (!config.toolRules) {
+    return;
+  }
+
+  const seen = new Set<string>();
+  for (const rule of config.toolRules) {
+    if (!rule?.toolKey || typeof rule.toolKey !== 'string') {
+      throw new AgentSessionConfigValidationError('toolRules entries must include a non-empty toolKey.');
+    }
+    if (rule.toolKey.length > 255) {
+      throw new AgentSessionConfigValidationError(`toolRules entry "${rule.toolKey}" exceeds maximum toolKey length.`);
+    }
+    if (rule.mode !== 'allow' && rule.mode !== 'require_approval' && rule.mode !== 'deny') {
+      throw new AgentSessionConfigValidationError(
+        `toolRules entry "${rule.toolKey}" has unsupported mode "${rule.mode}".`
+      );
+    }
+    if (seen.has(rule.toolKey)) {
+      throw new AgentSessionConfigValidationError(`Duplicate tool rule "${rule.toolKey}" is not allowed.`);
+    }
+    seen.add(rule.toolKey);
+  }
+}
+
+export function validateAgentSessionRuntimeSettings(config: AgentSessionRuntimeSettingsValue): void {
+  validatePromptField(config.workspaceImage, 'workspaceImage');
+  validatePromptField(config.workspaceEditorImage, 'workspaceEditorImage');
+  validatePromptField(config.workspaceGatewayImage, 'workspaceGatewayImage');
+  validateStringRecord(config.scheduling?.nodeSelector, 'scheduling.nodeSelector');
+  validateBooleanField(
+    config.scheduling?.keepAttachedServicesOnSessionNode,
+    'scheduling.keepAttachedServicesOnSessionNode'
+  );
+  validateNonNegativeIntegerField(config.readiness?.timeoutMs, 'readiness.timeoutMs');
+  validateNonNegativeIntegerField(config.readiness?.pollMs, 'readiness.pollMs');
+  validateStringRecord(config.resources?.workspace?.requests, 'resources.workspace.requests');
+  validateStringRecord(config.resources?.workspace?.limits, 'resources.workspace.limits');
+  validateStringRecord(config.resources?.editor?.requests, 'resources.editor.requests');
+  validateStringRecord(config.resources?.editor?.limits, 'resources.editor.limits');
+  validateStringRecord(config.resources?.workspaceGateway?.requests, 'resources.workspaceGateway.requests');
+  validateStringRecord(config.resources?.workspaceGateway?.limits, 'resources.workspaceGateway.limits');
+  validateOptionalStringField(config.workspaceStorage?.defaultSize, 'workspaceStorage.defaultSize', 64);
+  validateStringArrayField(config.workspaceStorage?.allowedSizes, 'workspaceStorage.allowedSizes');
+  validateBooleanField(config.workspaceStorage?.allowClientOverride, 'workspaceStorage.allowClientOverride');
+  validateAccessModeField(config.workspaceStorage?.accessMode, 'workspaceStorage.accessMode');
+  validateWorkspaceBackendProviderField(config.workspaceBackend?.provider, 'workspaceBackend.provider');
+  validateOptionalStringField(config.workspaceBackend?.opensandbox?.domain, 'workspaceBackend.opensandbox.domain');
+  validateOpenSandboxProtocolField(
+    config.workspaceBackend?.opensandbox?.protocol,
+    'workspaceBackend.opensandbox.protocol'
+  );
+  validateOptionalStringField(
+    config.workspaceBackend?.opensandbox?.apiKey,
+    'workspaceBackend.opensandbox.apiKey',
+    4096
+  );
+  validateOptionalStringField(config.workspaceBackend?.opensandbox?.image, 'workspaceBackend.opensandbox.image');
+  validateOptionalStringField(
+    config.workspaceBackend?.opensandbox?.poolRef,
+    'workspaceBackend.opensandbox.poolRef',
+    253
+  );
+  validateNullablePositiveIntegerField(
+    config.workspaceBackend?.opensandbox?.timeoutSeconds,
+    'workspaceBackend.opensandbox.timeoutSeconds'
+  );
+  validateBooleanField(
+    config.workspaceBackend?.opensandbox?.useServerProxy,
+    'workspaceBackend.opensandbox.useServerProxy'
+  );
+  validateBooleanField(config.workspaceBackend?.opensandbox?.secureAccess, 'workspaceBackend.opensandbox.secureAccess');
+  validateStringRecord(
+    config.workspaceBackend?.opensandbox?.resourceLimits,
+    'workspaceBackend.opensandbox.resourceLimits'
+  );
+  validatePositiveIntegerField(
+    config.workspaceBackend?.opensandbox?.execdPort,
+    'workspaceBackend.opensandbox.execdPort'
+  );
+  validatePositiveIntegerField(
+    config.workspaceBackend?.opensandbox?.gatewayPort,
+    'workspaceBackend.opensandbox.gatewayPort'
+  );
+  validatePositiveIntegerField(
+    config.workspaceBackend?.opensandbox?.editorPort,
+    'workspaceBackend.opensandbox.editorPort'
+  );
+  validateOptionalStringField(config.workspaceBackend?.e2b?.apiKey, 'workspaceBackend.e2b.apiKey', 4096);
+  validateOptionalStringField(config.workspaceBackend?.e2b?.templateId, 'workspaceBackend.e2b.templateId', 253);
+  validateOptionalStringField(config.workspaceBackend?.e2b?.domain, 'workspaceBackend.e2b.domain');
+  validateNullablePositiveIntegerField(
+    config.workspaceBackend?.e2b?.timeoutSeconds,
+    'workspaceBackend.e2b.timeoutSeconds'
+  );
+  validateBooleanField(config.workspaceBackend?.e2b?.autoPause, 'workspaceBackend.e2b.autoPause');
+  validateOptionalStringField(config.workspaceBackend?.daytona?.apiKey, 'workspaceBackend.daytona.apiKey', 4096);
+  validateOptionalStringField(config.workspaceBackend?.daytona?.snapshot, 'workspaceBackend.daytona.snapshot', 253);
+  validateOptionalStringField(config.workspaceBackend?.daytona?.apiUrl, 'workspaceBackend.daytona.apiUrl');
+  validateOptionalStringField(config.workspaceBackend?.daytona?.target, 'workspaceBackend.daytona.target', 253);
+  validateNonNegativeIntegerField(
+    config.workspaceBackend?.daytona?.autoArchiveInterval,
+    'workspaceBackend.daytona.autoArchiveInterval'
+  );
+  validateOptionalStringField(config.workspaceBackend?.modal?.tokenId, 'workspaceBackend.modal.tokenId', 4096);
+  validateOptionalStringField(config.workspaceBackend?.modal?.tokenSecret, 'workspaceBackend.modal.tokenSecret', 4096);
+  validateOptionalStringField(config.workspaceBackend?.modal?.environment, 'workspaceBackend.modal.environment', 253);
+  validateOptionalStringField(config.workspaceBackend?.modal?.appName, 'workspaceBackend.modal.appName', 253);
+  validateOptionalStringField(config.workspaceBackend?.modal?.image, 'workspaceBackend.modal.image');
+  validateOptionalStringField(
+    config.workspaceBackend?.modal?.imageRegistrySecret,
+    'workspaceBackend.modal.imageRegistrySecret',
+    253
+  );
+  validatePositiveIntegerField(config.workspaceBackend?.modal?.timeoutSeconds, 'workspaceBackend.modal.timeoutSeconds');
+  validatePositiveNumberField(config.workspaceBackend?.modal?.cpu, 'workspaceBackend.modal.cpu');
+  validatePositiveIntegerField(config.workspaceBackend?.modal?.memoryMiB, 'workspaceBackend.modal.memoryMiB');
+  validateStringArrayField(
+    config.workspaceBackend?.modal?.inboundCidrAllowlist,
+    'workspaceBackend.modal.inboundCidrAllowlist'
+  );
+  validatePositiveIntegerField(config.cleanup?.activeIdleSuspendMs, 'cleanup.activeIdleSuspendMs');
+  validatePositiveIntegerField(config.cleanup?.startingTimeoutMs, 'cleanup.startingTimeoutMs');
+  validatePositiveIntegerField(config.cleanup?.hibernatedRetentionMs, 'cleanup.hibernatedRetentionMs');
+  validatePositiveIntegerField(config.cleanup?.intervalMs, 'cleanup.intervalMs');
+  validatePositiveIntegerField(config.cleanup?.redisTtlSeconds, 'cleanup.redisTtlSeconds');
+  validatePositiveIntegerField(config.durability?.runExecutionLeaseMs, 'durability.runExecutionLeaseMs');
+  validatePositiveIntegerField(config.durability?.queuedRunDispatchStaleMs, 'durability.queuedRunDispatchStaleMs');
+  validatePositiveIntegerField(config.durability?.dispatchRecoveryLimit, 'durability.dispatchRecoveryLimit');
+  validatePositiveIntegerField(config.durability?.maxDurablePayloadBytes, 'durability.maxDurablePayloadBytes');
+  validatePositiveIntegerField(config.durability?.payloadPreviewBytes, 'durability.payloadPreviewBytes');
+  validatePositiveIntegerField(config.durability?.fileChangePreviewChars, 'durability.fileChangePreviewChars');
+}

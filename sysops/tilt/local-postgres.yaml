@@ -1,0 +1,97 @@
+# Copyright 2025 GoodRx, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-postgres-pvc
+  namespace: lifecycle-app
+  annotations:
+    tilt.dev/down-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-postgres
+  namespace: lifecycle-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-postgres
+  template:
+    metadata:
+      labels:
+        app: local-postgres
+    spec:
+      containers:
+        - name: local-postgres
+          # The same name you used in docker_build(...) above
+          image: local-postgres:latest
+
+          # The Dockerfile sets POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+          # but you can also re-declare them here if you like (overrides Dockerfile ENV).
+          env:
+            - name: POSTGRES_USER
+              value: 'lifecycle'
+            - name: POSTGRES_PASSWORD
+              value: 'lifecycle'
+            - name: POSTGRES_DB
+              value: 'lifecycle'
+
+          ports:
+            - containerPort: 5432
+              name: pg
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - lifecycle
+                - -d
+                - lifecycle
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: local-postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-postgres
+  namespace: lifecycle-app
+spec:
+  type: ClusterIP
+  selector:
+    app: local-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

@@ -1,0 +1,166 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { BaseTool } from '../baseTool';
+import { ToolResult } from '../types';
+import { K8sClient } from '../shared/k8sClient';
+import { OutputLimiter } from '../outputLimiter';
+import { deduplicateConsecutiveLines, sanitizeLogText, searchLogLines } from '../shared/logView';
+
+export class GetPodLogsTool extends BaseTool {
+  static readonly Name = 'get_pod_logs';
+
+  constructor(private k8sClient: K8sClient) {
+    super(
+      "Fetch logs from a pod in THIS environment's namespace. For a crashing or restarting pod (CrashLoopBackOff, non-zero restart count), set previous=true to read the crashed instance — the current container is often empty or pre-crash. Pass container for multi-container pods. The namespace defaults to this environment's namespace; any other namespace is rejected.",
+      {
+        type: 'object',
+        properties: {
+          pod_name: { type: 'string', description: 'The pod name' },
+          namespace: {
+            type: 'string',
+            description:
+              "Optional. Defaults to this environment's namespace. If provided, it MUST equal the environment's namespace; any other value is rejected.",
+          },
+          container: { type: 'string', description: 'Optional specific container name' },
+          previous: {
+            type: 'boolean',
+            description:
+              'Read logs from the PREVIOUS (crashed/restarted) container instance. Essential for CrashLoopBackOff: the current instance is usually empty; the previous one holds the crash output.',
+          },
+          tail_lines: { type: 'number', description: 'Number of lines from the end of logs (default: 100)' },
+          head_lines: {
+            type: 'number',
+            description:
+              'Number of lines from the start of logs (default: 50). Combined with tail_lines for head+tail truncation.',
+          },
+          search: {
+            type: 'string',
+            description:
+              'Case-insensitive regex matched against each fetched line. Returns matching lines with context and line numbers (relative to the fetched tail) instead of the head/tail view. Raise tail_lines to widen the searched window.',
+          },
+        },
+        required: ['pod_name'],
+      }
+    );
+  }
+
+  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+    if (this.checkAborted(signal)) {
+      return this.createErrorResult('Operation cancelled', 'CANCELLED');
+    }
+
+    let namespace: string;
+    try {
+      // SECURITY: lock to the build's namespace; reject any foreign namespace.
+      namespace = this.k8sClient.resolveNamespace(args.namespace as string | undefined);
+    } catch (error: any) {
+      return this.createErrorResult(error.message || 'Namespace not allowed', 'NAMESPACE_NOT_ALLOWED');
+    }
+
+    const previous = args.previous === true;
+    try {
+      const podName = args.pod_name as string;
+      const container = args.container as string | undefined;
+      const tailLines = (args.tail_lines as number) || 100;
+      const headLines = (args.head_lines as number) || 50;
+
+      const response = await this.k8sClient.coreApi.readNamespacedPodLog(
+        podName,
+        namespace,
+        container,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        previous,
+        undefined,
+        tailLines
+      );
+
+      const cleanLines = sanitizeLogText(response.body).split('\n');
+
+      const search = typeof args.search === 'string' ? args.search.trim() : '';
+      if (search) {
+        return this.renderSearchView(podName, previous, cleanLines, search);
+      }
+
+      const dedupedLines = deduplicateConsecutiveLines(cleanLines);
+
+      let finalLines: string[];
+      if (dedupedLines.length > headLines + tailLines) {
+        const omitted = dedupedLines.length - headLines - tailLines;
+        finalLines = [
+          ...dedupedLines.slice(0, headLines),
+          `... [${omitted} lines omitted of ${dedupedLines.length} total] ...`,
+          ...dedupedLines.slice(-tailLines),
+        ];
+      } else {
+        finalLines = dedupedLines;
+      }
+
+      const processedLogs = OutputLimiter.truncateLogOutput(finalLines.join('\n'), 30000, headLines, tailLines);
+
+      const displayContent = `Pod logs: ${finalLines.length} lines from ${podName}${
+        previous ? ' (previous instance)' : ''
+      } (${dedupedLines.length} total, head=${headLines} tail=${tailLines})`;
+
+      const truncationNote =
+        dedupedLines.length > finalLines.length
+          ? ` (truncated to head=${headLines} tail=${tailLines} of ${dedupedLines.length} deduped lines)`
+          : '';
+      const agentContent = `Logs for pod ${podName}${previous ? ' (previous instance)' : ''}: ${
+        dedupedLines.length
+      } lines after dedupe${truncationNote}\n\`\`\`\n${processedLogs}\n\`\`\``;
+
+      return this.createSuccessResult(agentContent, displayContent);
+    } catch (error: any) {
+      const message: string = error?.message || 'Failed to fetch pod logs';
+      if (previous && /previous terminated container|not found/i.test(message)) {
+        return this.createErrorResult(
+          'No previous (crashed) container instance found — the pod has not restarted yet, or kept no prior instance. Read current logs (omit previous), or check container status and events for the waiting/terminated reason.',
+          'NO_PREVIOUS_CONTAINER'
+        );
+      }
+      return this.createErrorResult(message, 'EXECUTION_ERROR');
+    }
+  }
+
+  private renderSearchView(podName: string, previous: boolean, cleanLines: string[], search: string): ToolResult {
+    let view;
+    try {
+      view = searchLogLines(cleanLines, search);
+    } catch (error: any) {
+      return this.createErrorResult(`Invalid search pattern: ${error.message}`, 'INVALID_PARAMETERS');
+    }
+
+    const scope = `${cleanLines.length}-line fetched tail of pod ${podName}${previous ? ' (previous instance)' : ''}`;
+    if (view.totalMatches === 0) {
+      return this.createSuccessResult(
+        `No lines match /${search}/i in the ${scope}. Raise tail_lines to search further back, or drop search for the head/tail view.`,
+        `Pod log search: 0 matches`
+      );
+    }
+
+    const capNote =
+      view.renderedMatches < view.totalMatches ? ` (showing first ${view.renderedMatches}; narrow the pattern)` : '';
+    const agentContent = [
+      `${view.totalMatches} lines match /${search}/i in the ${scope}${capNote}. Line numbers are relative to the fetched tail ("<line>:" match, "<line>-" context).`,
+      `\`\`\`\n${view.rendered}\n\`\`\``,
+    ].join('\n');
+    return this.createSuccessResult(agentContent, `Pod log search: ${view.totalMatches} matches`);
+  }
+}

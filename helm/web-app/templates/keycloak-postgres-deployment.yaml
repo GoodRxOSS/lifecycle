@@ -1,0 +1,97 @@
+{{- /*
+Copyright 2025 GoodRx, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+
+{{- if .Values.keycloak.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-keycloak-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: keycloak-postgresql
+spec:
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+      component: keycloak-postgresql
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        component: keycloak-postgresql
+    spec:
+      containers:
+      - name: keycloak-postgresql
+        image: "{{ .Values.keycloak.postgresImage.registry }}{{ .Values.keycloak.postgresImage.repository }}:{{ .Values.keycloak.postgresImage.tag }}"
+        args: ["-c", "max_connections=100", "-c", "shared_buffers=12MB"]
+        ports:
+        - name: postgres
+          containerPort: 5432
+          protocol: TCP
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: postgresUsername
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-keycloak-admin
+              key: postgresPassword
+        - name: POSTGRES_DB
+          value: keycloak
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        livenessProbe:
+          tcpSocket:
+            port: 5432
+          initialDelaySeconds: 30
+          timeoutSeconds: 1
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - "/bin/sh"
+            - "-i"
+            - "-c"
+            - psql 127.0.0.1 -U ${POSTGRES_USER} -q -d ${POSTGRES_DB} -c 'SELECT 1'
+          initialDelaySeconds: 5
+          timeoutSeconds: 1
+          periodSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: keycloak-postgresql-data
+          mountPath: "/var/lib/postgresql/data"
+          subPath: pgdata
+        resources:
+          {{- toYaml .Values.keycloak.postgresResources | nindent 10 }}
+      volumes:
+      - name: keycloak-postgresql-data
+        {{- if .Values.keycloak.persistent }}
+        persistentVolumeClaim:
+          claimName: {{ .Release.Name }}-keycloak-postgresql
+        {{- else }}
+        emptyDir:
+          medium: ''
+        {{- end }}
+{{- end }}

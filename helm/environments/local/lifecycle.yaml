@@ -1,0 +1,345 @@
+# Copyright 2025 GoodRx, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+global:
+  image:
+    repository: lifecycle-app
+    tag: dev
+    pullPolicy: Never
+  imagePullSecrets: []
+  serviceAccount:
+    create: true
+    name: 'runtime-sa'
+  podSecurityContext:
+    fsGroup: 2000
+  securityContext:
+    readOnlyRootFilesystem: false
+    runAsNonRoot: false
+  env:
+    # Add any global env vars here if needed
+    - name: PORT
+      value: '80'
+    - name: OBJECT_STORE_TYPE
+      value: 'minio'
+    - name: OBJECT_STORE_ENDPOINT
+      value: 'minio.lifecycle-app.svc.cluster.local'
+    - name: OBJECT_STORE_PORT
+      value: '9000'
+    - name: OBJECT_STORE_ACCESS_KEY
+      value: 'minioadmin'
+    - name: OBJECT_STORE_SECRET_KEY
+      value: 'minioadmin'
+    - name: OBJECT_STORE_BUCKET
+      value: 'lifecycle-logs'
+    - name: OBJECT_STORE_USE_SSL
+      value: 'false'
+    # Tilt's buildkit service (sysops/tilt/buildkit.yaml); the code fallback expects a chart-named lifecycle-buildkit.
+    - name: BUILDKIT_HOST
+      value: 'tcp://buildkit.lifecycle-app.svc.cluster.local:1234'
+    - name: ENABLE_AUTH
+      value: 'true'
+    - name: APP_HOST
+      value: 'http://localhost:5001'
+    - name: LIFECYCLE_UI_URL
+      value: 'http://localhost:3000'
+    - name: CHAT_PREVIEW_DOMAIN
+      value: 'localhost:5001'
+    - name: AGENT_SESSION_WORKSPACE_IMAGE
+      value: 'lifecycle-workspace:latest'
+    - name: AGENT_SESSION_WORKSPACE_EDITOR_IMAGE
+      value: 'codercom/code-server:4.98.2'
+    - name: AGENT_SESSION_WORKSPACE_GATEWAY_IMAGE
+      value: 'lifecycle-workspace:latest'
+    - name: AGENT_SESSION_WORKSPACE_BACKEND
+      value: 'opensandbox'
+    - name: OPEN_SANDBOX_PROTOCOL
+      value: 'http'
+    - name: OPEN_SANDBOX_DOMAIN
+      value: 'opensandbox-server.opensandbox-system.svc.cluster.local'
+    - name: OPEN_SANDBOX_API_KEY
+      value: 'lifecycle-opensandbox-dev'
+    - name: OPEN_SANDBOX_POOL_REF
+      value: 'lifecycle-workspace-pool'
+    - name: OPEN_SANDBOX_USE_SERVER_PROXY
+      value: 'true'
+  envFrom:
+    - secretRef:
+        name: app-secrets
+
+components:
+  web:
+    enabled: true
+    fullnameOverride: 'lifecycle-web'
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 80
+      targetPort: 80
+    ingress:
+      enabled: false
+    deployment:
+      replicaCount: 1
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          memory: 12Gi
+      extraEnv:
+        - name: JOB_VERSION
+          value: default
+        - name: ENVIRONMENT
+          value: dev
+        - name: APP_ENV
+          value: dev
+        - name: STAGE
+          value: stage
+        - name: PINO_PRETTY
+          value: 'false'
+        - name: LOG_LEVEL
+          value: info
+        - name: NODE_ENV
+          value: development
+        - name: NODE_OPTIONS
+          value: '--max-old-space-size=6144'
+        # The lifecycle-ui dev server browses the API cross-origin; without this every :3000 call fails CORS preflight.
+        - name: ALLOWED_ORIGINS
+          value: 'http://localhost:3000'
+        - name: LIFECYCLE_MODE
+          value: web
+        - name: PORT
+          value: '80'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
+        - name: MCP_SERVER_ENABLED
+          value: 'true'
+        - name: MCP_RESOURCE_URL
+          value: http://localhost:5001/mcp
+      ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 6
+        timeoutSeconds: 60
+      readinessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 12
+        timeoutSeconds: 60
+
+  worker:
+    enabled: true
+    fullnameOverride: 'lifecycle-worker'
+    service:
+      enabled: false
+    ingress:
+      enabled: false
+    deployment:
+      replicaCount: 1
+      extraEnv:
+        - name: JOB_VERSION
+          value: default
+        - name: ENVIRONMENT
+          value: dev
+        - name: STAGE
+          value: dev
+        - name: PINO_PRETTY
+          value: 'false'
+        - name: LOG_LEVEL
+          value: info
+        - name: NODE_ENV
+          value: development
+        - name: APP_ENV
+          value: dev
+        - name: AWS_REGION
+          value: 'us-west-2'
+        - name: AWS_PROFILE
+          value: REPLACE_ME_WITH_AWS_PROFILE
+        - name: LIFECYCLE_MODE
+          value: job
+        - name: PORT
+          value: '80'
+        - name: MAX_GITHUB_API_REQUEST
+          value: '250'
+        - name: GITHUB_API_REQUEST_INTERVAL
+          value: '10000'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
+      ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        failureThreshold: 12
+        timeoutSeconds: 10
+      readinessProbe:
+        httpGet:
+          path: /api/jobs
+          port: 80
+        periodSeconds: 10
+        failureThreshold: 10
+        timeoutSeconds: 10
+
+  gateway:
+    enabled: true
+    fullnameOverride: 'lifecycle-gateway'
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 80
+      targetPort: 80
+    ingress:
+      enabled: false
+    deployment:
+      replicaCount: 1
+      extraEnv:
+        - name: JOB_VERSION
+          value: default
+        - name: ENVIRONMENT
+          value: dev
+        - name: APP_ENV
+          value: dev
+        - name: NODE_ENV
+          value: development
+        - name: LIFECYCLE_MODE
+          value: gateway
+        - name: PORT
+          value: '80'
+        - name: DD_TRACE_ENABLED
+          value: 'false'
+      ports:
+        - name: http
+          containerPort: 80
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 6
+        timeoutSeconds: 60
+      readinessProbe:
+        httpGet:
+          path: /api/health
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 30
+        failureThreshold: 12
+        timeoutSeconds: 60
+
+postgresql:
+  enabled: false
+
+redis:
+  enabled: false
+
+minio:
+  enabled: false
+  defaultBuckets: 'lifecycle-logs,lifecycle-sites'
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  persistence:
+    enabled: true
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+rbac:
+  create: true
+
+keycloak:
+  enabled: true
+  realm: lifecycle
+  scheme: http
+  url: localhost:8081
+  appUrl: localhost:5001
+  uiScheme: http
+  uiUrl: localhost:3000
+
+  adminUsername: admin
+  adminPassword: admin
+  defaultUserPassword: changeme
+
+  postgresUsername: keycloakdb
+  postgresPassword: keycloakdb
+
+  lifecycleCoreClientSecret: changeme
+
+  # Identity Provider configurations (disabled for local dev, enable as needed)
+  companyIdp:
+    enabled: true
+    clientId: app-broker
+    clientSecret: changeme
+    tokenUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/token
+    authorizationUrl: http://localhost:8081/realms/company/protocol/openid-connect/auth
+    userInfoUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/userinfo
+    jwksUrl: http://lifecycle-keycloak.lifecycle-app.svc.cluster.local:8080/realms/company/protocol/openid-connect/certs
+    issuer: http://localhost:8081/realms/company
+
+  githubIdp:
+    enabled: true
+    # clientId and clientSecret will be taken from secrets.githubClientId and secrets.githubClientSecret
+    # clientId
+    # clientSecret
+
+  image:
+    registry: quay.io
+    repository: keycloak/keycloak
+    tag: 26.4.7
+
+  resources:
+    requests:
+      cpu: 400m
+      memory: 512Mi
+    limits:
+      memory: 768Mi
+
+  postgresImage:
+    registry: ''
+    repository: library/postgres
+    tag: 16.3-alpine
+
+  postgresResources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  persistent: true
+  volumeSize: 1Gi
+
+  ingress:
+    enabled: false
+    className: nginx
+    tls: false

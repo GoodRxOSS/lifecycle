@@ -1,0 +1,41 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import * as YamlService from 'server/models/yaml';
+
+export interface AgentSessionEnvironmentResourceRequirements {
+  readonly requests?: Record<string, string>;
+  readonly limits?: Record<string, string>;
+}
+
+export interface AgentSessionEnvironmentConfig {
+  readonly resources?: {
+    readonly agent?: AgentSessionEnvironmentResourceRequirements;
+    readonly editor?: AgentSessionEnvironmentResourceRequirements;
+  };
+  readonly prewarm?: {
+    readonly services?: string[];
+  };
+  readonly skills?: YamlService.AgentSessionSkillRef[];
+}
+
+export interface Environment {
+  readonly ignoreFiles?: string[];
+  readonly defaultServices?: YamlService.DependencyService[];
+  readonly optionalServices?: YamlService.DependencyService[];
+  readonly webhooks?: YamlService.Webhook[];
+  readonly agentSession?: AgentSessionEnvironmentConfig;
+}

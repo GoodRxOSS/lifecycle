@@ -1,0 +1,57 @@
+/**
+ * Copyright 2025 GoodRx, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { NextRequest } from 'next/server';
+import { createApiHandler } from 'server/lib/createApiHandler';
+import { successResponse } from 'server/lib/response';
+import { getLogger } from 'server/lib/logger';
+import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
+
+/**
+ * @openapi
+ * /api/v2/ai/agent/runtime-config/repos:
+ *   get:
+ *     summary: List all repository agent runtime config overrides
+ *     description: >
+ *       Returns an array of all repository-level Agent runtime configuration overrides.
+ *       These are partial configs that override specific fields of the global config.
+ *       To see the fully merged config for a specific repo, use the /effective endpoint instead.
+ *       Soft-deleted overrides are excluded from the response.
+ *     tags:
+ *       - Agent Runtime Config
+ *     operationId: listRepoAgentRuntimeConfigs
+ *     responses:
+ *       '200':
+ *         description: Array of repository config overrides
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ListRepoAgentRuntimeConfigsSuccessResponse'
+ *       '500':
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ */
+const getHandler = async (req: NextRequest) => {
+  const service = AgentRuntimeConfigService.getInstance();
+  const configs = await service.listRepoConfigs();
+  getLogger().info('AgentRuntimeConfig: repo configs listed via=api count=' + configs.length);
+  return successResponse(configs, { status: 200 }, req);
+};
+
+export const GET = createApiHandler(getHandler, { auth: 'session' });

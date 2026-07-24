@@ -1,0 +1,1709 @@
+{
+  "id": "schema-1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "format": "schema100Version",
+      "comment": "One of [1.0.0]"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabledFeatures": {
+          "type": "array"
+        },
+        "autoDeploy": {
+          "type": "boolean"
+        },
+        "githubDeployments": {
+          "type": "boolean"
+        },
+        "useGithubStatusComment": {
+          "type": "boolean"
+        },
+        "defaultServices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "serviceId": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        "optionalServices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "serviceId": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        "webhooks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "format": "webhookState"
+              },
+              "type": {
+                "type": "string",
+                "format": "webhookType"
+              },
+              "pipelineId": {
+                "type": "string"
+              },
+              "trigger": {
+                "type": "string"
+              },
+              "docker": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "image": {
+                    "type": "string"
+                  },
+                  "command": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timeout": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "image"
+                ]
+              },
+              "command": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "image": {
+                    "type": "string"
+                  },
+                  "script": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "image",
+                  "script"
+                ]
+              },
+              "env": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "state",
+              "type",
+              "env"
+            ]
+          }
+        },
+        "agentSession": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "agent": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "editor": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requests": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "limits": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "prewarm": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "services": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "branch": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "branch",
+                  "path"
+                ]
+              }
+            }
+          }
+        },
+        "ignoreFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "services": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "appShort": {
+            "type": "string"
+          },
+          "defaultUUID": {
+            "type": "string"
+          },
+          "requires": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "deploymentDependsOn": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "type": "string"
+            }
+          },
+          "helm": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "cfStepType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "args": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "branchName": {
+                "type": "string"
+              },
+              "chart": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "repoUrl": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "valueFiles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              },
+              "envLens": {
+                "type": "boolean"
+              },
+              "grpc": {
+                "type": "boolean"
+              },
+              "gatewayApi": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "protocol": {
+                    "type": "string",
+                    "enum": [
+                      "http",
+                      "grpc"
+                    ]
+                  },
+                  "gateway": {
+                    "type": "string",
+                    "enum": [
+                      "internal",
+                      "external"
+                    ]
+                  },
+                  "gatewayName": {
+                    "type": "string"
+                  },
+                  "gatewayNamespace": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "type": "number"
+                  },
+                  "hostnames": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "rules": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "gateways": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "http": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "internal": {
+                            "type": "string"
+                          },
+                          "external": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "grpc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "internal": {
+                            "type": "string"
+                          },
+                          "external": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "annotations": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "routes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "gateway": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "gatewayName": {
+                          "type": "string"
+                        },
+                        "hostnames": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "annotations": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "port": {
+                          "type": "number"
+                        },
+                        "rules": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "securityPolicy": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "annotations": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            },
+                            "allowedCIDRs": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "securityPolicy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "annotations": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      },
+                      "allowedCIDRs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "disableIngressHost": {
+                "type": "boolean"
+              },
+              "overrideDefaultIpWhitelist": {
+                "type": "boolean"
+              },
+              "docker": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "defaultTag": {
+                    "type": "string"
+                  },
+                  "pipelineId": {
+                    "type": "string"
+                  },
+                  "ecr": {
+                    "type": "string"
+                  },
+                  "builder": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "engine": {
+                        "type": "string",
+                        "enum": [
+                          "buildkit",
+                          "kaniko",
+                          "ci"
+                        ]
+                      },
+                      "resources": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "requests": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "limits": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "app": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "afterBuildPipelineConfig": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "afterBuildPipelineId": {
+                            "type": "string"
+                          },
+                          "detatchAfterBuildPipeline": {
+                            "type": "boolean"
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "dockerfilePath": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "string"
+                      },
+                      "env": {
+                        "type": "object"
+                      },
+                      "ports": {
+                        "type": "array",
+                        "minItems": 1
+                      }
+                    },
+                    "required": [
+                      "dockerfilePath"
+                    ]
+                  },
+                  "init": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "dockerfilePath": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "string"
+                      },
+                      "env": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "dockerfilePath"
+                    ]
+                  }
+                },
+                "required": [
+                  "defaultTag",
+                  "app"
+                ]
+              },
+              "deploymentMethod": {
+                "type": "string",
+                "enum": [
+                  "native",
+                  "ci"
+                ]
+              },
+              "nativeHelm": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "defaultHelmVersion": {
+                    "type": "string"
+                  },
+                  "jobTimeout": {
+                    "type": "number"
+                  },
+                  "serviceAccount": {
+                    "type": "string"
+                  },
+                  "defaultArgs": {
+                    "type": "string"
+                  },
+                  "image": {
+                    "type": "string"
+                  },
+                  "postRenderer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "args": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "codefresh": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "branchName": {
+                "type": "string"
+              },
+              "env": {
+                "type": "object"
+              },
+              "deploy": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "pipelineId": {
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "type": "string"
+                  }
+                }
+              },
+              "destroy": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "pipelineId": {
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "type": "string"
+                  }
+                }
+              },
+              "deployment": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "helm": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "chartName": {
+                        "type": "string"
+                      },
+                      "chartRepoUrl": {
+                        "type": "string"
+                      },
+                      "chartVersion": {
+                        "type": "string"
+                      },
+                      "cmdPs": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string"
+                      },
+                      "customValues": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "customValueFiles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "helmVersion": {
+                        "type": "string"
+                      },
+                      "attachPvc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "mountPath": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "public": {
+                    "type": "boolean"
+                  },
+                  "capacityType": {
+                    "type": "string",
+                    "format": "capacityType"
+                  },
+                  "resource": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "cpu": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "memory": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "disabled": {
+                        "type": "boolean"
+                      },
+                      "tcpSocketPort": {
+                        "type": "number"
+                      },
+                      "httpGet": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "number"
+                          }
+                        }
+                      },
+                      "initialDelaySeconds": {
+                        "type": "number"
+                      },
+                      "periodSeconds": {
+                        "type": "number"
+                      },
+                      "timeoutSeconds": {
+                        "type": "number"
+                      },
+                      "successThreshold": {
+                        "type": "number"
+                      },
+                      "failureThreshold": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "hostnames": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "host": {
+                        "type": "string"
+                      },
+                      "acmARN": {
+                        "type": "string"
+                      },
+                      "defaultInternalHostname": {
+                        "type": "string"
+                      },
+                      "defaultPublicUrl": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "network": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "ipWhitelist": {
+                        "type": "array"
+                      },
+                      "pathPortMapping": {
+                        "type": "object"
+                      },
+                      "hostPortMapping": {
+                        "type": "object"
+                      },
+                      "grpc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enable": {
+                            "type": "boolean"
+                          },
+                          "host": {
+                            "type": "string"
+                          },
+                          "defaultHost": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "serviceDisks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "mountPath": {
+                          "type": "string"
+                        },
+                        "accessModes": {
+                          "type": "string",
+                          "format": "diskAccessMode"
+                        },
+                        "storageSize": {
+                          "type": "string"
+                        },
+                        "medium": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
+                    }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
+                  }
+                }
+              }
+            },
+            "required": [
+              "repository",
+              "branchName"
+            ]
+          },
+          "github": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "branchName": {
+                "type": "string"
+              },
+              "docker": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "defaultTag": {
+                    "type": "string"
+                  },
+                  "pipelineId": {
+                    "type": "string"
+                  },
+                  "ecr": {
+                    "type": "string"
+                  },
+                  "builder": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "engine": {
+                        "type": "string",
+                        "enum": [
+                          "buildkit",
+                          "kaniko",
+                          "ci"
+                        ]
+                      },
+                      "resources": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "requests": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "limits": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "app": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "afterBuildPipelineConfig": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "afterBuildPipelineId": {
+                            "type": "string"
+                          },
+                          "detatchAfterBuildPipeline": {
+                            "type": "boolean"
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "dockerfilePath": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "string"
+                      },
+                      "env": {
+                        "type": "object"
+                      },
+                      "ports": {
+                        "type": "array",
+                        "minItems": 1
+                      }
+                    },
+                    "required": [
+                      "dockerfilePath"
+                    ]
+                  },
+                  "init": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "dockerfilePath": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "string"
+                      },
+                      "env": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "dockerfilePath"
+                    ]
+                  }
+                },
+                "required": [
+                  "defaultTag",
+                  "app"
+                ]
+              },
+              "deployment": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "helm": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "chartName": {
+                        "type": "string"
+                      },
+                      "chartRepoUrl": {
+                        "type": "string"
+                      },
+                      "chartVersion": {
+                        "type": "string"
+                      },
+                      "cmdPs": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string"
+                      },
+                      "customValues": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "customValueFiles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "helmVersion": {
+                        "type": "string"
+                      },
+                      "attachPvc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "mountPath": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "public": {
+                    "type": "boolean"
+                  },
+                  "capacityType": {
+                    "type": "string",
+                    "format": "capacityType"
+                  },
+                  "resource": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "cpu": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "memory": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "disabled": {
+                        "type": "boolean"
+                      },
+                      "tcpSocketPort": {
+                        "type": "number"
+                      },
+                      "httpGet": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "number"
+                          }
+                        }
+                      },
+                      "initialDelaySeconds": {
+                        "type": "number"
+                      },
+                      "periodSeconds": {
+                        "type": "number"
+                      },
+                      "timeoutSeconds": {
+                        "type": "number"
+                      },
+                      "successThreshold": {
+                        "type": "number"
+                      },
+                      "failureThreshold": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "hostnames": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "host": {
+                        "type": "string"
+                      },
+                      "acmARN": {
+                        "type": "string"
+                      },
+                      "defaultInternalHostname": {
+                        "type": "string"
+                      },
+                      "defaultPublicUrl": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "network": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "ipWhitelist": {
+                        "type": "array"
+                      },
+                      "pathPortMapping": {
+                        "type": "object"
+                      },
+                      "hostPortMapping": {
+                        "type": "object"
+                      },
+                      "grpc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enable": {
+                            "type": "boolean"
+                          },
+                          "host": {
+                            "type": "string"
+                          },
+                          "defaultHost": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "serviceDisks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "mountPath": {
+                          "type": "string"
+                        },
+                        "accessModes": {
+                          "type": "string",
+                          "format": "diskAccessMode"
+                        },
+                        "storageSize": {
+                          "type": "string"
+                        },
+                        "medium": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
+                    }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
+                  }
+                }
+              },
+              "envLens": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "repository",
+              "branchName",
+              "docker"
+            ]
+          },
+          "docker": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "dockerImage": {
+                "type": "string"
+              },
+              "defaultTag": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "string"
+              },
+              "env": {
+                "type": "object"
+              },
+              "ports": {
+                "type": "array"
+              },
+              "deployment": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "helm": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "chartName": {
+                        "type": "string"
+                      },
+                      "chartRepoUrl": {
+                        "type": "string"
+                      },
+                      "chartVersion": {
+                        "type": "string"
+                      },
+                      "cmdPs": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string"
+                      },
+                      "customValues": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "customValueFiles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "helmVersion": {
+                        "type": "string"
+                      },
+                      "attachPvc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "mountPath": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "public": {
+                    "type": "boolean"
+                  },
+                  "capacityType": {
+                    "type": "string",
+                    "format": "capacityType"
+                  },
+                  "resource": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "cpu": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "memory": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "request": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "disabled": {
+                        "type": "boolean"
+                      },
+                      "tcpSocketPort": {
+                        "type": "number"
+                      },
+                      "httpGet": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "number"
+                          }
+                        }
+                      },
+                      "initialDelaySeconds": {
+                        "type": "number"
+                      },
+                      "periodSeconds": {
+                        "type": "number"
+                      },
+                      "timeoutSeconds": {
+                        "type": "number"
+                      },
+                      "successThreshold": {
+                        "type": "number"
+                      },
+                      "failureThreshold": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "hostnames": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "host": {
+                        "type": "string"
+                      },
+                      "acmARN": {
+                        "type": "string"
+                      },
+                      "defaultInternalHostname": {
+                        "type": "string"
+                      },
+                      "defaultPublicUrl": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "network": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "ipWhitelist": {
+                        "type": "array"
+                      },
+                      "pathPortMapping": {
+                        "type": "object"
+                      },
+                      "hostPortMapping": {
+                        "type": "object"
+                      },
+                      "grpc": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "enable": {
+                            "type": "boolean"
+                          },
+                          "host": {
+                            "type": "string"
+                          },
+                          "defaultHost": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "serviceDisks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "mountPath": {
+                          "type": "string"
+                        },
+                        "accessModes": {
+                          "type": "string",
+                          "format": "diskAccessMode"
+                        },
+                        "storageSize": {
+                          "type": "string"
+                        },
+                        "medium": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "mountPath",
+                        "storageSize"
+                      ]
+                    }
+                  },
+                  "node_selector": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Simple key-value pairs for Kubernetes node selector"
+                  },
+                  "node_affinity": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Full Kubernetes nodeAffinity object for advanced node selection"
+                  }
+                }
+              },
+              "envLens": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "dockerImage",
+              "defaultTag"
+            ]
+          },
+          "externalHttp": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "defaultInternalHostname": {
+                "type": "string"
+              },
+              "defaultPublicUrl": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "defaultInternalHostname",
+              "defaultPublicUrl"
+            ]
+          },
+          "auroraRestore": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "arguments"
+            ]
+          },
+          "configuration": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "branchName": {
+                "type": "string"
+              },
+              "data": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "data"
+            ]
+          },
+          "dev": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "image": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "installCommand": {
+                "type": "string"
+              },
+              "workDir": {
+                "type": "string"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "env": {
+                "type": "object"
+              },
+              "forwardEnvVarsToAgent": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "agentSession": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pollMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "skills": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "repo": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "branch": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "repo",
+                        "branch",
+                        "path"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "image",
+              "command"
+            ]
+          },
+          "ignoreFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    }
+  }
+}
