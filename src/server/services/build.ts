@@ -2254,7 +2254,7 @@ export default class BuildService extends BaseService {
     environmentId,
     lifecycleConfig,
   }: DeployOptions & { repositoryId: number }) {
-    const environments = await this.getEnvironmentsToBuild(environmentId, repositoryId);
+    const environments = await this.getEnvironmentsToBuild(environmentId);
 
     if (!environments.length) {
       getLogger().debug('Build: no matching environments');
@@ -3648,19 +3648,15 @@ export default class BuildService extends BaseService {
   /**
    * Returns an array of environments to build.
    * @param environmentId the default environmentId (if one exists)
-   * @param repositoryId the repository to use for finding relevant environments, if needed
    */
-  private async getEnvironmentsToBuild(environmentId: number | undefined, repositoryId: number) {
-    let environments: Environment[] = [];
-    if (environmentId != null) {
-      environments.push(await this.db.models.Environment.findOne({ id: environmentId }));
-    } else {
-      environments = environments.concat(
-        await this.db.models.Environment.find().withGraphJoined('services').where('services.repositoryId', repositoryId)
-      );
+  private async getEnvironmentsToBuild(environmentId: number | undefined): Promise<Environment[]> {
+    if (environmentId == null) {
+      return [];
     }
 
-    return environments;
+    const environment = await this.db.models.Environment.findOne({ id: environmentId });
+
+    return environment != null ? [environment] : [];
   }
 
   private async updateDeploysImageDetails(
