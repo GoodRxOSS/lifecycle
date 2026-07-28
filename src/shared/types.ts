@@ -31,8 +31,6 @@ export type Link = {
   url: string;
 };
 
-export type FeatureFlags = Record<string, boolean>;
-
 export interface ContainerInfo {
   name: string;
   state: string;

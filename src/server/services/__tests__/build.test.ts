@@ -158,7 +158,7 @@ jest.mock('server/lib/fastly', () =>
 );
 
 import BuildService, { computeIdempotencyRequestDigest, assertIdempotentReplayAllowed } from '../build';
-import { BuildKind, BuildStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
 import * as github from 'server/lib/github';
 
 function createThenableQuery(result: any[] = []) {
@@ -467,7 +467,7 @@ describe('BuildService status updates', () => {
       uuid: 'sample-build',
       runUUID: 'run-1',
       kind: BuildKind.SANDBOX,
-      deploys: [],
+      deploys: undefined,
       reload: jest.fn().mockResolvedValue(undefined),
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
       $query: jest.fn(() => ({ patch })),
@@ -1581,5 +1581,419 @@ describe('idempotency digest + replay authorization (D12)', () => {
         assertIdempotentReplayAllowed({ idempotencyRequestDigest: null, githubRepositoryId: 7 }, digest, null)
       )
     ).toBeNull();
+  });
+});
+
+describe('BuildService focused changed-line coverage', () => {
+  const queueManager = () => ({
+    registerQueue: jest.fn(() => ({
+      add: jest.fn().mockResolvedValue(undefined),
+      process: jest.fn(),
+      on: jest.fn(),
+    })),
+  });
+
+  const serviceWith = (db: Record<string, unknown>) =>
+    new BuildService(db as any, {} as any, {} as any, queueManager() as any);
+
+  const deployQuery = (deploys: any[]) => {
+    const query: any = {
+      where: jest.fn(() => query),
+      withGraphFetched: jest.fn().mockResolvedValue(deploys),
+    };
+    return query;
+  };
+
+  beforeEach(() => {
+    mockDeployQuery.mockReset();
+    mockGetAllConfigs.mockResolvedValue({ serviceAccount: { name: 'builder' } });
+  });
+
+  test('returns null when the queue fingerprint build lookup misses', async () => {
+    const query: any = {
+      findOne: jest.fn(() => query),
+      withGraphFetched: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = serviceWith({ models: { Build: { query: jest.fn(() => query) } } });
+
+    await expect((service as any).getBuildForQueueFingerprint(41)).resolves.toBeNull();
+  });
+
+  test('uses default pagination when a legacy caller omits pagination', async () => {
+    const query: any = {
+      select: jest.fn(() => query),
+      where: jest.fn(() => query),
+      whereNotIn: jest.fn(() => query),
+      modify: jest.fn((callback: (builder: any) => void) => {
+        callback(query);
+        return query;
+      }),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn(() => query),
+      orderBy: jest.fn(() => query),
+      page: jest.fn().mockResolvedValue({ results: [], total: 0 }),
+    };
+    const service = serviceWith({ models: { Build: { query: jest.fn(() => query) } } });
+
+    await (service as any).getAllBuilds('', undefined, '', undefined);
+
+    expect(query.page).toHaveBeenCalledWith(0, 25);
+  });
+
+  test('executes the deploy graph projection for build detail hydration', async () => {
+    const graphSelect = jest.fn();
+    const build = { id: 10, uuid: 'detail', deploys: [] };
+    const query: any = {
+      findOne: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
+      select: jest.fn(() => query),
+      withGraphFetched: jest.fn(() => query),
+      modifyGraph: jest.fn((_name: string, callback: (builder: any) => void) => {
+        callback({ select: graphSelect });
+        return query;
+      }),
+      then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(build).then(resolve, reject),
+    };
+    const overrideQuery: any = {
+      findOne: jest.fn(() => overrideQuery),
+      select: jest.fn(() => overrideQuery),
+      withGraphFetched: jest.fn(() => overrideQuery),
+      then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve({ ...build, deploys: [] }).then(resolve, reject),
+    };
+    const service = serviceWith({
+      models: { Build: { query: jest.fn().mockReturnValueOnce(query).mockReturnValueOnce(overrideQuery) } },
+    });
+    mockGetServiceOverrideStates.mockResolvedValueOnce([]);
+    mockGetAllConfigs.mockResolvedValueOnce({ domainDefaults: {} });
+
+    await service.getBuildByUUID('detail');
+
+    expect(graphSelect).toHaveBeenCalledWith(
+      'id',
+      'buildId',
+      'uuid',
+      'status',
+      'statusMessage',
+      'active',
+      'devMode',
+      'cname',
+      'deployableId',
+      'branchName',
+      'deployPipelineId',
+      'githubRepositoryId',
+      'runUUID',
+      'publicUrl',
+      'dockerImage',
+      'buildLogs',
+      'createdAt',
+      'updatedAt',
+      'sha',
+      'initDockerImage',
+      'env',
+      'initEnv'
+    );
+  });
+
+  test('builds every supported image type and ignores inactive and unsupported deploys', async () => {
+    const makeDeploy = (uuid: string, type: DeployTypes, active = true) => ({
+      uuid,
+      active,
+      deployable: { type },
+      $query: jest.fn(() => ({ patchAndFetch: jest.fn().mockResolvedValue(undefined) })),
+    });
+    const deploys = [
+      makeDeploy('docker', DeployTypes.DOCKER),
+      makeDeploy('github', DeployTypes.GITHUB),
+      makeDeploy('helm', DeployTypes.HELM),
+      makeDeploy('external', DeployTypes.EXTERNAL_HTTP),
+      makeDeploy('inactive', DeployTypes.DOCKER, false),
+    ];
+    mockDeployQuery.mockReturnValue(deployQuery(deploys));
+    const buildImage = jest.fn().mockResolvedValue(true);
+    const service = serviceWith({ services: { Deploy: { buildImage } } });
+
+    await expect(service.buildImages({ id: 4 } as any)).resolves.toBe(true);
+
+    expect(buildImage.mock.calls.map(([deploy]) => deploy.uuid)).toEqual(['docker', 'github', 'helm']);
+  });
+
+  test('fails image and CLI processing cleanly for a loaded deploy missing its deployable', async () => {
+    const missing = { uuid: 'missing', active: true };
+    mockDeployQuery.mockReturnValue(deployQuery([{ uuid: 'inactive', active: false }, missing]));
+    const service = serviceWith({ services: { Deploy: { buildImage: jest.fn(), deployCLI: jest.fn() } } });
+
+    await expect(service.buildImages({ id: 4 } as any)).resolves.toBe(false);
+    await expect(
+      service.deployCLIServices({ id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) } as any)
+    ).resolves.toBe(false);
+  });
+
+  test('deploys only active CLI services and records an individual CLI failure', async () => {
+    const cliSuccess = {
+      uuid: 'cli-success',
+      active: true,
+      runUUID: 'run-success',
+      deployable: { type: DeployTypes.CODEFRESH },
+    };
+    const cliFailure = {
+      uuid: 'cli-failure',
+      active: true,
+      runUUID: null,
+      deployable: { type: DeployTypes.AURORA_RESTORE },
+    };
+    const ignored = {
+      uuid: 'docker',
+      active: true,
+      deployable: { type: DeployTypes.DOCKER },
+    };
+    mockDeployQuery.mockReturnValue(deployQuery([cliSuccess, cliFailure, ignored]));
+    const failure = new Error('cli failed');
+    const deployCLI = jest.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(failure);
+    const recordDeployFailure = jest.fn().mockResolvedValue(false);
+    const service = serviceWith({ services: { Deploy: { deployCLI, recordDeployFailure } } });
+    const build = { id: 4, runUUID: 'build-run', $fetchGraph: jest.fn().mockResolvedValue(undefined) };
+
+    await expect(service.deployCLIServices(build as any)).resolves.toBe(false);
+
+    expect(deployCLI).toHaveBeenCalledTimes(2);
+    expect(recordDeployFailure).toHaveBeenCalledWith(cliFailure, 'build-run', {
+      status: DeployStatus.ERROR,
+      error: failure,
+      fallbackMessage: 'CLI deploy failed.',
+    });
+  });
+
+  test('filters inactive manifests and rejects a loaded active deploy missing its deployable', async () => {
+    mockDeployQuery.mockReturnValue(
+      deployQuery([
+        { uuid: 'inactive', active: false },
+        { uuid: 'missing', active: true },
+      ])
+    );
+    const service = serviceWith({});
+    const build = {
+      id: 4,
+      uuid: 'manifest',
+      namespace: 'env-manifest',
+      kind: BuildKind.SANDBOX,
+      $query: jest.fn(),
+    };
+
+    await expect(
+      service.generateAndApplyManifests({
+        build: build as any,
+        githubRepositoryId: null,
+        namespace: build.namespace,
+      })
+    ).rejects.toThrow('Deployable not found for deploy missing');
+  });
+
+  test('accepts a loaded active configuration deploy in manifest filtering', async () => {
+    const deploy = {
+      uuid: 'config',
+      active: true,
+      deployable: { type: DeployTypes.CONFIGURATION },
+      $query: jest.fn(() => ({ patch: jest.fn() })),
+    };
+    mockDeployQuery.mockReturnValue(deployQuery([deploy]));
+    const service = serviceWith({});
+    jest.spyOn(service as any, 'updateDeploysImageDetails').mockResolvedValue(undefined);
+    const build = {
+      id: 4,
+      uuid: 'manifest',
+      namespace: 'env-manifest',
+      kind: BuildKind.SANDBOX,
+      $query: jest.fn(),
+    };
+
+    await expect(
+      service.generateAndApplyManifests({
+        build: build as any,
+        githubRepositoryId: null,
+        namespace: build.namespace,
+      })
+    ).resolves.toBe(true);
+  });
+
+  test('covers empty and scoped running-image updates', async () => {
+    const service = serviceWith({});
+    await expect(
+      (service as any).updateDeploysImageDetails({
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        deploys: undefined,
+      })
+    ).resolves.toBeUndefined();
+
+    const patch = jest.fn().mockResolvedValue(undefined);
+    await (service as any).updateDeploysImageDetails(
+      {
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        deploys: [
+          {
+            githubRepositoryId: 42,
+            branchName: 'main',
+            dockerImage: 'image:v1',
+            $query: jest.fn(() => ({ patch })),
+          },
+        ],
+      },
+      42,
+      'main'
+    );
+    expect(patch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'image:v1' });
+  });
+
+  test('resolves direct and repository-derived build environments', async () => {
+    const direct = { id: 5 };
+    const related = [{ id: 6 }];
+    const repositoryQuery: any = {
+      withGraphJoined: jest.fn(() => repositoryQuery),
+      where: jest.fn().mockResolvedValue(related),
+    };
+    const service = serviceWith({
+      models: {
+        Environment: {
+          findOne: jest.fn().mockResolvedValue(direct),
+          find: jest.fn(() => repositoryQuery),
+        },
+      },
+    });
+
+    await expect((service as any).getEnvironmentsToBuild(5, 9)).resolves.toEqual([direct]);
+    await expect((service as any).getEnvironmentsToBuild(undefined, 9)).resolves.toEqual(related);
+  });
+
+  test('creates missing PR builds with and without a root repository identity', async () => {
+    const createHarness = (repositoryId?: number) => {
+      const buildQuery: any = {
+        where: jest.fn(() => buildQuery),
+        whereNull: jest.fn(() => buildQuery),
+        first: jest.fn().mockResolvedValue(undefined),
+      };
+      const repositoryQuery: any = {
+        findById: jest.fn(() => repositoryQuery),
+        select: jest.fn().mockResolvedValue(repositoryId == null ? undefined : { githubRepositoryId: 42 }),
+      };
+      const buildCreate = jest.fn(async (attributes: Record<string, unknown>) => ({ id: 77, ...attributes }));
+      const service = serviceWith({
+        models: {
+          Build: { query: jest.fn(() => buildQuery), create: buildCreate },
+          Repository: { query: jest.fn(() => repositoryQuery) },
+        },
+      });
+      return { service, buildCreate };
+    };
+    const environment = { id: 5 };
+    const options = {
+      pullRequestId: 12,
+      repositoryBranchName: 'feature',
+      repositoryId: 9,
+    };
+    const withRepository = createHarness(9);
+    const withoutRepository = createHarness();
+
+    await expect(
+      (withRepository.service as any).findOrCreateBuild(environment, options, {
+        environment: { enabledFeatures: ['x'], githubDeployments: true },
+      })
+    ).resolves.toMatchObject({ id: 77, githubRepositoryId: 42 });
+    expect(withRepository.buildCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ githubRepositoryId: 42, githubDeployments: true })
+    );
+
+    await expect(
+      (withoutRepository.service as any).findOrCreateBuild(
+        environment,
+        { ...options, repositoryId: undefined },
+        undefined
+      )
+    ).resolves.toMatchObject({ id: 77, githubRepositoryId: null });
+    expect(withoutRepository.buildCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ githubRepositoryId: null, githubDeployments: false })
+    );
+  });
+
+  test('serializes current deploy ids and non-null service URLs', async () => {
+    const summaryQuery: any = {
+      alias: jest.fn(() => summaryQuery),
+      select: jest.fn(() => summaryQuery),
+      joinRelated: jest.fn(() => summaryQuery),
+      whereIn: jest.fn(() => summaryQuery),
+      where: jest.fn(() => summaryQuery),
+      whereNotNull: jest.fn().mockResolvedValue([
+        {
+          buildId: 7,
+          status: DeployStatus.READY,
+          publicUrl: 'app.example.test',
+          deployableName: 'app',
+          deployableType: DeployTypes.DOCKER,
+        },
+      ]),
+    };
+    const service = serviceWith({
+      models: { Deploy: { query: jest.fn(() => summaryQuery) } },
+    });
+    const summaries = await (service as any).resolveEnvironmentServiceSummaries([{ id: 7 }]);
+    const serialized = (service as any).serializeEnvironmentSummary(
+      {
+        id: 7,
+        uuid: 'api-env-123456',
+        runUUID: 'deploy-run-7',
+        status: BuildStatus.DEPLOYED,
+        namespace: 'env-api-env-123456',
+        triggerType: 'api',
+        branchName: 'main',
+        githubRepositoryId: 42,
+        deployEnabled: true,
+        pullRequest: null,
+        deploys: [],
+      },
+      new Map([[42, 'org/repo']]),
+      summaries
+    );
+
+    expect(serialized).toMatchObject({
+      currentDeployId: 'deploy-run-7',
+      ready: true,
+      phase: 'ready',
+    });
+  });
+
+  test('produces ingress configurations for host, path, and default port mappings', async () => {
+    const hostForDeployableDeploy = jest.fn(() => 'service.example.test');
+    const service = serviceWith({ services: { Deploy: { hostForDeployableDeploy } } });
+    const deploy = (uuid: string, deployable: Record<string, unknown>) => ({
+      uuid,
+      active: true,
+      deployable: {
+        public: true,
+        type: DeployTypes.DOCKER,
+        port: '8080',
+        ...deployable,
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+    const host = deploy('host', { hostPortMapping: { admin: '9090' } });
+    const path = deploy('path', { pathPortMapping: { '/api': 8081 } });
+    const fallback = deploy('fallback', {});
+    const build = {
+      deploys: [host, path, fallback],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.domainsAndCertificatesForBuild(build as any, true)).resolves.toEqual([
+      expect.objectContaining({ host: 'admin-service.example.test', pathPortMapping: { '/': 9090 } }),
+      expect.objectContaining({ host: 'service.example.test', pathPortMapping: { '/api': 8081 } }),
+      expect.objectContaining({ host: 'service.example.test', pathPortMapping: { '/': 8080 } }),
+    ]);
+    await expect(
+      service.domainsAndCertificatesForBuild(
+        { $fetchGraph: jest.fn().mockResolvedValue(undefined), deploys: undefined } as any,
+        true
+      )
+    ).resolves.toEqual([]);
+    await expect(service.domainsAndCertificatesForBuild(null as any, true)).resolves.toEqual([]);
   });
 });

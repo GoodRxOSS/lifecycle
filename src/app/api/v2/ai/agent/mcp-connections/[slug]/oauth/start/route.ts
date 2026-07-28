@@ -15,6 +15,7 @@
  */
 
 import { auth } from '@ai-sdk/mcp';
+import { discoverOAuthProtectedResourceMetadata } from '@modelcontextprotocol/sdk/client/auth.js';
 import { NextRequest, NextResponse } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { requireRequestUserIdentity } from 'server/lib/get-user';
@@ -28,7 +29,11 @@ import {
 } from 'server/services/agentRuntime/mcp/connectionConfig';
 import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
 import McpOAuthFlowService from 'server/services/agentRuntime/mcp/oauthFlow';
-import { PersistentOAuthClientProvider } from 'server/services/agentRuntime/mcp/oauthProvider';
+import {
+  getMcpOAuthRegistrationRedirectUrl,
+  isMcpOAuthClientAuthenticationCompatible,
+  PersistentOAuthClientProvider,
+} from 'server/services/agentRuntime/mcp/oauthProvider';
 import type { McpDiscoveredTool, McpStoredUserConnectionState } from 'server/services/agentRuntime/mcp/types';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
@@ -43,7 +48,12 @@ function hasCompatibleRedirectUri(state: OAuthConnectionState, redirectUrl: stri
     return true;
   }
 
-  return redirectUris.includes(redirectUrl);
+  return redirectUris.includes(redirectUrl) || redirectUris.includes(getMcpOAuthRegistrationRedirectUrl(redirectUrl));
+}
+
+function hasCompatibleClientAuthentication(state: OAuthConnectionState, redirectUrl: string): boolean {
+  const client = state.clientInformation;
+  return !client || isMcpOAuthClientAuthenticationCompatible(client, redirectUrl);
 }
 
 function sanitizeInitialOAuthState(
@@ -54,7 +64,7 @@ function sanitizeInitialOAuthState(
     return null;
   }
 
-  if (hasCompatibleRedirectUri(state, redirectUrl)) {
+  if (hasCompatibleRedirectUri(state, redirectUrl) && hasCompatibleClientAuthentication(state, redirectUrl)) {
     return state;
   }
 
@@ -88,6 +98,22 @@ function resolveAppOrigin(req: NextRequest): string | null {
   } catch {
     return null;
   }
+}
+
+async function discoverAuthorizationScope(serverUrl: string): Promise<string | undefined> {
+  const metadata = await discoverOAuthProtectedResourceMetadata(serverUrl);
+  const expectedResource = new URL(serverUrl);
+  const advertisedResource = new URL(metadata.resource);
+  if (expectedResource.href !== advertisedResource.href) {
+    throw new Error(
+      `MCP protected-resource metadata identifies ${advertisedResource.href}, but the configured MCP URL is ${expectedResource.href}.`
+    );
+  }
+  if (!metadata.authorization_servers?.length) {
+    throw new Error('MCP protected-resource metadata does not advertise an authorization server.');
+  }
+  const advertisedScope = metadata.scopes_supported?.join(' ').trim();
+  return advertisedScope || undefined;
 }
 
 /**
@@ -174,35 +200,9 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
   );
   const initialState =
     existing?.state?.type === 'oauth' ? sanitizeInitialOAuthState(existing.state, callbackUrl) : null;
-  const flow = await McpOAuthFlowService.create({
-    userId: userIdentity.userId,
-    ownerGithubUsername: userIdentity.githubUsername,
-    slug,
-    scope,
-    definitionFingerprint,
-    appOrigin: resolveAppOrigin(req),
-  });
-
-  const provider = new PersistentOAuthClientProvider({
-    userId: userIdentity.userId,
-    ownerGithubUsername: userIdentity.githubUsername,
-    scope,
-    slug,
-    definitionFingerprint,
-    authConfig,
-    redirectUrl: callbackUrl,
-    statePrefix: flow.flowId,
-    initialState,
-    discoveredTools: existing?.discoveredTools,
-    validatedAt: existing?.validatedAt,
-    validationError: existing?.validationError,
-    interactive: true,
-  });
   const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
-  const transport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig, {
-    authProvider: provider,
-  });
-  if (transport.type === 'stdio') {
+  const transportWithoutAuth = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig);
+  if (transportWithoutAuth.type === 'stdio') {
     return NextResponse.json(
       {
         request_id: req.headers.get('x-request-id'),
@@ -212,11 +212,53 @@ const postHandler = async (req: NextRequest, { params }: { params: Promise<{ slu
       { status: 400 }
     );
   }
+  let authorizationScope: string | undefined;
+  try {
+    authorizationScope = await discoverAuthorizationScope(transportWithoutAuth.url);
+  } catch (error) {
+    return errorResponse(
+      new Error(
+        `Lifecycle could not discover a valid OAuth configuration for this MCP server: ${
+          error instanceof Error ? error.message : 'invalid protected-resource metadata'
+        }`
+      ),
+      { status: 422 },
+      req
+    );
+  }
+  const flow = await McpOAuthFlowService.create({
+    userId: userIdentity.userId,
+    ownerGithubUsername: userIdentity.githubUsername,
+    slug,
+    scope,
+    definitionFingerprint,
+    appOrigin: resolveAppOrigin(req),
+  });
+  const provider = new PersistentOAuthClientProvider({
+    userId: userIdentity.userId,
+    ownerGithubUsername: userIdentity.githubUsername,
+    scope,
+    slug,
+    definitionFingerprint,
+    authConfig,
+    oauthScope: authorizationScope,
+    redirectUrl: callbackUrl,
+    statePrefix: flow.flowId,
+    initialState,
+    discoveredTools: existing?.discoveredTools,
+    validatedAt: existing?.validatedAt,
+    validationError: existing?.validationError,
+    interactive: true,
+  });
+  const transport = {
+    ...transportWithoutAuth,
+    authProvider: provider,
+  };
 
   try {
     const result = await auth(provider, {
       serverUrl: transport.url,
-      scope: authConfig.scope,
+      scope: authorizationScope,
     });
 
     if (result !== 'REDIRECT') {

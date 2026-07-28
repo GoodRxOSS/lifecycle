@@ -182,8 +182,6 @@ export function normalizeAuthConfig(input: unknown): McpAuthConfig {
       return {
         mode: 'oauth',
         provider: 'generic-oauth2.1',
-        scope: typeof raw.scope === 'string' ? raw.scope.trim() : undefined,
-        resource: typeof raw.resource === 'string' ? raw.resource.trim() : undefined,
         clientName: typeof raw.clientName === 'string' ? raw.clientName.trim() : undefined,
         instructions: typeof raw.instructions === 'string' ? raw.instructions.trim() : undefined,
       };
@@ -428,10 +426,14 @@ export function applyCompiledConnectionConfigToTransport(
   };
 }
 
-// Single source of truth: OAuth clients register this exact redirect URI, so every
-// flow (interactive start, callback, runtime refresh) must build the identical URL.
-export function buildMcpOAuthCallbackUrl(slug: string): string {
-  const url = new URL(APP_HOST);
+// Single source of truth for the actual authorization and token-exchange redirect.
+// The callback is flow-bound and public, so local OAuth can use the standards-defined
+// IP-literal loopback form even when the Lifecycle UI itself is opened on localhost.
+export function buildMcpOAuthCallbackUrl(slug: string, appHost = APP_HOST): string {
+  const url = new URL(appHost);
+  if (url.protocol === 'http:' && url.hostname.toLowerCase() === 'localhost') {
+    url.hostname = '127.0.0.1';
+  }
   url.pathname = `/api/v2/ai/agent/mcp-connections/${encodeURIComponent(slug)}/oauth/callback`;
   return url.toString();
 }

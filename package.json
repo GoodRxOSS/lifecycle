@@ -10,10 +10,10 @@
   ],
   "scripts": {
     "babel-node": "babel-node --extensions '.ts'",
-    "dev": "LOG_LEVEL=${LOG_LEVEL:-info} ts-node -r ./dd-trace.js -r tsconfig-paths/register --project tsconfig.server.json ws-server.ts | pino-pretty -c -t HH:MM -i pid,hostname,filename -o '{msg}'",
+    "dev": "LOG_LEVEL=${LOG_LEVEL:-info} ts-node -r ./dd-trace-init.js -r tsconfig-paths/register --project tsconfig.server.json ws-server.ts | pino-pretty -c -t HH:MM -i pid,hostname,filename -o '{msg}'",
     "build": "next build && tsc --project tsconfig.server.json && tsc-alias -p tsconfig.server.json",
     "build:local": "next build --no-lint && tsc --project tsconfig.server.json && tsc-alias -p tsconfig.server.json",
-    "start": "NEXT_MANUAL_SIG_HANDLE=true NODE_ENV=production node -r ./dd-trace.js .next/ws-server.js",
+    "start": "NEXT_MANUAL_SIG_HANDLE=true NODE_ENV=production node -r ./dd-trace-init.js .next/ws-server.js",
     "run-prod": "port=5001 pnpm run start",
     "knex": "pnpm run knex",
     "test": "NODE_ENV=test jest --maxWorkers=75% && node --test sysops/workspace-gateway/*.test.mjs",
@@ -26,9 +26,7 @@
     "prepare": "husky install",
     "generate:jsonschemas": "tsx ./scripts/generateSchemas.ts generatejson",
     "generate:yamls": "tsx ./scripts/generateSchemas.ts generateyaml",
-    "generate:schemas": "pnpm run generate:jsonschemas && pnpm run generate:yamls",
-    "eval:baseline": "ts-node eval/baseline/captureBaseline.ts",
-    "eval:compare": "ts-node eval/compare.ts"
+    "generate:schemas": "pnpm run generate:jsonschemas && pnpm run generate:yamls"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",
@@ -43,6 +41,8 @@
     "@octokit/core": "^5.0.2",
     "@octokit/webhooks": "^12.0.1",
     "ai": "^7.0.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "aws-sdk": "^2.1004.0",
     "bullmq": "5.56.8",
     "cockatiel": "^3.2.1",

@@ -31,9 +31,9 @@ import { containsSecretRefTemplate } from 'server/lib/secretRefs';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { normalizeRepoFullName } from 'server/lib/normalizeRepoFullName';
 import { toPublicHref } from 'server/lib/publicHref';
-import { UniqueViolationError, type AnyQueryBuilder } from 'objection';
+import { UniqueViolationError, type AnyQueryBuilder, type Transaction } from 'objection';
 
-import { Build, Deploy, Environment, Repository } from 'server/models';
+import { Build, Deploy, Deployable, Environment, Repository } from 'server/models';
 import { BuildKind, BuildStatus, CLIDeployTypes, DeployStatus, DeployTypes, PullRequestStatus } from 'shared/constants';
 import { type DeployOptions } from './deploy';
 import DeployService from './deploy';
@@ -66,6 +66,7 @@ import ApiAccessConfigService from './apiAccessConfig';
 import { getBranchName, getDeployType, getRepositoryName, type Service } from 'server/models/yaml/YamlService';
 import type { LifecycleConfig } from 'server/models/yaml/Config';
 import * as YamlService from 'server/models/yaml';
+import { getEnvironmentPhaseFromState, isActiveServiceReady } from 'server/lib/environments/readiness';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
@@ -74,6 +75,7 @@ const RESOLVE_QUEUE_DEDUP_TTL_MS = 30000;
 const TRIGGER_SEQUENCE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const TEARDOWN_RETRY_GRACE_MS = 15 * 60 * 1000;
 const BUILD_DEPLOYMENT_LOCK_TTL_MS = 15 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const PR_AUTHORITY_REVALIDATED_DELETE_REASONS = new Set([
   'pull_request_closed',
   'deploy_disabled',
@@ -124,8 +126,49 @@ interface DeleteBuildOptions {
   deploymentLockAlreadyHeld?: boolean;
 }
 
+export type RedeployBuildResult =
+  | { status: 'success'; message: string; deployId: string }
+  | { status: 'not_found' | 'tearing_down' | 'deploy_disabled'; message: string };
+
+export type ApplyApiEnvironmentPatchResult =
+  | { mode: 'applied'; changed: boolean; build: Build }
+  | { mode: 'redeploy_queued'; changed: true; deployId: string; build: Build };
+
+export interface ApplyApiEnvironmentPatchOptions {
+  /** MCP patches individual keys; REST retains its established whole-map replacement. */
+  envMode?: 'merge' | 'replace';
+}
+
+export interface ExtendApiEnvironmentOptions {
+  ifExpiresAt?: string;
+  rejectPullRequest?: boolean;
+}
+
+export interface ExtendApiEnvironmentResult {
+  /** Exact row returned by the extension transaction. */
+  build: Build;
+  /** Whole-hour change from the additive base max(now, locked stored expiry). */
+  addedHours: number;
+  /** True when the configured maximum shortened or clamped the requested extension. */
+  maxReached: boolean;
+}
+
+export interface CreateApiEnvironmentAuthorization {
+  /** Stable repository identities. Non-null takes precedence over the legacy name list. */
+  repositoryAllowlistRepoIds?: number[] | null;
+  /** Legacy, mutable repository-name constraints retained for older API keys. */
+  repositoryAllowlist?: string[] | null;
+}
+
+export interface LockedApiEnvironmentDeletionGuard {
+  rejectPullRequest?: boolean;
+  /** Recomputes the phase-1 decision-state hash under the row lock; throwing aborts before teardown is claimed. */
+  validateLockedState?: (build: Build, trx: Transaction) => void | Promise<void>;
+}
+
 export default class BuildService extends BaseService {
   ingressService = new IngressService(this.db, this.redis, this.redlock, this.queueManager);
+
   /**
    * For every build that is not closed
    * 1. Check if the PR is open, if not, destroy
@@ -161,9 +204,10 @@ export default class BuildService extends BaseService {
   }
 
   private async getBuildForQueueFingerprint(buildId: number): Promise<Build | null> {
-    return this.db.models.Build.query()
+    const build = await this.db.models.Build.query()
       .findOne({ id: buildId })
       .withGraphFetched('[pullRequest, deploys.[deployable]]');
+    return build ?? null;
   }
 
   private getBuildFingerprintDeployKey(deploy: Deploy): string {
@@ -520,7 +564,10 @@ export default class BuildService extends BaseService {
       })
       .orderBy('updatedAt', 'desc');
 
-    const { data, metadata: paginationMetadata } = await paginate<Build>(baseQuery, pagination);
+    const { data, metadata: paginationMetadata } = await paginate<Build>(
+      baseQuery,
+      pagination ?? { page: 1, limit: 25 }
+    );
 
     return { data, paginationMetadata };
   }
@@ -551,6 +598,8 @@ export default class BuildService extends BaseService {
         'isStatic',
         'kind',
         'baseBuildId',
+        'environmentId',
+        'pullRequestId',
         'commentRuntimeEnv',
         'commentInitEnv',
         'triggerType',
@@ -562,7 +611,9 @@ export default class BuildService extends BaseService {
         'autoTrack',
         'trackDefaultBranches',
         'createdByUserId',
-        'createdByGithubLogin'
+        'createdByTokenId',
+        'createdByGithubLogin',
+        'runUUID'
       )
       .withGraphFetched('[baseBuild, pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {
@@ -584,6 +635,7 @@ export default class BuildService extends BaseService {
       .modifyGraph('deploys', (b) => {
         b.select(
           'id',
+          'buildId',
           'uuid',
           'status',
           'statusMessage',
@@ -593,6 +645,8 @@ export default class BuildService extends BaseService {
           'deployableId',
           'branchName',
           'deployPipelineId',
+          'githubRepositoryId',
+          'runUUID',
           'publicUrl',
           'dockerImage',
           'buildLogs',
@@ -632,12 +686,17 @@ export default class BuildService extends BaseService {
    */
   async listEnvironments(params: {
     excludeStatuses?: string | null;
+    statuses?: string[] | null;
     search?: string | null;
     trigger?: string | null;
+    repositoryGithubRepositoryId?: number | null;
     githubLogin?: string | null;
     ownerUserId?: string | null;
     createdByTokenId?: number | null;
     hasReadyActiveService?: boolean | null;
+    createdBefore?: string | null;
+    createdAfter?: string | null;
+    expiresBefore?: string | null;
     repositoryAllowlist?: string[] | null;
     repositoryAllowlistRepoIds?: number[] | null;
     pagination?: PaginationParams;
@@ -662,10 +721,14 @@ export default class BuildService extends BaseService {
         'builds.githubRepositoryId',
         'builds.deployEnabled',
         'builds.autoTrack',
+        'builds.trackDefaultBranches',
+        'builds.configSha',
+        'builds.runUUID',
         'builds.expiresAt',
         'builds.createdAt',
         'builds.updatedAt',
         'builds.createdByUserId',
+        'builds.createdByTokenId',
         'builds.createdByGithubLogin'
       )
       .where('builds.kind', BuildKind.ENVIRONMENT);
@@ -683,8 +746,32 @@ export default class BuildService extends BaseService {
         if (exclude.length > 0) {
           qb.whereNotIn('builds.status', exclude);
         }
+        if (params.statuses && params.statuses.length > 0) {
+          qb.whereIn('builds.status', params.statuses);
+        }
         if (params.trigger) {
           qb.where('builds.triggerType', params.trigger);
+        }
+        const repositoryGithubRepositoryId = params.repositoryGithubRepositoryId;
+        if (repositoryGithubRepositoryId != null) {
+          qb.where((repository) => {
+            repository
+              .where('builds.githubRepositoryId', repositoryGithubRepositoryId)
+              .orWhereExists(
+                this.db.models.Build.relatedQuery('pullRequest')
+                  .joinRelated('repository')
+                  .where('repository.githubRepositoryId', repositoryGithubRepositoryId)
+              );
+          });
+        }
+        if (params.createdBefore) {
+          qb.where('builds.createdAt', '<', params.createdBefore);
+        }
+        if (params.createdAfter) {
+          qb.where('builds.createdAt', '>', params.createdAfter);
+        }
+        if (params.expiresBefore) {
+          qb.where('builds.expiresAt', '<', params.expiresBefore);
         }
         if (params.createdByTokenId != null) {
           qb.where('builds.createdByTokenId', params.createdByTokenId);
@@ -782,30 +869,55 @@ export default class BuildService extends BaseService {
 
   private async resolveEnvironmentServiceSummaries(
     builds: Build[]
-  ): Promise<Map<number, { activeServiceCount: number; hasReadyActiveService: boolean }>> {
+  ): Promise<
+    Map<number, { activeServiceCount: number; hasReadyActiveService: boolean; allActiveServicesReady: boolean }>
+  > {
     const buildIds = builds.map((build) => Number(build.id)).filter((id) => Number.isFinite(id));
     if (buildIds.length === 0) return new Map();
 
     const rows = (await this.db.models.Deploy.query()
       .alias('deploys')
-      .select('deploys.buildId', 'deploys.status', 'deployable.name as deployableName')
+      .select(
+        'deploys.buildId',
+        'deploys.status',
+        'deploys.publicUrl',
+        'deployable.name as deployableName',
+        'deployable.type as deployableType'
+      )
       .joinRelated('deployable')
       .whereIn('deploys.buildId', buildIds)
       .where('deploys.active', true)
       .whereNotNull('deployable.name')) as unknown as Array<{
       buildId: number;
       status: DeployStatus;
+      publicUrl: string | null;
       deployableName: string;
+      deployableType: string | null;
     }>;
 
-    const aggregates = new Map<number, { names: Set<string>; hasReadyActiveService: boolean }>();
+    const aggregates = new Map<
+      number,
+      { names: Set<string>; hasReadyActiveService: boolean; allActiveServicesReady: boolean }
+    >();
     for (const row of rows) {
       const buildId = Number(row.buildId);
       const name = row.deployableName?.trim();
       if (!name) continue;
-      const aggregate = aggregates.get(buildId) ?? { names: new Set<string>(), hasReadyActiveService: false };
+      const aggregate = aggregates.get(buildId) ?? {
+        names: new Set<string>(),
+        hasReadyActiveService: false,
+        allActiveServicesReady: true,
+      };
       aggregate.names.add(name);
       if (row.status === DeployStatus.READY) aggregate.hasReadyActiveService = true;
+      aggregate.allActiveServicesReady =
+        aggregate.allActiveServicesReady &&
+        isActiveServiceReady({
+          active: true,
+          status: row.status,
+          publicUrl: row.publicUrl ?? '',
+          deployable: { type: row.deployableType },
+        });
       aggregates.set(buildId, aggregate);
     }
 
@@ -815,6 +927,7 @@ export default class BuildService extends BaseService {
         {
           activeServiceCount: aggregate.names.size,
           hasReadyActiveService: aggregate.hasReadyActiveService,
+          allActiveServicesReady: aggregate.allActiveServicesReady,
         },
       ])
     );
@@ -823,7 +936,10 @@ export default class BuildService extends BaseService {
   private serializeEnvironmentSummary(
     build: Build,
     sourceRepositoryNames?: Map<number, string>,
-    serviceSummaries?: Map<number, { activeServiceCount: number; hasReadyActiveService: boolean }>
+    serviceSummaries?: Map<
+      number,
+      { activeServiceCount: number; hasReadyActiveService: boolean; allActiveServicesReady: boolean }
+    >
   ): Record<string, unknown> {
     const source = getBuildSource(build);
     const pullRequest = source.pullRequest;
@@ -837,10 +953,14 @@ export default class BuildService extends BaseService {
     const serviceSummary = serviceSummaries?.get(Number(build.id)) ?? {
       activeServiceCount: activeDeploysByName.size,
       hasReadyActiveService: [...activeDeploysByName.values()].some((deploy) => deploy.status === DeployStatus.READY),
+      allActiveServicesReady: [...activeDeploysByName.values()].every(isActiveServiceReady),
     };
+    const ready = build.status === BuildStatus.DEPLOYED && serviceSummary.allActiveServicesReady;
     return {
       uuid: build.uuid,
+      environmentId: build.id,
       status: build.status,
+      phase: getEnvironmentPhaseFromState(build.status, isDeployEnabled(build), ready),
       statusMessage: build.statusMessage ?? null,
       namespace: build.namespace,
       trigger: build.triggerType ?? 'github_pr',
@@ -853,6 +973,8 @@ export default class BuildService extends BaseService {
       deletedAt: build.deletedAt ?? null,
       activeServiceCount: serviceSummary.activeServiceCount,
       hasReadyActiveService: serviceSummary.hasReadyActiveService,
+      ready,
+      currentDeployId: build.runUUID ?? null,
       // Human owner: API envs carry it durably (createdByGithubLogin); PR envs fall back to the PR author.
       author: build.createdByGithubLogin ?? pullRequest?.githubLogin ?? null,
       createdByUserId: build.createdByUserId ?? null,
@@ -1028,11 +1150,22 @@ export default class BuildService extends BaseService {
     return expectedBuildId == null ? enqueue() : this.withBuildDeploymentLock(expectedBuildId, enqueue);
   }
 
-  async redeployBuild(buildUuid: string, expectedBuildId?: number) {
+  async redeployBuild(
+    buildUuid: string,
+    expectedBuildId?: number,
+    expectedBuildKind?: BuildKind
+  ): Promise<RedeployBuildResult> {
     const correlationId = `api-redeploy-${Date.now()}-${nanoid(8)}`;
     return withLogContext({ correlationId, buildUuid }, async () => {
-      const enqueue = async () => {
-        const identity = expectedBuildId == null ? { uuid: buildUuid } : { uuid: buildUuid, id: expectedBuildId };
+      const enqueue = async (): Promise<RedeployBuildResult> => {
+        const identity =
+          expectedBuildId == null
+            ? { uuid: buildUuid }
+            : {
+                uuid: buildUuid,
+                id: expectedBuildId,
+                ...(expectedBuildKind ? { kind: expectedBuildKind } : {}),
+              };
         const build = await this.db.models.Build.query()
           .findOne(identity)
           .whereNull('deletedAt')
@@ -1075,10 +1208,12 @@ export default class BuildService extends BaseService {
         return {
           status: 'success',
           message: `Redeploy for build ${buildUuid} has been queued`,
+          deployId: runUUID,
         };
       };
 
-      return expectedBuildId == null ? enqueue() : this.withBuildDeploymentLock(expectedBuildId, enqueue);
+      // The worker serializes execution and revalidates authority under the deployment lock.
+      return enqueue();
     });
   }
 
@@ -1227,10 +1362,11 @@ export default class BuildService extends BaseService {
    */
   public async createApiEnvironment(
     input: CreateApiEnvironmentInput,
-    authorizedRepoIds?: number[] | null
+    authorization?: CreateApiEnvironmentAuthorization | null,
+    options: { requireApiEnvironmentsEnabled?: boolean } = {}
   ): Promise<CreateApiEnvironmentResult> {
-    // Replay is a promise about an already-accepted request. Resolve it before mutable feature flags,
-    // repository onboarding, or GitHub config reads can turn a safe retry into a new failure.
+    const repositoryAuthorization = normalizeCreateApiEnvironmentAuthorization(authorization);
+    // Resolve replays before mutable flag/onboarding/config reads can turn a safe retry into a new failure.
     const creator = input.createdByUserId
       ? `user:${input.createdByUserId}`
       : input.createdByTokenId != null
@@ -1242,14 +1378,19 @@ export default class BuildService extends BaseService {
     if (idempotencyKey) {
       const existing = await this.db.models.Build.query().findOne({ idempotencyKey }).whereNull('deletedAt');
       if (existing) {
-        assertIdempotentReplayAllowed(existing, idempotencyRequestDigest, authorizedRepoIds);
+        assertIdempotentReplayAllowed(
+          existing,
+          idempotencyRequestDigest,
+          repositoryAuthorization.repositoryAllowlistRepoIds
+        );
+        await this.assertApiEnvironmentRepositoryAllowed(existing.githubRepositoryId, repositoryAuthorization);
         await this.reenqueueCreateIfStranded(existing, input.services ?? null);
         return { build: existing, replayed: true };
       }
     }
 
     const config = await this.getApiEnvironmentsConfig();
-    if (!config.enabled) {
+    if (options.requireApiEnvironmentsEnabled !== false && !config.enabled) {
       throw new AppError({
         httpStatus: 403,
         code: 'api_environments_disabled',
@@ -1284,6 +1425,11 @@ export default class BuildService extends BaseService {
         message: `Repository ${fullName} is not onboarded into Lifecycle.`,
       });
     }
+    await this.assertApiEnvironmentRepositoryAllowed(
+      repository.githubRepositoryId,
+      repositoryAuthorization,
+      repository.fullName
+    );
 
     const environmentId = input.environmentId ?? repository.defaultEnvId;
     if (environmentId == null) {
@@ -1347,8 +1493,8 @@ export default class BuildService extends BaseService {
     const nanoId = customAlphabet('1234567890abcdef', 6);
     const env = lifecycleConfig?.environment;
 
-    const insertBuild = async (uuid: string): Promise<Build> =>
-      this.db.models.Build.create({
+    const insertBuild = async (uuid: string): Promise<Build> => {
+      const attributes = {
         uuid,
         environmentId: environment.id,
         status: BuildStatus.QUEUED,
@@ -1372,7 +1518,10 @@ export default class BuildService extends BaseService {
         autoTrack: input.autoTrack ?? false,
         commentRuntimeEnv: input.env ?? {},
         commentInitEnv: input.initEnv ?? input.env ?? {},
-      });
+      };
+      const inserted = await this.db.models.Build.create(attributes);
+      return Object.assign(inserted, attributes);
+    };
 
     let build: Build;
     try {
@@ -1382,7 +1531,12 @@ export default class BuildService extends BaseService {
         if (idempotencyKey) {
           const existing = await this.db.models.Build.query().findOne({ idempotencyKey }).whereNull('deletedAt');
           if (existing) {
-            assertIdempotentReplayAllowed(existing, idempotencyRequestDigest, authorizedRepoIds);
+            assertIdempotentReplayAllowed(
+              existing,
+              idempotencyRequestDigest,
+              repositoryAuthorization.repositoryAllowlistRepoIds
+            );
+            await this.assertApiEnvironmentRepositoryAllowed(existing.githubRepositoryId, repositoryAuthorization);
             await this.reenqueueCreateIfStranded(existing, input.services ?? null);
             return { build: existing, replayed: true };
           }
@@ -1401,6 +1555,40 @@ export default class BuildService extends BaseService {
 
     getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Environment: api create queued uuid=${build.uuid}`);
     return { build, replayed: false };
+  }
+
+  /**
+   * Enforce create/replay repository authority at the service boundary.
+   *
+   * Stable repository ids deliberately do not require the repository to remain
+   * onboarded: a retry promises the already-accepted stored Build. Legacy
+   * name-only keys resolve the stored id to its current live repository name
+   * and fail closed if that identity can no longer be resolved.
+   */
+  private async assertApiEnvironmentRepositoryAllowed(
+    githubRepositoryId: number | null | undefined,
+    authorization: NormalizedCreateApiEnvironmentAuthorization,
+    repositoryFullName?: string | null
+  ): Promise<void> {
+    if (authorization.repositoryAllowlistRepoIds != null) {
+      assertRepositoryIdAllowed(githubRepositoryId, authorization.repositoryAllowlistRepoIds);
+      return;
+    }
+    if (authorization.repositoryAllowlist == null) return;
+
+    let resolvedFullName = repositoryFullName ?? null;
+    if (!resolvedFullName && githubRepositoryId != null) {
+      const repository = await this.db.models.Repository.query()
+        .where({ githubRepositoryId })
+        .whereNull('deletedAt')
+        .first();
+      resolvedFullName = repository?.fullName ?? null;
+    }
+
+    const allowedNames = authorization.repositoryAllowlist.map(normalizeRepoFullName);
+    if (!resolvedFullName || !allowedNames.includes(normalizeRepoFullName(resolvedFullName))) {
+      throw forbiddenRepositoryError();
+    }
   }
 
   /** An enqueue failure after the insert would strand the build in `queued`; replay re-enqueues it (jobId dedupes). */
@@ -1586,7 +1774,12 @@ export default class BuildService extends BaseService {
     }
   };
 
-  async extendApiEnvironment(uuid: string, hours?: number | null, expectedBuildId?: number): Promise<Build> {
+  async extendApiEnvironment(
+    uuid: string,
+    hours?: number | null,
+    expectedBuildId?: number,
+    options: ExtendApiEnvironmentOptions = {}
+  ): Promise<ExtendApiEnvironmentResult> {
     const config = await this.getApiEnvironmentsConfig();
     return this.db.models.Build.transact(async (trx) => {
       const identity = expectedBuildId == null ? { uuid } : { uuid, id: expectedBuildId };
@@ -1595,7 +1788,22 @@ export default class BuildService extends BaseService {
         .where('kind', BuildKind.ENVIRONMENT)
         .whereNull('deletedAt')
         .forUpdate();
-      if (!build || build.triggerType !== 'api') {
+      if (!build) {
+        throw new AppError({
+          httpStatus: 404,
+          code: 'env_not_found',
+          message: `API environment ${uuid} was not found.`,
+        });
+      }
+      if (build.triggerType !== 'api') {
+        if (options.rejectPullRequest) {
+          throw new AppError({
+            httpStatus: 409,
+            code: 'pr_environment_not_extendable',
+            message:
+              "Environments created from pull requests follow the pull request's lifetime and cannot be extended.",
+          });
+        }
         throw new AppError({
           httpStatus: 404,
           code: 'env_not_found',
@@ -1609,15 +1817,39 @@ export default class BuildService extends BaseService {
           message: `Environment ${uuid} is being (or has been) torn down and cannot be extended.`,
         });
       }
-      const expiresAt = computeExtendedExpiry(
-        new Date(),
-        build.expiresAt ? new Date(build.expiresAt) : null,
-        hours ?? config.extensionHours,
-        config.maxTtlHours
-      );
-      return this.db.models.Build.query(trx).patchAndFetchById(build.id, {
+      if (options.ifExpiresAt !== undefined) {
+        const expectedExpiry = timestampSecond(options.ifExpiresAt);
+        if (expectedExpiry == null) {
+          throw new BadRequestError('ifExpiresAt must be a valid date-time.', 'invalid_body');
+        }
+        const currentExpiry = timestampSecond(build.expiresAt);
+        if (currentExpiry !== expectedExpiry) {
+          throw new AppError({
+            httpStatus: 409,
+            code: 'expiry_conflict',
+            message:
+              "The environment's expiry changed after you read it. Read the environment again before extending it.",
+            details: { currentExpiresAt: build.expiresAt ?? null },
+          });
+        }
+      }
+      const now = new Date();
+      const parsedCurrentExpiry = build.expiresAt ? new Date(build.expiresAt) : null;
+      const currentExpiry =
+        parsedCurrentExpiry && Number.isFinite(parsedCurrentExpiry.getTime()) ? parsedCurrentExpiry : null;
+      const effectiveHours = hours ?? config.extensionHours;
+      const expiresAt = computeExtendedExpiry(now, currentExpiry, effectiveHours, config.maxTtlHours);
+      const updated = await this.db.models.Build.query(trx).patchAndFetchById(build.id, {
         expiresAt: expiresAt.toISOString(),
       } as Partial<Build>);
+      const storedExpiryBase = currentExpiry?.getTime() ?? now.getTime();
+      const additiveBase = Math.max(now.getTime(), storedExpiryBase);
+      const intendedExpiry = additiveBase + Math.max(effectiveHours, 1) * HOUR_MS;
+      return {
+        build: updated,
+        addedHours: Math.round((expiresAt.getTime() - additiveBase) / HOUR_MS),
+        maxReached: expiresAt.getTime() < intendedExpiry,
+      };
     });
   }
 
@@ -1627,49 +1859,26 @@ export default class BuildService extends BaseService {
     override: import('./override').default,
     patch: {
       services?: { name: string; active?: boolean; branchOrExternalUrl?: string }[] | null;
-      env?: Record<string, string> | null;
-      initEnv?: Record<string, string> | null;
+      env?: Record<string, string | null> | null;
+      initEnv?: Record<string, string | null> | null;
       deployEnabled?: boolean;
       autoTrack?: boolean;
       trackDefaultBranches?: boolean;
-    }
-  ): Promise<void> {
-    rejectSecretRefEnv(patch.env, 'env');
-    rejectSecretRefEnv(patch.initEnv, 'initEnv');
-
-    if ((patch.deployEnabled !== undefined || patch.autoTrack !== undefined) && build.triggerType !== 'api') {
-      throw new AppError({
-        httpStatus: 422,
-        code: 'invalid_field_for_trigger',
-        message:
-          'deployEnabled and autoTrack only apply to API-created environments; PR environments are controlled by their deploy labels.',
-      });
-    }
-    if (patch.autoTrack === true && build.configSha) {
-      throw new AppError({
-        httpStatus: 422,
-        code: 'auto_track_pinned_source',
-        message: 'autoTrack cannot be enabled for an environment pinned to an immutable source revision.',
-      });
-    }
-
-    const serviceOverrides = Array.isArray(patch.services) ? patch.services : [];
-    if (serviceOverrides.length > 0) {
-      await override.validateServiceOverrides(build, build.deploys ?? [], serviceOverrides);
-    }
+    },
+    options: ApplyApiEnvironmentPatchOptions = {}
+  ): Promise<ApplyApiEnvironmentPatchResult> {
+    const envMode = options.envMode ?? 'replace';
+    rejectSecretRefEnv(patch.env, 'env', envMode === 'merge');
+    rejectSecretRefEnv(patch.initEnv, 'initEnv', envMode === 'merge');
+    const requestedServiceOverrides = Array.isArray(patch.services) ? patch.services : [];
 
     const runUuid = nanoid();
-    const buildPatch: Partial<Build> = {};
-    if (patch.deployEnabled !== undefined) {
-      buildPatch.deployEnabled = patch.deployEnabled;
-      if (!patch.deployEnabled) buildPatch.runUUID = runUuid;
-    }
-    if (patch.autoTrack !== undefined) buildPatch.autoTrack = patch.autoTrack;
-    const hasBuildConfigPatch = patch.env != null || patch.initEnv != null || patch.trackDefaultBranches !== undefined;
-
     const persistPatch = () =>
       this.db.models.Build.transact(async (trx) => {
-        const current = await this.db.models.Build.query(trx).findById(build.id).whereNull('deletedAt').forUpdate();
+        const current = await this.db.models.Build.query(trx)
+          .findOne({ id: build.id, uuid: build.uuid, kind: BuildKind.ENVIRONMENT })
+          .whereNull('deletedAt')
+          .forUpdate();
         if (!current) {
           throw new AppError({
             httpStatus: 404,
@@ -1684,50 +1893,115 @@ export default class BuildService extends BaseService {
             message: `Environment ${build.uuid} is being (or has been) torn down and cannot be updated.`,
           });
         }
+        // The caller's graph is a read snapshot; reload relationships only after the row lock, bound to this transaction.
+        await current.$fetchGraph('[baseBuild, pullRequest, deploys.[deployable, repository]]', {
+          transaction: trx,
+        } as any);
+        if ((patch.deployEnabled !== undefined || patch.autoTrack !== undefined) && current.triggerType !== 'api') {
+          throw new AppError({
+            httpStatus: 422,
+            code: 'invalid_field_for_trigger',
+            message:
+              'deployEnabled and autoTrack only apply to API-created environments; PR environments are controlled by their deploy labels.',
+          });
+        }
+        if (patch.autoTrack === true && current.configSha) {
+          throw new AppError({
+            httpStatus: 422,
+            code: 'auto_track_pinned_source',
+            message: 'autoTrack cannot be enabled for an environment pinned to an immutable source revision.',
+          });
+        }
+
+        const serviceOverrides =
+          requestedServiceOverrides.length > 0
+            ? await override.validateServiceOverrides(current, current.deploys ?? [], requestedServiceOverrides)
+            : [];
+        const changedServiceOverrides = serviceOverrides.filter((serviceOverride) =>
+          serviceOverrideChanges(current.deploys ?? [], serviceOverride)
+        );
+
+        const deployWasEnabled = isDeployEnabled(current);
+        const buildPatch: Partial<Build> = {};
+        if (patch.deployEnabled !== undefined && patch.deployEnabled !== current.deployEnabled) {
+          buildPatch.deployEnabled = patch.deployEnabled;
+          if (!patch.deployEnabled) buildPatch.runUUID = runUuid;
+        }
+        if (patch.autoTrack !== undefined && patch.autoTrack !== current.autoTrack) {
+          buildPatch.autoTrack = patch.autoTrack;
+        }
+
+        const configPatch: {
+          commentRuntimeEnv?: Record<string, string>;
+          commentInitEnv?: Record<string, string>;
+          trackDefaultBranches?: boolean;
+        } = {};
+        if (patch.env != null) {
+          const next = applyEnvironmentMapPatch(current.commentRuntimeEnv, patch.env, envMode);
+          if (!_.isEqual(next, current.commentRuntimeEnv ?? {})) configPatch.commentRuntimeEnv = next;
+        }
+        if (patch.initEnv != null) {
+          const next = applyEnvironmentMapPatch(current.commentInitEnv, patch.initEnv, envMode);
+          if (!_.isEqual(next, current.commentInitEnv ?? {})) configPatch.commentInitEnv = next;
+        }
+        if (patch.trackDefaultBranches !== undefined && patch.trackDefaultBranches !== current.trackDefaultBranches) {
+          configPatch.trackDefaultBranches = patch.trackDefaultBranches;
+        }
 
         if (Object.keys(buildPatch).length > 0) {
-          await build.$query(trx).patch(buildPatch);
-          Object.assign(build, buildPatch);
+          await current.$query(trx).patch(buildPatch);
+          Object.assign(current, buildPatch);
         }
 
-        if (hasBuildConfigPatch) {
+        if (Object.keys(configPatch).length > 0) {
           await override.applyBuildConfigPatch({
-            build,
-            pullRequest: build.pullRequest ?? null,
-            patch: {
-              ...(patch.env != null ? { commentRuntimeEnv: patch.env } : {}),
-              ...(patch.initEnv != null ? { commentInitEnv: patch.initEnv } : {}),
-              ...(patch.trackDefaultBranches !== undefined ? { trackDefaultBranches: patch.trackDefaultBranches } : {}),
-            },
+            build: current,
+            pullRequest: current.pullRequest ?? null,
+            patch: configPatch,
             runUuid,
             enqueueRedeploy: false,
             trx,
           });
         }
 
-        if (serviceOverrides.length > 0) {
+        if (changedServiceOverrides.length > 0) {
           await override.applyServiceOverrides({
-            build,
-            deploys: build.deploys ?? [],
-            pullRequest: build.pullRequest ?? null,
-            serviceOverrides,
+            build: current,
+            deploys: current.deploys ?? [],
+            pullRequest: current.pullRequest ?? null,
+            serviceOverrides: changedServiceOverrides,
             runUuid,
             enqueueRedeploy: false,
             trx,
           });
         }
+
+        Object.assign(current, configPatch, buildPatch);
+        // Overrides patch Deploy/Deployable rows; refresh the graph so the returned Build is the post-write snapshot.
+        await current.$fetchGraph('[baseBuild, pullRequest, deploys.[deployable, repository]]', {
+          transaction: trx,
+        } as any);
+        Object.assign(build, current);
+        const deploymentRelevantChanged = Object.keys(configPatch).length > 0 || changedServiceOverrides.length > 0;
+        return {
+          build: current,
+          changed: Object.keys(buildPatch).length > 0 || deploymentRelevantChanged,
+          queueRedeploy: deploymentRelevantChanged && deployWasEnabled,
+        };
       });
 
-    await this.withBuildDeploymentLock(build.id, async () => {
-      await persistPatch();
-      if ((hasBuildConfigPatch || serviceOverrides.length > 0) && isDeployEnabled(build)) {
+    return this.withBuildDeploymentLock(build.id, async () => {
+      const persisted = await persistPatch();
+      if (persisted.queueRedeploy) {
         await this.enqueueResolveAndDeployBuild({
           buildId: build.id,
           runUUID: runUuid,
           triggerRef: runUuid,
           ...extractContextForQueue(),
         });
+        return { mode: 'redeploy_queued', changed: true, deployId: runUuid, build: persisted.build };
       }
+      return { mode: 'applied', changed: persisted.changed, build: persisted.build };
     });
   }
 
@@ -1769,9 +2043,13 @@ export default class BuildService extends BaseService {
    * the shared deployment lock prevents PATCH/redeploy from reopening the deploy gate between
    * the claim and the deterministic delete enqueue.
    */
-  async requestApiEnvironmentDeletion(buildUuid: string, expectedBuildId: number): Promise<Build> {
+  async requestApiEnvironmentDeletion(
+    buildUuid: string,
+    expectedBuildId: number,
+    guard: LockedApiEnvironmentDeletionGuard = {}
+  ): Promise<Build> {
     return this.withBuildDeploymentLock(expectedBuildId, async () => {
-      const build = await this.db.models.Build.transact(async (trx) => {
+      const claim = await this.db.models.Build.transact(async (trx) => {
         const current = await this.db.models.Build.query(trx)
           .findOne({ id: expectedBuildId, uuid: buildUuid })
           .where('kind', BuildKind.ENVIRONMENT)
@@ -1792,8 +2070,20 @@ export default class BuildService extends BaseService {
             message: 'Static environments cannot be destroyed through the environments API.',
           });
         }
+        if (guard.rejectPullRequest && current.triggerType !== 'api') {
+          throw new AppError({
+            httpStatus: 409,
+            code: 'env_pr_protected',
+            message:
+              'This environment is managed by its pull request. Close the pull request or remove its deploy label to tear it down.',
+          });
+        }
 
         const ownsTeardown = current.status === BuildStatus.TEARING_DOWN || current.status === BuildStatus.TORN_DOWN;
+        if (ownsTeardown) return { build: current, newlyClaimed: false };
+
+        await guard.validateLockedState?.(current, trx);
+
         const teardownRunUUID = ownsTeardown && current.runUUID ? current.runUUID : buildTeardownRunUUID(current.id);
         const claimPatch: Partial<Build> = {
           ...(!ownsTeardown ? { status: BuildStatus.TEARING_DOWN } : {}),
@@ -1805,11 +2095,11 @@ export default class BuildService extends BaseService {
           await current.$query(trx).patch(claimPatch);
           Object.assign(current, claimPatch);
         }
-        return current;
+        return { build: current, newlyClaimed: true };
       });
 
-      await this.enqueueBuildDeletion(build, 'api_delete');
-      return build;
+      await this.enqueueBuildDeletion(claim.build, 'api_delete');
+      return claim.build;
     });
   }
 
@@ -1965,7 +2255,7 @@ export default class BuildService extends BaseService {
    */
   async domainsAndCertificatesForBuild(build: Build, allServices: boolean): Promise<IngressConfiguration[]> {
     await build?.$fetchGraph('deploys.[deployable]');
-    const deploys = build?.deploys;
+    const deploys = build?.deploys ?? [];
 
     const result: IngressConfiguration[] = _.flatten(
       await Promise.all(
@@ -2036,7 +2326,7 @@ export default class BuildService extends BaseService {
     } else {
       return [
         {
-          host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable),
+          host: this.db.services.Deploy.hostForDeployableDeploy(deploy, deployable)!,
           deployUUID: deploy.uuid,
           serviceHost: `${deploy.uuid}`,
           ipWhitelist: deployable.ipWhitelist,
@@ -2292,7 +2582,7 @@ export default class BuildService extends BaseService {
   public async createBuild(
     environment: Environment,
     options: DeployOptions,
-    lifecycleConfig: LifecycleYamlConfigOptions
+    lifecycleConfig: LifecycleYamlConfigOptions | undefined
   ) {
     try {
       const build = await this.findOrCreateBuild(environment, options, lifecycleConfig);
@@ -2424,7 +2714,12 @@ export default class BuildService extends BaseService {
 
     const runUUID = requestedRunUUID || nanoid();
     let claim = this.db.models.Build.query()
-      .patch({ runUUID } as Partial<Build>)
+      .patch({
+        runUUID,
+        // deployId equality is observable only with this non-ready state, so a deploy-bound wait cannot accept prior success.
+        status: BuildStatus.PENDING,
+        statusMessage: null,
+      } as Partial<Build>)
       .where({ id: build.id })
       .whereNull('deletedAt');
 
@@ -2443,6 +2738,8 @@ export default class BuildService extends BaseService {
     }
 
     build.runUUID = runUUID;
+    build.status = BuildStatus.PENDING;
+    build.statusMessage = null;
     if (!(await this.isDeploymentRunCurrent(build.id, runUUID))) {
       getLogger().info('Deploy: aborting run reason=authority_changed');
       return null;
@@ -2458,7 +2755,7 @@ export default class BuildService extends BaseService {
   public async resolveAndDeployBuild(
     build: Build,
     isDeploy: boolean,
-    githubRepositoryId = null,
+    githubRepositoryId: number | null = null,
     sourceRef?: string | null,
     options: ResolveAndDeployBuildOptions = {}
   ) {
@@ -2517,15 +2814,19 @@ export default class BuildService extends BaseService {
         }
       }
       const deploys = await this.db.services.Deploy.findOrCreateDeploys(
-        environment,
+        environment!,
         build,
-        githubRepositoryId,
+        githubRepositoryId ?? undefined,
         sourceRef,
         options.sourceBranch
       );
       build?.$setRelated('deploys', deploys);
       await build?.$fetchGraph('pullRequest');
-      await new BuildEnvironmentVariables(this.db).resolve(build, githubRepositoryId, options.sourceBranch);
+      await new BuildEnvironmentVariables(this.db).resolve(
+        build,
+        githubRepositoryId ?? undefined,
+        options.sourceBranch
+      );
 
       // Source/config resolution can take long enough for a PR close/label removal
       // or API pause to land. Never begin shared build/CLI work on stale authority.
@@ -2661,7 +2962,7 @@ export default class BuildService extends BaseService {
   private async findOrCreateBuild(
     environment: Environment,
     options: DeployOptions,
-    lifecycleConfig: LifecycleYamlConfigOptions
+    lifecycleConfig: LifecycleYamlConfigOptions | undefined
   ) {
     const haikunator = new Haikunator({
       defaults: {
@@ -2676,27 +2977,34 @@ export default class BuildService extends BaseService {
     const env = lifecycleConfig?.environment;
     const enabledFeatures = env?.enabledFeatures || [];
     const githubDeployments = env?.githubDeployments || false;
-    const build =
-      (await this.db.models.Build.query()
-        .where('pullRequestId', options.pullRequestId)
-        .where('environmentId', environment.id)
-        .whereNull('deletedAt')
-        .first()) ||
+    const existing = await this.db.models.Build.query()
+      .where('pullRequestId', options.pullRequestId)
+      .where('environmentId', environment.id)
+      .whereNull('deletedAt')
+      .first();
+    let build = existing;
+    if (!build) {
+      const rootRepository =
+        options.repositoryId == null
+          ? null
+          : await this.db.models.Repository.query().findById(options.repositoryId).select('githubRepositoryId');
       // insertOnUuid retries haikunator collisions against the live-uuid unique index.
-      (await insertOnUuid(
+      build = await insertOnUuid(
         (uuid: string) =>
           this.db.models.Build.create({
             uuid,
             environmentId: environment.id,
             status: BuildStatus.QUEUED,
             pullRequestId: options.pullRequestId,
+            githubRepositoryId: rootRepository?.githubRepositoryId ?? null,
             sha: nanoId(),
             enabledFeatures: JSON.stringify(enabledFeatures),
             githubDeployments,
             namespace: `env-${uuid}`,
           }),
         haikunator
-      ));
+      );
+    }
     getLogger().info(`Build: created branch=${options.repositoryBranchName}`);
     return build;
   }
@@ -2767,7 +3075,7 @@ export default class BuildService extends BaseService {
       }
 
       await Promise.all(
-        build.deploys.map(async (deploy) => {
+        (build.deploys ?? []).map(async (deploy) => {
           await deploy.$query().patch({ status: DeployStatus.TORN_DOWN });
           if (build.githubDeployments)
             await this.db.services.GithubService.githubDeploymentQueue.add('deployment', {
@@ -2833,7 +3141,8 @@ export default class BuildService extends BaseService {
         await build.reload();
         await build?.$fetchGraph('[deploys.[deployable], pullRequest.[repository]]');
 
-        const { deploys, pullRequest } = build;
+        const deploys = build.deploys ?? [];
+        const { pullRequest } = build;
         const isSandboxBuild = build.kind === BuildKind.SANDBOX;
         const repository = pullRequest?.repository;
 
@@ -2969,7 +3278,7 @@ export default class BuildService extends BaseService {
 
   async deployCLIServices(
     build: Build,
-    githubRepositoryId = null,
+    githubRepositoryId: number | null = null,
     sourceRef?: string | null,
     sourceBranch?: string | null
   ): Promise<boolean> {
@@ -2994,12 +3303,14 @@ export default class BuildService extends BaseService {
       return _.every(
         await Promise.all(
           deploys
-            .filter((d) => d.active && CLIDeployTypes.has(d.deployable.type))
-            .map(async (deploy) => {
-              if (!deploy) {
-                getLogger().debug(`Deploy is undefined in deployCLIServices: deploysLength=${deploys.length}`);
-                return false;
+            .filter((deploy): deploy is Deploy & { deployable: Deployable } => {
+              if (!deploy.active) return false;
+              if (!deploy.deployable) {
+                throw new Error(`Deployable not found for deploy ${deploy.uuid}`);
               }
+              return CLIDeployTypes.has(deploy.deployable.type);
+            })
+            .map(async (deploy) => {
               try {
                 const result = await this.db.services.Deploy.deployCLI(
                   deploy,
@@ -3032,7 +3343,7 @@ export default class BuildService extends BaseService {
    */
   async buildImages(
     build: Build,
-    githubRepositoryId = null,
+    githubRepositoryId: number | null = null,
     sourceRef?: string | null,
     sourceBranch?: string | null
   ): Promise<boolean> {
@@ -3052,12 +3363,15 @@ export default class BuildService extends BaseService {
       });
 
     try {
-      const deploysToBuild = deploys.filter((d) => {
+      const deploysToBuild = deploys.filter((deploy): deploy is Deploy & { deployable: Deployable } => {
+        if (!deploy.active) return false;
+        if (!deploy.deployable) {
+          throw new Error(`Deployable not found for deploy ${deploy.uuid}`);
+        }
         return (
-          d.active &&
-          (d.deployable.type === DeployTypes.DOCKER ||
-            d.deployable.type === DeployTypes.GITHUB ||
-            d.deployable.type === DeployTypes.HELM)
+          deploy.deployable.type === DeployTypes.DOCKER ||
+          deploy.deployable.type === DeployTypes.GITHUB ||
+          deploy.deployable.type === DeployTypes.HELM
         );
       });
       getLogger().debug(
@@ -3068,13 +3382,10 @@ export default class BuildService extends BaseService {
 
       const results = await Promise.all(
         deploysToBuild.map(async (deploy, index) => {
-          if (deploy === undefined) {
-            getLogger().debug(`Deploy is undefined in buildImages: deploysLength=${build.deploys.length}`);
-          }
           await deploy.$query().patchAndFetch({
             deployPipelineId: null,
             deployOutput: null,
-          });
+          } as unknown as Partial<Deploy>);
           const result = await this.db.services.Deploy.buildImage(
             deploy,
             index,
@@ -3146,7 +3457,13 @@ export default class BuildService extends BaseService {
           deployable: true,
         });
 
-      const activeDeploys = allDeploys.filter((d) => d.active);
+      const activeDeploys = allDeploys.filter((deploy): deploy is Deploy & { deployable: Deployable } => {
+        if (!deploy.active) return false;
+        if (!deploy.deployable) {
+          throw new Error(`Deployable not found for deploy ${deploy.uuid}`);
+        }
+        return true;
+      });
 
       // Generate manifests for GitHub/Docker/CLI deploys
       for (const deploy of activeDeploys) {
@@ -3216,7 +3533,7 @@ export default class BuildService extends BaseService {
    * @param environmentId the default environmentId (if one exists)
    * @param repositoryId the repository to use for finding relevant environments, if needed
    */
-  private async getEnvironmentsToBuild(environmentId: number, repositoryId: number) {
+  private async getEnvironmentsToBuild(environmentId: number | undefined, repositoryId: number) {
     let environments: Environment[] = [];
     if (environmentId != null) {
       environments.push(await this.db.models.Environment.findOne({ id: environmentId }));
@@ -3229,9 +3546,13 @@ export default class BuildService extends BaseService {
     return environments;
   }
 
-  private async updateDeploysImageDetails(build: Build, githubRepositoryId?: number, sourceBranch?: string | null) {
+  private async updateDeploysImageDetails(
+    build: Build,
+    githubRepositoryId?: number | null,
+    sourceBranch?: string | null
+  ) {
     await build?.$fetchGraph('deploys');
-    const deploys = build.deploys.filter(
+    const deploys = (build.deploys ?? []).filter(
       (deploy) =>
         (!githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId) &&
         (!githubRepositoryId || !sourceBranch || deploy.branchName === sourceBranch)
@@ -3478,7 +3799,7 @@ export default class BuildService extends BaseService {
           // YAML import, deployable/deploy reconciliation, image builds, CLI
           // deploys, and manifest application all mutate shared per-build rows.
           // Keep the one lock for this entire sequence.
-          await this.importYamlConfigFile(build.environment, build, githubRepositoryId, {
+          await this.importYamlConfigFile(build.environment!, build, githubRepositoryId, {
             skipDeletedServiceReconciliation,
             sourceRef: effectiveSourceRef,
             sourceBranch,
@@ -3555,7 +3876,7 @@ export default class BuildService extends BaseService {
 
     return withLogContext({ correlationId, sender, _ddTraceContext }, async () => {
       let jobId;
-      let buildId: number;
+      let buildId: number | undefined;
       try {
         jobId = job?.data?.buildId;
         const githubRepositoryId = job?.data?.githubRepositoryId;
@@ -3664,16 +3985,42 @@ export function assertIdempotentReplayAllowed(
     });
   }
   if (authorizedRepoIds != null) {
-    const repoId = existing.githubRepositoryId;
-    const allowed = repoId != null && authorizedRepoIds.map(Number).includes(Number(repoId));
-    if (!allowed) {
-      throw new AppError({
-        httpStatus: 403,
-        code: 'forbidden_repository',
-        message: 'This API key is not authorized for the repository of the referenced environment.',
-      });
-    }
+    assertRepositoryIdAllowed(existing.githubRepositoryId, authorizedRepoIds);
   }
+}
+
+interface NormalizedCreateApiEnvironmentAuthorization {
+  repositoryAllowlistRepoIds: number[] | null;
+  repositoryAllowlist: string[] | null;
+}
+
+function normalizeCreateApiEnvironmentAuthorization(
+  authorization: CreateApiEnvironmentAuthorization | null | undefined
+): NormalizedCreateApiEnvironmentAuthorization {
+  if (authorization == null) {
+    return { repositoryAllowlistRepoIds: null, repositoryAllowlist: null };
+  }
+  return {
+    repositoryAllowlistRepoIds:
+      authorization.repositoryAllowlistRepoIds == null
+        ? null
+        : authorization.repositoryAllowlistRepoIds.map(Number).filter(Number.isFinite),
+    repositoryAllowlist:
+      authorization.repositoryAllowlist == null ? null : authorization.repositoryAllowlist.map(normalizeRepoFullName),
+  };
+}
+
+function forbiddenRepositoryError(): AppError {
+  return new AppError({
+    httpStatus: 403,
+    code: 'forbidden_repository',
+    message: 'This API key is not authorized for the repository of the referenced environment.',
+  });
+}
+
+function assertRepositoryIdAllowed(githubRepositoryId: number | null | undefined, authorizedRepoIds: number[]): void {
+  const allowed = githubRepositoryId != null && authorizedRepoIds.map(Number).includes(Number(githubRepositoryId));
+  if (!allowed) throw forbiddenRepositoryError();
 }
 
 export interface CreateApiEnvironmentInput {
@@ -3926,9 +4273,14 @@ function buildServicePreview(
 }
 
 /** SECURITY: API-supplied env overrides must not smuggle secret references ({{vault:...}}) into pods — non-string values would carry them past a string-only scan. */
-function rejectSecretRefEnv(env: Record<string, string> | null | undefined, field: string): void {
+function rejectSecretRefEnv(
+  env: Record<string, string | null> | null | undefined,
+  field: string,
+  allowNull = false
+): void {
   if (!env) return;
   for (const [key, value] of Object.entries(env)) {
+    if (value === null && allowNull) continue;
     if (typeof value !== 'string') {
       throw new AppError({
         httpStatus: 422,
@@ -3944,6 +4296,45 @@ function rejectSecretRefEnv(env: Record<string, string> | null | undefined, fiel
       });
     }
   }
+}
+
+function applyEnvironmentMapPatch(
+  current: Record<string, unknown> | null | undefined,
+  patch: Record<string, string | null>,
+  mode: 'merge' | 'replace'
+): Record<string, string> {
+  const result: Record<string, string> = mode === 'merge' ? { ...(current as Record<string, string>) } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete result[key];
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function serviceOverrideChanges(
+  deploys: Deploy[],
+  serviceOverride: { name: string; active?: boolean; branchOrExternalUrl?: string }
+): boolean {
+  const deploy = deploys.find((candidate) => candidate.deployable?.name === serviceOverride.name);
+  if (!deploy) return true;
+  if (serviceOverride.active !== undefined && serviceOverride.active !== deploy.active) return true;
+  if (serviceOverride.branchOrExternalUrl !== undefined) {
+    const current =
+      deploy.deployable!.type === DeployTypes.EXTERNAL_HTTP
+        ? deploy.publicUrl ?? undefined
+        : deploy.branchName ?? undefined;
+    if (serviceOverride.branchOrExternalUrl !== current) return true;
+  }
+  return false;
+}
+
+function timestampSecond(value: string | Date | null | undefined): number | null {
+  if (value == null) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.trunc(timestamp / 1000) : null;
 }
 
 async function insertOnUuid(

@@ -81,6 +81,8 @@ describe('OpenAPI v2 environment contract', () => {
     expect(successSchema('/api/v2/environments/{uuid}/deploy', 'post', '202')).toEqual({
       $ref: '#/components/schemas/EnvironmentQueuedOperationSuccessResponse',
     });
+    expect(schemas.EnvironmentQueuedOperation.properties.deployId).toEqual(expect.objectContaining({ type: 'string' }));
+    expect(schemas.EnvironmentQueuedOperation.required).not.toContain('deployId');
     expect(successSchema('/api/v2/environments/{uuid}/extend', 'post', '200')).toEqual({
       $ref: '#/components/schemas/EnvironmentLeaseExtensionSuccessResponse',
     });
@@ -221,6 +223,55 @@ describe('OpenAPI v2 sites contract', () => {
         },
       },
     ]);
+  });
+});
+
+describe('OpenAPI Lifecycle MCP admin contract', () => {
+  const lifecycleMcpComponents = [
+    'UpdateLifecycleMcpSettings',
+    'LifecycleMcpIssue',
+    'LifecycleMcpTool',
+    'LifecycleMcpCapability',
+    'LifecycleMcpSettings',
+    'LifecycleMcpSettingsSuccessResponse',
+  ];
+
+  it('defines the small, strict MCP settings and status family', () => {
+    expect(lifecycleMcpComponents.filter((name) => !schemas[name])).toEqual([]);
+    expect(schemas.UpdateLifecycleMcpSettings).toEqual(
+      expect.objectContaining({
+        required: ['enabled', 'allowChanges'],
+        additionalProperties: false,
+      })
+    );
+    expect(Object.keys(schemas.UpdateLifecycleMcpSettings.properties)).toEqual(['enabled', 'allowChanges']);
+    expect(schemas.LifecycleMcpIssue.required).toEqual(['code', 'message']);
+    expect(schemas.LifecycleMcpSettings.required).toEqual([
+      'enabled',
+      'allowChanges',
+      'endpoint',
+      'issue',
+      'capabilities',
+    ]);
+    expect(schemas.LifecycleMcpCapability.properties.id.enum).toEqual([
+      'understand-environments',
+      'diagnose-environments',
+      'manage-environments',
+      'view-hosted-sites',
+    ]);
+  });
+
+  it('defines GET and PUT with the same status response', () => {
+    for (const method of ['get', 'put'] as const) {
+      expect(
+        getOperation('/api/v2/config/mcp', method)?.responses?.['200']?.content?.['application/json']?.schema
+      ).toEqual({
+        $ref: '#/components/schemas/LifecycleMcpSettingsSuccessResponse',
+      });
+    }
+    expect(getOperation('/api/v2/config/mcp', 'put').responses).toEqual(
+      expect.objectContaining({ '400': expect.anything(), '409': expect.anything(), '503': expect.anything() })
+    );
   });
 });
 

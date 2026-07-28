@@ -88,7 +88,7 @@ export function parseOptionalNullableString(body: JsonObject, field: string): st
   if (value !== null && typeof value !== 'string') {
     throw new BadRequestError(`${field} must be a string or null`, 'invalid_body');
   }
-  return value;
+  return value as string | null;
 }
 
 export function parseOptionalPositiveInteger(

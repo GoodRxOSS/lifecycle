@@ -20,6 +20,7 @@ import { getLogger } from 'server/lib/logger';
 import type { Principal } from 'server/lib/principal';
 
 export const DEFAULT_RATE_LIMIT_PER_MINUTE = 600;
+export const DEFAULT_MCP_TOOL_RATE_LIMIT_PER_MINUTE = 600;
 const WINDOW_SECONDS = 60;
 const REDIS_TIMEOUT_MS = 250;
 
@@ -103,5 +104,31 @@ export async function checkApiKeyRateLimit(principal: Principal): Promise<RateLi
       'AuthRateLimit: limiter unavailable; failing open'
     );
     return { allowed: true, retryAfterSeconds: 0 };
+  }
+}
+
+/** User-keyed limit for OAuth MCP tool invocations; a server-side safety boundary, not an admin setting. */
+export async function checkMcpToolRateLimit(principal: Principal): Promise<RateLimitResult> {
+  if (principal.authMethod !== 'oauth' || principal.kind !== 'user' || !principal.userId) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const windowEpoch = Math.floor(nowSeconds / WINDOW_SECONDS);
+  const bucketKey = `mcprl:${principal.userId}:${windowEpoch}`;
+
+  try {
+    const count = await incrementWindow(bucketKey);
+    if (count > DEFAULT_MCP_TOOL_RATE_LIMIT_PER_MINUTE) {
+      const retryAfterSeconds = Math.max(1, (windowEpoch + 1) * WINDOW_SECONDS - nowSeconds);
+      return { allowed: false, retryAfterSeconds };
+    }
+    return { allowed: true, retryAfterSeconds: 0 };
+  } catch (error) {
+    getLogger().error(
+      { error, event: 'mcp.ratelimit.unavailable', principalKind: principal.kind, userId: principal.userId },
+      'MCP rate limiter unavailable; rejecting tool invocation'
+    );
+    return { allowed: false, retryAfterSeconds: 30 };
   }
 }

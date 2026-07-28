@@ -2021,6 +2021,83 @@ describe('AgentCapabilityService.buildToolSet', () => {
     );
   });
 
+  it('does not treat domain status fields as MCP execution failures', async () => {
+    mockResolveServers.mockResolvedValue([
+      {
+        slug: 'lifecycle-mcp',
+        name: 'Lifecycle MCP',
+        transport: {
+          type: 'http',
+          url: 'https://mcp.example.test',
+        },
+        timeout: 30000,
+        defaultArgs: {},
+        env: {},
+        discoveredTools: [
+          {
+            name: 'diagnose_environment',
+            description: 'Diagnose an environment',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                uuid: { type: 'string' },
+              },
+              required: ['uuid'],
+            },
+            annotations: {
+              readOnlyHint: true,
+            },
+          },
+        ],
+      },
+    ]);
+    const diagnosis = {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            uuid: 'rough-meadow-630705',
+            status: 'error',
+            verdict: '4 of 8 services failing',
+          }),
+        },
+      ],
+      structuredContent: {
+        uuid: 'rough-meadow-630705',
+        status: 'error',
+        verdict: '4 of 8 services failing',
+      },
+    };
+    mockCallTool.mockResolvedValueOnce(diagnosis);
+    const onToolFinished = jest.fn();
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      hooks: {
+        onToolFinished,
+      },
+    });
+
+    const tool = tools.mcp__lifecycle_mcp__diagnose_environment as {
+      execute: (input: Record<string, unknown>, context?: { toolCallId?: string }) => Promise<unknown>;
+    };
+    const result = await tool.execute({ uuid: 'rough-meadow-630705' }, { toolCallId: 'tool-diagnose-environment' });
+
+    expect(result).toEqual(diagnosis);
+    expect(onToolFinished).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'diagnose_environment',
+        status: 'completed',
+        result: diagnosis,
+      })
+    );
+  });
+
   it('lets tool rules require approval for workspace_core HTTP publishing', async () => {
     mockResolveServers.mockResolvedValue([]);
     mockModeForCapability.mockReturnValue('allow');

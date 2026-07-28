@@ -19,6 +19,7 @@ import {
   renderLogWindow,
   sanitizeLogText,
   searchLogLines,
+  searchLogLinesLiteral,
   stripAnsiControl,
 } from '../logView';
 
@@ -92,6 +93,46 @@ describe('searchLogLines', () => {
   it('throws on an invalid or oversized pattern', () => {
     expect(() => searchLogLines(['a'], '([')).toThrow();
     expect(() => searchLogLines(['a'], 'x'.repeat(300))).toThrow('too long');
+  });
+});
+
+describe('searchLogLinesLiteral', () => {
+  it('treats regular-expression metacharacters as ordinary text', () => {
+    const lines = ['prefix [a-z]+ suffix', 'prefix alphabet suffix'];
+    const view = searchLogLinesLiteral(lines, '[A-Z]+');
+
+    expect(view.totalMatches).toBe(1);
+    expect(view.rendered).toContain('1: prefix [a-z]+ suffix');
+    expect(view.rendered).not.toContain('2: prefix alphabet suffix');
+  });
+
+  it('does not construct a RegExp while scanning', () => {
+    const original = global.RegExp;
+    const constructor = jest.fn(() => {
+      throw new Error('RegExp construction is forbidden');
+    });
+    Object.defineProperty(global, 'RegExp', { configurable: true, value: constructor });
+    try {
+      expect(searchLogLinesLiteral(['literal .* value'], '.*').totalMatches).toBe(1);
+      expect(constructor).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(global, 'RegExp', { configurable: true, value: original });
+    }
+  });
+
+  it('caps a giant line before scanning the entire value', () => {
+    const view = searchLogLinesLiteral([`${'x'.repeat(2_000_000)}needle`], 'needle', {
+      maxScanChars: 64 * 1024,
+    });
+
+    expect(view.totalMatches).toBe(0);
+    expect(view.scanCapped).toBe(true);
+    expect(view.scannedChars).toBe(64 * 1024);
+  });
+
+  it('enforces the literal query bound', () => {
+    expect(() => searchLogLinesLiteral(['a'], '')).toThrow('required');
+    expect(() => searchLogLinesLiteral(['a'], 'x'.repeat(257))).toThrow('too long');
   });
 });
 

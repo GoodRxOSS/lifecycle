@@ -423,7 +423,6 @@ const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
       serverUrl: transport.url,
       authorizationCode: code,
       callbackState,
-      scope: authConfig.scope,
     });
 
     const validatedAt = new Date().toISOString();

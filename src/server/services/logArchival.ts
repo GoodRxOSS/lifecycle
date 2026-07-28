@@ -24,6 +24,7 @@ import {
 import { getS3Client } from 'server/lib/objectStore/s3Client';
 import { OBJECT_STORE_BUCKET, OBJECT_STORE_TYPE } from 'shared/config';
 import { getLogger } from 'server/lib/logger';
+import { truncateUtf8Tail } from 'server/lib/truncateUtf8';
 import { ArchivedJobMetadata } from './types/logArchival';
 
 function objectPrefix(namespace: string, jobType: 'build' | 'deploy', serviceName: string, jobName: string): string {
@@ -105,6 +106,47 @@ export class LogArchivalService {
     } catch (error) {
       if (error?.name === 'NoSuchKey') return null;
       getLogger().warn({ error }, `LogArchival: failed to fetch logs key=${key}`);
+      return null;
+    }
+  }
+
+  /** Fetches only the trailing byte range; unlike getArchivedLogs it never materializes a multi-gigabyte object. */
+  async getArchivedLogsTail(
+    namespace: string,
+    jobType: 'build' | 'deploy',
+    serviceName: string,
+    jobName: string,
+    maxBytes: number
+  ): Promise<{ logs: string; truncated: boolean } | null> {
+    const client = getS3Client();
+    const key = `${objectPrefix(namespace, jobType, serviceName, jobName)}/logs.txt`;
+    const byteLimit = Math.max(1, Math.trunc(maxBytes));
+    try {
+      const response = await client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          Range: `bytes=-${byteLimit}`,
+        })
+      );
+      if (!response.Body) {
+        getLogger().warn(`LogArchival: empty body for key=${key}`);
+        return null;
+      }
+      const bytes = Buffer.from(await response.Body.transformToByteArray());
+      let start = 0;
+      while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) {
+        start += 1;
+      }
+      const bounded = truncateUtf8Tail(bytes.subarray(start).toString('utf8'), byteLimit);
+      const rangeStart = /^bytes\s+(\d+)-/i.exec(response.ContentRange ?? '')?.[1];
+      return {
+        logs: bounded.text,
+        truncated: bounded.truncated || start > 0 || (rangeStart !== undefined && Number(rangeStart) > 0),
+      };
+    } catch (error) {
+      if (error?.name === 'NoSuchKey') return null;
+      getLogger().warn({ error }, `LogArchival: failed to fetch bounded logs key=${key}`);
       return null;
     }
   }

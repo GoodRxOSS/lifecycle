@@ -63,7 +63,7 @@ export function getBuildSource(build: Build): BuildSourceRef {
     shadowCompare(build, pullRequest);
     return {
       fullName: pullRequest.fullName ?? null,
-      branchName: pullRequest.branchName ?? null,
+      branchName: pullRequest.branchName ?? build.branchName ?? null,
       githubRepositoryId:
         pullRequest.repository?.githubRepositoryId != null ? Number(pullRequest.repository.githubRepositoryId) : null,
       configSha: null,
@@ -82,7 +82,7 @@ export function getBuildSource(build: Build): BuildSourceRef {
 
 export function isDeployEnabled(build: Build): boolean {
   if (build.pullRequest) {
-    return build.pullRequest.deployOnUpdate;
+    return build.pullRequest.deployOnUpdate === true;
   }
   return build.deployEnabled === true;
 }

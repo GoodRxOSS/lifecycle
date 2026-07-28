@@ -260,6 +260,9 @@ async function invokeWebhooks(req: NextApiRequest, res: NextApiResponse) {
 
 async function retrieveWebhooks(req: NextApiRequest, res: NextApiResponse) {
   const { uuid, page = 1, limit = 100 } = req.query;
+  if (typeof uuid !== 'string') {
+    return res.status(400).json({ error: 'Invalid UUID' });
+  }
   try {
     const pageNumber = Math.max(1, parseInt(page as string, 10) || 1);
     const limitNumber = Math.max(1, parseInt(limit as string, 10) || 10);

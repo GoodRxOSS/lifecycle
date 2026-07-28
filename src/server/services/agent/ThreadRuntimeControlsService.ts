@@ -317,7 +317,7 @@ function capabilityAllowed({
   });
 }
 
-function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
+function allowedMcpCapabilityIds(context: RuntimeChoiceContext): AgentCapabilityCatalogId[] {
   const capabilityRefs = [
     ...(context.definition.requiredCapabilityRefs || []),
     ...(context.definition.optionalCapabilityRefs || []),
@@ -325,7 +325,7 @@ function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
   ].filter(isMcpCapability);
   const uniqueCapabilityRefs = [...new Set(capabilityRefs)];
 
-  return uniqueCapabilityRefs.some(
+  return uniqueCapabilityRefs.filter(
     (capabilityId) =>
       capabilityAllowed({
         capabilityId,
@@ -333,6 +333,10 @@ function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
         context,
       }).allowed
   );
+}
+
+function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
+  return allowedMcpCapabilityIds(context).length > 0;
 }
 
 function assertDefinitionUsable(definition: AgentDefinitionContract, sourceKind: AgentCapabilitySourceKind): void {
@@ -561,7 +565,7 @@ export default class AgentThreadRuntimeControlsService {
     }
 
     const mcpConnections = await new McpConfigService().listEnabledConnectionsForUser(repoFullName, userIdentity);
-    const { state, lookup } = buildChoiceState({
+    const runtimeContext = {
       selectedAgentId: definition.id,
       definition,
       sourceKind,
@@ -572,14 +576,21 @@ export default class AgentThreadRuntimeControlsService {
       activeRun: false,
       savedChoices,
       mcpConnections,
-    });
+    };
+    const { state, lookup } = buildChoiceState(runtimeContext);
 
-    const selectedRuntimeCapabilityIds = state.tools.selectedChoiceIds
+    const selectedToolCapabilityIds = state.tools.selectedChoiceIds
       .map((choiceId) => lookup.toolsById.get(choiceId)?.rawCapabilityId)
       .filter((capabilityId): capabilityId is AgentCapabilityCatalogId => Boolean(capabilityId));
     const selectedRuntimeMcpConnectionRefs = state.mcp.selectedChoiceIds
       .map((choiceId) => lookup.mcpById.get(choiceId)?.rawConnectionId)
       .filter((connectionRef): connectionRef is string => Boolean(connectionRef));
+    const selectedRuntimeCapabilityIds = [
+      ...new Set([
+        ...selectedToolCapabilityIds,
+        ...(selectedRuntimeMcpConnectionRefs.length > 0 ? allowedMcpCapabilityIds(runtimeContext) : []),
+      ]),
+    ];
 
     return {
       metadataPresent: true,

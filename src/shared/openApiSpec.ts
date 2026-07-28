@@ -442,6 +442,88 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        UpdateLifecycleMcpSettings: {
+          type: 'object',
+          description: 'Lifecycle MCP administrator settings.',
+          properties: {
+            enabled: { type: 'boolean' },
+            allowChanges: { type: 'boolean' },
+          },
+          required: ['enabled', 'allowChanges'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpIssue: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+            message: { type: 'string' },
+          },
+          required: ['code', 'message'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpTool: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            access: { type: 'string', enum: ['read', 'change'] },
+          },
+          required: ['name', 'description', 'access'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpCapability: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              enum: ['understand-environments', 'diagnose-environments', 'manage-environments', 'view-hosted-sites'],
+            },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            tools: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/LifecycleMcpTool' },
+            },
+          },
+          required: ['id', 'label', 'description', 'tools'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpSettings: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            allowChanges: { type: 'boolean' },
+            endpoint: { type: 'string', format: 'uri', nullable: true },
+            issue: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/LifecycleMcpIssue' }],
+            },
+            capabilities: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/LifecycleMcpCapability' },
+            },
+          },
+          required: ['enabled', 'allowChanges', 'endpoint', 'issue', 'capabilities'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpSettingsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/LifecycleMcpSettings' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
         EnvironmentTrigger: {
           type: 'string',
           enum: ['api', 'github_pr'],
@@ -583,6 +665,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             uuid: { type: 'string' },
             status: { type: 'string', enum: ['deploy_queued', 'tearing_down_queued'] },
+            deployId: { type: 'string', description: 'Identifier of the queued deploy. Absent for teardown.' },
             statusUrl: { type: 'string' },
           },
           required: ['uuid', 'status', 'statusUrl'],
@@ -1220,48 +1303,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           required: ['providers', 'mcpConnections'],
-        },
-
-        RepositorySearchResult: {
-          type: 'object',
-          properties: {
-            id: { type: 'integer' },
-            githubRepositoryId: { type: 'integer' },
-            githubInstallationId: { type: 'integer' },
-            ownerId: { type: 'integer', nullable: true },
-            fullName: { type: 'string' },
-            htmlUrl: { type: 'string', nullable: true },
-            defaultEnvId: { type: 'integer', nullable: true },
-            onboarded: { type: 'boolean' },
-            createdAt: { type: 'string', format: 'date-time', nullable: true },
-            updatedAt: { type: 'string', format: 'date-time', nullable: true },
-            deletedAt: { type: 'string', format: 'date-time', nullable: true },
-          },
-          required: ['githubRepositoryId', 'fullName', 'onboarded'],
-        },
-
-        SearchRepositoriesResponse: {
-          type: 'object',
-          properties: {
-            repositories: {
-              type: 'array',
-              items: { $ref: '#/components/schemas/RepositorySearchResult' },
-            },
-          },
-          required: ['repositories'],
-        },
-
-        SearchRepositoriesSuccessResponse: {
-          allOf: [
-            { $ref: '#/components/schemas/SuccessApiResponse' },
-            {
-              type: 'object',
-              properties: {
-                data: { $ref: '#/components/schemas/SearchRepositoriesResponse' },
-              },
-              required: ['data'],
-            },
-          ],
         },
 
         OnboardRepositoryRequest: {
@@ -6846,8 +6887,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               properties: {
                 mode: { type: 'string', enum: ['oauth'] },
                 provider: { type: 'string', enum: ['generic-oauth2.1'] },
-                scope: { type: 'string' },
-                resource: { type: 'string' },
                 clientName: { type: 'string' },
                 instructions: { type: 'string' },
               },

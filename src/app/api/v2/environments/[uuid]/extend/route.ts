@@ -93,7 +93,7 @@ const postHandler = createPrincipalApiHandler(
     }
     await assertBuildRepositoryAllowed(principal, target);
 
-    const build = await buildService.extendApiEnvironment(uuid, hours, target.id);
+    const { build } = await buildService.extendApiEnvironment(uuid, hours, target.id);
     return successResponse({ uuid: build.uuid, expiresAt: build.expiresAt }, { status: 200 }, req);
   }
 );

@@ -24,15 +24,26 @@ jest.mock('server/services/globalConfig', () => {
 });
 jest.mock('server/lib/logger', () => {
   const warn = jest.fn();
-  return { getLogger: () => ({ warn, info: jest.fn(), error: jest.fn(), debug: jest.fn() }), __warn: warn };
+  const error = jest.fn();
+  return {
+    getLogger: () => ({ warn, info: jest.fn(), error, debug: jest.fn() }),
+    __warn: warn,
+    __error: error,
+  };
 });
 
-import { checkApiKeyRateLimit, DEFAULT_RATE_LIMIT_PER_MINUTE } from '../authRateLimit';
+import {
+  checkApiKeyRateLimit,
+  checkMcpToolRateLimit,
+  DEFAULT_MCP_TOOL_RATE_LIMIT_PER_MINUTE,
+  DEFAULT_RATE_LIMIT_PER_MINUTE,
+} from '../authRateLimit';
 import type { Principal } from 'server/lib/principal';
 
 const mockEval = (jest.requireMock('server/lib/dependencies') as any).__evalMock as jest.Mock;
 const mockGetAllConfigs = (jest.requireMock('server/services/globalConfig') as any).__getAllConfigs as jest.Mock;
 const mockWarn = (jest.requireMock('server/lib/logger') as any).__warn as jest.Mock;
+const mockError = (jest.requireMock('server/lib/logger') as any).__error as jest.Mock;
 
 const keyPrincipal = (over: Partial<Principal> = {}): Principal => ({
   kind: 'personal_key',
@@ -59,6 +70,11 @@ const sessionPrincipal = (): Principal => ({
   repositoryAllowlist: null,
   repositoryAllowlistRepoIds: null,
   identity: null,
+});
+
+const oauthPrincipal = (): Principal => ({
+  ...sessionPrincipal(),
+  authMethod: 'oauth',
 });
 
 const bucketKeyOf = (call: number) => mockEval.mock.calls[call][2] as string;
@@ -158,5 +174,47 @@ describe('checkApiKeyRateLimit', () => {
 
     expect(bucketKeyOf(0)).not.toBe(bucketKeyOf(1));
     nowSpy.mockRestore();
+  });
+});
+
+describe('checkMcpToolRateLimit', () => {
+  it('limits OAuth tool calls by Lifecycle user without consulting API-key configuration', async () => {
+    mockEval.mockResolvedValueOnce(DEFAULT_MCP_TOOL_RATE_LIMIT_PER_MINUTE);
+    await expect(checkMcpToolRateLimit(oauthPrincipal())).resolves.toEqual({
+      allowed: true,
+      retryAfterSeconds: 0,
+    });
+
+    mockEval.mockResolvedValueOnce(DEFAULT_MCP_TOOL_RATE_LIMIT_PER_MINUTE + 1);
+    const denied = await checkMcpToolRateLimit(oauthPrincipal());
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+    expect(bucketKeyOf(0)).toContain('mcprl:u-1:');
+    expect(mockGetAllConfigs).not.toHaveBeenCalled();
+  });
+
+  it('does not spend the MCP bucket for non-OAuth principals', async () => {
+    await expect(checkMcpToolRateLimit(sessionPrincipal())).resolves.toEqual({
+      allowed: true,
+      retryAfterSeconds: 0,
+    });
+    await expect(checkMcpToolRateLimit(keyPrincipal())).resolves.toEqual({
+      allowed: true,
+      retryAfterSeconds: 0,
+    });
+    expect(mockEval).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with a bounded retry when the MCP limiter is unavailable', async () => {
+    mockEval.mockRejectedValue(new Error('redis down'));
+
+    await expect(checkMcpToolRateLimit(oauthPrincipal())).resolves.toEqual({
+      allowed: false,
+      retryAfterSeconds: 30,
+    });
+    expect(mockError).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'mcp.ratelimit.unavailable', userId: 'u-1' }),
+      expect.any(String)
+    );
   });
 });

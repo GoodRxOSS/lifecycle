@@ -477,12 +477,20 @@ describe('First-party agent definition integration regressions', () => {
     expect(freeformRun.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual([
       'read_context',
       'external_mcp_read',
+      'external_mcp_write',
       'workspace_files',
       'workspace_shell',
       'workspace_git',
       'network_access',
       'preview_publish',
     ]);
+    expect(getCapabilityAccess(freeformRun, 'external_mcp_write')).toEqual(
+      expect.objectContaining({
+        allowed: true,
+        availability: 'admin_only',
+        approvalMode: 'require_approval',
+      })
+    );
     expect(serializeRunPlanSummary(freeformRun.runPlanSnapshot)?.agent.id).toBe('system.agent');
 
     await expect(

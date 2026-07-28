@@ -73,6 +73,22 @@ export class Metrics {
     return this;
   };
 
+  public timing = (metric, milliseconds: number, tags = {}, options: MetricsPublicOptions = {}) => {
+    if (!this.config.isEnabled) return this;
+    const timingTags = options?.forceExactTags ? tags : this.constructTags(tags);
+    const scopedMetric = this.constructScopedMetric(metric);
+    this.client.timing(scopedMetric, milliseconds, timingTags);
+    return this;
+  };
+
+  public gauge = (metric, value: number, tags = {}, options: MetricsPublicOptions = {}) => {
+    if (!this.config.isEnabled) return this;
+    const gaugeTags = options?.forceExactTags ? tags : this.constructTags(tags);
+    const scopedMetric = this.constructScopedMetric(metric);
+    this.client.gauge(scopedMetric, value, gaugeTags);
+    return this;
+  };
+
   public updateEventDetails = (eventDetails: MetricsEvent) => {
     this.config.eventDetails = Object.assign({}, this.config.eventDetails, eventDetails);
     return this;

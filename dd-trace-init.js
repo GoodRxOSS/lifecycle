@@ -14,10 +14,31 @@
  * limitations under the License.
  */
 
-export const FEATURE_FLAG = {
-  hasTest: true,
-};
+'use strict';
 
-export const MALFORMED_FEATURE_FLAG_BOOLEAN_STRING = {
-  hasTest: "true",
-};
+// Runtime TS loaders honor baseUrl, so a root dd-trace.js would shadow node_modules and make this preload require itself.
+const tracer = require('dd-trace').init({
+  serviceMapping: {
+    redis: 'lifecycle-redis',
+    ioredis: 'lifecycle-redis',
+    pg: 'lifecycle-postgres',
+  },
+});
+
+const blocklist = [/^\/api\/health/, /^\/api\/jobs/, /^\/_next\/static/, /^\/_next\/webpack-hmr/];
+
+tracer.use('http', {
+  server: {
+    blocklist,
+  },
+  client: {
+    blocklist,
+  },
+});
+
+tracer.use('next', {
+  blocklist,
+});
+
+tracer.use('net', false);
+tracer.use('dns', false);

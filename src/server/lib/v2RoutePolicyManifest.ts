@@ -214,6 +214,8 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'POST', route: '/api/v2/config/metadata', policy: 'session', roles: ['admin'] },
   { method: 'DELETE', route: '/api/v2/config/metadata/{id}', policy: 'session', roles: ['admin'] },
   { method: 'PATCH', route: '/api/v2/config/metadata/{id}', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/config/mcp', policy: 'session', roles: ['admin'] },
+  { method: 'PUT', route: '/api/v2/config/mcp', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/config/sites', policy: 'session', roles: ['admin'] },
   { method: 'PUT', route: '/api/v2/config/sites', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/environments', policy: 'principal', scope: 'env:read' },

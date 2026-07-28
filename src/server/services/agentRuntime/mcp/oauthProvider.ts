@@ -20,6 +20,47 @@ import UserMcpConnectionService from 'server/services/userMcpConnection';
 import type { McpDiscoveredTool, McpOauthAuthConfig, McpStoredUserConnectionState } from './types';
 
 type PersistedOAuthState = Extract<McpStoredUserConnectionState, { type: 'oauth' }>;
+type McpOAuthClientMetadata = OAuthClientMetadata & {
+  application_type: 'native' | 'web';
+};
+
+function isHttpLoopback(redirect: URL): boolean {
+  const hostname = redirect.hostname.toLowerCase();
+  return (
+    redirect.protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]')
+  );
+}
+
+function getOAuthApplicationType(redirectUrl: string): McpOAuthClientMetadata['application_type'] {
+  const redirect = new URL(redirectUrl);
+  return isHttpLoopback(redirect) ? 'native' : 'web';
+}
+
+export function getMcpOAuthTokenEndpointAuthMethod(redirectUrl: string): 'none' | 'client_secret_basic' {
+  return isHttpLoopback(new URL(redirectUrl)) ? 'none' : 'client_secret_basic';
+}
+
+export function isMcpOAuthClientAuthenticationCompatible(
+  clientInformation: OAuthClientInformation,
+  redirectUrl: string
+): boolean {
+  const expectedMethod = getMcpOAuthTokenEndpointAuthMethod(redirectUrl);
+  if (expectedMethod === 'none') {
+    return !clientInformation.client_secret;
+  }
+  return Boolean(clientInformation.client_secret);
+}
+
+export function getMcpOAuthRegistrationRedirectUrl(redirectUrl: string): string {
+  const redirect = new URL(redirectUrl);
+  // RFC 8252 permits an authorization request to choose any port for an IP
+  // loopback redirect. Keycloak 26.4 accepts that form only when the DCR
+  // metadata registers the same IP/path without a port.
+  if (redirect.protocol === 'http:' && (redirect.hostname === '127.0.0.1' || redirect.hostname === '[::1]')) {
+    redirect.port = '';
+  }
+  return redirect.toString();
+}
 
 export const OAUTH_RECONNECT_REQUIRED_MESSAGE =
   'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.';
@@ -38,6 +79,7 @@ type PersistentOAuthClientProviderOptions = {
   slug: string;
   definitionFingerprint: string;
   authConfig: McpOauthAuthConfig;
+  oauthScope?: string;
   redirectUrl: string;
   statePrefix?: string;
   initialState?: PersistedOAuthState | null;
@@ -65,14 +107,16 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
     return this.options.redirectUrl;
   }
 
-  get clientMetadata(): OAuthClientMetadata {
+  get clientMetadata(): McpOAuthClientMetadata {
     return {
-      redirect_uris: [this.redirectUrl],
+      redirect_uris: [getMcpOAuthRegistrationRedirectUrl(this.redirectUrl)],
+      application_type: getOAuthApplicationType(this.redirectUrl),
+      token_endpoint_auth_method: getMcpOAuthTokenEndpointAuthMethod(this.redirectUrl),
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       client_name: this.options.authConfig.clientName || `${this.options.slug} MCP`,
       client_uri: new URL(this.redirectUrl).origin,
-      scope: this.options.authConfig.scope,
+      ...(this.options.oauthScope ? { scope: this.options.oauthScope } : {}),
     };
   }
 
@@ -233,9 +277,31 @@ export class PersistentOAuthClientProvider implements OAuthClientProvider {
     await this.persist();
   }
 
-  async validateResourceURL(_serverUrl: string | URL, resource?: string): Promise<URL | undefined> {
-    const configuredResource = this.options.authConfig.resource;
-    const effective = configuredResource || resource;
-    return effective ? new URL(effective) : undefined;
+  async validateResourceURL(serverUrl: string | URL, resource?: string): Promise<URL> {
+    if (!resource) {
+      throw new Error('MCP protected-resource metadata did not identify its resource.');
+    }
+
+    const expected = new URL(serverUrl);
+    const advertised = new URL(resource);
+    for (const [label, url] of [
+      ['configured MCP URL', expected],
+      ['protected-resource metadata', advertised],
+    ] as const) {
+      if (url.username || url.password || url.search || url.hash) {
+        throw new Error(`${label} must not include credentials, a query, or a fragment.`);
+      }
+    }
+
+    // RFC 9728 section 3.3 requires identity, not merely a same-origin or
+    // path-prefix relationship. Returning the expected URL also guarantees the
+    // same identifier is sent on authorization, token, and refresh requests.
+    if (advertised.href !== expected.href) {
+      throw new Error(
+        `MCP protected-resource metadata identifies ${advertised.href}, but the configured MCP URL is ${expected.href}.`
+      );
+    }
+
+    return expected;
   }
 }

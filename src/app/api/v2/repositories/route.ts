@@ -43,6 +43,11 @@ import RepositoryService from 'server/services/repository';
  *           enum: [onboarded, all]
  *           default: onboarded
  *       - in: query
+ *         name: installationId
+ *         schema:
+ *           type: integer
+ *         description: Optional GitHub App installation ID to scope repository results.
+ *       - in: query
  *         name: q
  *         schema:
  *           type: string

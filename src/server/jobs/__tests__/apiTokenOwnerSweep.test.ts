@@ -38,11 +38,11 @@ jest.mock('server/services/apiToken', () => ({
   default: { revokeByOwnerIdentifier: jest.fn() },
 }));
 jest.mock('server/services/authAudit', () => ({ recordAuthAuditEvent: jest.fn() }));
-jest.mock('server/services/keycloakAdmin', () => ({ isConfigured: jest.fn(), getUserStatus: jest.fn() }));
+jest.mock('server/services/keycloak/principalStatus', () => ({ isConfigured: jest.fn(), getUserStatus: jest.fn() }));
 
 import ApiTokenService from 'server/services/apiToken';
 import { recordAuthAuditEvent } from 'server/services/authAudit';
-import { getUserStatus, isConfigured } from 'server/services/keycloakAdmin';
+import { getUserStatus, isConfigured } from 'server/services/keycloak/principalStatus';
 import { processApiTokenOwnerSweep, warnIfApiTokenOwnerSweepUnconfigured } from '../apiTokenOwnerSweep';
 
 const mockIsConfigured = isConfigured as jest.Mock;

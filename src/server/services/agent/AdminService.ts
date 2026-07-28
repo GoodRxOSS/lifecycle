@@ -354,11 +354,11 @@ export default class AgentAdminService {
       runCount: runCountByThreadId.get(thread.id) || 0,
       pendingActionsCount: pendingCountByThreadId.get(thread.id) || 0,
       latestRun: latestRunByThreadId.has(thread.id)
-        ? AgentRunService.serializeRun({
-            ...(latestRunByThreadId.get(thread.id) as AgentRun),
-            threadUuid: thread.uuid,
-            sessionUuid: session.uuid,
-          } as AgentRun)
+        ? {
+            ...AgentRunService.serializeRun(latestRunByThreadId.get(thread.id)!),
+            threadId: thread.uuid,
+            sessionId: session.uuid,
+          }
         : null,
     }));
 
@@ -419,21 +419,17 @@ export default class AgentAdminService {
         .orderBy('event.sequence', 'asc'),
     ]);
 
-    const runs = runRows.map((run) =>
-      AgentRunService.serializeRun({
-        ...run,
-        threadUuid: thread.uuid,
-        sessionUuid: session.uuid,
-      } as AgentRun)
-    );
+    const runs = runRows.map((run) => ({
+      ...AgentRunService.serializeRun(run),
+      threadId: thread.uuid,
+      sessionId: session.uuid,
+    }));
 
-    const pendingActions = pendingRows.map((action) =>
-      ApprovalService.serializePendingAction({
-        ...action,
-        threadUuid: thread.uuid,
-        runUuid: (action as AgentPendingAction & { runUuid?: string }).runUuid,
-      } as AgentPendingAction)
-    );
+    const pendingActions = pendingRows.map((action) => ({
+      ...ApprovalService.serializePendingAction(action),
+      threadId: thread.uuid,
+      runId: (action as AgentPendingAction & { runUuid?: string }).runUuid || String(action.runId),
+    }));
 
     const threadSummary = sessionDetail.threads.find((candidate) => candidate.id === threadUuid);
     if (!threadSummary) {
@@ -449,12 +445,13 @@ export default class AgentAdminService {
       }),
       runs,
       events: eventRows.map((event) =>
-        AgentRunEventService.serializeRunEvent({
-          ...event,
-          runUuid: (event as AgentRunEvent & { runUuid?: string }).runUuid,
-          threadUuid: thread.uuid,
-          sessionUuid: session.uuid,
-        } as AgentRunEvent)
+        AgentRunEventService.serializeRunEvent(
+          Object.assign(event, {
+            runUuid: (event as AgentRunEvent & { runUuid?: string }).runUuid,
+            threadUuid: thread.uuid,
+            sessionUuid: session.uuid,
+          })
+        )
       ),
       pendingActions,
       toolExecutions: toolRows.map(toToolExecutionRecord),

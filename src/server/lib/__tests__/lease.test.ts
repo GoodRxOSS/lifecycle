@@ -49,6 +49,11 @@ describe('computeExtendedExpiry', () => {
     const current = new Date(now.getTime() + 330 * HOUR);
     expect(computeExtendedExpiry(now, current, 24, 336).getTime()).toBe(now.getTime() + 336 * HOUR);
   });
+
+  it('does not shorten an existing lease when an administrator lowers the maximum', () => {
+    const current = new Date(now.getTime() + 400 * HOUR);
+    expect(computeExtendedExpiry(now, current, 24, 336).getTime()).toBe(current.getTime());
+  });
 });
 
 describe('isExpired', () => {

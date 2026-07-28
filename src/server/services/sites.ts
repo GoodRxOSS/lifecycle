@@ -111,11 +111,20 @@ export default class SitesService extends Service {
   }
 
   private serialize(site: Site, config: ResolvedSitesConfig): SiteResponse {
+    const expiresAt = site.expiresAt ? new Date(site.expiresAt).getTime() : null;
+    const status =
+      site.status === 'active' &&
+      config.ttl.enabled &&
+      expiresAt !== null &&
+      Number.isFinite(expiresAt) &&
+      expiresAt <= Date.now()
+        ? 'expired'
+        : site.status;
     return {
       id: site.siteId,
       name: site.name,
       url: buildSiteUrl(site.siteId, config),
-      status: site.status,
+      status,
       createdAt: site.createdAt || null,
       updatedAt: site.updatedAt || null,
       expiresAt: site.expiresAt || null,

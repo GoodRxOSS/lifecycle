@@ -32,14 +32,40 @@ export interface EnvironmentPodInfo extends PodInfo {
   serviceName: string;
 }
 
-export async function getEnvironmentPods(uuid: string): Promise<EnvironmentPodInfo[]> {
-  const kc = loadKubeConfig();
-  const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
+export interface EnvironmentPodCoreApi {
+  listNamespacedPod(
+    namespace: string,
+    pretty?: string,
+    allowWatchBookmarks?: boolean,
+    _continue?: string,
+    fieldSelector?: string,
+    labelSelector?: string
+  ): Promise<{ body: { items?: k8s.V1Pod[] } }>;
+}
 
+export async function getEnvironmentPodsInNamespace(
+  namespace: string,
+  options: {
+    coreV1?: EnvironmentPodCoreApi;
+    labelSelector?: string;
+    maxPods?: number;
+  } = {}
+): Promise<EnvironmentPodInfo[]> {
+  const coreV1 =
+    options.coreV1 ??
+    (() => {
+      const kc = loadKubeConfig();
+      return kc.makeApiClient(k8s.CoreV1Api);
+    })();
   try {
-    const namespace = `env-${uuid}`;
-
-    const podResp = await coreV1.listNamespacedPod(namespace);
+    const podResp = await coreV1.listNamespacedPod(
+      namespace,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options.labelSelector
+    );
     const pods = podResp.body.items ?? [];
 
     if (pods.length === 0) {
@@ -51,6 +77,7 @@ export async function getEnvironmentPods(uuid: string): Promise<EnvironmentPodIn
         const appName = pod.metadata?.labels?.['app.kubernetes.io/name'];
         return appName !== 'native-build' && appName !== 'native-helm';
       })
+      .slice(0, Math.max(1, Math.trunc(options.maxPods ?? Number.MAX_SAFE_INTEGER)))
       .map((pod) => {
         const ageSeconds = podAgeSeconds(pod);
         const containers = extractContainers(pod);
@@ -71,7 +98,12 @@ export async function getEnvironmentPods(uuid: string): Promise<EnvironmentPodIn
         };
       });
   } catch (error) {
-    getLogger().error({ error }, `K8s: failed to list environment pods uuid=${uuid}`);
+    getLogger().error({ error }, `K8s: failed to list environment pods namespace=${namespace}`);
     throw error;
   }
+}
+
+/** Legacy wrapper assuming the env-<uuid> namespace; diagnostics pass the build row's stored namespace. */
+export async function getEnvironmentPods(uuid: string): Promise<EnvironmentPodInfo[]> {
+  return getEnvironmentPodsInNamespace(`env-${uuid}`);
 }

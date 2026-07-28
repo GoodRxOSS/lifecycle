@@ -14,11 +14,7 @@
  * limitations under the License.
  */
 
-/**
- * Keep at most the trailing `maxBytes` UTF-8 bytes of `text`, never splitting a
- * multi-byte character. Line-count limits alone don't bound archived log payloads:
- * a single long line (JSON, base64 blobs) can be arbitrarily large.
- */
+/** Line-count limits alone cannot bound a payload: one long line can be arbitrarily large. */
 export function truncateUtf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const buffer = Buffer.from(text, 'utf8');
   if (buffer.length <= maxBytes) {

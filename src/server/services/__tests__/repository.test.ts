@@ -218,6 +218,7 @@ describe('RepositoryService', () => {
         items: 1,
         limit: 25,
       });
+      expect(github.listInstallationRepositories).not.toHaveBeenCalled();
     });
 
     test('applies a legacy name-only constraint before pagination and fails closed on an empty list', async () => {

@@ -16,7 +16,6 @@
 
 import { NextRequest } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
-import { assertNamedRepositoryAllowed } from 'server/lib/repositoryAuthorization';
 import { getPaginationParamsFromURL } from 'server/lib/paginate';
 import { successResponse } from 'server/lib/response';
 import { AppError, BadRequestError } from 'server/lib/appError';
@@ -204,8 +203,6 @@ const postHandler = createPrincipalApiHandler({ scope: 'env:write' }, async (req
     });
   }
 
-  await assertNamedRepositoryAllowed(principal, body.repository);
-
   const buildService = new BuildService();
   const { build, replayed } = await buildService.createApiEnvironment(
     {
@@ -227,7 +224,10 @@ const postHandler = createPrincipalApiHandler({ scope: 'env:write' }, async (req
       createdByUserId: principal.userId,
       createdByGithubLogin: principal.identity?.githubUsername ?? null,
     },
-    principal.repositoryAllowlistRepoIds
+    {
+      repositoryAllowlistRepoIds: principal.repositoryAllowlistRepoIds,
+      repositoryAllowlist: principal.repositoryAllowlist,
+    }
   );
 
   return successResponse(
