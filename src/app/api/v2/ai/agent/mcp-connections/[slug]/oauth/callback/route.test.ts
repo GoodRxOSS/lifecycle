@@ -149,7 +149,6 @@ describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
         serverUrl: 'https://mcp.example.com/v1/mcp',
         authorizationCode: 'sample-code',
         callbackState: 'flow-123.sample-state',
-        scope: 'sample.read',
       })
     );
     expect(mockDiscoverTools).toHaveBeenCalledWith(

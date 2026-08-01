@@ -75,17 +75,17 @@ const postHandler = createPrincipalApiHandler(
     }
 
     const result = await buildService.redeployBuild(build.uuid, build.id);
-    if (result?.status === 'not_found') {
-      throw new NotFoundError(`Environment ${uuid} was not found.`, 'env_not_found');
-    }
-    if (result?.status === 'tearing_down') {
-      throw new AppError({
-        httpStatus: 409,
-        code: 'env_tearing_down',
-        message: `Environment ${uuid} is being (or has been) torn down and cannot be deployed.`,
-      });
-    }
-    if (result?.status === 'deploy_disabled') {
+    if (!('deployId' in result)) {
+      if (result.status === 'not_found') {
+        throw new NotFoundError(`Environment ${uuid} was not found.`, 'env_not_found');
+      }
+      if (result.status === 'tearing_down') {
+        throw new AppError({
+          httpStatus: 409,
+          code: 'env_tearing_down',
+          message: `Environment ${uuid} is being (or has been) torn down and cannot be deployed.`,
+        });
+      }
       throw new AppError({
         httpStatus: 409,
         code: 'deploy_disabled',
@@ -93,7 +93,12 @@ const postHandler = createPrincipalApiHandler(
       });
     }
     return successResponse(
-      { uuid: build.uuid, status: 'deploy_queued', statusUrl: `/api/v2/environments/${build.uuid}` },
+      {
+        uuid: build.uuid,
+        status: 'deploy_queued',
+        deployId: result.deployId,
+        statusUrl: `/api/v2/environments/${build.uuid}`,
+      },
       { status: 202 },
       req
     );

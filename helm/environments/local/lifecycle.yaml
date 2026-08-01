@@ -122,10 +122,13 @@ components:
           value: '80'
         - name: DD_TRACE_ENABLED
           value: 'false'
-        - name: MCP_SERVER_ENABLED
-          value: 'true'
-        - name: MCP_RESOURCE_URL
-          value: http://localhost:5001/mcp
+        - name: KEYCLOAK_MANAGEMENT_CLIENT_ID
+          value: lifecycle-api-keycloak-management
+        - name: KEYCLOAK_MANAGEMENT_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: lifecycle-keycloak-api-keycloak-management
+              key: clientSecret
       ports:
         - name: http
           containerPort: 80
@@ -185,6 +188,13 @@ components:
           value: '10000'
         - name: DD_TRACE_ENABLED
           value: 'false'
+        - name: KEYCLOAK_PRINCIPAL_SYNC_CLIENT_ID
+          value: lifecycle-api-principal-sync
+        - name: KEYCLOAK_PRINCIPAL_SYNC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: lifecycle-keycloak-api-principal-sync
+              key: clientSecret
       ports:
         - name: http
           containerPort: 80

@@ -23,7 +23,7 @@ import { getLogger } from 'server/lib/logger';
 import type { AgentApprovalMode, AgentCapabilityKey, AgentToolAuditRecord } from './types';
 import type { AgentCapabilityCatalogId } from './capabilityCatalog';
 import type { ResolvedMcpServer } from 'server/services/agentRuntime/mcp/types';
-import { buildProposedFileChanges, buildResultFileChanges, didToolResultFail } from './fileChanges';
+import { buildProposedFileChanges, buildResultFileChanges } from './fileChanges';
 import { buildAgentToolKey } from './toolKeys';
 import type { AgentRuntimeToolMetadata } from './toolMetadata';
 import {
@@ -135,8 +135,8 @@ export function registerGenericMcpTool({
       try {
         await client.connect(server.transport, server.timeout);
         const rawResult = await client.callTool(discoveredTool.name, runtimeArgs, server.timeout);
-        const failed = rawResult.isError || didToolResultFail(rawResult);
-        const result = failed ? sanitizeMcpResult(rawResult, mcpSecretSources) : rawResult;
+        const failed = rawResult.isError === true;
+        const result = sanitizeMcpResult(rawResult, mcpSecretSources);
         if (toolCallId) {
           const changes = buildResultFileChanges({
             toolCallId,

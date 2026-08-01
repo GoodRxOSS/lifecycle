@@ -209,26 +209,6 @@ function asFileChangeArtifact(value: unknown): AgentFileChangeArtifact | null {
   };
 }
 
-function isLogicalToolFailure(value: unknown): boolean {
-  const payload = unwrapToolPayload(value);
-  if (!isRecord(payload)) {
-    return false;
-  }
-
-  return (
-    payload.ok === false ||
-    payload.success === false ||
-    payload.isError === true ||
-    payload.error === true ||
-    (typeof payload.error === 'string' && payload.error.trim().length > 0) ||
-    (typeof payload.status === 'string' && /^(error|failed|denied)$/i.test(payload.status))
-  );
-}
-
-export function didToolResultFail(value: unknown): boolean {
-  return isLogicalToolFailure(value);
-}
-
 export function buildProposedFileChanges({
   toolCallId,
   sourceTool,

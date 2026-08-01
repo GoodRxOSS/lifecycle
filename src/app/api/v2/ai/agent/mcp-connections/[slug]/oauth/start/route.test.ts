@@ -17,6 +17,7 @@
 import { NextRequest } from 'next/server';
 
 const mockAuth = jest.fn();
+const mockDiscoverOAuthProtectedResourceMetadata = jest.fn();
 const mockGetBySlugAndScope = jest.fn();
 const mockDiscoverTools = jest.fn();
 const mockGetDecryptedConnection = jest.fn();
@@ -27,6 +28,10 @@ const mockInvalidateFlow = jest.fn();
 
 jest.mock('@ai-sdk/mcp', () => ({
   auth: (...args: unknown[]) => mockAuth(...args),
+}));
+
+jest.mock('@modelcontextprotocol/sdk/client/auth.js', () => ({
+  discoverOAuthProtectedResourceMetadata: (...args: unknown[]) => mockDiscoverOAuthProtectedResourceMetadata(...args),
 }));
 
 jest.mock('server/services/agentRuntime/mcp/config', () => {
@@ -106,9 +111,13 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
       authConfig: {
         mode: 'oauth',
         provider: 'generic-oauth2.1',
-        scope: 'sample.read',
       },
     } as const);
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValue({
+      resource: 'https://mcp.example.com/v1/mcp',
+      authorization_servers: ['https://auth.example.com'],
+      scopes_supported: ['sample.read'],
+    });
     mockDiscoverTools.mockResolvedValue([{ name: 'sampleTool', inputSchema: {} }]);
     mockGetDecryptedConnection.mockResolvedValue(null);
     mockCreateFlow.mockResolvedValue({
@@ -160,10 +169,67 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
       })
     );
     expect(provider.redirectUrl).toBe(
-      'http://localhost:5001/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback'
+      'http://127.0.0.1:5001/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback'
     );
     await expect(provider.state()).resolves.toMatch(/^flow-123\./);
+    expect(mockDiscoverOAuthProtectedResourceMetadata).toHaveBeenCalledWith('https://mcp.example.com/v1/mcp');
     expect(mockInvalidateFlow).not.toHaveBeenCalled();
+  });
+
+  it('derives OAuth scopes from the MCP server instead of administrator overrides', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce({
+      id: 7,
+      slug: 'sample-oauth',
+      scope: 'global',
+      enabled: true,
+      timeout: 30000,
+      preset: 'oauth-http',
+      transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+      sharedConfig: {},
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+      },
+    } as const);
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce({
+      resource: 'https://mcp.example.com/v1/mcp',
+      authorization_servers: ['https://auth.example.com'],
+      scopes_supported: ['sample.read', 'offline_access'],
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockDiscoverOAuthProtectedResourceMetadata).toHaveBeenCalledWith('https://mcp.example.com/v1/mcp');
+    const provider = mockAuth.mock.calls[0]?.[0] as {
+      clientMetadata: { scope?: string };
+    };
+    expect(provider.clientMetadata.scope).toBe('sample.read offline_access');
+    expect(mockAuth).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        serverUrl: 'https://mcp.example.com/v1/mcp',
+        scope: 'sample.read offline_access',
+      })
+    );
+  });
+
+  it('fails before authorization when protected-resource metadata identifies a different resource', async () => {
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce({
+      resource: 'https://mcp.example.com/',
+      authorization_servers: ['https://auth.example.com'],
+      scopes_supported: ['sample.read'],
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(422);
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockCreateFlow).not.toHaveBeenCalled();
   });
 
   it('invalidates the unused flow when authorization completes without redirecting', async () => {
@@ -297,6 +363,11 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
         'OAuth start failed Authorization=Bearer shared-header-secret query=query/secret+value encoded=query%2Fsecret%2Bvalue'
       )
     );
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce({
+      resource: 'https://mcp.example.com/v1/mcp?api_key=query/secret+value',
+      authorization_servers: ['https://auth.example.com'],
+      scopes_supported: ['sample.read'],
+    });
 
     const response = await POST(makeRequest(), {
       params: Promise.resolve({ slug: 'sample-oauth' }),
@@ -346,5 +417,50 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
         token_type: 'bearer',
       },
     });
+  });
+
+  it('reuses a locally registered portless client instead of triggering needless registration', async () => {
+    const registeredRedirectUri = 'http://127.0.0.1/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback';
+    const clientInformation = {
+      client_id: 'sample-client',
+      redirect_uris: [registeredRedirectUri],
+    };
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        clientInformation,
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+    mockAuth.mockImplementationOnce(
+      async (provider: {
+        clientInformation: () => Promise<typeof clientInformation | undefined>;
+        redirectToAuthorization: (url: URL) => Promise<void>;
+      }) => {
+        await expect(provider.clientInformation()).resolves.toEqual(clientInformation);
+        await provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'));
+        return 'REDIRECT';
+      }
+    );
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const provider = mockAuth.mock.calls[0]?.[0] as {
+      currentState: Record<string, unknown>;
+      clientMetadata: { redirect_uris: string[] };
+    };
+
+    expect(response.status).toBe(200);
+    expect(provider.currentState).toEqual({
+      type: 'oauth',
+      clientInformation,
+    });
+    expect(provider.clientMetadata.redirect_uris).toEqual([registeredRedirectUri]);
   });
 });

@@ -63,9 +63,15 @@ export type LogSearchView = {
 };
 
 type LineMatch = { index: number; matchStart: number };
+type SearchRenderOptions = {
+  maxMatches: number;
+  contextLines: number;
+  maxChars: number;
+};
 
 const IN_LINE_WINDOW_BEFORE = 150;
 const IN_LINE_WINDOW_TOTAL = 1000;
+const DEFAULT_LITERAL_SCAN_CHARS = 4 * 1024 * 1024;
 
 // Matches inside giant lines render a window around the match, not the line head —
 // otherwise the hit would be clamped away with the rest of the line.
@@ -78,36 +84,12 @@ function formatMatchedLine(line: string, lineNo: number, matchStart: number): st
   return `${lineNo}: [chars ${from + 1}–${to} of ${line.length}] ${prefix}${line.slice(from, to)}${suffix}`;
 }
 
-export function searchLogLines(
+function renderSearchMatches(
   lines: string[],
-  pattern: string,
-  opts: { maxMatches?: number; contextLines?: number; maxChars?: number; timeBoxMs?: number } = {}
-): LogSearchView {
-  if (pattern.length > MAX_SEARCH_PATTERN_CHARS) {
-    throw new Error(`search pattern too long (max ${MAX_SEARCH_PATTERN_CHARS} chars)`);
-  }
-  const re = new RegExp(pattern, 'i');
-  const { maxMatches = 50, contextLines = 2, maxChars = 26000, timeBoxMs = 2000 } = opts;
-
-  const deadline = Date.now() + timeBoxMs;
-  const kept: LineMatch[] = [];
-  let totalMatches = 0;
-  let timedOut = false;
-  let scannedLines = lines.length;
-
-  for (let i = 0; i < lines.length; i++) {
-    if ((i & 1023) === 0 && Date.now() > deadline) {
-      timedOut = true;
-      scannedLines = i;
-      break;
-    }
-    const m = re.exec(lines[i]);
-    if (m) {
-      totalMatches++;
-      if (kept.length < maxMatches) kept.push({ index: i, matchStart: m.index });
-    }
-  }
-
+  kept: LineMatch[],
+  options: SearchRenderOptions
+): Pick<LogSearchView, 'renderedMatches' | 'charCapped' | 'rendered'> {
+  const { contextLines, maxChars } = options;
   const matchByLine = new Map<number, LineMatch>();
   const renderIndices: number[] = [];
   const seen = new Set<number>();
@@ -146,7 +128,128 @@ export function searchLogLines(
     prev = i;
   }
 
-  return { totalMatches, renderedMatches, charCapped, timedOut, scannedLines, rendered: out.join('\n') };
+  return { renderedMatches, charCapped, rendered: out.join('\n') };
+}
+
+export function searchLogLines(
+  lines: string[],
+  pattern: string,
+  opts: { maxMatches?: number; contextLines?: number; maxChars?: number; timeBoxMs?: number } = {}
+): LogSearchView {
+  if (pattern.length > MAX_SEARCH_PATTERN_CHARS) {
+    throw new Error(`search pattern too long (max ${MAX_SEARCH_PATTERN_CHARS} chars)`);
+  }
+  const re = new RegExp(pattern, 'i');
+  const { maxMatches = 50, contextLines = 2, maxChars = 26000, timeBoxMs = 2000 } = opts;
+
+  const deadline = Date.now() + timeBoxMs;
+  const kept: LineMatch[] = [];
+  let totalMatches = 0;
+  let timedOut = false;
+  let scannedLines = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    if ((i & 1023) === 0 && Date.now() > deadline) {
+      timedOut = true;
+      scannedLines = i;
+      break;
+    }
+    const m = re.exec(lines[i]);
+    if (m) {
+      totalMatches++;
+      if (kept.length < maxMatches) kept.push({ index: i, matchStart: m.index });
+    }
+  }
+
+  return {
+    totalMatches,
+    timedOut,
+    scannedLines,
+    ...renderSearchMatches(lines, kept, { maxMatches, contextLines, maxChars }),
+  };
+}
+
+export type LiteralLogSearchView = LogSearchView & {
+  scanCapped: boolean;
+  scannedChars: number;
+};
+
+/**
+ * MCP's search contract is a bounded, case-insensitive literal substring
+ * search. It intentionally never constructs a RegExp. The scan cap prevents a
+ * single giant archived line from monopolizing the event loop.
+ */
+export function searchLogLinesLiteral(
+  lines: string[],
+  text: string,
+  opts: {
+    maxMatches?: number;
+    contextLines?: number;
+    maxChars?: number;
+    timeBoxMs?: number;
+    maxScanChars?: number;
+  } = {}
+): LiteralLogSearchView {
+  if (text.length < 1) {
+    throw new Error('search text is required');
+  }
+  if (text.length > MAX_SEARCH_PATTERN_CHARS) {
+    throw new Error(`search text too long (max ${MAX_SEARCH_PATTERN_CHARS} chars)`);
+  }
+
+  const {
+    maxMatches = 50,
+    contextLines = 2,
+    maxChars = 26_000,
+    timeBoxMs = 2_000,
+    maxScanChars = DEFAULT_LITERAL_SCAN_CHARS,
+  } = opts;
+  const needle = text.toLowerCase();
+  const deadline = Date.now() + Math.max(1, timeBoxMs);
+  const scanLimit = Math.max(1, Math.trunc(maxScanChars));
+  const kept: LineMatch[] = [];
+  let totalMatches = 0;
+  let timedOut = false;
+  let scanCapped = false;
+  let scannedLines = 0;
+  let scannedChars = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (Date.now() > deadline) {
+      timedOut = true;
+      break;
+    }
+    const remaining = scanLimit - scannedChars;
+    if (remaining <= 0) {
+      scanCapped = true;
+      break;
+    }
+
+    const line = lines[i];
+    const sliceLength = Math.min(line.length, remaining);
+    const matchStart = line.slice(0, sliceLength).toLowerCase().indexOf(needle);
+    scannedChars += sliceLength;
+    scannedLines = i + 1;
+    if (sliceLength < line.length) {
+      scanCapped = true;
+    }
+    if (matchStart >= 0) {
+      totalMatches++;
+      if (kept.length < maxMatches) kept.push({ index: i, matchStart });
+    }
+    if (scanCapped) {
+      break;
+    }
+  }
+
+  return {
+    totalMatches,
+    timedOut,
+    scanCapped,
+    scannedLines,
+    scannedChars,
+    ...renderSearchMatches(lines, kept, { maxMatches, contextLines, maxChars }),
+  };
 }
 
 export type LogWindowView = {

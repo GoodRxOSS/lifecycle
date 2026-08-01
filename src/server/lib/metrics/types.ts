@@ -52,6 +52,7 @@ export interface MetricsOptions extends Record<string, unknown> {
 export interface MetricsClient {
   increment: Function;
   timing: Function;
+  gauge: Function;
   event: Function;
 }
 
@@ -62,10 +63,4 @@ export interface MetricsEvent {
 
 export interface MetricsPublicOptions {
   forceExactTags?: boolean;
-}
-
-export interface MetricsItem {
-  name: string;
-  timing?: number;
-  tags?: Record<string, string>;
 }

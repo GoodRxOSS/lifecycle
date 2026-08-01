@@ -17,10 +17,12 @@
 class StatsD {
   increment: jest.Mock;
   timing: jest.Mock;
+  gauge: jest.Mock;
   event: jest.Mock;
   constructor() {
     this.increment = jest.fn();
     this.timing = jest.fn();
+    this.gauge = jest.fn();
     this.event = jest.fn();
   }
 }

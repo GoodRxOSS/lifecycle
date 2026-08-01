@@ -54,6 +54,15 @@ describe('scrubSecretsFromText', () => {
     expect(scrubSecretsFromText(`LIFECYCLE_GATEWAY_TOKEN=${gatewayToken}`)).toBe('LIFECYCLE_GATEWAY_TOKEN=[redacted]');
   });
 
+  it('redacts Lifecycle key shapes, embedded deny-key assignments, and PEM private keys', () => {
+    const lifecycleKey = `lfc_${'a'.repeat(32)}`;
+    expect(scrubSecretsFromText(`key=${lifecycleKey}`)).toBe('key=[redacted]');
+    expect(scrubSecretsFromText('MY_SERVICE_TOKEN=supersecretvalue123')).toBe('MY_SERVICE_TOKEN=[redacted]');
+    expect(scrubSecretsFromText('-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----')).toBe(
+      '[redacted]'
+    );
+  });
+
   it('does NOT over-redact ordinary reasoning prose, git SHAs, or file paths', () => {
     const reasoning =
       'While reviewing commit 0a1b2c3d4e5f60718293a4b5c6d7e8f901234567 I traced the token handling bug ' +

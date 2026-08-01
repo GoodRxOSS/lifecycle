@@ -14,7 +14,13 @@
  * limitations under the License.
  */
 
-import { buildTriageDossier, classifyDeployPhase, TriageCoreApi } from '../triageDossier';
+import {
+  buildTriageDossier,
+  classifyDeployPhase,
+  collectTriageEvidence,
+  renderTriageEvidence,
+  TriageCoreApi,
+} from '../triageDossier';
 
 function fakeCoreApi(overrides: Partial<TriageCoreApi> = {}): TriageCoreApi {
   return {
@@ -65,6 +71,17 @@ describe('buildTriageDossier', () => {
     expect(dossier).toContain('- buildStatusMessage: lifecycle.yaml: services[0].name is required');
   });
 
+  it('renders generic build errors as orchestration failures rather than invalid configuration', async () => {
+    const dossier = await buildTriageDossier(
+      { uuid: 'build-1', status: 'error', statusMessage: 'worker orchestration timed out' },
+      []
+    );
+
+    expect(dossier).toContain('## environment — phase=orchestration status=error');
+    expect(dossier).toContain('- buildStatusMessage: worker orchestration timed out');
+    expect(dossier).not.toContain('phase=config');
+  });
+
   it('renders build-phase evidence from persisted buildOutput and notes when it is missing', async () => {
     const dossier = await buildTriageDossier(failedBuild, [
       {
@@ -87,6 +104,116 @@ describe('buildTriageDossier', () => {
     expect(dossier).toContain('```log');
     expect(dossier).toContain('## api — phase=build status=build_failed');
     expect(dossier).toContain('- build logs unavailable (no persisted buildOutput)');
+  });
+
+  it('keeps the existing rendered dossier byte-for-byte over structured evidence', async () => {
+    const deploys = [
+      {
+        uuid: 'web-build-1',
+        status: 'build_failed',
+        statusMessage: 'Build failed',
+        buildOutput: 'step 1 ok\nERROR: missing Dockerfile',
+        deployable: { name: 'web' },
+      },
+      {
+        uuid: 'worker-build-1',
+        status: 'queued',
+        deployable: { name: 'worker', deploymentDependsOn: ['web'] },
+      },
+    ];
+    const expected =
+      '## web — phase=build status=build_failed\n' +
+      '- statusMessage: Build failed\n' +
+      '- build logs (tail):\n' +
+      '```log\n' +
+      'step 1 ok\n' +
+      'ERROR: missing Dockerfile\n' +
+      '```\n' +
+      '## worker — phase=blocked status=queued\n' +
+      '- blocked: waiting on failed deploy web';
+
+    const evidence = await collectTriageEvidence(failedBuild, deploys);
+
+    expect(evidence).not.toBeNull();
+    expect(renderTriageEvidence(evidence!)).toBe(expected);
+    await expect(buildTriageDossier(failedBuild, deploys)).resolves.toBe(expected);
+  });
+
+  it('redacts secret canaries before either structured or rendered evidence leaves the helper', async () => {
+    const secret = 'supersecretvalue123';
+    const deploys = [
+      {
+        uuid: 'web-build-1',
+        status: 'build_failed',
+        statusMessage: `PASSWORD=${secret}`,
+        buildOutput: `API_KEY=${secret}`,
+        deployable: { name: 'web' },
+      },
+    ];
+
+    const evidence = await collectTriageEvidence(failedBuild, deploys);
+    const rendered = await buildTriageDossier(failedBuild, deploys);
+
+    expect(JSON.stringify(evidence)).not.toContain(secret);
+    expect(rendered).not.toContain(secret);
+    expect(rendered).toContain('[redacted]');
+  });
+
+  it('pins requested services and states Codefresh limits', async () => {
+    const deploys = [
+      {
+        uuid: 'first-build-1',
+        status: 'build_failed',
+        buildOutput: 'first evidence',
+        deployable: { name: 'first' },
+      },
+      {
+        uuid: 'second-build-1',
+        status: 'build_failed',
+        buildOutput: 'second evidence',
+        deployable: { name: 'second' },
+      },
+      {
+        uuid: 'third-build-1',
+        status: 'build_failed',
+        buildOutput: 'third evidence',
+        deployable: { name: 'third' },
+      },
+      {
+        uuid: 'fourth-build-1',
+        status: 'build_failed',
+        buildOutput: 'fourth evidence',
+        deployable: { name: 'fourth' },
+      },
+      {
+        uuid: 'fifth-build-1',
+        status: 'build_failed',
+        buildOutput: 'fifth evidence',
+        deployable: { name: 'fifth' },
+      },
+      {
+        uuid: 'pipeline-build-1',
+        status: 'build_failed',
+        provider: 'codefresh' as const,
+        deployable: { name: 'pipeline' },
+      },
+    ];
+
+    const evidence = await collectTriageEvidence(failedBuild, deploys, {
+      pinnedServices: ['fifth', 'pipeline'],
+    });
+
+    expect(evidence?.failingServices.find((service) => service.name === 'fifth')).toMatchObject({
+      detailed: true,
+      logTail: expect.stringContaining('fifth evidence'),
+    });
+    expect(evidence?.failingServices.find((service) => service.name === 'pipeline')).toMatchObject({
+      detailed: true,
+      unsupportedProvider: 'codefresh',
+    });
+    expect(renderTriageEvidence(evidence!)).toContain(
+      'diagnostic evidence unavailable: Codefresh pipelines are unsupported by this surface'
+    );
   });
 
   it('collects runtime evidence from k8s for pod-not-ready failures', async () => {
@@ -155,10 +282,67 @@ describe('buildTriageDossier', () => {
     expect(coreApi.readNamespacedPodLog).toHaveBeenCalledWith(
       'web-build-1-7f9',
       'env-build-1',
+      'web',
       undefined,
       undefined,
+      64 * 1024,
+      undefined,
+      true,
+      undefined,
+      40
+    );
+  });
+
+  it('reads previous logs from a restarting init container when app containers have not started', async () => {
+    const coreApi = fakeCoreApi({
+      listNamespacedPod: jest.fn().mockResolvedValue({
+        body: {
+          items: [
+            {
+              metadata: { name: 'web-build-1-init' },
+              status: {
+                phase: 'Pending',
+                conditions: [{ type: 'Ready', status: 'False' }],
+                initContainerStatuses: [
+                  {
+                    name: 'init-db',
+                    restartCount: 3,
+                    state: { waiting: { reason: 'CrashLoopBackOff' } },
+                    lastState: { terminated: { reason: 'Error', exitCode: 1 } },
+                  },
+                ],
+                containerStatuses: [
+                  { name: 'web', restartCount: 0, state: { waiting: { reason: 'PodInitializing' } } },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+      readNamespacedPodLog: jest.fn().mockResolvedValue({ body: 'migration failed' }),
+    });
+
+    const dossier = await buildTriageDossier(
+      failedBuild,
+      [
+        {
+          uuid: 'web-build-1',
+          status: 'deploy_failed',
+          statusMessage: 'Pods failed to become ready within timeout',
+          deployable: { name: 'web' },
+        },
+      ],
+      { coreApi }
+    );
+
+    expect(dossier).toContain('migration failed');
+    expect(coreApi.readNamespacedPodLog).toHaveBeenCalledWith(
+      'web-build-1-init',
+      'env-build-1',
+      'init-db',
       undefined,
       undefined,
+      64 * 1024,
       undefined,
       true,
       undefined,

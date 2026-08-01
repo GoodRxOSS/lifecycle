@@ -731,9 +731,4 @@ export default class RepositoryService extends BaseService {
 
     return repository;
   }
-
-  async searchRepositories(query: string, limit = 10): Promise<RepositoryResponse[]> {
-    const result = await this.listOnboardedRepositories({ query, limit });
-    return result.repositories;
-  }
 }

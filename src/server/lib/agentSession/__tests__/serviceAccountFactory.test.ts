@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+export {};
+
 const mockEnsureServiceAccount = jest.fn();
 
 jest.mock('server/lib/kubernetes/common/serviceAccount', () => ({

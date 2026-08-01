@@ -16,8 +16,6 @@
 
 import {
   constructUrl,
-  determineFeatureFlagValue,
-  determineFeatureFlagStatus,
   determineIfFastlyIsUsed,
   enableService,
   constructLinkDictionary,
@@ -34,8 +32,6 @@ jest.mock('server/lib/logger', () => ({
     error: jest.fn(),
   })),
 }));
-
-import { FEATURE_FLAG, MALFORMED_FEATURE_FLAG_BOOLEAN_STRING } from 'shared/__fixtures__/utils';
 
 describe('utils', () => {
   describe('#determineIfFastlyIsUsed', () => {
@@ -204,23 +200,6 @@ describe('utils', () => {
   });
 });
 
-describe('determineFeatureFlagStatus', () => {
-  const features = {
-    'feature-1': false,
-    'feature-2': true,
-    'feature-3': false,
-  };
-  test('it returns false if feature is not defined', () => {
-    const result = determineFeatureFlagStatus('feature-1', features);
-    expect(result).toEqual(false);
-  });
-
-  test('it returns true if feature is defined', () => {
-    const result = determineFeatureFlagStatus('feature-2', features);
-    expect(result).toEqual(true);
-  });
-});
-
 describe('enableService', () => {
   class Svc {
     test: string;
@@ -234,23 +213,6 @@ describe('enableService', () => {
   test('it enables a service based on a feature flag', () => {
     const result = enableService(Svc, new DB() as any, new Redis() as any, new Redlock() as any);
     expect(result).toEqual({ test: 'foo bar' });
-  });
-});
-
-describe('determineFeatureFlagValue', () => {
-  test('returns true if everything is set', () => {
-    const result = determineFeatureFlagValue('hasTest', FEATURE_FLAG);
-    expect(result).toEqual(true);
-  });
-
-  test('returns false if featureFlags is not defined', () => {
-    const result = determineFeatureFlagValue('hasTest');
-    expect(result).toEqual(false);
-  });
-
-  test('returns false if the featureFlags item value is not a boolean', () => {
-    const result = determineFeatureFlagValue('hasTest', MALFORMED_FEATURE_FLAG_BOOLEAN_STRING as any);
-    expect(result).toEqual(false);
   });
 });
 

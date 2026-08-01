@@ -418,6 +418,7 @@ describe('AgentRunPlanResolver', () => {
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual([
       'read_context',
       'external_mcp_read',
+      'external_mcp_write',
       'workspace_files',
       'workspace_shell',
       'workspace_git',
@@ -932,6 +933,7 @@ describe('AgentRunPlanResolver', () => {
     expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual([
       'read_context',
       'external_mcp_read',
+      'external_mcp_write',
       'workspace_files',
       'workspace_shell',
       'workspace_git',

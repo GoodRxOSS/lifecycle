@@ -543,6 +543,54 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(mockPatchRuntimeControlChoices).not.toHaveBeenCalled();
   });
 
+  it('admits allowed MCP capabilities when a connection is selected', async () => {
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+    mockGetRuntimeControlChoices.mockReturnValue({
+      version: 1,
+      toolChoiceIds: [],
+      mcpChoiceIds: [state.mcp.connections[0].id],
+    });
+
+    const choices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
+      thread,
+      userIdentity,
+      definition: SYSTEM_AGENT_DEFINITIONS['system.freeform'],
+      sourceKind: 'freeform_chat',
+      capabilityPolicy: undefined,
+      customAgentCreationPolicy: undefined,
+      approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+      repoFullName: 'example-org/example-repo',
+    });
+
+    expect(choices.selectedRuntimeCapabilityIds).toEqual(['read_context', 'external_mcp_read', 'external_mcp_write']);
+    expect(choices.selectedRuntimeMcpConnectionRefs).toEqual(['global:sample-mcp']);
+  });
+
+  it('does not admit optional MCP capabilities when no connection is selected', async () => {
+    mockGetRuntimeControlChoices.mockReturnValue({
+      version: 1,
+      toolChoiceIds: [],
+      mcpChoiceIds: [],
+    });
+
+    const choices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
+      thread,
+      userIdentity,
+      definition: SYSTEM_AGENT_DEFINITIONS['system.freeform'],
+      sourceKind: 'freeform_chat',
+      capabilityPolicy: undefined,
+      customAgentCreationPolicy: undefined,
+      approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+      repoFullName: 'example-org/example-repo',
+    });
+
+    expect(choices.selectedRuntimeCapabilityIds).toEqual(['read_context']);
+    expect(choices.selectedRuntimeMcpConnectionRefs).toEqual([]);
+  });
+
   it('rejects raw, unknown, and policy-denied choices', async () => {
     await expect(
       AgentThreadRuntimeControlsService.patchChoices({

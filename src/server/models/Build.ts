@@ -26,7 +26,7 @@ export default class Build extends Model {
    *  error/config_error from any stage; tearing_down → torn_down terminal.)
    */
   status!: string;
-  statusMessage!: string;
+  statusMessage!: string | null;
   manifest!: string;
   kind!: BuildKind;
 

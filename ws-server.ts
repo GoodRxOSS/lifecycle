@@ -35,8 +35,9 @@ import next from 'next';
 import { WebSocketServer, WebSocket } from 'ws';
 import { rootLogger } from './src/server/lib/logger';
 import { LIFECYCLE_MODE } from './src/shared/config';
-import { isMcpServerEnabled, isAuthEnabled } from './src/server/mcp/config';
+import { isMcpServingProcess } from './src/server/mcp/config';
 import { handleMcpHttpRequest as mcpHttpRequestHandler } from './src/server/mcp/handler';
+import { createLifecycleMcpRegistry } from './src/server/mcp/tools';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import {
@@ -90,19 +91,11 @@ type McpHttpHandler = (
   res: ServerResponse,
   pathname: string | null | undefined
 ) => Promise<boolean>;
-// The MCP feature flag still gates whether the handler is *wired up*; the module
-// itself is imported statically. (It was previously loaded via a deferred require to
-// keep the ESM-only jose / MCP SDK off the boot path on Node < 20.19, but all deploys
-// now run Node 22 — where require(esm) is supported — so the workaround is unnecessary.)
+// Persisted administrator settings gate tool admission; this check only keeps the HTTP endpoint off workers.
 let handleMcpHttpRequest: McpHttpHandler | null = null;
-if (isMcpServerEnabled()) {
-  if (isAuthEnabled() && !process.env.MCP_RESOURCE_URL) {
-    logger.warn(
-      'MCP: MCP_SERVER_ENABLED is true with auth on but MCP_RESOURCE_URL is unset; ' +
-        'token audiences will be validated against a localhost default and all real tokens will be rejected'
-    );
-  }
-  handleMcpHttpRequest = mcpHttpRequestHandler;
+if (isMcpServingProcess()) {
+  const registry = createLifecycleMcpRegistry();
+  handleMcpHttpRequest = (req, res, pathname) => mcpHttpRequestHandler(req, res, pathname, registry);
 }
 let sitesGatewayService: SitesService | null = null;
 

@@ -17,7 +17,7 @@
 import ApiToken from 'server/models/ApiToken';
 import ApiTokenService from 'server/services/apiToken';
 import { recordAuthAuditEvent } from 'server/services/authAudit';
-import { getUserStatus, isConfigured } from 'server/services/keycloakAdmin';
+import { getUserStatus, isConfigured } from 'server/services/keycloak/principalStatus';
 import { getLogger } from 'server/lib/logger';
 
 export const API_TOKEN_OWNER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;

@@ -25,7 +25,7 @@ export function computeInitialExpiry(now: Date, ttlHours: number, maxTtlHours: n
 
 /**
  * Extends from max(now, current) so an expired-but-unswept lease resumes from
- * now, and the result never exceeds now + maxTtlHours.
+ * now. A lowered policy cap never shortens an existing future lease.
  */
 export function computeExtendedExpiry(
   now: Date,
@@ -35,7 +35,8 @@ export function computeExtendedExpiry(
 ): Date {
   const base = current ? Math.max(now.getTime(), current.getTime()) : now.getTime();
   const cap = now.getTime() + maxTtlHours * HOUR_MS;
-  return new Date(Math.min(base + Math.max(extensionHours, 1) * HOUR_MS, cap));
+  const cappedExtension = Math.min(base + Math.max(extensionHours, 1) * HOUR_MS, cap);
+  return new Date(Math.max(cappedExtension, current?.getTime() ?? 0));
 }
 
 export function isExpired(now: Date, expiresAt: Date | string | null | undefined): boolean {

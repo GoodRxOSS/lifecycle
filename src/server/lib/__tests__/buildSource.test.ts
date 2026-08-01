@@ -35,7 +35,7 @@ jest.mock('server/models', () => ({
 import { getBuildSource, isDeployEnabled, resolveBuildSourceRepository } from 'server/lib/buildSource';
 import type Build from 'server/models/Build';
 
-const prBuild = (deployOnUpdate: boolean, extra: Record<string, unknown> = {}) =>
+const prBuild = (deployOnUpdate: boolean | null, extra: Record<string, unknown> = {}) =>
   ({
     uuid: 'happy-otter-123456',
     pullRequest: {
@@ -60,9 +60,10 @@ const apiBuild = (extra: Record<string, unknown> = {}) =>
 afterEach(() => jest.clearAllMocks());
 
 describe('isDeployEnabled', () => {
-  it('returns the literal pullRequest.deployOnUpdate whenever a PR exists', () => {
+  it('uses pullRequest.deployOnUpdate whenever a PR exists and normalizes nullable rows', () => {
     expect(isDeployEnabled(prBuild(true))).toBe(true);
     expect(isDeployEnabled(prBuild(false))).toBe(false);
+    expect(isDeployEnabled(prBuild(null))).toBe(false);
   });
 
   it('never consults build.deployEnabled when a PR exists', () => {
@@ -96,6 +97,13 @@ describe('getBuildSource', () => {
 
     expect(source.branchName).toBe('feature-1');
     expect(source.githubRepositoryId).toBe(42);
+  });
+
+  it('falls back to the build branch for legacy PR rows without a branch', () => {
+    const build = prBuild(true, { branchName: 'legacy-feature' });
+    build.pullRequest!.branchName = null as unknown as string;
+
+    expect(getBuildSource(build).branchName).toBe('legacy-feature');
   });
 
   it('reads the build trigger columns for PR-less builds', () => {

@@ -108,8 +108,9 @@ export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefi
     description: 'Answer general questions without build or workspace requirements.',
     instructionRefs: ['system:freeform'],
     capabilityRefs: ['read_context', 'external_mcp_read'],
-    // Optional so a freeform chat can use the workspace it explicitly requests mid-run; policy may deny them without blocking chat.
+    // Optional capabilities remain policy-gated and can be selected per thread without blocking basic chat.
     optionalCapabilityRefs: [
+      'external_mcp_write',
       'workspace_files',
       'workspace_shell',
       'workspace_git',

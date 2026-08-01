@@ -18,6 +18,16 @@ import StatsD from 'hot-shots';
 import { METRIC_DEFAULTS } from 'server/lib/metrics/constants';
 import { Metrics } from 'server/lib/metrics';
 
+interface MetricsInternals {
+  constructTags(tags?: Record<string, unknown>): Record<string, unknown>;
+  constructScopedMetric(metric: string): string;
+  constructConfig(type: string, options: Record<string, unknown>): unknown;
+}
+
+function internals(metrics: Metrics): MetricsInternals {
+  return metrics as unknown as MetricsInternals;
+}
+
 describe('Metrics', () => {
   let metrics: Metrics;
   let mockClient;
@@ -58,6 +68,30 @@ describe('Metrics', () => {
     });
   });
 
+  it('should record a duration metric', () => {
+    metrics.timing('test-duration', 125, { tag1: 'value1' });
+    expect(mockClient.timing).toHaveBeenCalledWith('lifecycle.test-type.test-duration', 125, {
+      env: 'prd',
+      uuid: 'test-uuid',
+      repositoryName: 'test-repo',
+      branchName: 'test-branch',
+      tag1: 'value1',
+      sha: 'sha',
+    });
+  });
+
+  it('should record a gauge metric', () => {
+    metrics.gauge('test-gauge', 7, { tag1: 'value1' });
+    expect(mockClient.gauge).toHaveBeenCalledWith('lifecycle.test-type.test-gauge', 7, {
+      env: 'prd',
+      uuid: 'test-uuid',
+      repositoryName: 'test-repo',
+      branchName: 'test-branch',
+      tag1: 'value1',
+      sha: 'sha',
+    });
+  });
+
   it('should trigger an event metric', () => {
     metrics.event('test-metric', 'this is a test', { tag1: 'value1' });
     expect(mockClient.event).toHaveBeenCalledWith(
@@ -80,7 +114,7 @@ describe('Metrics', () => {
   });
 
   it('should construct tags correctly', () => {
-    const tags = metrics.constructTags({ tag1: 'value1' });
+    const tags = internals(metrics).constructTags({ tag1: 'value1' });
     expect(tags).toMatchObject({
       env: 'prd',
       uuid: 'test-uuid',
@@ -92,7 +126,7 @@ describe('Metrics', () => {
   });
 
   it('should construct scoped metric correctly', () => {
-    const scopedMetric = metrics.constructScopedMetric('test-metric');
+    const scopedMetric = internals(metrics).constructScopedMetric('test-metric');
     expect(scopedMetric).toBe('lifecycle.test-type.test-metric');
   });
 
@@ -144,7 +178,7 @@ describe('Metrics', () => {
       isEnabled: true,
     };
 
-    const result = metrics.constructConfig(type, options);
+    const result = internals(metrics).constructConfig(type, options);
     expect(result).toEqual(expectedConfig);
   });
 });

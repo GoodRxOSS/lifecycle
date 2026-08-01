@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { truncateUtf8Tail } from '../truncate';
+import { truncateUtf8Tail } from '../truncateUtf8';
 
 describe('truncateUtf8Tail', () => {
   it('returns text unchanged when within the byte limit', () => {

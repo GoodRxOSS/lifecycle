@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,30 +14,10 @@
  * limitations under the License.
  */
 
-'use strict';
-
-const tracer = require('dd-trace').init({
-  serviceMapping: {
-    redis: 'lifecycle-redis',
-    ioredis: 'lifecycle-redis',
-    pg: 'lifecycle-postgres',
-  },
-});
-
-const blocklist = [/^\/api\/health/, /^\/api\/jobs/, /^\/_next\/static/, /^\/_next\/webpack-hmr/];
-
-tracer.use('http', {
-  server: {
-    blocklist,
-  },
-  client: {
-    blocklist,
-  },
-});
-
-tracer.use('next', {
-  blocklist,
-});
-
-tracer.use('net', false);
-tracer.use('dns', false);
+export function mcpApplicationKey(): Buffer {
+  const value = process.env.ENCRYPTION_KEY?.trim();
+  if (!value || !/^[0-9a-f]{64}$/i.test(value)) {
+    throw new Error('ENCRYPTION_KEY must be configured for MCP security tokens');
+  }
+  return Buffer.from(value, 'hex');
+}

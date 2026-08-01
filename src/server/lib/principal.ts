@@ -28,10 +28,10 @@ export type PrincipalKind = 'user' | 'personal_key' | 'service_key';
 
 export interface Principal {
   kind: PrincipalKind;
-  authMethod: 'session' | 'api_key';
-  /** Keycloak sub; owner sub for personal keys; null for service keys. */
+  authMethod: 'session' | 'oauth' | 'api_key';
+  /** OAuth subject; owner subject for personal keys; null for service keys. */
   userId: string | null;
-  /** sub, or `token:<name>` for service keys — audit/attribution string. */
+  /** Subject, or `token:<name>` for service keys — audit/attribution string. */
   actor: string;
   /** Realm roles for sessions; [] for keys. */
   roles: LifecycleRole[];

@@ -19,7 +19,7 @@ import Redlock from 'redlock';
 import Database from 'server/database';
 import { Deploy } from 'server/models';
 import Fastly from 'server/lib/fastly';
-import { Link, FeatureFlags } from 'shared/types';
+import { Link } from 'shared/types';
 import { getLogger } from 'server/lib/logger';
 import Model from 'server/models/_Model';
 
@@ -109,21 +109,6 @@ export const insertBuildLink = (buildLinks: Record<string, string>, name: string
 });
 
 /**
- *determineFeatureStatus
- * @description determines if a feature is enabled or not
- * @param {string} featureFlag, the name of the featureFlag
- * @param {object} featureFlags
- * @returns {string|boolean}
- */
-export const determineFeatureFlagStatus = (featureFlag: string, featureFlags = {}): string | boolean => {
-  const featureList = Object.keys(featureFlags);
-  if (featureList.length === 0) return false;
-  const feature = featureList.find((feature) => feature === featureFlag);
-  if (!feature) return false;
-  return featureFlags?.[featureFlag];
-};
-
-/**
  * enableService
  * @description enables a service if a feature flag is enabled
  * @param {class} svc, the service to be enabled
@@ -134,16 +119,6 @@ export const determineFeatureFlagStatus = (featureFlag: string, featureFlags = {
  * @returns {class} new svc class
  */
 export const enableService = (svc, db: Database, redis: Redis.Redis, redlock: Redlock) => new svc(db, redis, redlock);
-
-/**
- * determineBuildFeatureFlagValue
- * @description determines the value for a given feature flag considering it's values in the service heirarchy
- * @param {string} featureFlag a feature flag to be evaluated
- * @param {object} featureFlags a record of feature flags
- * @returns {boolean} featureFlag value
- */
-export const determineFeatureFlagValue = (featureFlag = '', featureFlags: FeatureFlags = {}) =>
-  featureFlags?.[featureFlag] === true;
 
 /**
  * mergeKeyValueArrays

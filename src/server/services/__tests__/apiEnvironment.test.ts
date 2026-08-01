@@ -123,7 +123,7 @@ jest.mock('server/lib/paginate', () => ({
 
 import { UniqueViolationError } from 'objection';
 import BuildService from '../build';
-import { BuildStatus, DeployStatus } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployStatus } from 'shared/constants';
 
 const uniqueViolation = () => Object.create(UniqueViolationError.prototype);
 
@@ -132,6 +132,7 @@ const API_CONFIG = {
 };
 
 const NOW = new Date('2026-07-07T12:00:00Z');
+const HOUR_MS = 60 * 60 * 1000;
 
 function makeService({
   repository = { id: 11, githubRepositoryId: 42, fullName: 'org/repo', defaultEnvId: 5 },
@@ -159,6 +160,7 @@ function makeService({
     },
     Repository: {
       query: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
         whereRaw: jest.fn().mockReturnThis(),
         whereNull: jest.fn().mockReturnThis(),
         first: jest.fn().mockResolvedValue(repository),
@@ -208,6 +210,20 @@ describe('createApiEnvironment', () => {
       httpStatus: 403,
       code: 'api_environments_disabled',
     });
+  });
+
+  it('skips the api_environments flag for callers gated elsewhere, like MCP', async () => {
+    mockGetApiEnvironmentsConfig.mockResolvedValue({ ...API_CONFIG.api_environments, enabled: false });
+    const { service, models } = makeService();
+    (models.Repository.query as jest.Mock).mockReturnValue({
+      whereRaw: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(
+      service.createApiEnvironment(validInput, null, { requireApiEnvironmentsEnabled: false })
+    ).rejects.toMatchObject({ code: 'repo_not_onboarded' });
   });
 
   it('404s a repository that is not onboarded or soft-deleted, matching case-insensitively', async () => {
@@ -328,6 +344,27 @@ describe('createApiEnvironment', () => {
     );
   });
 
+  it('returns the accepted environment when insert only returns its generated id', async () => {
+    const { service, queueAdd } = makeService({ createdBuild: { id: 99 } as any });
+
+    const { build } = await service.createApiEnvironment(validInput);
+
+    expect(build).toEqual(
+      expect.objectContaining({
+        id: 99,
+        status: BuildStatus.QUEUED,
+        namespace: `env-${build.uuid}`,
+        expiresAt: new Date(NOW.getTime() + 72 * HOUR_MS).toISOString(),
+      })
+    );
+    expect(build.uuid).toMatch(/^[a-z]+-[a-z]+-[a-z0-9]{6}$/);
+    expect(queueAdd).toHaveBeenCalledWith(
+      'environment-create',
+      expect.objectContaining({ buildId: 99, buildUuid: build.uuid }),
+      { jobId: 'env-create-99' }
+    );
+  });
+
   it('rejects autoTrack for an immutable create-time source', async () => {
     const { service, buildCreate } = makeService();
 
@@ -349,7 +386,9 @@ describe('createApiEnvironment', () => {
 
   it('replays an existing environment for a known idempotency key without inserting', async () => {
     const existing = { id: 42, uuid: 'existing-env-abcdef', status: 'deployed' };
-    const { service, models, buildCreate, queueAdd } = makeService({ existingIdempotent: existing });
+    const { service, models, buildCreate, queueAdd } = makeService({
+      existingIdempotent: existing,
+    });
     const findOne = jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(existing) }));
     (models.Build.query as jest.Mock).mockReturnValue({ findOne });
 
@@ -381,6 +420,96 @@ describe('createApiEnvironment', () => {
     });
 
     expect(mockGetApiEnvironmentsConfig).not.toHaveBeenCalled();
+    expect(mockGetYamlFileContent).not.toHaveBeenCalled();
+    expect(buildCreate).not.toHaveBeenCalled();
+  });
+
+  it('authorizes a stored replay by stable repository id even after the mutable repository name is de-onboarded', async () => {
+    const existing = {
+      id: 42,
+      uuid: 'existing-env-abcdef',
+      status: BuildStatus.DEPLOYED,
+      githubRepositoryId: 42,
+    };
+    const { service, models, queueAdd } = makeService({ repository: null as any });
+    (models.Build.query as jest.Mock).mockReturnValue({
+      findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(existing) })),
+    });
+
+    await expect(
+      service.createApiEnvironment(
+        { ...validInput, idempotencyKey: 'idem-1' },
+        {
+          repositoryAllowlistRepoIds: [42],
+          repositoryAllowlist: ['renamed/repository'],
+        }
+      )
+    ).resolves.toEqual({ build: existing, replayed: true });
+
+    expect(models.Repository.query).not.toHaveBeenCalled();
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('denies a stored replay before re-enqueue when its stable repository id is no longer authorized', async () => {
+    const existing = {
+      id: 42,
+      uuid: 'existing-env-abcdef',
+      status: BuildStatus.QUEUED,
+      githubRepositoryId: 42,
+    };
+    const { service, models, queueAdd } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue({
+      findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(existing) })),
+    });
+
+    await expect(
+      service.createApiEnvironment({ ...validInput, idempotencyKey: 'idem-1' }, { repositoryAllowlistRepoIds: [99] })
+    ).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden_repository' });
+
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('resolves legacy name-only replay authority from the stored repository id, not the incoming name', async () => {
+    const existing = {
+      id: 42,
+      uuid: 'existing-env-abcdef',
+      status: BuildStatus.DEPLOYED,
+      githubRepositoryId: 42,
+    };
+    const renamedRepository = {
+      id: 11,
+      githubRepositoryId: 42,
+      fullName: 'new-org/new-repo',
+      defaultEnvId: 5,
+    };
+    const { service, models } = makeService({ repository: renamedRepository });
+    (models.Build.query as jest.Mock).mockReturnValue({
+      findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(existing) })),
+    });
+
+    await expect(
+      service.createApiEnvironment(
+        { ...validInput, idempotencyKey: 'idem-1' },
+        { repositoryAllowlist: ['NEW-ORG/NEW-REPO'], repositoryAllowlistRepoIds: null }
+      )
+    ).resolves.toEqual({ build: existing, replayed: true });
+
+    await expect(
+      service.createApiEnvironment(
+        { ...validInput, idempotencyKey: 'idem-1' },
+        { repositoryAllowlist: ['org/repo'], repositoryAllowlistRepoIds: null }
+      )
+    ).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden_repository' });
+  });
+
+  it('enforces repository identity for a new create after resolving the onboarded repository', async () => {
+    const { service, buildCreate } = makeService();
+
+    await expect(service.createApiEnvironment(validInput, { repositoryAllowlistRepoIds: [99] })).rejects.toMatchObject({
+      httpStatus: 403,
+      code: 'forbidden_repository',
+    });
+
     expect(mockGetYamlFileContent).not.toHaveBeenCalled();
     expect(buildCreate).not.toHaveBeenCalled();
   });
@@ -445,6 +574,52 @@ describe('createApiEnvironment', () => {
 
     expect(buildCreate).toHaveBeenCalledTimes(2);
     expect(build.id).toBe(1);
+  });
+
+  it('converges an insert-time idempotency race for the legacy repository-id authorization form', async () => {
+    const { service, models, buildCreate } = makeService();
+    const accepted = {
+      id: 88,
+      uuid: 'accepted-env-123456',
+      status: BuildStatus.PENDING,
+      githubRepositoryId: 42,
+      idempotencyRequestDigest: null,
+    };
+    const whereNull = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(accepted);
+    (models.Build.query as jest.Mock).mockReturnValue({
+      findOne: jest.fn(() => ({ whereNull })),
+    });
+    buildCreate.mockRejectedValue(uniqueViolation());
+
+    await expect(
+      service.createApiEnvironment(
+        { ...validInput, name: 'accepted-env-123456', idempotencyKey: 'idem-race' },
+        { repositoryAllowlistRepoIds: [42, Number.NaN] }
+      )
+    ).resolves.toEqual({ build: accepted, replayed: true });
+
+    expect(whereNull).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the resolved repository name for legacy authorization and fails closed when it disappears', async () => {
+    const { service, models } = makeService();
+
+    await expect(
+      service.createApiEnvironment(validInput, { repositoryAllowlist: ['Org/Repo'] })
+    ).resolves.toMatchObject({ replayed: false });
+
+    (models.Repository.query as jest.Mock).mockReturnValue({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    });
+    await expect(
+      (service as any).assertApiEnvironmentRepositoryAllowed(
+        42,
+        { repositoryAllowlistRepoIds: null, repositoryAllowlist: ['org/repo'] },
+        undefined
+      )
+    ).rejects.toMatchObject({ code: 'forbidden_repository' });
   });
 
   it('rejects invalid vanity name formats', async () => {
@@ -607,6 +782,56 @@ describe('extendApiEnvironment', () => {
     await expect(service.extendApiEnvironment('x')).rejects.toMatchObject({ code: 'env_not_found' });
   });
 
+  it('404s when the locked environment row no longer exists', async () => {
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(lockedBuildQuery(undefined));
+
+    await expect(service.extendApiEnvironment('x')).rejects.toMatchObject({ code: 'env_not_found' });
+  });
+
+  it('rejects null and invalid ifExpiresAt values before extending', async () => {
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(
+      lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'api', expiresAt: NOW.toISOString() })
+    );
+
+    await expect(service.extendApiEnvironment('x', 1, 9, { ifExpiresAt: null as any })).rejects.toMatchObject({
+      code: 'invalid_body',
+    });
+    await expect(service.extendApiEnvironment('x', 1, 9, { ifExpiresAt: 'not-a-date' })).rejects.toMatchObject({
+      code: 'invalid_body',
+    });
+  });
+
+  it('reports a null locked expiry in a compare-and-set conflict', async () => {
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(
+      lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'api', expiresAt: null })
+    );
+
+    await expect(service.extendApiEnvironment('x', 1, 9, { ifExpiresAt: NOW.toISOString() })).rejects.toMatchObject({
+      code: 'expiry_conflict',
+      details: { currentExpiresAt: null },
+    });
+  });
+
+  it('extends from now when the locked row has no finite expiry', async () => {
+    const patchAndFetchById = jest.fn(async (_id: number, patch: any) => ({ id: 9, ...patch }));
+    const { service, models } = makeService();
+    const locked = { id: 9, uuid: 'x', triggerType: 'api', expiresAt: null as string | null };
+    (models.Build.query as jest.Mock).mockReturnValue(lockedBuildQuery(locked, patchAndFetchById));
+
+    await expect(service.extendApiEnvironment('x', 1, 9)).resolves.toMatchObject({
+      addedHours: 1,
+      maxReached: false,
+    });
+    locked.expiresAt = 'not-a-date';
+    await expect(service.extendApiEnvironment('x', 1, 9)).resolves.toMatchObject({
+      addedHours: 1,
+      maxReached: false,
+    });
+  });
+
   it('extends from the current lease with the configured hours', async () => {
     const current = new Date(NOW.getTime() + 10 * 3600 * 1000);
     const patchAndFetchById = jest.fn(async (_id: number, patch: any) => ({ uuid: 'x', ...patch }));
@@ -625,7 +850,145 @@ describe('extendApiEnvironment', () => {
     });
     expect(query.lock.forUpdate).toHaveBeenCalled();
     expect(models.Build.transact).toHaveBeenCalledTimes(1);
-    expect(result.expiresAt).toBe(new Date(current.getTime() + 24 * 3600 * 1000).toISOString());
+    expect(result).toMatchObject({
+      build: { expiresAt: new Date(current.getTime() + 24 * 3600 * 1000).toISOString() },
+      addedHours: 24,
+      maxReached: false,
+    });
+  });
+
+  it('reports requested time from the locked additive base when extending an already-expired lease', async () => {
+    const current = new Date(NOW.getTime() - 10 * HOUR_MS);
+    const patchAndFetchById = jest.fn(async (_id: number, patch: any) => ({ id: 9, uuid: 'x', ...patch }));
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(
+      lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'api', expiresAt: current.toISOString() }, patchAndFetchById)
+    );
+
+    const result = await service.extendApiEnvironment('x', 24, 9);
+
+    expect(result).toMatchObject({
+      build: { expiresAt: new Date(NOW.getTime() + 24 * HOUR_MS).toISOString() },
+      addedHours: 24,
+      maxReached: false,
+    });
+  });
+
+  it('preserves a grandfathered expiry above a lowered cap and reports that no time was added', async () => {
+    const current = new Date(NOW.getTime() + 400 * HOUR_MS);
+    const patchAndFetchById = jest.fn(async (_id: number, patch: any) => ({ id: 9, uuid: 'x', ...patch }));
+    const { service, models } = makeService();
+    mockGetApiEnvironmentsConfig.mockImplementation(async () => {
+      if (mockGetApiEnvironmentsConfig.mock.calls.length > 1) {
+        throw new Error('configuration was fetched more than once');
+      }
+      return API_CONFIG.api_environments;
+    });
+    (models.Build.query as jest.Mock).mockReturnValue(
+      lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'api', expiresAt: current.toISOString() }, patchAndFetchById)
+    );
+
+    const result = await service.extendApiEnvironment('x', undefined, 9);
+
+    expect(result).toMatchObject({
+      build: { expiresAt: current.toISOString() },
+      addedHours: 0,
+      maxReached: true,
+    });
+    expect(mockGetApiEnvironmentsConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent extensions and computes each receipt from its own locked prestate', async () => {
+    const shared = {
+      id: 9,
+      uuid: 'x',
+      triggerType: 'api',
+      expiresAt: new Date(NOW.getTime() + 1 * HOUR_MS).toISOString(),
+    };
+    const { service, models } = makeService();
+    let transactionTail = Promise.resolve<unknown>(undefined);
+    (models.Build.transact as jest.Mock).mockImplementation((callback: (trx: object) => Promise<unknown>) => {
+      const transaction = transactionTail.then(() => callback({}));
+      transactionTail = transaction.then(
+        () => undefined,
+        () => undefined
+      );
+      return transaction;
+    });
+    const query = lockedBuildQuery(
+      shared,
+      jest.fn(async (_id: number, patch: any) => {
+        Object.assign(shared, patch);
+        return { ...shared };
+      })
+    );
+    (models.Build.query as jest.Mock).mockReturnValue(query);
+
+    const [first, second] = await Promise.all([
+      service.extendApiEnvironment('x', 2, 9),
+      service.extendApiEnvironment('x', 2, 9),
+    ]);
+
+    expect(first).toMatchObject({ addedHours: 2, maxReached: false });
+    expect(second).toMatchObject({ addedHours: 2, maxReached: false });
+    expect(second.build.expiresAt).toBe(new Date(NOW.getTime() + 5 * HOUR_MS).toISOString());
+  });
+
+  it('checks ifExpiresAt at second precision under the row lock', async () => {
+    const current = new Date(NOW.getTime() + 10 * 3600 * 1000);
+    current.setMilliseconds(987);
+    const patchAndFetchById = jest.fn(async (_id: number, patch: any) => ({ uuid: 'x', ...patch }));
+    const { service, models } = makeService();
+    const query = lockedBuildQuery(
+      { id: 9, uuid: 'x', triggerType: 'api', expiresAt: current.toISOString() },
+      patchAndFetchById
+    );
+    (models.Build.query as jest.Mock).mockReturnValue(query);
+
+    const sameSecond = new Date(current);
+    sameSecond.setMilliseconds(1);
+    await service.extendApiEnvironment('x', 2, 9, {
+      ifExpiresAt: sameSecond.toISOString(),
+    });
+
+    expect(query.lock.forUpdate).toHaveBeenCalled();
+    expect(patchAndFetchById).toHaveBeenCalledWith(9, {
+      expiresAt: new Date(current.getTime() + 2 * 3600 * 1000).toISOString(),
+    });
+  });
+
+  it('returns the locked current expiry on CAS conflict without extending', async () => {
+    const current = new Date(NOW.getTime() + 10 * 3600 * 1000).toISOString();
+    const patchAndFetchById = jest.fn();
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(
+      lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'api', expiresAt: current }, patchAndFetchById)
+    );
+
+    await expect(
+      service.extendApiEnvironment('x', 2, 9, {
+        ifExpiresAt: new Date(NOW.getTime() + 9 * 3600 * 1000).toISOString(),
+      })
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'expiry_conflict',
+      details: { currentExpiresAt: current },
+    });
+    expect(patchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('returns a distinct protected-PR error for MCP extension callers', async () => {
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValue(lockedBuildQuery({ id: 9, uuid: 'x', triggerType: 'github_pr' }));
+
+    await expect(
+      service.extendApiEnvironment('x', 1, 9, {
+        rejectPullRequest: true,
+      })
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'pr_environment_not_extendable',
+    });
   });
 
   it.each([BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN])(
@@ -837,8 +1200,10 @@ describe('enqueueBuildDeletion', () => {
 describe('requestApiEnvironmentDeletion', () => {
   function makeDeletionRequestService(current: any) {
     const { service, models, queueAdd } = makeService();
-    const claimPatch = jest.fn(async (patch: any) => Object.assign(current, patch));
-    current.$query = jest.fn(() => ({ patch: claimPatch }));
+    const claimPatch = jest.fn(async (patch: any) => {
+      if (current) Object.assign(current, patch);
+    });
+    if (current) current.$query = jest.fn(() => ({ patch: claimPatch }));
     const lockedQuery: any = {
       where: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockReturnThis(),
@@ -880,6 +1245,98 @@ describe('requestApiEnvironmentDeletion', () => {
     expect(result).toBe(current);
   });
 
+  it('revalidates the locked destroy preview before claiming teardown', async () => {
+    const current: any = {
+      id: 7,
+      uuid: 'api-env-123456',
+      kind: 'environment',
+      triggerType: 'api',
+      status: BuildStatus.DEPLOYED,
+      deployEnabled: true,
+      pullRequestId: null,
+    };
+    const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
+    const validateLockedState = jest.fn().mockResolvedValue(undefined);
+
+    await service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+      validateLockedState,
+      rejectPullRequest: true,
+    });
+
+    expect(validateLockedState).toHaveBeenCalledWith(current, expect.anything());
+    expect(validateLockedState.mock.invocationCallOrder[0]).toBeLessThan(claimPatch.mock.invocationCallOrder[0]);
+    expect(claimPatch.mock.invocationCallOrder[0]).toBeLessThan(queueAdd.mock.invocationCallOrder[0]);
+  });
+
+  it('404s when the exact id and uuid no longer resolve an environment row', async () => {
+    const { service, queueAdd, claimPatch } = makeDeletionRequestService(undefined);
+
+    await expect(service.requestApiEnvironmentDeletion('api-env-123456', 7)).rejects.toMatchObject({
+      code: 'env_not_found',
+    });
+    expect(claimPatch).not.toHaveBeenCalled();
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('does not mutate when the locked destroy preview changed', async () => {
+    const current: any = {
+      id: 7,
+      uuid: 'api-env-123456',
+      kind: 'environment',
+      triggerType: 'api',
+      status: BuildStatus.DEPLOYED,
+      deployEnabled: true,
+      pullRequestId: null,
+    };
+    const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
+    const previewChanged = Object.assign(new Error('preview changed'), {
+      httpStatus: 409,
+      code: 'confirmation_state_changed',
+    });
+    const validateLockedState = jest.fn().mockRejectedValue(previewChanged);
+
+    await expect(
+      service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+        validateLockedState,
+      })
+    ).rejects.toMatchObject({ code: 'confirmation_state_changed' });
+
+    expect(claimPatch).not.toHaveBeenCalled();
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it('rejects static and PR-managed environments before claiming teardown', async () => {
+    for (const current of [
+      {
+        id: 7,
+        uuid: 'api-env-123456',
+        kind: 'environment',
+        triggerType: 'api',
+        isStatic: true,
+        status: BuildStatus.DEPLOYED,
+      },
+      {
+        id: 7,
+        uuid: 'api-env-123456',
+        kind: 'environment',
+        triggerType: 'github_pr',
+        isStatic: false,
+        status: BuildStatus.DEPLOYED,
+      },
+    ]) {
+      const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
+      await expect(
+        service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+          rejectPullRequest: true,
+        })
+      ).rejects.toMatchObject({
+        code: current.isStatic ? 'env_static_protected' : 'env_pr_protected',
+      });
+      expect(claimPatch).not.toHaveBeenCalled();
+      expect(queueAdd).not.toHaveBeenCalled();
+    }
+  });
+
   it('converges a waiting TTL job and a later API delete on the same row-backed owner', async () => {
     const current: any = {
       id: 7,
@@ -904,7 +1361,7 @@ describe('requestApiEnvironmentDeletion', () => {
   });
 
   it.each([BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN])(
-    'reuses the persisted teardown owner when the exact row is already %s',
+    'reasserts the deterministic delete queue when the exact row is already %s',
     async (status) => {
       const current: any = {
         id: 7,
@@ -916,19 +1373,23 @@ describe('requestApiEnvironmentDeletion', () => {
         pullRequestId: null,
       };
       const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
+      const validateLockedState = jest.fn();
 
-      await service.requestApiEnvironmentDeletion('api-env-123456', 7);
+      await service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+        validateLockedState,
+      });
 
       expect(claimPatch).not.toHaveBeenCalled();
       expect(queueAdd).toHaveBeenCalledWith(
         'delete',
-        expect.objectContaining({ teardownRunUUID: 'existing-owner' }),
+        expect.objectContaining({ buildId: 7, teardownRunUUID: 'existing-owner' }),
         expect.objectContaining({ jobId: 'build-delete-7-authoritative' })
       );
+      expect(validateLockedState).not.toHaveBeenCalled();
     }
   );
 
-  it('serializes a concurrent redeploy so teardown ownership cannot be overwritten', async () => {
+  it('admits a concurrent redeploy without waiting for teardown and leaves teardown ownership intact', async () => {
     const current: any = {
       id: 7,
       uuid: 'api-env-123456',
@@ -983,11 +1444,18 @@ describe('requestApiEnvironmentDeletion', () => {
     const deletion = service.requestApiEnvironmentDeletion(current.uuid, current.id);
     await claimDidStart;
     const redeploy = service.redeployBuild(current.uuid, current.id);
-    releaseClaim();
 
+    await expect(redeploy).resolves.toMatchObject({ status: 'success', deployId: expect.any(String) });
+    expect(enqueueResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildId: current.id,
+        runUUID: expect.any(String),
+        triggerRef: expect.any(String),
+      })
+    );
+
+    releaseClaim();
     await expect(deletion).resolves.toBe(current);
-    await expect(redeploy).resolves.toMatchObject({ status: 'tearing_down' });
-    expect(enqueueResolve).not.toHaveBeenCalled();
     expect(current).toMatchObject({ status: BuildStatus.TEARING_DOWN, deployEnabled: false });
   });
 });
@@ -1240,24 +1708,30 @@ describe('applyApiEnvironmentPatch', () => {
     validateServiceOverrides: jest.fn(async (_build, _deploys, services) => services),
   });
 
-  const apiBuild = () =>
-    ({
+  const apiBuild = () => {
+    const build = {
       id: 1,
       uuid: 'api-env-123456',
       triggerType: 'api',
       pullRequest: null,
       deploys: [],
       $query: jest.fn(() => ({ patch: jest.fn() })),
-    } as any);
+    } as any;
+    build.$fetchGraph = jest.fn().mockResolvedValue(build);
+    return build;
+  };
 
   const allowMutableBuild = (models: any, current: any) => {
+    if (current && typeof current.$fetchGraph !== 'function') {
+      current.$fetchGraph = jest.fn().mockResolvedValue(current);
+    }
     const lock = {
       whereNull: jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockResolvedValue(current),
     };
-    const findById = jest.fn(() => lock);
-    (models.Build.query as jest.Mock).mockReturnValue({ findById });
-    return { findById, lock };
+    const findOne = jest.fn(() => lock);
+    (models.Build.query as jest.Mock).mockReturnValue({ findOne });
+    return { findOne, lock };
   };
 
   it('rejects secret references in patch.env and patch.initEnv without touching the build', async () => {
@@ -1293,9 +1767,10 @@ describe('applyApiEnvironmentPatch', () => {
   });
 
   it('rejects deployEnabled/autoTrack on PR-triggered builds with a stable code', async () => {
-    const { service } = makeService();
+    const { service, models } = makeService();
     const override = overrideMock();
     const prBuild = { ...apiBuild(), triggerType: 'github_pr', pullRequest: { deployOnUpdate: true } };
+    allowMutableBuild(models, prBuild);
 
     await expect(
       service.applyApiEnvironmentPatch(prBuild, override as any, { deployEnabled: false })
@@ -1306,9 +1781,10 @@ describe('applyApiEnvironmentPatch', () => {
   });
 
   it('rejects enabling autoTrack on a source-pinned API environment', async () => {
-    const { service } = makeService();
+    const { service, models } = makeService();
     const override = overrideMock();
     const build = { ...apiBuild(), configSha: 'abc123' };
+    allowMutableBuild(models, build);
 
     await expect(service.applyApiEnvironmentPatch(build, override as any, { autoTrack: true })).rejects.toMatchObject({
       httpStatus: 422,
@@ -1322,7 +1798,7 @@ describe('applyApiEnvironmentPatch', () => {
     const override = overrideMock();
     const patchFn = jest.fn();
     const build = apiBuild();
-    allowMutableBuild(models, build);
+    const { findOne } = allowMutableBuild(models, build);
     build.$query = jest.fn(() => ({ patch: patchFn }));
     build.deploys = [{ id: 9 }];
 
@@ -1352,6 +1828,118 @@ describe('applyApiEnvironmentPatch', () => {
         trx: expect.anything(),
       })
     );
+    expect(findOne).toHaveBeenCalledWith({
+      id: build.id,
+      uuid: build.uuid,
+      kind: BuildKind.ENVIRONMENT,
+    });
+  });
+
+  it('merges and null-deletes individual MCP env keys inside the locked patch', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: false,
+      commentRuntimeEnv: { A: 'old', B: 'keep' },
+    };
+    allowMutableBuild(models, build);
+    const enqueue = jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
+
+    const result = await service.applyApiEnvironmentPatch(
+      build,
+      override as any,
+      {
+        env: { A: 'new', B: null, C: 'added' },
+      },
+      { envMode: 'merge' }
+    );
+
+    expect(override.applyBuildConfigPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        patch: { commentRuntimeEnv: { A: 'new', C: 'added' } },
+        trx: expect.anything(),
+      })
+    );
+    expect(result).toEqual({ mode: 'applied', changed: true, build });
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('preserves REST whole-map replacement semantics under the same lock', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: false,
+      commentRuntimeEnv: { KEEP_ONLY_IN_OLD_MAP: 'old' },
+    };
+    allowMutableBuild(models, build);
+
+    await service.applyApiEnvironmentPatch(build, override as any, {
+      env: { REPLACEMENT: 'new' },
+    });
+
+    expect(override.applyBuildConfigPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        patch: { commentRuntimeEnv: { REPLACEMENT: 'new' } },
+      })
+    );
+  });
+
+  it('returns an applied no-op receipt without inventing a deploy id', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: true,
+      commentRuntimeEnv: { A: 'same' },
+    };
+    allowMutableBuild(models, build);
+    const enqueue = jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
+
+    const result = await service.applyApiEnvironmentPatch(
+      build,
+      override as any,
+      {
+        env: { A: 'same' },
+      },
+      { envMode: 'merge' }
+    );
+
+    expect(result).toEqual({ mode: 'applied', changed: false, build });
+    expect(result).not.toHaveProperty('deployId');
+    expect(override.applyBuildConfigPatch).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('resumes a paused environment with config changes without claiming an external queue effect', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: false,
+      commentRuntimeEnv: {},
+    };
+    allowMutableBuild(models, build);
+    const patchFn = jest.fn().mockResolvedValue(1);
+    build.$query = jest.fn(() => ({ patch: patchFn }));
+    const enqueue = jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
+
+    const result = await service.applyApiEnvironmentPatch(
+      build,
+      override as any,
+      {
+        deployEnabled: true,
+        env: { A: 'new' },
+      },
+      { envMode: 'merge' }
+    );
+
+    expect(patchFn).toHaveBeenCalledWith({ deployEnabled: true });
+    expect(override.applyBuildConfigPatch).toHaveBeenCalled();
+    expect(result).toEqual({ mode: 'applied', changed: true, build });
+    expect(result).not.toHaveProperty('deployId');
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('serializes a pause behind the same lock used by manifest apply and teardown', async () => {
@@ -1382,12 +1970,13 @@ describe('applyApiEnvironmentPatch', () => {
     expect(unlock).toHaveBeenCalledTimes(1);
   });
 
-  it('prevalidates all service overrides before opening the write transaction', async () => {
+  it('reloads and validates service overrides inside the locked write transaction', async () => {
     const { service, models } = makeService();
     const override = overrideMock();
     override.validateServiceOverrides.mockRejectedValue(new Error('missing service'));
     const build = apiBuild();
     build.deploys = [{ id: 9 }];
+    allowMutableBuild(models, build);
 
     await expect(
       service.applyApiEnvironmentPatch(build, override as any, {
@@ -1396,8 +1985,64 @@ describe('applyApiEnvironmentPatch', () => {
       })
     ).rejects.toThrow('missing service');
 
-    expect(models.Build.transact).not.toHaveBeenCalled();
+    expect(models.Build.transact).toHaveBeenCalledTimes(1);
+    expect(build.$fetchGraph).toHaveBeenCalledWith(
+      '[baseBuild, pullRequest, deploys.[deployable, repository]]',
+      expect.objectContaining({ transaction: expect.anything() })
+    );
     expect(build.$query).not.toHaveBeenCalled();
+  });
+
+  it('uses the locked deploy graph for change detection instead of overwriting a concurrent update', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const stale = apiBuild();
+    stale.deployEnabled = false;
+    stale.deploys = [{ id: 9, active: true, deployable: { name: 'app' } }];
+    const current = {
+      ...stale,
+      deploys: [{ id: 9, active: false, deployable: { name: 'app' } }],
+    };
+    current.$fetchGraph = jest.fn().mockImplementation(async () => current);
+    allowMutableBuild(models, current);
+
+    const result = await service.applyApiEnvironmentPatch(
+      stale,
+      override as any,
+      { services: [{ name: 'app', active: false }] },
+      { envMode: 'merge' }
+    );
+
+    expect(override.validateServiceOverrides).toHaveBeenCalledWith(current, current.deploys, [
+      { name: 'app', active: false },
+    ]);
+    expect(override.applyServiceOverrides).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ mode: 'applied', changed: false, build: current });
+  });
+
+  it('returns the post-write deploy graph captured inside the locked transaction', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = apiBuild();
+    build.deployEnabled = false;
+    let storedDeploys = [{ id: 9, active: true, deployable: { name: 'app' } }];
+    build.$fetchGraph = jest.fn().mockImplementation(async () => {
+      build.deploys = storedDeploys.map((deploy) => ({ ...deploy }));
+      return build;
+    });
+    override.applyServiceOverrides.mockImplementation(async () => {
+      storedDeploys = [{ id: 9, active: false, deployable: { name: 'app' } }];
+    });
+    allowMutableBuild(models, build);
+
+    const result = await service.applyApiEnvironmentPatch(build, override as any, {
+      services: [{ name: 'app', active: false }],
+    });
+
+    expect(build.$fetchGraph).toHaveBeenCalledTimes(2);
+    expect(result.build.deploys).toEqual([
+      expect.objectContaining({ id: 9, active: false, deployable: { name: 'app' } }),
+    ]);
   });
 
   it('commits combined config and service changes before enqueueing exactly one redeploy', async () => {
@@ -1409,7 +2054,7 @@ describe('applyApiEnvironmentPatch', () => {
     build.deploys = [{ id: 9 }];
     const enqueue = jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
 
-    await service.applyApiEnvironmentPatch(build, override as any, {
+    const result = await service.applyApiEnvironmentPatch(build, override as any, {
       env: { A: 'b' },
       services: [{ name: 'app', active: false }],
     });
@@ -1421,7 +2066,18 @@ describe('applyApiEnvironmentPatch', () => {
       expect.objectContaining({ enqueueRedeploy: false, trx: expect.anything() })
     );
     expect(enqueue).toHaveBeenCalledTimes(1);
-    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ buildId: 1, triggerRef: expect.any(String) }));
+    expect(result).toMatchObject({
+      mode: 'redeploy_queued',
+      changed: true,
+      deployId: expect.stringMatching(/^[A-Za-z0-9_-]{21}$/),
+      build,
+    });
+    if (result.mode !== 'redeploy_queued') throw new Error('expected a redeploy receipt');
+    expect(enqueue).toHaveBeenCalledWith({
+      buildId: 1,
+      runUUID: result.deployId,
+      triggerRef: result.deployId,
+    });
   });
 
   it.each([BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN])(
@@ -1454,6 +2110,104 @@ describe('applyApiEnvironmentPatch', () => {
     ).rejects.toMatchObject({ httpStatus: 404, code: 'env_not_found' });
 
     expect(build.$query).not.toHaveBeenCalled();
+  });
+
+  it('applies changed init, tracking, auto-track, and service fields from the locked graph only', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const deploys = [
+      { active: true, publicUrl: undefined, deployable: { name: 'external-new', type: 'externalHTTP' } },
+      { active: true, publicUrl: 'same-url', deployable: { name: 'external-same', type: 'externalHTTP' } },
+      { active: true, branchName: undefined, deployable: { name: 'branch-new', type: 'github' } },
+      { active: true, branchName: 'same-branch', deployable: { name: 'branch-same', type: 'github' } },
+      { active: true, deployable: { name: 'active-change', type: 'docker' } },
+      { active: true, deployable: { name: 'active-same', type: 'docker' } },
+      { active: true, deployable: undefined },
+    ];
+    const pullRequest = { id: 55 };
+    const build = {
+      ...apiBuild(),
+      deployEnabled: true,
+      autoTrack: false,
+      trackDefaultBranches: false,
+      commentInitEnv: undefined,
+      pullRequest,
+      deploys,
+    };
+    allowMutableBuild(models, build);
+    build.$query = jest.fn(() => ({ patch: jest.fn().mockResolvedValue(undefined) }));
+    const requested = [
+      { name: 'external-new', branchOrExternalUrl: 'new-url' },
+      { name: 'external-same', branchOrExternalUrl: 'same-url' },
+      { name: 'branch-new', branchOrExternalUrl: 'new-branch' },
+      { name: 'branch-same', branchOrExternalUrl: 'same-branch' },
+      { name: 'active-change', active: false },
+      { name: 'active-same', active: true },
+      { name: 'missing', active: true },
+    ];
+
+    await service.applyApiEnvironmentPatch(build, override as any, {
+      autoTrack: true,
+      trackDefaultBranches: true,
+      initEnv: { INIT: 'yes' },
+      services: requested,
+    });
+
+    expect(override.applyBuildConfigPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pullRequest,
+        patch: {
+          commentInitEnv: { INIT: 'yes' },
+          trackDefaultBranches: true,
+        },
+      })
+    );
+    expect(override.applyServiceOverrides).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pullRequest,
+        serviceOverrides: [requested[0], requested[2], requested[4], requested[6]],
+      })
+    );
+  });
+
+  it('uses empty locked deploy collections for validation and service application', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: true,
+      deploys: undefined,
+    };
+    allowMutableBuild(models, build);
+    jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
+
+    await service.applyApiEnvironmentPatch(build, override as any, {
+      services: [{ name: 'new-service', active: true }],
+    });
+
+    expect(override.validateServiceOverrides).toHaveBeenCalledWith(build, [], [{ name: 'new-service', active: true }]);
+    expect(override.applyServiceOverrides).toHaveBeenCalledWith(expect.objectContaining({ deploys: [] }));
+  });
+
+  it('compares init patches against an existing locked init environment map', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      deployEnabled: false,
+      commentInitEnv: { BEFORE: 'old' },
+    };
+    allowMutableBuild(models, build);
+
+    await service.applyApiEnvironmentPatch(build, override as any, {
+      initEnv: { AFTER: 'new' },
+    });
+
+    expect(override.applyBuildConfigPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        patch: { commentInitEnv: { AFTER: 'new' } },
+      })
+    );
   });
 });
 
@@ -1508,6 +2262,7 @@ describe('listEnvironments and getEnvironmentDetail serialization', () => {
       where: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockReturnThis(),
       whereNotIn: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
       whereExists: jest.fn().mockReturnThis(),
       whereNotExists: jest.fn().mockReturnThis(),
       modify: jest.fn().mockImplementation(function (this: any, fn: any) {
@@ -1688,6 +2443,53 @@ describe('listEnvironments and getEnvironmentDetail serialization', () => {
     expect(prRecorder.orWhereRaw).toHaveBeenCalledWith('LOWER("fullName") LIKE ?', ['%fea%']);
     expect(prRecorder.orWhereRaw).toHaveBeenCalledWith('LOWER("githubLogin") LIKE ?', ['%fea%']);
     expect(prRecorder.orWhereRaw).toHaveBeenCalledWith('LOWER("branchName") LIKE ?', ['%fea%']);
+  });
+
+  it('applies status and date filters in SQL before pagination', async () => {
+    const { service, models } = makeService();
+    const chain = listChain();
+    (models.Build.query as jest.Mock).mockReturnValue(chain);
+    mockPaginate.mockResolvedValue({ data: [], metadata: { page: 1 } });
+
+    await service.listEnvironments({
+      statuses: [BuildStatus.DEPLOYED, BuildStatus.ERROR],
+      createdBefore: '2026-07-25T00:00:00.000Z',
+      createdAfter: '2026-07-01T00:00:00.000Z',
+      expiresBefore: '2026-07-30T00:00:00.000Z',
+    });
+
+    expect(chain.whereIn).toHaveBeenCalledWith('builds.status', [BuildStatus.DEPLOYED, BuildStatus.ERROR]);
+    expect(chain.where).toHaveBeenCalledWith('builds.createdAt', '<', '2026-07-25T00:00:00.000Z');
+    expect(chain.where).toHaveBeenCalledWith('builds.createdAt', '>', '2026-07-01T00:00:00.000Z');
+    expect(chain.where).toHaveBeenCalledWith('builds.expiresAt', '<', '2026-07-30T00:00:00.000Z');
+  });
+
+  it('intersects an exact repository id across API and PR environment sources', async () => {
+    const { service, models } = makeService();
+    const repositoryPredicate: any = {
+      where: jest.fn().mockReturnThis(),
+      orWhereExists: jest.fn().mockReturnThis(),
+    };
+    const chain = listChain();
+    chain.where = jest.fn().mockImplementation(function (this: any, ...args: any[]) {
+      if (typeof args[0] === 'function') args[0](repositoryPredicate);
+      return this;
+    });
+    (models.Build.query as jest.Mock).mockReturnValue(chain);
+    const prSourceQuery: any = {
+      joinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+    };
+    (models.Build as any).relatedQuery = jest.fn(() => prSourceQuery);
+    mockPaginate.mockResolvedValue({ data: [], metadata: { page: 1 } });
+
+    await service.listEnvironments({ repositoryGithubRepositoryId: 42 });
+
+    expect(repositoryPredicate.where).toHaveBeenCalledWith('builds.githubRepositoryId', 42);
+    expect((models.Build as any).relatedQuery).toHaveBeenCalledWith('pullRequest');
+    expect(prSourceQuery.joinRelated).toHaveBeenCalledWith('repository');
+    expect(prSourceQuery.where).toHaveBeenCalledWith('repository.githubRepositoryId', 42);
+    expect(repositoryPredicate.orWhereExists).toHaveBeenCalledWith(prSourceQuery);
   });
 
   it('hides deleted rows when torn_down is excluded by default or explicitly', async () => {
@@ -1952,12 +2754,60 @@ describe('redeploy and destroy uuid liveness', () => {
     (models.Build.query as jest.Mock).mockReturnValue({ findOne });
     const enqueueResolve = jest.spyOn(service as any, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined);
 
-    const result = await service.redeployBuild('x', 4);
+    const result = await service.redeployBuild('x', 4, BuildKind.ENVIRONMENT);
 
-    expect(findOne).toHaveBeenCalledWith({ uuid: 'x', id: 4 });
+    expect(findOne).toHaveBeenCalledWith({ uuid: 'x', id: 4, kind: BuildKind.ENVIRONMENT });
     expect(whereNull).toHaveBeenCalledWith('deletedAt');
-    expect(enqueueResolve).toHaveBeenCalledWith(expect.objectContaining({ buildId: 4 }));
-    expect(result).toMatchObject({ status: 'success' });
+    expect(result).toMatchObject({
+      status: 'success',
+      deployId: expect.stringMatching(/^[A-Za-z0-9_-]{21}$/),
+    });
+    if (result.status !== 'success') throw new Error('expected successful redeploy receipt');
+    expect(enqueueResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buildId: 4,
+        runUUID: result.deployId,
+        triggerRef: result.deployId,
+      })
+    );
+  });
+
+  it('redeployBuild admits repeated requests as distinct deployment runs', async () => {
+    const { service, models } = makeService();
+    const build = {
+      id: 4,
+      uuid: 'x',
+      status: BuildStatus.DEPLOYED,
+      deployEnabled: true,
+      pullRequest: null,
+      pullRequestId: null,
+      deploys: [],
+    };
+    const whereNull = jest.fn(() => ({ withGraphFetched: jest.fn().mockResolvedValue(build) }));
+    (models.Build.query as jest.Mock).mockReturnValue({ findOne: jest.fn(() => ({ whereNull })) });
+    const enqueueResolve = jest.spyOn(service as any, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined);
+
+    const first = await service.redeployBuild('x', 4);
+    const second = await service.redeployBuild('x', 4);
+
+    expect(first).toMatchObject({ status: 'success', deployId: expect.any(String) });
+    expect(second).toMatchObject({ status: 'success', deployId: expect.any(String) });
+    if (first.status !== 'success' || second.status !== 'success') {
+      throw new Error('expected successful redeploy receipts');
+    }
+    expect(second.deployId).not.toBe(first.deployId);
+    expect(enqueueResolve.mock.calls.map(([request]) => request)).toEqual([
+      expect.objectContaining({
+        buildId: 4,
+        runUUID: first.deployId,
+        triggerRef: first.deployId,
+      }),
+      expect.objectContaining({
+        buildId: 4,
+        runUUID: second.deployId,
+        triggerRef: second.deployId,
+      }),
+    ]);
   });
 
   it.each([BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN])(
@@ -2024,7 +2874,7 @@ describe('redeploy and destroy uuid liveness', () => {
     expect(result).toMatchObject({ status: 'success' });
   });
 
-  it('redeployBuild rechecks the API deploy gate after acquiring the exact-id lock', async () => {
+  it('redeployBuild checks the API deploy gate before enqueue', async () => {
     const { service, models } = makeService();
     const paused = {
       id: 4,
@@ -2476,11 +3326,25 @@ describe('deleteBuild teardown ownership', () => {
 
   it('does not patch a key release when the key is already null', async () => {
     const { service } = makeTeardownService();
-    const { build, patch } = makeTeardownBuild({ idempotencyKey: null });
+    const { build, patch } = makeTeardownBuild({ idempotencyKey: null, deploys: undefined });
 
     await service.deleteBuild(build);
 
     expect(patch).not.toHaveBeenCalledWith({ idempotencyKey: null });
+  });
+
+  it('marks every loaded deploy torn down before completing namespace cleanup', async () => {
+    const { service } = makeTeardownService();
+    const deployPatch = jest.fn().mockResolvedValue(undefined);
+    const deploy = {
+      id: 19,
+      $query: jest.fn(() => ({ patch: deployPatch })),
+    };
+    const { build } = makeTeardownBuild({ idempotencyKey: null, deploys: [deploy] });
+
+    await service.deleteBuild(build);
+
+    expect(deployPatch).toHaveBeenCalledWith({ status: DeployStatus.TORN_DOWN });
   });
 
   it('leaves PR builds untouched: no gate flip, no runUUID bump', async () => {
@@ -2925,7 +3789,17 @@ describe('resolveAndDeployBuild teardown-ownership abort', () => {
     const recordFailure = jest
       .spyOn(service as any, 'recordBuildFailure')
       .mockResolvedValue(undefined) as jest.SpyInstance;
-    return { service, build, claimChain, claimPatch, buildImages, applyManifests, updateStatus, recordFailure };
+    return {
+      service,
+      models,
+      build,
+      claimChain,
+      claimPatch,
+      buildImages,
+      applyManifests,
+      updateStatus,
+      recordFailure,
+    };
   }
 
   it('aborts the manifest apply when teardown took runUUID ownership mid-flight', async () => {
@@ -2964,6 +3838,18 @@ describe('resolveAndDeployBuild teardown-ownership abort', () => {
 
     expect(applyManifests).toHaveBeenCalled();
     expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.DEPLOYED, expect.any(String), true, true);
+  });
+
+  it('passes a concrete repository id through deploy and environment-variable resolution', async () => {
+    const { service, build } = makeDeployRunService((patchedRunUUID) => ({
+      runUUID: patchedRunUUID,
+      status: BuildStatus.BUILDING,
+    }));
+    const findOrCreateDeploys = service.db.services.Deploy.findOrCreateDeploys as jest.Mock;
+
+    await service.resolveAndDeployBuild(build, false, 42, 'commit-ref');
+
+    expect(findOrCreateDeploys).toHaveBeenCalledWith(build.environment, build, 42, 'commit-ref', undefined);
   });
 
   it('rechecks ownership inside the apply lock when teardown starts during manifest deployment', async () => {
@@ -3005,10 +3891,12 @@ describe('resolveAndDeployBuild teardown-ownership abort', () => {
   });
 
   it('claims PR builds conditionally and honors current open/label authority', async () => {
-    const { service, build, claimChain, claimPatch, applyManifests } = makeDeployRunService((patchedRunUUID) => ({
-      runUUID: patchedRunUUID,
-      status: BuildStatus.DEPLOYING,
-    }));
+    const { service, models, build, claimChain, claimPatch, applyManifests } = makeDeployRunService(
+      (patchedRunUUID) => ({
+        runUUID: patchedRunUUID,
+        status: BuildStatus.DEPLOYING,
+      })
+    );
     build.pullRequestId = 55;
     build.pullRequest = {
       branchName: 'feature-1',
@@ -3023,8 +3911,13 @@ describe('resolveAndDeployBuild teardown-ownership abort', () => {
 
     await service.resolveAndDeployBuild(build, true);
 
-    expect(claimPatch).toHaveBeenCalledWith({ runUUID: expect.any(String) });
+    expect(claimPatch).toHaveBeenCalledWith({
+      runUUID: expect.any(String),
+      status: BuildStatus.PENDING,
+      statusMessage: null,
+    });
     expect(claimChain.where).not.toHaveBeenCalledWith('deployEnabled', true);
+    expect(models.Deploy.query).not.toHaveBeenCalled();
     expect(applyManifests).toHaveBeenCalled();
   });
 });

@@ -16,6 +16,12 @@
 
 import { OutputLimiter } from 'server/services/agent/tools/outputLimiter';
 import { renderLifecycleSchemaSlices } from 'server/lib/yamlSchemas/schemaSlice';
+import { scrubSecretsFromText } from 'server/lib/secretScrub';
+import {
+  MAX_LOG_FETCH_BYTES,
+  readNamespaceEventsBounded,
+  type DiagnosticCoreApi,
+} from 'server/lib/kubernetes/diagnosticReaders';
 
 export type TriagePhase = 'config' | 'build' | 'deploy' | 'runtime' | 'blocked';
 
@@ -32,6 +38,7 @@ export interface TriageDeployInput {
   statusMessage?: string | null;
   buildOutput?: string | null;
   active?: boolean;
+  provider?: 'kubernetes' | 'codefresh';
   deployable?: { name?: string; deploymentDependsOn?: string[] } | null;
   service?: { name?: string } | null;
 }
@@ -74,14 +81,14 @@ export interface TriageCoreApi {
     _continue?: string,
     fieldSelector?: string,
     labelSelector?: string
-  ): Promise<{ body: { items: PodLike[] } }>;
+  ): Promise<{ body: { items?: PodLike[] } }>;
   listNamespacedEvent(
     namespace: string,
     pretty?: string,
     allowWatchBookmarks?: boolean,
     _continue?: string,
     fieldSelector?: string
-  ): Promise<{ body: { items: EventLike[] } }>;
+  ): Promise<{ body: { items?: EventLike[] } }>;
   readNamespacedPodLog(
     name: string,
     namespace: string,
@@ -98,6 +105,43 @@ export interface TriageCoreApi {
 
 export interface TriageDossierOptions {
   coreApi?: TriageCoreApi;
+  pinnedServices?: readonly string[];
+}
+
+export interface TriageRuntimeEvidence {
+  stateNote?: string;
+  podSummaries: string[];
+  omittedFailingPods: number;
+  warningEvents: string[];
+  eventsUnavailable?: string;
+  previousLog?: { podName: string; content: string };
+  previousLogUnavailableFor?: string;
+  unavailable?: string;
+}
+
+export interface TriageServiceEvidence {
+  name: string;
+  phase: TriagePhase;
+  status: string;
+  statusMessage?: string;
+  detailed: boolean;
+  omittedMessage?: string;
+  runtime?: TriageRuntimeEvidence;
+  logTail?: string;
+  logsUnavailable?: boolean;
+  unsupportedProvider?: 'codefresh';
+}
+
+export interface TriageEvidence {
+  buildStatus: string;
+  config?: {
+    status: string;
+    statusMessage: string;
+    schemaSlices?: string;
+  };
+  failingServices: TriageServiceEvidence[];
+  blockedServices: Array<{ name: string; blocker: string }>;
+  fallback?: { phase: 'build' | 'deploy' | 'orchestration'; statusMessage: string };
 }
 
 const TERMINAL_FAILURE_STATUSES = new Set(['error', 'config_error', 'build_failed', 'deploy_failed']);
@@ -109,6 +153,7 @@ const LOG_TAIL_MAX = 2500;
 const MAX_FAILING_PODS = 3;
 const MAX_WARNING_EVENTS = 5;
 const POD_NOT_READY_RE = /pods? failed to become ready/i;
+const DEFAULT_TRIAGE_TIMEBOX_MS = 4_000;
 
 function deployName(deploy: TriageDeployInput): string {
   return deploy.deployable?.name || deploy.uuid || 'unknown';
@@ -119,13 +164,15 @@ function isFailureStatus(status: string | null | undefined): boolean {
 }
 
 function compactLine(value: string | null | undefined, max = 350): string {
-  const compact = (value || '').replace(/\s+/g, ' ').trim();
+  const compact = scrubSecretsFromText(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
   return compact.length > max ? `${compact.slice(0, max)}…` : compact;
 }
 
 // Tail of a log capped to maxChars, keeping the error window when present.
 function logTail(content: string, maxChars = LOG_TAIL_MAX): string {
-  return OutputLimiter.truncateLogOutput(content.trim(), maxChars, 5, 40);
+  return OutputLimiter.truncateLogOutput(scrubSecretsFromText(content).trim(), maxChars, 5, 40);
 }
 
 function fencedLog(content: string): string[] {
@@ -170,25 +217,44 @@ function podIsReady(pod: PodLike): boolean {
   return pod.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') || false;
 }
 
-function podLooksCrashLooping(pod: PodLike): boolean {
-  return (pod.status?.containerStatuses || []).some(
-    (c) => c.state?.waiting?.reason === 'CrashLoopBackOff' || (c.restartCount || 0) > 0
+function crashLoopingContainer(pod: PodLike): PodContainerState | undefined {
+  return [...(pod.status?.containerStatuses ?? []), ...(pod.status?.initContainerStatuses ?? [])].find(
+    (container) =>
+      Boolean(container.name) &&
+      (container.state?.waiting?.reason === 'CrashLoopBackOff' ||
+        ((container.restartCount ?? 0) > 0 && Boolean(container.lastState?.terminated)))
   );
+}
+
+async function withinDeadline<T>(work: Promise<T>, deadline: number): Promise<T> {
+  const remaining = Math.max(1, deadline - Date.now());
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('diagnostic read timed out')), remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function collectRuntimeEvidence(
   deploy: TriageDeployInput,
   namespace: string,
-  coreApi: TriageCoreApi
-): Promise<string[]> {
-  const lines: string[] = [];
-  const podsResp = await coreApi.listNamespacedPod(
-    namespace,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    `deploy_uuid=${deploy.uuid}`
+  coreApi: TriageCoreApi,
+  deadline: number
+): Promise<TriageRuntimeEvidence> {
+  const evidence: TriageRuntimeEvidence = {
+    podSummaries: [],
+    omittedFailingPods: 0,
+    warningEvents: [],
+  };
+  const podsResp = await withinDeadline(
+    coreApi.listNamespacedPod(namespace, undefined, undefined, undefined, undefined, `deploy_uuid=${deploy.uuid}`),
+    deadline
   );
   // Same job-pod filter as waitForDeployPodReady; Succeeded excludes completed build job pods.
   const pods = (podsResp.body.items || []).filter(
@@ -197,10 +263,9 @@ async function collectRuntimeEvidence(
   const failingPods = pods.filter((pod) => !podIsReady(pod));
 
   if (failingPods.length === 0) {
-    lines.push(
-      pods.length === 0 ? '- no pods found for this deploy' : '- all pods currently Ready (failure may be stale)'
-    );
-    return lines;
+    evidence.stateNote =
+      pods.length === 0 ? 'no pods found for this deploy' : 'all pods currently Ready (failure may be stale)';
+    return evidence;
   }
 
   for (const pod of failingPods.slice(0, MAX_FAILING_PODS)) {
@@ -209,50 +274,68 @@ async function collectRuntimeEvidence(
       ...(pod.status?.containerStatuses || []).map((s) => summarizeContainer(s, false)),
     ].filter((cause): cause is string => Boolean(cause));
     const detail = causes.length ? causes.join('; ') : `phase=${pod.status?.phase || 'unknown'}`;
-    lines.push(`- pod ${pod.metadata?.name}: ${detail}`);
+    evidence.podSummaries.push(`${pod.metadata?.name}: ${detail}`);
   }
   if (failingPods.length > MAX_FAILING_PODS) {
-    lines.push(`- (+${failingPods.length - MAX_FAILING_PODS} more failing pods)`);
+    evidence.omittedFailingPods = failingPods.length - MAX_FAILING_PODS;
   }
 
   const failingPodNames = new Set(failingPods.map((pod) => pod.metadata?.name).filter(Boolean));
   try {
-    const eventsResp = await coreApi.listNamespacedEvent(namespace);
-    const warnings = (eventsResp.body.items || [])
-      .filter((event) => event.type === 'Warning' && failingPodNames.has(event.involvedObject?.name))
-      .slice(-MAX_WARNING_EVENTS);
-    for (const event of warnings) {
+    const eventResult = await readNamespaceEventsBounded(
+      namespace,
+      coreApi as unknown as Pick<DiagnosticCoreApi, 'listNamespacedEvent'>,
+      {
+        allowedObjectNames: failingPodNames as Set<string>,
+        warningsOnly: true,
+        sourceTail: true,
+        maxWarnings: MAX_WARNING_EVENTS,
+        maxNormal: 0,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+      }
+    );
+    for (const event of eventResult.events) {
       const count = event.count && event.count > 1 ? ` (x${event.count})` : '';
-      lines.push(`- event: ${event.reason} ${compactLine(event.message, 200)}${count}`);
+      evidence.warningEvents.push(`${event.reason} ${compactLine(event.message, 200)}${count}`);
     }
   } catch (error) {
-    lines.push(`- events unavailable: ${compactLine((error as Error)?.message || String(error), 120)}`);
+    evidence.eventsUnavailable = compactLine((error as Error)?.message || String(error), 120);
   }
 
-  const crashLooper = failingPods.find(podLooksCrashLooping);
-  if (crashLooper?.metadata?.name) {
+  const crashLooper = failingPods
+    .map((pod) => ({ pod, container: crashLoopingContainer(pod) }))
+    .find(({ pod, container }) => Boolean(pod.metadata?.name && container?.name));
+  if (crashLooper?.pod.metadata?.name && crashLooper.container?.name) {
+    const podName = crashLooper.pod.metadata.name;
+    const containerName = crashLooper.container.name;
     try {
-      const logResp = await coreApi.readNamespacedPodLog(
-        crashLooper.metadata.name,
-        namespace,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        true,
-        undefined,
-        40
+      const logResp = await withinDeadline(
+        coreApi.readNamespacedPodLog(
+          podName,
+          namespace,
+          containerName,
+          undefined,
+          undefined,
+          MAX_LOG_FETCH_BYTES,
+          undefined,
+          true,
+          undefined,
+          40
+        ),
+        deadline
       );
       if (logResp.body?.trim()) {
-        lines.push(`- previous logs (${crashLooper.metadata.name}):`, ...fencedLog(logTail(logResp.body, 1800)));
+        evidence.previousLog = {
+          podName,
+          content: logTail(logResp.body, 1800),
+        };
       }
     } catch {
-      lines.push(`- previous logs unavailable for ${crashLooper.metadata.name}`);
+      evidence.previousLogUnavailableFor = podName;
     }
   }
 
-  return lines;
+  return evidence;
 }
 
 function blockerNameFor(deploy: TriageDeployInput, failingNames: string[]): string {
@@ -266,15 +349,12 @@ function renderBlock(header: string, evidenceLines: string[]): string {
   return capped ? `${header}\n${capped}` : header;
 }
 
-/**
- * Deterministic failure evidence for the Debug agent's system prompt. Returns the dossier body
- * (no header) when the build or an active deploy is in a terminal failure state, else null.
- */
-export async function buildTriageDossier(
+/** SECURITY: accepts no caller-selected namespace, label, pod, or job identifier; targets derive from the supplied rows. */
+export async function collectTriageEvidence(
   build: TriageBuildInput,
   deploys: TriageDeployInput[],
   options: TriageDossierOptions = {}
-): Promise<string | null> {
+): Promise<TriageEvidence | null> {
   const activeDeploys = deploys.filter((deploy) => deploy.active !== false);
   const failingDeploys = activeDeploys.filter((deploy) => isFailureStatus(deploy.status));
   const buildFailing = isFailureStatus(build.status);
@@ -283,25 +363,42 @@ export async function buildTriageDossier(
     return null;
   }
 
-  const blocks: string[] = [];
+  const evidence: TriageEvidence = {
+    buildStatus: build.status || '',
+    failingServices: [],
+    blockedServices: [],
+  };
 
-  if (build.status === 'config_error' || build.status === 'error') {
+  if (build.status === 'config_error') {
     // Schema-validation failures carry jsonschema paths; the matching schema slices give the
     // valid shape of exactly the failing fields (empty for non-schema errors).
     const schemaSlices = renderLifecycleSchemaSlices(build.statusMessage || '');
-    blocks.push(
-      renderBlock(`## environment — phase=config status=${build.status}`, [
-        `- buildStatusMessage: ${compactLine(build.statusMessage) || '<none>'}`,
-        ...(schemaSlices ? ['Relevant lifecycle.yaml schema for the failing paths:', schemaSlices] : []),
-      ])
-    );
+    evidence.config = {
+      status: build.status,
+      statusMessage: compactLine(build.statusMessage) || '<none>',
+      ...(schemaSlices ? { schemaSlices: scrubSecretsFromText(schemaSlices) } : {}),
+    };
   }
 
   const failingNames = failingDeploys.map(deployName);
+  const pinned = new Set((options.pinnedServices ?? []).slice(0, MAX_DETAILED_DEPLOYS));
+  const detailedNames = new Set<string>();
+  for (const deploy of failingDeploys) {
+    const name = deployName(deploy);
+    if (pinned.has(name) && detailedNames.size < MAX_DETAILED_DEPLOYS) {
+      detailedNames.add(name);
+    }
+  }
+  for (const deploy of failingDeploys) {
+    if (detailedNames.size >= MAX_DETAILED_DEPLOYS) break;
+    detailedNames.add(deployName(deploy));
+  }
+
+  const deadline = Date.now() + DEFAULT_TRIAGE_TIMEBOX_MS;
   let coreApi = options.coreApi;
   const getCoreApi = async (): Promise<TriageCoreApi> => {
     if (!coreApi) {
-      const k8s = await import('@kubernetes/client-node');
+      const k8s = await withinDeadline(import('@kubernetes/client-node'), deadline);
       const kc = new k8s.KubeConfig();
       kc.loadFromDefault();
       coreApi = kc.makeApiClient(k8s.CoreV1Api) as unknown as TriageCoreApi;
@@ -309,56 +406,146 @@ export async function buildTriageDossier(
     return coreApi;
   };
 
-  for (const [index, deploy] of failingDeploys.entries()) {
+  for (const deploy of failingDeploys) {
     const phase = classifyDeployPhase(deploy);
-    const header = `## ${deployName(deploy)} — phase=${phase} status=${deploy.status}`;
-
-    if (index >= MAX_DETAILED_DEPLOYS) {
-      blocks.push(`${header} (evidence omitted: ${compactLine(deploy.statusMessage, 160) || 'see statusMessage'})`);
+    const serviceEvidence: TriageServiceEvidence = {
+      name: compactLine(deployName(deploy), 100) || 'unknown',
+      phase,
+      status: compactLine(deploy.status, 100) || 'unknown',
+      detailed: detailedNames.has(deployName(deploy)),
+    };
+    if (!serviceEvidence.detailed) {
+      serviceEvidence.omittedMessage = compactLine(deploy.statusMessage, 160) || 'see statusMessage';
+      evidence.failingServices.push(serviceEvidence);
       continue;
     }
 
-    const lines: string[] = [];
     if (deploy.statusMessage) {
-      lines.push(`- statusMessage: ${compactLine(deploy.statusMessage)}`);
+      serviceEvidence.statusMessage = compactLine(deploy.statusMessage);
+    }
+    if (deploy.provider === 'codefresh') {
+      serviceEvidence.unsupportedProvider = 'codefresh';
+      evidence.failingServices.push(serviceEvidence);
+      continue;
     }
 
     if (phase === 'runtime') {
       if (!build.namespace) {
-        lines.push('- k8s evidence unavailable: build namespace unknown');
+        serviceEvidence.runtime = {
+          podSummaries: [],
+          omittedFailingPods: 0,
+          warningEvents: [],
+          unavailable: 'build namespace unknown',
+        };
       } else {
         try {
-          lines.push(...(await collectRuntimeEvidence(deploy, build.namespace, await getCoreApi())));
+          serviceEvidence.runtime = await collectRuntimeEvidence(deploy, build.namespace, await getCoreApi(), deadline);
         } catch (error) {
-          lines.push(`- k8s evidence unavailable: ${compactLine((error as Error)?.message || String(error), 200)}`);
+          serviceEvidence.runtime = {
+            podSummaries: [],
+            omittedFailingPods: 0,
+            warningEvents: [],
+            unavailable: compactLine((error as Error)?.message || String(error), 200),
+          };
         }
       }
     } else if (deploy.buildOutput?.trim()) {
-      lines.push(`- ${phase} logs (tail):`, ...fencedLog(logTail(deploy.buildOutput)));
+      serviceEvidence.logTail = logTail(deploy.buildOutput);
     } else {
-      lines.push(`- ${phase} logs unavailable (no persisted buildOutput)`);
+      serviceEvidence.logsUnavailable = true;
     }
 
-    blocks.push(renderBlock(header, lines));
+    evidence.failingServices.push(serviceEvidence);
   }
 
   const blockedDeploys = activeDeploys.filter(
     (deploy) => deploy.status === 'queued' && (failingDeploys.length > 0 || buildFailing)
   );
   for (const deploy of blockedDeploys) {
+    evidence.blockedServices.push({
+      name: compactLine(deployName(deploy), 100) || 'unknown',
+      blocker: compactLine(blockerNameFor(deploy, failingNames), 100),
+    });
+  }
+
+  if (!evidence.config && evidence.failingServices.length === 0 && evidence.blockedServices.length === 0) {
+    evidence.fallback = {
+      phase: build.status === 'error' ? 'orchestration' : build.status === 'build_failed' ? 'build' : 'deploy',
+      statusMessage: compactLine(build.statusMessage) || '<none>',
+    };
+  }
+
+  return evidence;
+}
+
+export function renderTriageEvidence(evidence: TriageEvidence): string {
+  const blocks: string[] = [];
+  if (evidence.config) {
     blocks.push(
-      renderBlock(`## ${deployName(deploy)} — phase=blocked status=queued`, [
-        `- blocked: waiting on failed deploy ${blockerNameFor(deploy, failingNames)}`,
+      renderBlock(`## environment — phase=config status=${evidence.config.status}`, [
+        `- buildStatusMessage: ${evidence.config.statusMessage}`,
+        ...(evidence.config.schemaSlices
+          ? ['Relevant lifecycle.yaml schema for the failing paths:', evidence.config.schemaSlices]
+          : []),
       ])
     );
   }
 
-  if (blocks.length === 0) {
+  for (const service of evidence.failingServices) {
+    const header = `## ${service.name} — phase=${service.phase} status=${service.status}`;
+    if (!service.detailed) {
+      blocks.push(`${header} (evidence omitted: ${service.omittedMessage || 'see statusMessage'})`);
+      continue;
+    }
+
+    const lines: string[] = [];
+    if (service.statusMessage) {
+      lines.push(`- statusMessage: ${service.statusMessage}`);
+    }
+    if (service.unsupportedProvider === 'codefresh') {
+      lines.push('- diagnostic evidence unavailable: Codefresh pipelines are unsupported by this surface');
+    } else if (service.runtime) {
+      const runtime = service.runtime;
+      if (runtime.unavailable) {
+        lines.push(`- k8s evidence unavailable: ${runtime.unavailable}`);
+      } else {
+        if (runtime.stateNote) lines.push(`- ${runtime.stateNote}`);
+        lines.push(...runtime.podSummaries.map((summary) => `- pod ${summary}`));
+        if (runtime.omittedFailingPods > 0) {
+          lines.push(`- (+${runtime.omittedFailingPods} more failing pods)`);
+        }
+        lines.push(...runtime.warningEvents.map((event) => `- event: ${event}`));
+        if (runtime.eventsUnavailable) {
+          lines.push(`- events unavailable: ${runtime.eventsUnavailable}`);
+        }
+        if (runtime.previousLog) {
+          lines.push(`- previous logs (${runtime.previousLog.podName}):`, ...fencedLog(runtime.previousLog.content));
+        }
+        if (runtime.previousLogUnavailableFor) {
+          lines.push(`- previous logs unavailable for ${runtime.previousLogUnavailableFor}`);
+        }
+      }
+    } else if (service.logTail) {
+      lines.push(`- ${service.phase} logs (tail):`, ...fencedLog(service.logTail));
+    } else if (service.logsUnavailable) {
+      lines.push(`- ${service.phase} logs unavailable (no persisted buildOutput)`);
+    }
+    blocks.push(renderBlock(header, lines));
+  }
+
+  for (const blocked of evidence.blockedServices) {
     blocks.push(
-      renderBlock(
-        `## environment — phase=${build.status === 'build_failed' ? 'build' : 'deploy'} status=${build.status}`,
-        [`- buildStatusMessage: ${compactLine(build.statusMessage) || '<none>'}`]
-      )
+      renderBlock(`## ${blocked.name} — phase=blocked status=queued`, [
+        `- blocked: waiting on failed deploy ${blocked.blocker}`,
+      ])
+    );
+  }
+
+  if (evidence.fallback) {
+    blocks.push(
+      renderBlock(`## environment — phase=${evidence.fallback.phase} status=${evidence.buildStatus}`, [
+        `- buildStatusMessage: ${evidence.fallback.statusMessage}`,
+      ])
     );
   }
 
@@ -374,4 +561,14 @@ export async function buildTriageDossier(
   }
 
   return rendered.join('\n');
+}
+
+/** Deterministic failure evidence for the Debug agent; null unless the build or an active deploy failed terminally. */
+export async function buildTriageDossier(
+  build: TriageBuildInput,
+  deploys: TriageDeployInput[],
+  options: TriageDossierOptions = {}
+): Promise<string | null> {
+  const evidence = await collectTriageEvidence(build, deploys, options);
+  return evidence ? renderTriageEvidence(evidence) : null;
 }

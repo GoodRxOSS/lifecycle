@@ -81,6 +81,7 @@ type SiteRow = {
 class SiteQuery {
   private filters: Array<(row: SiteRow) => boolean> = [];
   private sortBy: { field: keyof SiteRow; direction: string } | null = null;
+  private single = false;
 
   constructor(private readonly rows: SiteRow[]) {}
 
@@ -94,6 +95,12 @@ class SiteQuery {
       const user = values[0];
       this.filters.push((row) => row.createdBy?.toLowerCase() === user || row.updatedBy?.toLowerCase() === user);
     }
+    return this;
+  }
+
+  findOne(scope: Partial<SiteRow>) {
+    this.single = true;
+    this.filters.push((row) => Object.entries(scope).every(([key, value]) => row[key as keyof SiteRow] === value));
     return this;
   }
 
@@ -111,8 +118,9 @@ class SiteQuery {
     };
   }
 
-  then(resolve: (value: SiteRow[]) => unknown, reject?: (reason: unknown) => unknown) {
-    return Promise.resolve(this.filteredRows()).then(resolve, reject);
+  then(resolve: (value: SiteRow[] | SiteRow | undefined) => unknown, reject?: (reason: unknown) => unknown) {
+    const rows = this.filteredRows();
+    return Promise.resolve(this.single ? rows[0] : rows).then(resolve, reject);
   }
 
   private filteredRows() {
@@ -247,6 +255,42 @@ describe('SitesService', () => {
           items: 3,
           limit: 1,
         },
+      });
+    });
+
+    it('reports an active row as expired at the exact TTL boundary before cleanup runs', async () => {
+      const expiresAt = '2026-05-10T00:00:00.000Z';
+      const now = jest.spyOn(Date, 'now').mockReturnValue(new Date(expiresAt).getTime());
+      rows.push(createSiteRow({ expiresAt }));
+
+      await expect(service.listSites()).resolves.toMatchObject({
+        sites: [{ id: 'site-1', status: 'expired', expiresAt }],
+      });
+      await expect(service.getSite('site-1')).resolves.toMatchObject({
+        id: 'site-1',
+        status: 'expired',
+        expiresAt,
+      });
+      now.mockRestore();
+    });
+
+    it('keeps an elapsed expiresAt active when site TTL is disabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({
+        sites: {
+          enabled: true,
+          domain: 'sites.example.com',
+          hostPrefix: 'site',
+          ttl: { enabled: false },
+        },
+      });
+      rows.push(createSiteRow({ expiresAt: '2000-01-01T00:00:00.000Z' }));
+
+      await expect(service.listSites()).resolves.toMatchObject({
+        sites: [{ id: 'site-1', status: 'active' }],
+      });
+      await expect(service.getSite('site-1')).resolves.toMatchObject({
+        id: 'site-1',
+        status: 'active',
       });
     });
   });

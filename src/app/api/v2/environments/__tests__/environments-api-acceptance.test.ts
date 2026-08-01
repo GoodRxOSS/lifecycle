@@ -83,6 +83,7 @@ jest.mock('server/lib/logger', () => ({
 
 import { NextRequest } from 'next/server';
 import ApiTokenService from 'server/services/apiToken';
+import { AppError } from 'server/lib/appError';
 import { GET as listEnvironments, POST as createEnvironment } from 'src/app/api/v2/environments/route';
 import {
   GET as getEnvironment,
@@ -246,14 +247,24 @@ describe('POST /api/v2/environments', () => {
     expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
   });
 
-  it('403s repositories outside the token allowlist with a stable code', async () => {
+  it('403s repositories outside the token allowlist at the service boundary with a stable code', async () => {
     writeToken(['org/other']);
+    mockCreateApiEnvironment.mockRejectedValue(
+      new AppError({
+        httpStatus: 403,
+        code: 'forbidden_repository',
+        message: 'This API key is not authorized for the repository.',
+      })
+    );
     const res = await createEnvironment(request('POST', { repository: 'org/repo', branch: 'main' }));
     const body = await res.json();
 
     expect(res.status).toBe(403);
     expect(body.error.code).toBe('forbidden_repository');
-    expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
+    expect(mockCreateApiEnvironment).toHaveBeenCalledWith(expect.any(Object), {
+      repositoryAllowlistRepoIds: null,
+      repositoryAllowlist: ['org/other'],
+    });
   });
 
   it('202s a new environment with the poll contract and threads token attribution', async () => {
@@ -283,7 +294,10 @@ describe('POST /api/v2/environments', () => {
         idempotencyKey: 'k1',
         createdByTokenId: 7,
       }),
-      null
+      {
+        repositoryAllowlistRepoIds: null,
+        repositoryAllowlist: ['org/repo'],
+      }
     );
   });
 
@@ -303,7 +317,10 @@ describe('POST /api/v2/environments', () => {
     );
 
     expect(res.status).toBe(202);
-    expect(mockCreateApiEnvironment).toHaveBeenCalledWith(expect.any(Object), [42]);
+    expect(mockCreateApiEnvironment).toHaveBeenCalledWith(expect.any(Object), {
+      repositoryAllowlistRepoIds: [42],
+      repositoryAllowlist: ['org/repo'],
+    });
   });
 
   it('200s an idempotent replay', async () => {
@@ -701,7 +718,12 @@ describe('DELETE /api/v2/environments/{uuid}', () => {
 
     expect(res.status).toBe(202);
     expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith('x', 707);
-    expect(await res.json()).toMatchObject({ data: { uuid: 'x', status: 'tearing_down_queued' } });
+    expect(await res.json()).toMatchObject({
+      data: {
+        uuid: 'x',
+        status: 'tearing_down_queued',
+      },
+    });
   });
 
   it.each(['tearing_down', 'torn_down'])(
@@ -809,7 +831,16 @@ describe('POST /api/v2/environments/{uuid}/deploy', () => {
 
   it('202s and queues a redeploy for enabled environments', async () => {
     writeToken();
-    mockBuildLookup({ uuid: 'x', pullRequest: null, deployEnabled: true });
+    mockBuildLookup({
+      uuid: 'x',
+      pullRequest: null,
+      deployEnabled: true,
+    });
+    mockRedeployBuild.mockResolvedValue({
+      status: 'success',
+      message: 'queued',
+      deployId: 'V1StGXR8_Z5jdHi6abcde',
+    });
 
     const res = await deployEnvironment(request('POST', {}, 'http://localhost/api/v2/environments/x/deploy'), {
       params: { uuid: 'x' },
@@ -817,6 +848,12 @@ describe('POST /api/v2/environments/{uuid}/deploy', () => {
 
     expect(res.status).toBe(202);
     expect(mockRedeployBuild).toHaveBeenCalledWith('x', 101);
+    expect((await res.json()).data).toEqual({
+      uuid: 'x',
+      status: 'deploy_queued',
+      deployId: 'V1StGXR8_Z5jdHi6abcde',
+      statusUrl: '/api/v2/environments/x',
+    });
   });
 
   it('404s instead of redeploying a same-uuid successor when the authorized build disappeared', async () => {
@@ -859,6 +896,23 @@ describe('POST /api/v2/environments/{uuid}/deploy', () => {
     expect(res.status).toBe(409);
     expect((await res.json()).error.code).toBe('deploy_disabled');
     expect(mockRedeployBuild).toHaveBeenCalledWith('x', 809);
+  });
+
+  it('returns a deploy-disabled result when a concurrent pause wins', async () => {
+    writeToken();
+    mockBuildLookup({
+      uuid: 'x',
+      pullRequest: null,
+      deployEnabled: true,
+    });
+    mockRedeployBuild.mockResolvedValue({ status: 'deploy_disabled', message: 'paused' });
+
+    const res = await deployEnvironment(request('POST', {}, 'http://localhost/api/v2/environments/x/deploy'), {
+      params: { uuid: 'x' },
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe('deploy_disabled');
   });
 });
 
@@ -916,8 +970,19 @@ describe('POST /api/v2/environments/{uuid}/extend', () => {
 
   it('returns the new lease', async () => {
     writeToken();
-    mockBuildLookup({ uuid: 'x', pullRequest: null, githubRepositoryId: null });
-    mockExtendApiEnvironment.mockResolvedValue({ uuid: 'x', expiresAt: 'later' });
+    mockBuildLookup({
+      uuid: 'x',
+      pullRequest: null,
+      githubRepositoryId: null,
+    });
+    mockExtendApiEnvironment.mockResolvedValue({
+      build: {
+        uuid: 'x',
+        expiresAt: 'later',
+      },
+      addedHours: 12,
+      maxReached: false,
+    });
 
     const res = await extendEnvironment(
       request('POST', { hours: 12 }, 'http://localhost/api/v2/environments/x/extend'),
@@ -927,7 +992,10 @@ describe('POST /api/v2/environments/{uuid}/extend', () => {
     );
 
     expect(res.status).toBe(200);
-    expect((await res.json()).data).toEqual({ uuid: 'x', expiresAt: 'later' });
+    expect((await res.json()).data).toEqual({
+      uuid: 'x',
+      expiresAt: 'later',
+    });
     expect(mockExtendApiEnvironment).toHaveBeenCalledWith('x', 12, 101);
   });
 });

@@ -243,7 +243,7 @@ jest.mock('server/services/agent/RunService', () => ({
     registerAbortController: (...args: unknown[]) => mockRegisterAbortController(...args),
     clearAbortController: (...args: unknown[]) => mockClearAbortController(...args),
     patchProgressForExecutionOwner: (...args: unknown[]) => mockPatchProgressForExecutionOwner(...args),
-    heartbeatRunExecution: (...args: unknown[]) => mockHeartbeatRunExecution(...args),
+    heartbeatRunExecution: (...args: unknown[]) => Promise.resolve(mockHeartbeatRunExecution(...args)),
     getRunByUuid: (...args: unknown[]) => mockGetRunByUuid(...args),
     markFailed: (...args: unknown[]) => mockMarkFailed(...args),
     markFailedForExecutionOwner: (...args: unknown[]) => mockMarkFailedForExecutionOwner(...args),
@@ -399,6 +399,7 @@ const mockMarkSessionRuntimeFailure = AgentSessionService.markSessionRuntimeFail
 
 describe('AgentRunExecutor', () => {
   beforeEach(() => {
+    jest.useFakeTimers();
     jest.clearAllMocks();
     mockResolveSelection.mockResolvedValue({ provider: 'openai', modelId: 'gpt-5.4' });
     mockCreateLanguageModel.mockResolvedValue({ id: 'model-instance' });
@@ -490,6 +491,10 @@ describe('AgentRunExecutor', () => {
       },
       providerMetadata: undefined,
     });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it('builds agent instructions from the control-plane and session prompts', async () => {
@@ -2073,6 +2078,7 @@ describe('AgentRunExecutor', () => {
       });
 
       expect(mockHeartbeatRunExecution).not.toHaveBeenCalled();
+      mockHeartbeatRunExecution.mockReturnValueOnce(undefined);
 
       jest.advanceTimersByTime(60_000);
       await Promise.resolve();

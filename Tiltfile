@@ -89,6 +89,7 @@ ui_scheme = "https" if ngrok_ui_domain else "http"
 keycloak_host = ngrok_keycloak_domain or "localhost:8081"
 app_host = ngrok_domain or "localhost:5001"
 ui_host = ngrok_ui_domain or "localhost:3000"
+app_origin = "{}://{}".format(app_scheme, app_host)
 company_idp_origin = "{}://{}".format(keycloak_scheme, keycloak_host)
 internal_keycloak_origin = "http://lifecycle-keycloak-service.{}.svc.cluster.local:8080".format(app_namespace)
 
@@ -421,6 +422,10 @@ for r in lifecycle_deployment:
         containers = r["spec"]["template"]["spec"].get("containers", [])
         if len(containers) > 0:
             container = containers[0]
+            # With ngrok, APP_HOST must be the ngrok origin so agents can reach Lifecycle MCP under the same OAuth resource identifier.
+            for env_var in (container.get("env") or []):
+                if env_var.get("name") == "APP_HOST":
+                    env_var["value"] = app_origin
             if container.get("volumeMounts") == None:
                 container["volumeMounts"] = []
             container["volumeMounts"].append({

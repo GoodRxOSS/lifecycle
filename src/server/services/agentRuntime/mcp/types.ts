@@ -127,8 +127,6 @@ export type McpFieldSchema = {
 export type McpOauthAuthConfig = {
   mode: 'oauth';
   provider: 'generic-oauth2.1';
-  scope?: string;
-  resource?: string;
   clientName?: string;
   instructions?: string;
 };
