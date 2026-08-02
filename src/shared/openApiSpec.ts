@@ -524,6 +524,68 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        CreateLifecycleMcpOauthClient: {
+          type: 'object',
+          description: 'A public OAuth client to pre-register for Lifecycle MCP.',
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 80 },
+            redirectUris: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 10,
+              uniqueItems: true,
+              items: { type: 'string', minLength: 1, maxLength: 2048 },
+            },
+          },
+          required: ['name', 'redirectUris'],
+          additionalProperties: false,
+        },
+
+        LifecycleMcpOauthClient: {
+          type: 'object',
+          description: 'A public OAuth client created and managed by Lifecycle for MCP sign-in.',
+          properties: {
+            clientId: { type: 'string', pattern: '^lifecycle-mcp-[a-zA-Z0-9-]+$' },
+            name: { type: 'string' },
+            redirectUris: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            createdAt: { type: 'string', format: 'date-time', nullable: true },
+          },
+          required: ['clientId', 'name', 'redirectUris', 'createdAt'],
+          additionalProperties: false,
+        },
+
+        ListLifecycleMcpOauthClientsSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/LifecycleMcpOauthClient' },
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
+        LifecycleMcpOauthClientSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: { $ref: '#/components/schemas/LifecycleMcpOauthClient' },
+              },
+              required: ['data'],
+            },
+          ],
+        },
+
         EnvironmentTrigger: {
           type: 'string',
           enum: ['api', 'github_pr'],

@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-import Ajv2020, { type ErrorObject, type ValidateFunction } from 'ajv/dist/2020';
+import Ajv, { type ErrorObject, type ValidateFunction } from 'ajv';
+import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
 import type { McpJsonObject, McpObjectSchema, McpToolDefinition } from './contracts';
 
@@ -44,18 +45,31 @@ export function successObjectSchema(
   return closedObjectSchema({ ...properties, requestId: MCP_REQUEST_ID_SCHEMA }, [...required, 'requestId']);
 }
 
-const ajv = new Ajv2020({
+const validatorOptions = {
   allErrors: true,
   allowUnionTypes: true,
   coerceTypes: false,
   removeAdditional: false,
   strict: true,
   validateFormats: true,
-});
-addFormats(ajv);
+} as const;
+
+const ajv2020 = new Ajv2020(validatorOptions);
+const mcpSdkDialectAjv = new Ajv(validatorOptions);
+addFormats(ajv2020);
+addFormats(mcpSdkDialectAjv);
 
 export function compileMcpJsonValidator<T = unknown>(schema: Record<string, unknown>): ValidateFunction<T> {
-  return ajv.compile<T>(schema);
+  return ajv2020.compile<T>(schema);
+}
+
+function assertMcpSdkDialectCompatible(schema: Record<string, unknown>, label: string): void {
+  try {
+    mcpSdkDialectAjv.compile(schema);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} is incompatible with the MCP SDK JSON Schema validator: ${message}`);
+  }
 }
 
 export interface CompiledMcpToolDefinition {
@@ -91,6 +105,8 @@ export function compileMcpToolDefinition(definition: McpToolDefinition): Compile
   assertCanonicalObjectSchema(definition.inputSchema, `${definition.name}.inputSchema`);
   assertCanonicalObjectSchema(definition.outputSchema, `${definition.name}.outputSchema`);
   assertSuccessRequestId(definition.outputSchema, definition.name);
+  assertMcpSdkDialectCompatible(definition.inputSchema, `${definition.name}.inputSchema`);
+  assertMcpSdkDialectCompatible(definition.outputSchema, `${definition.name}.outputSchema`);
 
   return {
     definition,

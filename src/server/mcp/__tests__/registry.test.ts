@@ -209,6 +209,24 @@ it('rejects duplicate registered names without a fixed production count', () => 
   ).toThrow('Duplicate MCP tool definition');
 });
 
+it('rejects schemas that the MCP SDK JSON Schema dialect cannot interpret', () => {
+  const tool = definition('incompatible_output', 'understand-environments', 'read');
+  tool.outputSchema = successObjectSchema(
+    {
+      values: {
+        type: 'array',
+        prefixItems: [{ type: 'string' }],
+        items: false,
+      },
+    },
+    ['values']
+  );
+
+  expect(() => new McpToolRegistry([tool])).toThrow(
+    'incompatible_output.outputSchema is incompatible with the MCP SDK JSON Schema validator'
+  );
+});
+
 it('rejects input and output schemas that exceed their byte budgets', () => {
   const oversizedInput = definition('oversized_input', 'understand-environments', 'read');
   oversizedInput.inputSchema = {
