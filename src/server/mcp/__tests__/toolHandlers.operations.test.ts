@@ -15,6 +15,7 @@
  */
 
 import type { Transaction } from 'objection';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import { AppError } from 'server/lib/appError';
 import type Build from 'server/models/Build';
 import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
@@ -539,7 +540,7 @@ describe('destroy_environment', () => {
   }
 
   it('previews with a confirmation token sealed to the environment and user', async () => {
-    const { call } = harness({
+    const { call, registry } = harness({
       service: operationService({}),
       loadNamedEnvironment: async () => loadedEnvironment(environmentBuild()),
       lockDestroyPreview: async () => snapshot(),
@@ -567,6 +568,10 @@ describe('destroy_environment', () => {
       expiresInSeconds: 300,
     });
     expect(result.confirmToken).toMatch(/^lfcmcp_destroy_v1\./);
+    const outputSchema = registry.definitions().find(({ name }) => name === 'destroy_environment')!.outputSchema;
+    expect(new AjvJsonSchemaValidator().getValidator(outputSchema)(output)).toEqual(
+      expect.objectContaining({ valid: true })
+    );
     const claims = verifyDestroyConfirmation(
       result.confirmToken as string,
       { environmentId: ENVIRONMENT_ID, userId: 'user-1' },

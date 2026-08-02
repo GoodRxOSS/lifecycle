@@ -300,17 +300,7 @@ const destroyPreviewResultSchema = closedObjectSchema(
       type: 'array',
       minItems: 3,
       maxItems: 3,
-      prefixItems: [
-        { type: 'string', const: DESTROY_CONSEQUENCES_PREFIX },
-        {
-          type: 'string',
-          minLength: 1,
-          maxLength: 200,
-          pattern: '^The name .+ becomes available for reuse\\.$',
-        },
-        { type: 'string', const: DESTROY_IRREVERSIBLE_CONSEQUENCE },
-      ],
-      items: false,
+      items: { type: 'string', minLength: 1, maxLength: 200 },
     },
     confirmToken: {
       type: 'string',
