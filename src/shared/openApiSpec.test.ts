@@ -234,6 +234,10 @@ describe('OpenAPI Lifecycle MCP admin contract', () => {
     'LifecycleMcpCapability',
     'LifecycleMcpSettings',
     'LifecycleMcpSettingsSuccessResponse',
+    'CreateLifecycleMcpOauthClient',
+    'LifecycleMcpOauthClient',
+    'ListLifecycleMcpOauthClientsSuccessResponse',
+    'LifecycleMcpOauthClientSuccessResponse',
   ];
 
   it('defines the small, strict MCP settings and status family', () => {
@@ -271,6 +275,31 @@ describe('OpenAPI Lifecycle MCP admin contract', () => {
     }
     expect(getOperation('/api/v2/config/mcp', 'put').responses).toEqual(
       expect.objectContaining({ '400': expect.anything(), '409': expect.anything(), '503': expect.anything() })
+    );
+  });
+
+  it('defines bounded admin-only OAuth client management', () => {
+    expect(schemas.CreateLifecycleMcpOauthClient).toEqual(
+      expect.objectContaining({
+        required: ['name', 'redirectUris'],
+        additionalProperties: false,
+      })
+    );
+    expect(schemas.CreateLifecycleMcpOauthClient.properties.redirectUris).toEqual(
+      expect.objectContaining({ minItems: 1, maxItems: 10, uniqueItems: true })
+    );
+    expect(
+      getOperation('/api/v2/config/mcp/oauth-clients', 'get').responses['200'].content['application/json'].schema
+    ).toEqual({
+      $ref: '#/components/schemas/ListLifecycleMcpOauthClientsSuccessResponse',
+    });
+    expect(
+      getOperation('/api/v2/config/mcp/oauth-clients', 'post').responses['201'].content['application/json'].schema
+    ).toEqual({
+      $ref: '#/components/schemas/LifecycleMcpOauthClientSuccessResponse',
+    });
+    expect(getOperation('/api/v2/config/mcp/oauth-clients/{clientId}', 'delete').responses['204']).toEqual(
+      expect.objectContaining({ description: expect.any(String) })
     );
   });
 });
