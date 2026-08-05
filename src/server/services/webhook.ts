@@ -69,8 +69,7 @@ export default class WebhookService extends BaseService {
     }
 
     if (sourceRepository != null && sourceBranchName != null) {
-      const sourceConfigRef =
-        build.triggerType === 'api' ? sourceRef ?? build.configSha ?? sourceBranchName : sourceBranchName;
+      const sourceConfigRef = sourceRef ?? (build.triggerType === 'api' ? build.configSha : null) ?? sourceBranchName;
       const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
         sourceRepository,
         sourceConfigRef

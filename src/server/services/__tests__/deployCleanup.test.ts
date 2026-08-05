@@ -124,28 +124,33 @@ describe('DeployCleanupService', () => {
     const joinedCommands = commands.join('\n');
 
     expect(commands).toContain(
-      "kubectl delete deployment 'old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete deployment 'old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
     expect(commands).toContain(
-      "kubectl delete service 'old-api-build-1' 'internal-lb-old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete service 'old-api-build-1' 'internal-lb-old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
     expect(commands).toContain(
-      "kubectl delete ingress 'ingress-old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete ingress 'ingress-old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
     expect(commands).toContain(
-      "kubectl delete pvc 'old-api-build-1-data-claim' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete pvc 'old-api-build-1-data-claim' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
-    expect(commands).toContain("helm uninstall 'old-api-build-1' --namespace 'env-build-1'");
+    expect(commands).toContain("helm uninstall 'old-api-build-1' --namespace 'env-build-1' --timeout 5m");
     expect(joinedCommands).toContain('deploy_uuid=old-api-build-1');
     expect(joinedCommands).toContain('deploy-id=77');
     expect(joinedCommands).toContain('deployable-id=9');
     expect(joinedCommands).not.toContain('service=old-api');
     expect(joinedCommands).toContain(
-      "kubectl delete externalsecret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete externalsecret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
     expect(joinedCommands).toContain(
-      "kubectl delete secret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found"
+      "kubectl delete secret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
     );
+
+    for (const [command, options] of mockShellPromise.mock.calls) {
+      if (String(command).startsWith('kubectl ')) expect(options).toEqual({ timeout: 90_000 });
+      if (String(command).startsWith('helm ')) expect(options).toEqual({ timeout: 360_000 });
+    }
 
     expect(joinedCommands).not.toContain('delete namespace');
     expect(joinedCommands).not.toContain('delete all,pvc');
@@ -189,6 +194,38 @@ describe('DeployCleanupService', () => {
     expect(mockDeleteDeploy).not.toHaveBeenCalled();
   });
 
+  test('starts provider cleanup without holding or waiting for the native mutation gate', async () => {
+    const deploy = createDeploy({
+      deployable: { name: 'old-codefresh', type: DeployTypes.CODEFRESH, serviceDisksYaml: null },
+      env: {},
+    });
+    const service = createService();
+    let releaseNative!: () => void;
+    const nativeReleased = new Promise<void>((resolve) => {
+      releaseNative = resolve;
+    });
+    let providerStarted!: () => void;
+    const providerStart = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    mockCodefreshDestroy.mockImplementation(async () => providerStarted());
+    const nativeMutationGate = jest.fn(async (action: () => Promise<unknown>) => {
+      await nativeReleased;
+      return action();
+    });
+
+    const cleanup = service.cleanupDeploy(deploy, { mode: 'service', nativeMutationGate });
+    await providerStart;
+
+    expect(mockCodefreshDestroy).toHaveBeenCalledWith(deploy);
+    expect(mockShellPromise).not.toHaveBeenCalled();
+
+    releaseNative();
+    await expect(cleanup).resolves.toBe(true);
+    expect(nativeMutationGate).toHaveBeenCalledTimes(1);
+    expect(mockShellPromise).toHaveBeenCalled();
+  });
+
   test('service mode continues after a targeted teardown failure', async () => {
     mockShellPromise.mockImplementation((command: string) => {
       if (command.includes('kubectl delete deployment')) {
@@ -202,7 +239,7 @@ describe('DeployCleanupService', () => {
     await expect(service.cleanupDeploy(deploy, { mode: 'service' })).resolves.toBe(false);
 
     const commands = mockShellPromise.mock.calls.map(([command]) => command as string);
-    expect(commands).toContain("helm uninstall 'old-api-build-1' --namespace 'env-build-1'");
+    expect(commands).toContain("helm uninstall 'old-api-build-1' --namespace 'env-build-1' --timeout 5m");
     expect(mockMetricsIncrement).toHaveBeenCalledWith(
       'task',
       expect.objectContaining({ result: 'error', resourceType: 'deployment' })

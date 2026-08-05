@@ -132,4 +132,29 @@ describe('webhook yaml source resolution for PR-less builds', () => {
 
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'push-sha');
   });
+
+  it('imports PR webhook configuration from the immutable delivered source ref', async () => {
+    const repository = { fullName: 'org/repo' };
+    mockFetchLifecycleConfigByRepository.mockResolvedValue({ environment: { webhooks: [] } });
+    const service = new WebhookService(
+      {} as any,
+      {} as any,
+      {} as any,
+      { registerQueue: jest.fn(() => ({ add: jest.fn() })) } as any
+    );
+    const build: any = {
+      uuid: 'pr-env-222222',
+      triggerType: 'github_pr',
+      $query: jest.fn(() => ({ patch: jest.fn() })),
+    };
+    const pullRequest: any = {
+      branchName: 'feature',
+      repository,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await service.upsertWebhooksWithYaml(build, pullRequest, 'push-sha');
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'push-sha');
+  });
 });

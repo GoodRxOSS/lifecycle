@@ -15,6 +15,7 @@
  */
 
 import { BuildKind, DeployStatus } from 'shared/constants';
+import type { AcceptedDeploymentRefs } from 'server/lib/deploymentReconciliation/mailbox';
 import { Deploy, Deployable, Environment, PullRequest, Service } from '.';
 import Model from './_Model';
 
@@ -81,6 +82,10 @@ export default class Build extends Model {
   githubDeployments: boolean;
   dependencyGraph: Record<string, any>;
   namespace: string;
+
+  desiredGeneration!: number;
+  observedGeneration!: number;
+  acceptedRefs!: AcceptedDeploymentRefs;
 
   static tableName = 'builds';
   static timestamps = true;
@@ -159,6 +164,6 @@ export default class Build extends Model {
   };
 
   static get jsonAttributes() {
-    return ['commentInitEnv', 'commentRuntimeEnv'];
+    return ['commentInitEnv', 'commentRuntimeEnv', 'acceptedRefs'];
   }
 }

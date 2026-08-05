@@ -168,14 +168,19 @@ export async function applyExternalSecret(manifest: ExternalSecretManifest, name
 
   getLogger().info(`ExternalSecret: applying name=${manifest.metadata.name} namespace=${namespace}`);
 
-  await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
+  await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace} --request-timeout=60s`, {
+    timeout: 90_000,
+  });
 }
 
 export async function deleteExternalSecret(name: string, namespace: string): Promise<void> {
   getLogger().info(`ExternalSecret: deleting name=${name} namespace=${namespace}`);
 
   try {
-    await shellPromise(`kubectl delete externalsecret ${name} --namespace ${namespace} --ignore-not-found`);
+    await shellPromise(
+      `kubectl delete externalsecret ${name} --namespace ${namespace} --ignore-not-found --request-timeout=60s`,
+      { timeout: 90_000 }
+    );
   } catch (error) {
     getLogger().warn({ error }, `ExternalSecret: delete failed name=${name}`);
   }

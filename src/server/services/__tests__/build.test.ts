@@ -24,6 +24,12 @@ const mockQueueAdd = jest.fn();
 const mockCleanupDeploy = jest.fn();
 const mockDeleteServiceRows = jest.fn();
 const mockGetServiceOverrideStates = jest.fn();
+const mockGenerateGraph = jest.fn().mockResolvedValue({});
+const mockAcceptDeploymentIntent = jest.fn().mockResolvedValue({
+  accepted: true,
+  generation: 1,
+  scopeKey: 'all',
+});
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -43,6 +49,14 @@ jest.mock('server/lib/tracer', () => ({
   },
 }));
 
+jest.mock('server/lib/deploymentReconciliation/mailbox', () => {
+  const actual = jest.requireActual('server/lib/deploymentReconciliation/mailbox');
+  return {
+    ...actual,
+    acceptDeploymentIntent: (...args: any[]) => mockAcceptDeploymentIntent(...args),
+  };
+});
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
     error: jest.fn(),
@@ -61,6 +75,7 @@ jest.mock('shared/config', () => ({
   QUEUE_NAMES: {
     DELETE_QUEUE: 'delete_queue_test',
     BUILD_QUEUE: 'build_queue_test',
+    DEPLOYMENT_RECONCILIATION: 'deployment_reconciliation_test',
     RESOLVE_AND_DEPLOY: 'resolve_and_deploy_test',
     BUILD_CLEANUP_QUEUE: 'build_cleanup_test',
     BUILD_REQUEST_QUEUE: 'build_request_test',
@@ -96,6 +111,7 @@ jest.mock('server/lib/github', () => ({
   updateGitDeploymentStatus: jest.fn(),
   getPullRequest: jest.fn(),
   getSHAForBranch: jest.fn(),
+  compareCommits: jest.fn(),
   getYamlFileContentFromBranch: jest.fn(),
 }));
 
@@ -111,6 +127,10 @@ jest.mock('server/lib/buildEnvVariables', () => ({
   BuildEnvironmentVariables: jest.fn().mockImplementation(() => ({
     resolve: jest.fn().mockResolvedValue({}),
   })),
+}));
+
+jest.mock('server/lib/dependencyGraph', () => ({
+  generateGraph: (...args: any[]) => mockGenerateGraph(...args),
 }));
 
 jest.mock('server/services/globalConfig', () => ({
@@ -440,10 +460,22 @@ describe('BuildService build response queries', () => {
 });
 
 describe('BuildService status updates', () => {
+  const statusQuery = (affectedRows = 1) => {
+    const query: any = {
+      patch: jest.fn(() => query),
+      where: jest.fn(() => query),
+      whereNull: jest.fn(() => query),
+      then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(affectedRows).then(resolve, reject),
+    };
+    return query;
+  };
+
   test('updates only build status fields', async () => {
-    const patch = jest.fn().mockResolvedValue(undefined);
+    const query = statusQuery();
     const buildService = new BuildService(
       {
+        models: { Build: { query: jest.fn(() => query) } },
         services: {
           Webhook: {
             webhookQueue: {
@@ -470,23 +502,24 @@ describe('BuildService status updates', () => {
       deploys: undefined,
       reload: jest.fn().mockResolvedValue(undefined),
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
-      $query: jest.fn(() => ({ patch })),
     };
 
     await buildService.updateStatusAndComment(build as any, BuildStatus.DEPLOYED, 'run-1', true, true);
 
-    expect(patch).toHaveBeenCalledTimes(1);
-    expect(patch).toHaveBeenCalledWith({
+    expect(query.patch).toHaveBeenCalledTimes(1);
+    expect(query.patch).toHaveBeenCalledWith({
       status: BuildStatus.DEPLOYED,
       statusMessage: '',
     });
+    expect(query.where).toHaveBeenCalledWith({ id: 1, runUUID: 'run-1' });
   });
 
   test('does not abort teardown status progress when webhook notification enqueue fails', async () => {
-    const patch = jest.fn().mockResolvedValue(undefined);
+    const query = statusQuery();
     const webhookAdd = jest.fn().mockRejectedValue(new Error('redis unavailable'));
     const buildService = new BuildService(
       {
+        models: { Build: { query: jest.fn(() => query) } },
         services: {
           Webhook: { webhookQueue: { add: webhookAdd } },
         },
@@ -510,18 +543,55 @@ describe('BuildService status updates', () => {
       pullRequest: null,
       reload: jest.fn().mockResolvedValue(undefined),
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
-      $query: jest.fn(() => ({ patch })),
     };
 
     await expect(
       buildService.updateStatusAndComment(build as any, BuildStatus.TEARING_DOWN, 'run-1', true, true)
     ).resolves.toBeUndefined();
 
-    expect(patch).toHaveBeenCalledWith({
+    expect(query.patch).toHaveBeenCalledWith({
       status: BuildStatus.TEARING_DOWN,
       statusMessage: '',
     });
     expect(webhookAdd).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not publish after a newer desired generation takes ownership', async () => {
+    const query = statusQuery(0);
+    const webhookAdd = jest.fn();
+    const activityUpdate = jest.fn();
+    const buildService = new BuildService(
+      {
+        models: { Build: { query: jest.fn(() => query) } },
+        services: {
+          ActivityStream: { updatePullRequestActivityStream: activityUpdate },
+          Webhook: { webhookQueue: { add: webhookAdd } },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({ add: mockQueueAdd, process: jest.fn(), on: jest.fn() })),
+      } as any
+    );
+    const build = {
+      id: 1,
+      uuid: 'sample-build',
+      runUUID: 'run-a',
+      status: BuildStatus.DEPLOYING,
+      kind: BuildKind.ENVIRONMENT,
+      deploys: [],
+      pullRequest: { repository: {} },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await buildService.updateStatusAndComment(build as any, BuildStatus.DEPLOYED, 'run-a', true, true, null, 2);
+
+    expect(query.where).toHaveBeenCalledWith('desiredGeneration', 2);
+    expect(build.status).toBe(BuildStatus.DEPLOYING);
+    expect(activityUpdate).not.toHaveBeenCalled();
+    expect(webhookAdd).not.toHaveBeenCalled();
   });
 });
 
@@ -942,6 +1012,66 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
   });
 
+  test('a false cleanup result retains database rows for a retry', async () => {
+    createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
+    mockCleanupDeploy.mockResolvedValue(false);
+
+    await (buildService as any).reconcileDeletedDeployables(createBuild(), {
+      canReconcile: true,
+      deployables: [],
+      reconcileEligibleDeployables: [],
+    });
+
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+  });
+
+  test('runs only stale native teardown through the current generation promotion gate', async () => {
+    const staleDeploy = { id: 77, uuid: 'old-api-build-1', deployableId: 1 };
+    createService([{ id: 1, name: 'old-api' }], [staleDeploy]);
+    const nativeAction = jest.fn().mockResolvedValue(['native-clean']);
+    mockCleanupDeploy.mockImplementation(async (_deploy: any, options: any) => {
+      await options.nativeMutationGate(nativeAction);
+      return true;
+    });
+    const promotion = jest
+      .spyOn(buildService, 'withCurrentBuildPromotionLock')
+      .mockImplementation(async (_buildId, _isCurrent, action) => ({ admitted: true, value: await action() }));
+    jest.spyOn(buildService as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+
+    await (buildService as any).reconcileDeletedDeployables(
+      createBuild(),
+      { canReconcile: true, deployables: [], reconcileEligibleDeployables: [] },
+      undefined,
+      undefined,
+      'run-c',
+      3
+    );
+
+    expect(promotion).toHaveBeenCalledWith(10, expect.any(Function), nativeAction);
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [1] });
+  });
+
+  test('does not delete stale rows when native teardown loses generation authority', async () => {
+    createService([{ id: 1, name: 'old-api' }], [{ id: 77, uuid: 'old-api-build-1', deployableId: 1 }]);
+    mockCleanupDeploy.mockImplementation(async (_deploy: any, options: any) => {
+      await options.nativeMutationGate(async () => true);
+      return true;
+    });
+    jest.spyOn(buildService, 'withCurrentBuildPromotionLock').mockResolvedValue({ admitted: false });
+
+    await expect(
+      (buildService as any).reconcileDeletedDeployables(
+        createBuild(),
+        { canReconcile: true, deployables: [], reconcileEligibleDeployables: [] },
+        undefined,
+        undefined,
+        'run-c',
+        3
+      )
+    ).rejects.toThrow('Deployment generation was superseded');
+    expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+  });
+
   test('a partial cleanup failure deletes only the successfully cleaned rows', async () => {
     createService(
       [
@@ -1012,462 +1142,642 @@ describe('BuildService stale deploy reconciliation', () => {
       build,
       targetRepoId,
       undefined,
-      undefined
+      undefined,
+      targetRepoId
     );
     expect(reconcileDeletedDeployables).not.toHaveBeenCalled();
     expect(upsertWebhooksWithYaml).toHaveBeenCalledWith(build, build.pullRequest, null);
   });
 });
+describe('BuildService deployment reconciliation', () => {
+  const queueManager = () => ({
+    registerQueue: jest.fn(() => ({ add: jest.fn(), process: jest.fn(), on: jest.fn() })),
+  });
 
-describe('BuildService queue fingerprinting', () => {
-  let buildService: BuildService;
-  let mockBuildQuery: any;
-  let mockBuildQueueAdd: jest.Mock;
-  let mockResolveQueueAdd: jest.Mock;
-  let mockBuildQueueGetJob: jest.Mock;
+  const createBuild = (overrides: Record<string, unknown> = {}) => ({
+    id: 1,
+    uuid: 'sample-build',
+    status: BuildStatus.DEPLOYED,
+    deployEnabled: true,
+    pullRequest: { latestCommit: 'abcdef123456', status: 'open', deployOnUpdate: true },
+    deploys: [],
+    ...overrides,
+  });
 
-  const createMockBuild = (overrides: any = {}) =>
-    ({
-      id: 1,
-      commentRuntimeEnv: { FEATURE_FLAG: 'on' },
-      commentInitEnv: {},
-      pullRequest: { latestCommit: 'abcdef123456', status: 'open', deployOnUpdate: true },
-      deploys: [
-        {
-          id: 11,
-          uuid: 'api-deploy',
-          githubRepositoryId: 100,
-          branchName: 'feature-branch',
-          active: true,
-          publicUrl: 'https://example.test/api',
-          env: { API_URL: 'https://api.test' },
-          initEnv: { INIT_MODE: 'warm' },
-          deployable: { name: 'api', commentBranchName: null },
-        },
-        {
-          id: 22,
-          uuid: 'worker-deploy',
-          githubRepositoryId: 200,
-          branchName: 'feature-branch',
-          active: true,
-          publicUrl: 'https://example.test/worker',
-          env: { QUEUE: 'jobs' },
-          initEnv: {},
-          deployable: { name: 'worker', commentBranchName: 'worker-override' },
-        },
-      ],
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-      ...overrides,
-    } as any);
+  const serviceHarness = () => {
+    const buildQuery: any = {
+      findOne: jest.fn(() => buildQuery),
+      findById: jest.fn(() => buildQuery),
+      select: jest.fn(() => buildQuery),
+      whereRaw: jest.fn(() => buildQuery),
+      where: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
+      orderBy: jest.fn(() => buildQuery),
+      limit: jest.fn().mockResolvedValue([]),
+      withGraphFetched: jest.fn(),
+    };
+    const service = new BuildService(
+      { models: { Build: { query: jest.fn(() => buildQuery) } }, services: {} } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
+    );
+    const add = jest.fn().mockResolvedValue(undefined);
+    (service as any).deploymentReconciliationQueue = { add };
+    return { service, buildQuery, add };
+  };
+
+  const reconciliationWorkerHarness = () => {
+    const { service } = serviceHarness();
+    const failure = new Error('reconciliation infrastructure failed');
+    const claim = {
+      generation: 7,
+      token: 'run-current',
+      dirty: [{ scopeKey: 'all', intent: { type: 'all', requestId: 'run-current', gen: 7 } }],
+    };
+    const build = createBuild({ id: 1, runUUID: claim.token });
+
+    jest
+      .spyOn(service as any, 'tryWithDeploymentGenerationLock')
+      .mockImplementation(async (_buildId, _generation, action) => action());
+    const claimReconciliation = jest.spyOn(service as any, 'claimDeploymentReconciliation').mockResolvedValue(claim);
+    const withDeploymentLock = jest
+      .spyOn(service as any, 'withCurrentBuildDeploymentLock')
+      .mockImplementation(async (_buildId, _isCurrent, action) => ({ admitted: true, value: await action() }));
+    const loadBuild = jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
+    jest.spyOn(service as any, 'claimDeploymentRun').mockResolvedValue(claim.token);
+    jest.spyOn(service as any, 'deploymentReconciliationScopes').mockImplementation(() => {
+      throw failure;
+    });
+    const isCurrent = jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    const recordFailure = jest.spyOn(service as any, 'recordBuildFailure').mockResolvedValue(undefined);
+    const markObserved = jest.spyOn(service as any, 'markDeploymentReconciliationObserved').mockResolvedValue(true);
+
+    const job = (attemptsMade: number) => ({
+      data: { buildId: 1, generation: claim.generation },
+      attemptsMade,
+      opts: { attempts: 10 },
+    });
+
+    return {
+      service,
+      failure,
+      claim,
+      build,
+      claimReconciliation,
+      withDeploymentLock,
+      loadBuild,
+      isCurrent,
+      recordFailure,
+      markObserved,
+      job,
+    };
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
-
-    mockBuildQueueAdd = jest.fn().mockResolvedValue(undefined);
-    mockResolveQueueAdd = jest.fn().mockResolvedValue(undefined);
-    mockBuildQueueGetJob = jest.fn().mockResolvedValue(undefined);
-
-    mockBuildQuery = {
-      findOne: jest.fn().mockReturnThis(),
-      whereNull: jest.fn().mockReturnThis(),
-      withGraphFetched: jest.fn(),
-    };
-
-    const queueManager = {
-      registerQueue: jest.fn(() => ({
-        add: jest.fn(),
-        process: jest.fn(),
-        on: jest.fn(),
-      })),
-    };
-
-    buildService = new BuildService(
-      {
-        models: {
-          Build: {
-            query: jest.fn(() => mockBuildQuery),
-          },
-        },
-        services: {},
-      } as any,
-      {} as any,
-      {} as any,
-      queueManager as any
-    );
-    (buildService as any).buildQueue = { add: mockBuildQueueAdd, getJob: mockBuildQueueGetJob };
-    (buildService as any).resolveAndDeployBuildQueue = { add: mockResolveQueueAdd };
+    mockAcceptDeploymentIntent.mockResolvedValue({ accepted: true, generation: 1, scopeKey: 'all' });
   });
 
-  test('changes fingerprint when comment runtime env changes', async () => {
-    const baseBuild = createMockBuild();
-    const changedBuild = createMockBuild({
-      commentRuntimeEnv: { FEATURE_FLAG: 'off' },
-    });
+  test('signals only the exact durable generation accepted by the mailbox', async () => {
+    const { service, add } = serviceHarness();
 
-    const baseFingerprint = await buildService.computeBuildRequestFingerprint(baseBuild);
-    const changedFingerprint = await buildService.computeBuildRequestFingerprint(changedBuild);
+    await service.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
 
-    expect(baseFingerprint).not.toEqual(changedFingerprint);
+    expect(add).toHaveBeenCalledWith('reconcile', { buildId: 1, generation: 1 }, { jobId: 'reconcile-1-1' });
   });
 
-  test('changes fingerprint when static mode changes', async () => {
-    const previewBuild = createMockBuild({
-      isStatic: false,
-    });
-    const staticBuild = createMockBuild({
-      isStatic: true,
-    });
+  test('uses different queue identities for successive desired generations', async () => {
+    const { service, add } = serviceHarness();
+    mockAcceptDeploymentIntent
+      .mockResolvedValueOnce({ accepted: true, generation: 8, scopeKey: 'repository:100' })
+      .mockResolvedValueOnce({ accepted: true, generation: 9, scopeKey: 'repository:100' });
 
-    const previewFingerprint = await buildService.computeBuildRequestFingerprint(previewBuild);
-    const staticFingerprint = await buildService.computeBuildRequestFingerprint(staticBuild);
+    await service.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
+    await service.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
 
-    expect(previewFingerprint).not.toEqual(staticFingerprint);
+    expect(add.mock.calls[0][2]).toEqual({ jobId: 'reconcile-1-8' });
+    expect(add.mock.calls[1][2]).toEqual({ jobId: 'reconcile-1-9' });
   });
 
-  test('changes fingerprint when repository filter changes', async () => {
-    const build = createMockBuild();
+  test('accepts a tracked push as repository-selective work with its delivered SHA floor', async () => {
+    const { service } = serviceHarness();
 
-    const apiFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
-    const workerFingerprint = await buildService.computeBuildRequestFingerprint(build, 200);
-
-    expect(apiFingerprint).not.toEqual(workerFingerprint);
-  });
-
-  test('enqueues resolve queue with deduplication derived from the current build fingerprint', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
-
-    await buildService.enqueueResolveAndDeployBuild({
-      buildId: 1,
-      githubRepositoryId: 100,
-      correlationId: 'corr-1',
-    });
-
-    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
-      'resolve-deploy',
-      expect.objectContaining({
-        buildId: 1,
-        githubRepositoryId: 100,
-        correlationId: 'corr-1',
-      }),
-      expect.objectContaining({
-        deduplication: {
-          id: `resolve:1:${expectedFingerprint}`,
-          ttl: 30000,
-        },
-      })
-    );
-  });
-
-  test('enqueues build queue with a deterministic job id derived from the current build fingerprint', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
-
-    await buildService.enqueueBuildJob({
-      buildId: 1,
-      githubRepositoryId: 100,
-      correlationId: 'corr-2',
-    });
-
-    expect(mockBuildQueueAdd).toHaveBeenCalledWith(
-      'build',
-      expect.objectContaining({
-        buildId: 1,
-        githubRepositoryId: 100,
-        correlationId: 'corr-2',
-      }),
-      expect.objectContaining({
-        jobId: `build:1:${expectedFingerprint}`,
-      })
-    );
-  });
-
-  test('appends triggerRef to the resolve dedupe key so distinct triggers get distinct keys', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
-
-    await buildService.enqueueResolveAndDeployBuild({
-      buildId: 1,
-      githubRepositoryId: 100,
-      triggerRef: 'commit-a',
-    });
-    await buildService.enqueueResolveAndDeployBuild({
-      buildId: 1,
-      githubRepositoryId: 100,
-      triggerRef: 'commit-b',
-    });
-
-    const firstKey = mockResolveQueueAdd.mock.calls[0][2].deduplication.id;
-    const secondKey = mockResolveQueueAdd.mock.calls[1][2].deduplication.id;
-
-    expect(firstKey).toBe(`resolve:1:${expectedFingerprint}:commit-a`);
-    expect(secondKey).toBe(`resolve:1:${expectedFingerprint}:commit-b`);
-    expect(firstKey).not.toBe(secondKey);
-    // The trigger is forwarded into the job payload so the resolve step can hand it to the build step.
-    expect(mockResolveQueueAdd.mock.calls[0][1]).toEqual(expect.objectContaining({ triggerRef: 'commit-a' }));
-  });
-
-  test('keeps the exact source repository, branch, and ref in the resolve queue payload', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-
-    await buildService.enqueueResolveAndDeployBuild({
+    await service.enqueueResolveAndDeployBuild({
       buildId: 1,
       githubRepositoryId: 100,
       sourceGithubRepositoryId: 100,
-      sourceBranch: 'Feature/X',
-      sourceRef: 'commit-a',
-      triggerRef: 'commit-a',
+      sourceBranch: 'main',
+      sourceRef: 'commit-c',
+      sourceBeforeRef: 'commit-b',
+      runUUID: 'request-c',
     });
 
-    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
-      'resolve-deploy',
+    expect(mockAcceptDeploymentIntent).toHaveBeenCalledWith(1, {
+      type: 'source',
+      requestId: 'request-c',
+      target: 'repository',
+      githubRepositoryId: 100,
+      branch: 'main',
+      sha: 'commit-c',
+      beforeSha: 'commit-b',
+    });
+  });
+
+  test('uses distinct execution tokens when two source scopes reference the same SHA', async () => {
+    const { service } = serviceHarness();
+    mockAcceptDeploymentIntent
+      .mockResolvedValueOnce({ accepted: true, generation: 1, scopeKey: 'source:100:main' })
+      .mockResolvedValueOnce({ accepted: true, generation: 2, scopeKey: 'source:100:release' });
+
+    await service.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'main',
+      sourceRef: 'shared-sha',
+    });
+    await service.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'release',
+      sourceRef: 'shared-sha',
+    });
+
+    const first = mockAcceptDeploymentIntent.mock.calls[0][1];
+    const second = mockAcceptDeploymentIntent.mock.calls[1][1];
+    expect(first.sha).toBe('shared-sha');
+    expect(second.sha).toBe('shared-sha');
+    expect(first.requestId).not.toBe(second.requestId);
+  });
+
+  test('keeps root-source provenance while requesting a full-scope pass', async () => {
+    const { service } = serviceHarness();
+
+    await service.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'main',
+      sourceRef: 'commit-c',
+      runUUID: 'request-c',
+    });
+
+    expect(mockAcceptDeploymentIntent).toHaveBeenCalledWith(
+      1,
       expect.objectContaining({
+        type: 'source',
+        requestId: 'request-c',
+        target: 'all',
         githubRepositoryId: 100,
-        sourceGithubRepositoryId: 100,
-        sourceBranch: 'Feature/X',
-        sourceRef: 'commit-a',
-      }),
-      expect.any(Object)
+        sha: 'commit-c',
+      })
     );
   });
 
-  test('keeps the dedupe key commit-agnostic when no triggerRef is provided', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+  test('does not signal a source SHA already present in the mailbox', async () => {
+    const { service, add } = serviceHarness();
+    mockAcceptDeploymentIntent.mockResolvedValueOnce({
+      accepted: false,
+      generation: 7,
+      scopeKey: 'source:100:main',
+    });
 
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+    await service.enqueueResolveAndDeployBuild({
+      buildId: 1,
+      githubRepositoryId: 100,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'main',
+      sourceRef: 'commit-c',
+    });
 
-    await buildService.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
-
-    expect(mockResolveQueueAdd.mock.calls[0][2].deduplication.id).toBe(`resolve:1:${expectedFingerprint}`);
-    expect(mockResolveQueueAdd.mock.calls[0][1]).not.toHaveProperty('triggerRef');
+    expect(add).not.toHaveBeenCalled();
   });
 
-  test('the same triggerRef yields the same build job id so genuine duplicates still coalesce', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
+  test('the recovery sweep re-signals durable pending work', async () => {
+    const { service, buildQuery, add } = serviceHarness();
+    buildQuery.limit.mockResolvedValueOnce([{ id: 7, desiredGeneration: '3' }]);
 
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
+    await service.enqueuePendingDeploymentReconciliations();
 
-    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
-    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
-
-    expect(mockBuildQueueAdd.mock.calls[0][2].jobId).toBe(`build:1:${expectedFingerprint}:commit-a`);
-    expect(mockBuildQueueAdd.mock.calls[1][2].jobId).toBe(mockBuildQueueAdd.mock.calls[0][2].jobId);
+    expect(add).toHaveBeenCalledWith('reconcile', { buildId: 7, generation: 3 }, { jobId: 'reconcile-7-3' });
   });
 
-  test('logs a dedupe skip when a matching build job already exists', async () => {
-    const build = createMockBuild();
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-    mockBuildQueueGetJob.mockResolvedValue({ id: 'existing' });
-
-    const expectedFingerprint = await buildService.computeBuildRequestFingerprint(build, 100);
-
-    await buildService.enqueueBuildJob({ buildId: 1, githubRepositoryId: 100, triggerRef: 'commit-a' });
-
-    expect(mockBuildQueueGetJob).toHaveBeenCalledWith(`build:1:${expectedFingerprint}:commit-a`);
-    // add() is still invoked; it is a no-op when the job already exists.
-    expect(mockBuildQueueAdd).toHaveBeenCalled();
-  });
-
-  test('service redeploy queues scoped build without deleted-service reconciliation', async () => {
-    const patchAndFetch = jest.fn().mockResolvedValue(undefined);
-    const deploy = {
+  test('service redeploy uses the effective source repository and leaves row ownership to the worker', async () => {
+    const { service, buildQuery, add } = serviceHarness();
+    const directPatch = jest.fn();
+    const clicked = {
       id: 33,
-      uuid: 'pdm-db-good-dev-0',
+      uuid: 'pdm-db-sample-build',
       githubRepositoryId: 425935548,
       deployable: {
         name: 'pdm-db',
-        repositoryId: 425935548,
+        resolvedFromRepositoryId: 425935548,
+        repositoryId: 100,
       },
-      $query: jest.fn(() => ({ patchAndFetch })),
+      $query: directPatch,
     };
-    const build = createMockBuild({
-      id: 1449,
-      uuid: 'good-dev-0',
-      deploys: [deploy],
-    });
-    mockBuildQuery.withGraphFetched.mockResolvedValue(build);
-
-    await buildService.redeployServiceFromBuild('good-dev-0', 'pdm-db');
-
-    expect(mockResolveQueueAdd).toHaveBeenCalledWith(
-      'resolve-deploy',
-      expect.objectContaining({
-        buildId: 1449,
-        githubRepositoryId: 425935548,
-        skipDeletedServiceReconciliation: true,
-      }),
-      expect.any(Object)
+    buildQuery.withGraphFetched.mockResolvedValue(
+      createBuild({
+        id: 1449,
+        uuid: 'good-dev-0',
+        deploys: [
+          clicked,
+          {
+            id: 34,
+            githubRepositoryId: 425935548,
+            deployable: { name: 'pdm-api', resolvedFromRepositoryId: 425935548 },
+          },
+          { id: 35, githubRepositoryId: 999, deployable: { name: 'unrelated', resolvedFromRepositoryId: 999 } },
+        ],
+      })
     );
-    expect(patchAndFetch).toHaveBeenCalledWith({
-      runUUID: expect.any(String),
-    });
+
+    await service.redeployServiceFromBuild('good-dev-0', 'pdm-db');
+
+    expect(mockAcceptDeploymentIntent).toHaveBeenCalledWith(
+      1449,
+      expect.objectContaining({ type: 'repository', githubRepositoryId: 425935548 })
+    );
+    expect(add).toHaveBeenCalledWith('reconcile', { buildId: 1449, generation: 1 }, { jobId: 'reconcile-1449-1' });
+    expect(directPatch).not.toHaveBeenCalled();
   });
 
-  test('resolve queue preserves deleted-service reconciliation skip flag for service redeploys', async () => {
-    const build = createMockBuild({
-      id: 1449,
-      uuid: 'good-dev-0',
+  test('service redeploy rejects a service without a source repository identity', async () => {
+    const { service, buildQuery, add } = serviceHarness();
+    buildQuery.withGraphFetched.mockResolvedValue(
+      createBuild({
+        deploys: [
+          {
+            id: 33,
+            githubRepositoryId: null,
+            deployable: { name: 'pdm-db', resolvedFromRepositoryId: null, repositoryId: null },
+          },
+        ],
+      })
+    );
+
+    await expect(service.redeployServiceFromBuild('sample-build', 'pdm-db')).rejects.toThrow(
+      'Cannot redeploy pdm-db: source repository is unknown.'
+    );
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  test('repository redeploy bulk-claims every Deploy from that repository without a service-id predicate', async () => {
+    const deployClaim: any = {
+      patch: jest.fn(() => deployClaim),
+      where: jest.fn(() => deployClaim),
+      then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(2).then(resolve, reject),
+    };
+    const deploys = [
+      { id: 11, githubRepositoryId: 42, branchName: 'main' },
+      { id: 12, githubRepositoryId: 42, branchName: 'release' },
+      { id: 13, githubRepositoryId: 99, branchName: 'main' },
+    ];
+    const findOrCreateDeploys = jest.fn().mockResolvedValue(deploys);
+    const service = new BuildService(
+      {
+        models: { Deploy: { query: jest.fn(() => deployClaim) } },
+        services: { Deploy: { findOrCreateDeploys } },
+      } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
+    );
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    jest.spyOn(service, 'markConfigurationsAsBuilt').mockResolvedValue(undefined);
+    jest.spyOn(service, 'updateStatusAndComment').mockResolvedValue(undefined);
+    mockGenerateGraph.mockRejectedValueOnce(new Error('graph omitted from scope assertion'));
+    const build: any = {
+      id: 4,
+      uuid: 'large-static',
+      runUUID: 'run-c',
+      environment: { id: 7 },
       pullRequest: {
-        latestCommit: 'abcdef123456',
-        status: 'open',
-        deployOnUpdate: true,
+        fullName: 'org/root',
+        branchName: 'main',
+        latestCommit: 'root-sha',
+        repository: { githubRepositoryId: 1 },
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
       },
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    });
-    mockBuildQuery.findOne.mockResolvedValue(build);
-    const enqueueBuildJob = jest.spyOn(buildService, 'enqueueBuildJob').mockResolvedValue(undefined as any);
+      $setRelated: jest.fn(),
+    };
 
-    await buildService.processResolveAndDeployBuildQueue({
-      data: {
-        buildId: 1449,
-        githubRepositoryId: 425935548,
-        skipDeletedServiceReconciliation: true,
-      },
+    await (service as any).prepareDeploymentScope(build, 42, undefined, {
+      runUUID: 'run-c',
     });
 
-    expect(enqueueBuildJob).toHaveBeenCalledWith(
-      expect.objectContaining({
-        buildId: 1449,
-        githubRepositoryId: 425935548,
-        skipDeletedServiceReconciliation: true,
-      })
-    );
+    expect(deployClaim.patch).toHaveBeenCalledWith({ runUUID: 'run-c' });
+    expect(deployClaim.where).toHaveBeenCalledWith({ buildId: 4 });
+    expect(deployClaim.where).toHaveBeenCalledWith('githubRepositoryId', 42);
+    expect(deployClaim.where).not.toHaveBeenCalledWith('branchName', expect.anything());
+    expect(deployClaim.where).not.toHaveBeenCalledWith('id', expect.anything());
+    expect(deploys.map((deploy: any) => deploy.runUUID)).toEqual(['run-c', 'run-c', undefined]);
   });
 
-  test('forwards queue identity and immutable source refs from resolve to build', async () => {
-    const build = createMockBuild({
-      id: 1449,
-      uuid: 'good-dev-0',
-      pullRequest: {
-        latestCommit: 'abcdef123456',
-        status: 'open',
-        deployOnUpdate: true,
-        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+  test('a stale B signal cannot claim or execute C mailbox contents', async () => {
+    const row = {
+      desiredGeneration: 3,
+      observedGeneration: 0,
+      acceptedRefs: {
+        'source:100:main': {
+          type: 'source',
+          requestId: 'request-c',
+          target: 'repository',
+          githubRepositoryId: 100,
+          branch: 'main',
+          sha: 'commit-c',
+          gen: 3,
+        },
       },
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    });
-    mockBuildQuery.findOne.mockResolvedValue(build);
-    const enqueueBuildJob = jest.spyOn(buildService, 'enqueueBuildJob').mockResolvedValue(undefined as any);
-
-    await buildService.processResolveAndDeployBuildQueue({
-      id: '42',
-      data: {
-        buildId: 1449,
-        githubRepositoryId: 425935548,
-        triggerRef: 'head-commit-sha',
-        sourceRef: 'head-commit-sha',
-        sourceGithubRepositoryId: 425935548,
-        sourceBranch: 'Main',
-      },
-    });
-
-    expect(enqueueBuildJob).toHaveBeenCalledWith(
-      expect.objectContaining({
-        triggerRef: 'head-commit-sha',
-        sourceRef: 'head-commit-sha',
-        sourceGithubRepositoryId: 425935548,
-        sourceBranch: 'Main',
-        triggerSequence: '42',
-      })
+    };
+    const query: any = {
+      findById: jest.fn(() => query),
+      whereNull: jest.fn().mockResolvedValue(row),
+    };
+    const service = new BuildService(
+      { models: { Build: { query: jest.fn(() => query) } } } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
     );
+
+    await expect((service as any).claimDeploymentReconciliation(1, 2)).resolves.toBeNull();
+    await expect((service as any).claimDeploymentReconciliation(1, 3)).resolves.toEqual({
+      generation: 3,
+      token: 'request-c',
+      dirty: [
+        {
+          scopeKey: 'source:100:main',
+          intent: row.acceptedRefs['source:100:main'],
+        },
+      ],
+    });
   });
 
-  test('rethrows build enqueue failures so the resolve job retry budget is used', async () => {
-    const build = createMockBuild({ id: 1449, uuid: 'good-dev-0' });
-    mockBuildQuery.findOne.mockResolvedValue(build);
-    jest.spyOn(buildService, 'enqueueBuildJob').mockRejectedValue(new Error('redis unavailable'));
+  test('repository-scoped work stays selective while a root-source intent remains full-scope', () => {
+    const { service } = serviceHarness();
+    const scopes = (service as any).deploymentReconciliationScopes([
+      {
+        scopeKey: 'source:100:main',
+        intent: {
+          type: 'source',
+          requestId: 'repo-c',
+          target: 'repository',
+          githubRepositoryId: 100,
+          branch: 'main',
+          sha: 'commit-c',
+          gen: 1,
+        },
+      },
+      {
+        scopeKey: 'source:200:main',
+        intent: {
+          type: 'source',
+          requestId: 'root-d',
+          target: 'all',
+          githubRepositoryId: 200,
+          branch: 'main',
+          sha: 'commit-d',
+          gen: 2,
+        },
+      },
+    ]);
+
+    // The full pass runs first, then the delivered repo SHA is re-applied as a
+    // selective floor so a lagging live-head read cannot roll C back to B.
+    expect(scopes).toEqual([
+      {
+        githubRepositoryId: null,
+        sourceGithubRepositoryId: 200,
+        sourceRef: 'commit-d',
+        sourceBeforeRef: undefined,
+        sourceBranch: 'main',
+      },
+      {
+        githubRepositoryId: 100,
+        sourceGithubRepositoryId: 100,
+        sourceRef: 'commit-c',
+        sourceBeforeRef: undefined,
+        sourceBranch: 'main',
+      },
+    ]);
+  });
+
+  test('manual full redeploy cannot erase an older delivered repository SHA', () => {
+    const { service } = serviceHarness();
+    const scopes = (service as any).deploymentReconciliationScopes([
+      {
+        scopeKey: 'source:100:main',
+        intent: {
+          type: 'source',
+          requestId: 'repo-c',
+          target: 'repository',
+          githubRepositoryId: 100,
+          branch: 'main',
+          sha: 'commit-c',
+          gen: 1,
+        },
+      },
+      { scopeKey: 'all', intent: { type: 'all', requestId: 'manual-all', gen: 2 } },
+    ]);
+
+    expect(scopes).toEqual([
+      { githubRepositoryId: null },
+      {
+        githubRepositoryId: 100,
+        sourceGithubRepositoryId: 100,
+        sourceRef: 'commit-c',
+        sourceBeforeRef: undefined,
+        sourceBranch: 'main',
+      },
+    ]);
+  });
+
+  test('starts the newest repository source before retained work for another repository', () => {
+    const { service } = serviceHarness();
+    const scopes = (service as any).deploymentReconciliationScopes([
+      {
+        scopeKey: 'source:100:main',
+        intent: {
+          type: 'source',
+          requestId: 'repo-a',
+          target: 'repository',
+          githubRepositoryId: 100,
+          branch: 'main',
+          sha: 'commit-a',
+          gen: 1,
+        },
+      },
+      {
+        scopeKey: 'source:200:main',
+        intent: {
+          type: 'source',
+          requestId: 'repo-b',
+          target: 'repository',
+          githubRepositoryId: 200,
+          branch: 'main',
+          sha: 'commit-b',
+          gen: 2,
+        },
+      },
+    ]);
+
+    expect(scopes.map((scope) => scope.githubRepositoryId)).toEqual([200, 100]);
+  });
+
+  test('different generations use different execution locks so C does not wait for A', async () => {
+    let releaseA!: () => void;
+    let signalAStarted!: () => void;
+    const aHeld = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const aStarted = new Promise<void>((resolve) => {
+      signalAStarted = resolve;
+    });
+    const lock = jest.fn(async () => ({ unlock: jest.fn().mockResolvedValue(undefined), extend: jest.fn() }));
+    const service = new BuildService({} as any, {} as any, { lock } as any, queueManager() as any);
+
+    const a = (service as any).tryWithDeploymentGenerationLock(1, 1, async () => {
+      signalAStarted();
+      await aHeld;
+    });
+    await aStarted;
+
+    let cRan = false;
+    await (service as any).tryWithDeploymentGenerationLock(1, 3, async () => {
+      cRan = true;
+    });
+
+    expect(cRan).toBe(true);
+    expect(lock.mock.calls.map(([resource]) => resource)).toEqual(['build-reconcile.1.1', 'build-reconcile.1.3']);
+    releaseA();
+    await a;
+  });
+
+  test('retries an intermediate generic reconciliation failure without publishing a terminal error', async () => {
+    const { service, failure, recordFailure, markObserved, job } = reconciliationWorkerHarness();
+
+    await expect(service.processDeploymentReconciliationQueue(job(0))).rejects.toBe(failure);
+
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(markObserved).not.toHaveBeenCalled();
+  });
+
+  test('publishes and observes one fenced generic failure on the final queue attempt', async () => {
+    const { service, failure, build, claim, recordFailure, markObserved, job } = reconciliationWorkerHarness();
+
+    await expect(service.processDeploymentReconciliationQueue(job(9))).resolves.toBeUndefined();
+
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith(
+      build,
+      BuildStatus.ERROR,
+      claim.token,
+      failure,
+      'Build queue processing failed.',
+      claim.generation
+    );
+    expect(markObserved).toHaveBeenCalledTimes(1);
+    expect(markObserved).toHaveBeenCalledWith(1, claim.generation, claim.token);
+  });
+
+  test('rethrows a still-current generic failure that happens before the run becomes active', async () => {
+    const { service, failure, loadBuild, recordFailure, markObserved, job } = reconciliationWorkerHarness();
+    loadBuild.mockRejectedValueOnce(failure);
+
+    await expect(service.processDeploymentReconciliationQueue(job(0))).rejects.toBe(failure);
+
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(markObserved).not.toHaveBeenCalled();
+  });
+
+  test('claims the token to publish and observe a pre-active failure only on its final attempt', async () => {
+    const { service, failure, build, claim, withDeploymentLock, loadBuild, recordFailure, markObserved, job } =
+      reconciliationWorkerHarness();
+    loadBuild.mockRejectedValueOnce(failure);
+
+    await expect(service.processDeploymentReconciliationQueue(job(9))).resolves.toBeUndefined();
+
+    expect(withDeploymentLock).toHaveBeenCalledTimes(2);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith(
+      build,
+      BuildStatus.ERROR,
+      claim.token,
+      failure,
+      'Build queue processing failed.',
+      claim.generation
+    );
+    expect(markObserved).toHaveBeenCalledWith(1, claim.generation, claim.token);
+  });
+
+  test('does not mistake an authority-read failure for proof that a failed pass is stale', async () => {
+    const { service, failure, isCurrent, recordFailure, markObserved, job } = reconciliationWorkerHarness();
+    const authorityError = new Error('authority read unavailable');
+    isCurrent.mockRejectedValueOnce(authorityError);
+
+    await expect(service.processDeploymentReconciliationQueue(job(0))).rejects.toBe(authorityError);
+
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(markObserved).not.toHaveBeenCalled();
+    expect(failure).not.toBe(authorityError);
+  });
+
+  test('never regresses an accepted SHA to a lagging or divergent live branch head', async () => {
+    const repositoryQuery: any = {
+      findOne: jest.fn(() => repositoryQuery),
+      whereNull: jest.fn().mockResolvedValue({ fullName: 'org/service' }),
+    };
+    const service = new BuildService(
+      { models: { Repository: { query: jest.fn(() => repositoryQuery) } } } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
+    );
+    (github.getSHAForBranch as jest.Mock).mockResolvedValue('older-head');
+    (github.compareCommits as jest.Mock).mockResolvedValue('behind');
 
     await expect(
-      buildService.processResolveAndDeployBuildQueue({ id: '43', data: { buildId: 1449, triggerRef: 'sha' } })
-    ).rejects.toThrow('redis unavailable');
+      (service as any).resolveCurrentSourceRef({
+        githubRepositoryId: 42,
+        sourceGithubRepositoryId: 42,
+        sourceBranch: 'main',
+        sourceRef: 'commit-c',
+        sourceBeforeRef: 'commit-b',
+      })
+    ).resolves.toBe('commit-c');
   });
 
-  test('rejects an out-of-order trigger after a newer sequence claimed the same build/source scope', async () => {
-    const values = new Map<string, string>();
-    (buildService as any).redis = {
-      get: jest.fn(async (key: string) => values.get(key) ?? null),
-      set: jest.fn(async (key: string, value: string) => {
-        values.set(key, value);
-        return 'OK';
-      }),
+  test('may advance an accepted SHA only when GitHub proves the live head is its descendant', async () => {
+    const repositoryQuery: any = {
+      findOne: jest.fn(() => repositoryQuery),
+      whereNull: jest.fn().mockResolvedValue({ fullName: 'org/service' }),
     };
-
-    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '102')).resolves.toBe(true);
-    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '101')).resolves.toBe(false);
-    await expect((buildService as any).claimTriggerSequence(7, 100, 'stable', '101')).resolves.toBe(true);
-    await expect((buildService as any).claimTriggerSequence(7, 200, 'main', '101')).resolves.toBe(true);
-    await expect((buildService as any).claimTriggerSequence(7, 100, 'main', '102')).resolves.toBe(true);
-
-    expect(values).toEqual(
-      new Map([
-        ['build-deployment-sequence.resolve_and_deploy_test.7.100.main', '102'],
-        ['build-deployment-sequence.resolve_and_deploy_test.7.100.stable', '101'],
-        ['build-deployment-sequence.resolve_and_deploy_test.7.200.main', '101'],
-      ])
+    const service = new BuildService(
+      { models: { Repository: { query: jest.fn(() => repositoryQuery) } } } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
     );
-    for (const call of ((buildService as any).redis.set as jest.Mock).mock.calls) {
-      expect(call.slice(2)).toEqual(['EX', 7 * 24 * 60 * 60]);
-    }
-  });
+    (github.getSHAForBranch as jest.Mock).mockResolvedValue('commit-d');
+    (github.compareCommits as jest.Mock).mockResolvedValue('ahead');
 
-  test('keeps the delivered ref when it is still the live branch head', async () => {
-    const whereNull = jest.fn().mockResolvedValue({ githubRepositoryId: 100, fullName: 'org/repo' });
-    const findOne = jest.fn(() => ({ whereNull }));
-    (buildService as any).db.models.Repository = { query: jest.fn(() => ({ findOne })) };
-    (github.getSHAForBranch as jest.Mock).mockResolvedValue('newest-sha');
-
-    await expect((buildService as any).resolveEffectiveSourceRef(100, 'Feature/X', 'newest-sha')).resolves.toBe(
-      'newest-sha'
-    );
-
-    expect(findOne).toHaveBeenCalledWith({ githubRepositoryId: 100 });
-    expect(whereNull).toHaveBeenCalledWith('deletedAt');
-    expect(github.getSHAForBranch).toHaveBeenCalledWith('Feature/X', 'org', 'repo');
-  });
-
-  test('converges a stale delivered ref to the live branch head instead of dropping the push', async () => {
-    const whereNull = jest.fn().mockResolvedValue({ githubRepositoryId: 100, fullName: 'org/repo' });
-    (buildService as any).db.models.Repository = {
-      query: jest.fn(() => ({ findOne: jest.fn(() => ({ whereNull })) })),
-    };
-    (github.getSHAForBranch as jest.Mock).mockResolvedValue('newest-sha');
-
-    await expect((buildService as any).resolveEffectiveSourceRef(100, 'Feature/X', 'older-sha')).resolves.toBe(
-      'newest-sha'
-    );
-  });
-
-  test('fails open to the delivered ref on head-check, repository, or lookup failures', async () => {
-    const whereNull = jest
-      .fn()
-      .mockResolvedValueOnce({ githubRepositoryId: 100, fullName: 'org/repo' })
-      .mockResolvedValueOnce(undefined);
-    (buildService as any).db.models.Repository = {
-      query: jest.fn(() => ({ findOne: jest.fn(() => ({ whereNull })) })),
-    };
-    (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('GitHub unavailable'));
-
-    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
-    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
-    await expect((buildService as any).resolveEffectiveSourceRef(100, undefined, 'sha')).resolves.toBe('sha');
-
-    const databaseError = new Error('database unavailable');
-    (buildService as any).db.models.Repository = {
-      query: jest.fn(() => ({
-        findOne: jest.fn(() => ({ whereNull: jest.fn().mockRejectedValue(databaseError) })),
-      })),
-    };
-    await expect((buildService as any).resolveEffectiveSourceRef(100, 'main', 'sha')).resolves.toBe('sha');
+    await expect(
+      (service as any).resolveCurrentSourceRef({
+        githubRepositoryId: 42,
+        sourceGithubRepositoryId: 42,
+        sourceBranch: 'main',
+        sourceRef: 'commit-c',
+      })
+    ).resolves.toBe('commit-d');
+    expect(github.compareCommits).toHaveBeenCalledWith({
+      fullName: 'org/service',
+      base: 'commit-c',
+      head: 'commit-d',
+    });
   });
 });
 
@@ -1609,16 +1919,6 @@ describe('BuildService focused changed-line coverage', () => {
     mockGetAllConfigs.mockResolvedValue({ serviceAccount: { name: 'builder' } });
   });
 
-  test('returns null when the queue fingerprint build lookup misses', async () => {
-    const query: any = {
-      findOne: jest.fn(() => query),
-      withGraphFetched: jest.fn().mockResolvedValue(undefined),
-    };
-    const service = serviceWith({ models: { Build: { query: jest.fn(() => query) } } });
-
-    await expect((service as any).getBuildForQueueFingerprint(41)).resolves.toBeNull();
-  });
-
   test('uses default pagination when a legacy caller omits pagination', async () => {
     const query: any = {
       select: jest.fn(() => query),
@@ -1698,6 +1998,7 @@ describe('BuildService focused changed-line coverage', () => {
 
   test('builds every supported image type and ignores inactive and unsupported deploys', async () => {
     const makeDeploy = (uuid: string, type: DeployTypes, active = true) => ({
+      id: uuid,
       uuid,
       active,
       deployable: { type },
@@ -1712,11 +2013,65 @@ describe('BuildService focused changed-line coverage', () => {
     ];
     mockDeployQuery.mockReturnValue(deployQuery(deploys));
     const buildImage = jest.fn().mockResolvedValue(true);
-    const service = serviceWith({ services: { Deploy: { buildImage } } });
+    const mutationQuery: any = {
+      patch: jest.fn(() => mutationQuery),
+      where: jest.fn().mockResolvedValue(1),
+    };
+    const service = serviceWith({
+      models: { Deploy: { query: jest.fn(() => mutationQuery) } },
+      services: { Deploy: { buildImage } },
+    });
 
-    await expect(service.buildImages({ id: 4 } as any)).resolves.toBe(true);
+    await expect(service.buildImages({ id: 4 } as any, 'build-run')).resolves.toBe(true);
 
     expect(buildImage.mock.calls.map(([deploy]) => deploy.uuid)).toEqual(['docker', 'github', 'helm']);
+  });
+
+  test('keeps every static execution lane scoped to the changed repository and branch', async () => {
+    const imageQuery = deployQuery([]);
+    const cliQuery = deployQuery([]);
+    const manifestQuery = deployQuery([]);
+    mockDeployQuery.mockReturnValueOnce(imageQuery).mockReturnValueOnce(cliQuery).mockReturnValueOnce(manifestQuery);
+    const service = serviceWith({ services: { Deploy: { buildImage: jest.fn(), deployCLI: jest.fn() } } });
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    jest.spyOn(service as any, 'updateDeploysImageDetails').mockResolvedValue(undefined);
+    const build = {
+      id: 4,
+      uuid: 'large-static',
+      namespace: 'env-large-static',
+      kind: BuildKind.SANDBOX,
+      isStatic: true,
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    } as any;
+
+    await service.buildImages(build, 'run-c', 42, 'sha-c', 'main');
+    await service.deployCLIServices(build, 'run-c', 42, 'sha-c', 'main');
+    await service.generateAndApplyManifests({
+      build,
+      runUUID: 'run-c',
+      expectedGeneration: 3,
+      githubRepositoryId: 42,
+      sourceBranch: 'main',
+      namespace: build.namespace,
+    });
+
+    for (const query of [imageQuery, cliQuery, manifestQuery]) {
+      expect(query.where).toHaveBeenCalledWith({
+        buildId: 4,
+        runUUID: 'run-c',
+        githubRepositoryId: 42,
+        branchName: 'main',
+      });
+    }
+  });
+
+  test('treats a retained targeted scope with no remaining Deploy rows as a successful no-op', async () => {
+    mockDeployQuery.mockReturnValue(deployQuery([]));
+    const service = serviceWith({ services: { Deploy: { deployCLI: jest.fn() } } });
+    const build = { id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) };
+
+    await expect(service.deployCLIServices(build as any, 'run-c', 42, 'sha-c', 'main')).resolves.toBe(true);
   });
 
   test('fails image and CLI processing cleanly for a loaded deploy missing its deployable', async () => {
@@ -1724,9 +2079,9 @@ describe('BuildService focused changed-line coverage', () => {
     mockDeployQuery.mockReturnValue(deployQuery([{ uuid: 'inactive', active: false }, missing]));
     const service = serviceWith({ services: { Deploy: { buildImage: jest.fn(), deployCLI: jest.fn() } } });
 
-    await expect(service.buildImages({ id: 4 } as any)).resolves.toBe(false);
+    await expect(service.buildImages({ id: 4 } as any, 'build-run')).resolves.toBe(false);
     await expect(
-      service.deployCLIServices({ id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) } as any)
+      service.deployCLIServices({ id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) } as any, 'build-run')
     ).resolves.toBe(false);
   });
 
@@ -1755,7 +2110,7 @@ describe('BuildService focused changed-line coverage', () => {
     const service = serviceWith({ services: { Deploy: { deployCLI, recordDeployFailure } } });
     const build = { id: 4, runUUID: 'build-run', $fetchGraph: jest.fn().mockResolvedValue(undefined) };
 
-    await expect(service.deployCLIServices(build as any)).resolves.toBe(false);
+    await expect(service.deployCLIServices(build as any, 'build-run')).resolves.toBe(false);
 
     expect(deployCLI).toHaveBeenCalledTimes(2);
     expect(recordDeployFailure).toHaveBeenCalledWith(cliFailure, 'build-run', {
@@ -1800,6 +2155,7 @@ describe('BuildService focused changed-line coverage', () => {
     mockDeployQuery.mockReturnValue(deployQuery([deploy]));
     const service = serviceWith({});
     jest.spyOn(service as any, 'updateDeploysImageDetails').mockResolvedValue(undefined);
+    const enqueueIngress = jest.spyOn(service as any, 'enqueueIngressManifest').mockResolvedValue(undefined);
     const build = {
       id: 4,
       uuid: 'manifest',
@@ -1815,6 +2171,18 @@ describe('BuildService focused changed-line coverage', () => {
         namespace: build.namespace,
       })
     ).resolves.toBe(true);
+    expect(enqueueIngress).toHaveBeenCalledWith(4, undefined, undefined);
+
+    enqueueIngress.mockClear();
+    await expect(
+      service.generateAndApplyManifests({
+        build: build as any,
+        githubRepositoryId: null,
+        namespace: build.namespace,
+        enqueueIngress: false,
+      })
+    ).resolves.toBe(true);
+    expect(enqueueIngress).not.toHaveBeenCalled();
   });
 
   test('covers empty and scoped running-image updates', async () => {
@@ -1826,8 +2194,14 @@ describe('BuildService focused changed-line coverage', () => {
       })
     ).resolves.toBeUndefined();
 
-    const patch = jest.fn().mockResolvedValue(undefined);
-    await (service as any).updateDeploysImageDetails(
+    const deployUpdate: any = {
+      patch: jest.fn(() => deployUpdate),
+      where: jest.fn(() => deployUpdate),
+      then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(1).then(resolve, reject),
+    };
+    const scopedService = serviceWith({ models: { Deploy: { query: jest.fn(() => deployUpdate) } } });
+    await (scopedService as any).updateDeploysImageDetails(
       {
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
         deploys: [
@@ -1835,14 +2209,17 @@ describe('BuildService focused changed-line coverage', () => {
             githubRepositoryId: 42,
             branchName: 'main',
             dockerImage: 'image:v1',
-            $query: jest.fn(() => ({ patch })),
+            id: 9,
           },
         ],
       },
+      'build-run',
       42,
       'main'
     );
-    expect(patch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'image:v1' });
+    expect(deployUpdate.patch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'image:v1' });
+    expect(deployUpdate.where).toHaveBeenCalledWith({ id: 9 });
+    expect(deployUpdate.where).toHaveBeenCalledWith('runUUID', 'build-run');
   });
 
   test('resolves direct and repository-derived build environments', async () => {

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy, generateHelmManifest } from '../helm';
+import { shouldUseNativeHelm, createHelmContainer, nativeHelmDeploy, generateHelmManifest, deployHelm } from '../helm';
 import * as nativeHelmUtils from '../utils';
 import yaml from 'js-yaml';
 import {
@@ -35,6 +35,11 @@ import { shellPromise } from 'server/lib/shell';
 import { getLogArchivalService } from 'server/services/logArchival';
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import * as YamlService from 'server/models/yaml';
+import { SecretProcessor } from 'server/services/secretProcessor';
+import DeployService from 'server/services/deploy';
+import { Metrics } from 'server/lib/metrics';
+import { AuthorityLockLostError } from 'server/lib/authorityLock';
+import { DeployStatus } from 'shared/constants';
 
 jest.mock('server/services/globalConfig');
 jest.mock('../utils', () => {
@@ -44,8 +49,15 @@ jest.mock('../utils', () => {
     determineChartType: jest.fn(originalModule.determineChartType),
     getHelmConfiguration: jest.fn(originalModule.getHelmConfiguration),
     mergeHelmConfigWithGlobal: jest.fn(originalModule.mergeHelmConfigWithGlobal),
+    validateHelmConfiguration: jest.fn(originalModule.validateHelmConfiguration),
   };
 });
+jest.mock('server/lib/metrics', () => ({
+  Metrics: jest.fn().mockImplementation(() => ({
+    increment: jest.fn(),
+    event: jest.fn(),
+  })),
+}));
 jest.mock('server/lib/kubernetes');
 jest.mock('server/lib/random', () => ({
   randomAlphanumeric: jest.fn().mockReturnValue('k4hlde'),
@@ -1702,11 +1714,16 @@ describe('Native Helm', () => {
 
   describe('nativeHelmDeploy', () => {
     it('uses the canonical deploy job name for monitoring and archival', async () => {
+      const outputPatch: any = {
+        patch: jest.fn(() => outputPatch),
+        where: jest.fn().mockResolvedValue(1),
+      };
       const deploy = {
         uuid: 'sample-cosmos-emulator-preview-build-123456',
         sha: 'abcdef1234567890',
         branchName: 'main',
         id: 42,
+        runUUID: 'run-c',
         deployableId: 99,
         deployable: {
           name: 'sample-cosmos-emulator',
@@ -1719,9 +1736,7 @@ describe('Native Helm', () => {
           pullRequest: { repository: { fullName: 'example-org/example-chart' } },
         },
         $fetchGraph: jest.fn().mockResolvedValue(undefined),
-        $query: jest.fn().mockReturnValue({
-          patch: jest.fn().mockResolvedValue(undefined),
-        }),
+        $query: jest.fn().mockReturnValue(outputPatch),
       } as unknown as Deploy;
 
       const archiveLogs = jest.fn().mockResolvedValue(undefined);
@@ -1733,6 +1748,7 @@ describe('Native Helm', () => {
       (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValue({
         chartType: ChartType.PUBLIC,
         customValues: [],
+        helmSecretRefs: [{ provider: 'aws', path: 'apps/sample', key: 'token', envKey: 'TOKEN' }],
         valuesFiles: [],
         chartPath: 'prometheus-community/prometheus',
         releaseName: deploy.uuid,
@@ -1756,6 +1772,17 @@ describe('Native Helm', () => {
       (getLogArchivalService as jest.Mock).mockReturnValue({
         archiveLogs,
       });
+      const processSecretRefs = jest.spyOn(SecretProcessor.prototype, 'processSecretRefs').mockResolvedValue({
+        secretRefs: [],
+        expectedKeysPerSecret: { 'sample-secret': ['TOKEN'] },
+        syncTokensPerSecret: { 'sample-secret': 'sync-c' },
+        warnings: [],
+      });
+      const waitForSecretSync = jest.spyOn(SecretProcessor.prototype, 'waitForSecretSync').mockResolvedValue();
+      const secretMutationGate = jest.fn(async (_deploy: Deploy, action: () => Promise<unknown>) => ({
+        admitted: true as const,
+        value: await action(),
+      }));
 
       const setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((fn: TimerHandler) => {
         if (typeof fn === 'function') {
@@ -1764,7 +1791,7 @@ describe('Native Helm', () => {
         return 0 as any;
       }) as typeof setTimeout);
 
-      const result = await nativeHelmDeploy(deploy, { namespace: 'testns' });
+      const result = await nativeHelmDeploy(deploy, { namespace: 'testns', secretMutationGate });
       const expectedJobName = buildDeployJobName({
         deployUuid: deploy.uuid,
         jobId: 'k4hlde',
@@ -1772,6 +1799,15 @@ describe('Native Helm', () => {
       });
 
       expect(waitForJobAndGetLogs).toHaveBeenCalledWith(expectedJobName, 'testns', `[HELM ${deploy.uuid}]`);
+      expect(secretMutationGate).toHaveBeenCalledWith(deploy, expect.any(Function));
+      expect(processSecretRefs).toHaveBeenCalled();
+      expect(waitForSecretSync).toHaveBeenCalledWith({ 'sample-secret': ['TOKEN'] }, 'testns', 60000, {
+        'sample-secret': 'sync-c',
+      });
+      expect(shellPromise).toHaveBeenCalledWith(expect.stringContaining('--request-timeout=60s'), {
+        timeout: 90_000,
+      });
+      expect(outputPatch.where).toHaveBeenCalledWith({ id: 42, runUUID: 'run-c' });
       expect(archiveLogs).toHaveBeenCalledWith(expect.objectContaining({ jobName: expectedJobName }), 'helm logs');
       expect(result).toEqual({
         completed: true,
@@ -1780,6 +1816,53 @@ describe('Native Helm', () => {
       });
 
       setTimeoutSpy.mockRestore();
+    });
+  });
+
+  describe('deployHelm', () => {
+    it('rethrows authority lock loss without publishing a deployment failure', async () => {
+      const deploy = {
+        uuid: 'sample-service-preview-build-123456',
+        runUUID: 'run-c',
+        deployable: {
+          name: 'sample-service',
+          helm: { deploymentMethod: 'native' },
+        },
+        build: { namespace: 'testns' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Deploy;
+      const lockError = new AuthorityLockLostError('deploy-external-secrets.42');
+      const secretMutationGate = jest.fn().mockRejectedValue(lockError);
+      const patchAndUpdateActivityFeed = jest
+        .spyOn(DeployService.prototype, 'patchAndUpdateActivityFeed')
+        .mockResolvedValue(undefined);
+      const recordDeployFailure = jest.spyOn(DeployService.prototype, 'recordDeployFailure').mockResolvedValue(false);
+
+      (nativeHelmUtils.validateHelmConfiguration as jest.Mock).mockResolvedValueOnce([]);
+      (nativeHelmUtils.getHelmConfiguration as jest.Mock).mockResolvedValueOnce({
+        helmSecretRefs: [{ provider: 'aws', path: 'apps/sample', key: 'token', envKey: 'TOKEN' }],
+      });
+      mockGetAllConfigs.mockResolvedValue({});
+
+      try {
+        await expect(deployHelm([deploy], { secretMutationGate })).rejects.toBe(lockError);
+
+        expect(secretMutationGate).toHaveBeenCalledWith(deploy, expect.any(Function));
+        expect(Metrics).not.toHaveBeenCalled();
+        expect(recordDeployFailure).not.toHaveBeenCalled();
+        expect(patchAndUpdateActivityFeed).toHaveBeenCalledTimes(1);
+        expect(patchAndUpdateActivityFeed).toHaveBeenCalledWith(
+          deploy,
+          {
+            status: DeployStatus.DEPLOYING,
+            statusMessage: 'Deploying via Native Helm',
+          },
+          'run-c'
+        );
+      } finally {
+        patchAndUpdateActivityFeed.mockRestore();
+        recordDeployFailure.mockRestore();
+      }
     });
   });
 

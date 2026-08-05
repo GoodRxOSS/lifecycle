@@ -23,6 +23,8 @@ import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import { JobMonitor } from 'server/lib/kubernetes/JobMonitor';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
 
+const APPLY_JOB_DEADLINE_SECONDS = 9 * 60;
+
 export interface KubernetesApplyJobConfig {
   deploy: Deploy;
   namespace: string;
@@ -74,6 +76,10 @@ export async function createKubernetesApplyJob({
     },
     spec: {
       ttlSecondsAfterFinished: 86400,
+      // JobMonitor's terminal-condition loop is intentionally generic. Give
+      // this admitted mutation a Kubernetes-enforced bound below its 10-minute
+      // monitor budget so a wedged kubectl cannot hold promotion forever.
+      activeDeadlineSeconds: APPLY_JOB_DEADLINE_SECONDS,
       backoffLimit: 0,
       template: {
         metadata: {
@@ -99,7 +105,6 @@ export async function createKubernetesApplyJob({
               
               if kubectl get deployment ${deploy.uuid} -n ${namespace} &>/dev/null; then
                 kubectl rollout restart deployment/${deploy.uuid} -n ${namespace}
-                kubectl rollout status deployment/${deploy.uuid} -n ${namespace} --timeout=300s
               fi
             `,
               ],

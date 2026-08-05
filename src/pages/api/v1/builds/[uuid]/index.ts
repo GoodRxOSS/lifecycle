@@ -101,10 +101,9 @@ async function updateBuild(req: NextApiRequest, res: NextApiResponse, correlatio
 
     if (build.pullRequest?.deployOnUpdate) {
       getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Triggering redeploy after UUID update`);
-      await new BuildService().resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await new BuildService().enqueueResolveAndDeployBuild({
         buildId: build.id,
         runUUID: nanoid(),
-        correlationId,
       });
     }
 

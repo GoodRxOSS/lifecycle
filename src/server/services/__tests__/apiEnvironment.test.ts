@@ -142,6 +142,10 @@ function makeService({
 } = {}) {
   const buildCreate = jest.fn(async (attrs: any) => createdBuild ?? { id: 99, ...attrs });
   const buildFindOneChain = { whereNull: jest.fn().mockResolvedValue(existingIdempotent) };
+  const deployQueryChain: any = {
+    patch: jest.fn(() => deployQueryChain),
+    where: jest.fn(() => deployQueryChain),
+  };
   const models = {
     Build: {
       create: buildCreate,
@@ -168,7 +172,7 @@ function makeService({
       })),
     },
     Environment: { query: jest.fn(() => ({ findById: jest.fn().mockResolvedValue(environment) })) },
-    Deploy: { query: jest.fn() },
+    Deploy: { query: jest.fn(() => deployQueryChain) },
     Deployable: { query: jest.fn() },
   };
   const services = {
@@ -1450,7 +1454,6 @@ describe('requestApiEnvironmentDeletion', () => {
       expect.objectContaining({
         buildId: current.id,
         runUUID: expect.any(String),
-        triggerRef: expect.any(String),
       })
     );
 
@@ -1608,9 +1611,7 @@ describe('processApiEnvironmentCreateQueue', () => {
       })
     );
     expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.PENDING, expect.any(String), true, true);
-    expect(enqueueResolve).toHaveBeenCalledWith(
-      expect.objectContaining({ buildId: 7, triggerRef: expect.any(String) })
-    );
+    expect(enqueueResolve).toHaveBeenCalledWith(expect.objectContaining({ buildId: 7, runUUID: expect.any(String) }));
   });
 
   it('skips the deploy chain when deploys are paused', async () => {
@@ -2076,7 +2077,6 @@ describe('applyApiEnvironmentPatch', () => {
     expect(enqueue).toHaveBeenCalledWith({
       buildId: 1,
       runUUID: result.deployId,
-      triggerRef: result.deployId,
     });
   });
 
@@ -2767,7 +2767,6 @@ describe('redeploy and destroy uuid liveness', () => {
       expect.objectContaining({
         buildId: 4,
         runUUID: result.deployId,
-        triggerRef: result.deployId,
       })
     );
   });
@@ -2800,12 +2799,10 @@ describe('redeploy and destroy uuid liveness', () => {
       expect.objectContaining({
         buildId: 4,
         runUUID: first.deployId,
-        triggerRef: first.deployId,
       }),
       expect.objectContaining({
         buildId: 4,
         runUUID: second.deployId,
-        triggerRef: second.deployId,
       }),
     ]);
   });
@@ -3424,255 +3421,7 @@ describe('deleteBuild teardown ownership', () => {
   });
 });
 
-describe('deploy pipeline torn-down guards', () => {
-  const pipelineBuild = (overrides: any = {}) => ({
-    id: 7,
-    uuid: 'api-env-123456',
-    status: BuildStatus.TORN_DOWN,
-    deletedAt: null,
-    deployEnabled: true,
-    pullRequest: null,
-    $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    ...overrides,
-  });
-
-  function makePipelineService(build: any) {
-    const { service, models } = makeService();
-    (models.Build.query as jest.Mock).mockReturnValue({ findOne: jest.fn().mockResolvedValue(build) });
-    return { service };
-  }
-
-  it('processResolveAndDeployBuildQueue skips torn-down PR-less builds', async () => {
-    const build = pipelineBuild();
-    const { service } = makePipelineService(build);
-    const enqueueBuildJob = jest.spyOn(service as any, 'enqueueBuildJob').mockResolvedValue(undefined);
-
-    await service.processResolveAndDeployBuildQueue({ data: { buildId: 7 } });
-
-    expect(enqueueBuildJob).not.toHaveBeenCalled();
-  });
-
-  it('processResolveAndDeployBuildQueue lets a re-enabled open PR recreate a torn-down build', async () => {
-    const build = pipelineBuild({
-      pullRequestId: 55,
-      pullRequest: { status: 'open', deployOnUpdate: true, $fetchGraph: jest.fn() },
-    });
-    const { service } = makePipelineService(build);
-    const enqueueBuildJob = jest.spyOn(service as any, 'enqueueBuildJob').mockResolvedValue(undefined);
-
-    await service.processResolveAndDeployBuildQueue({ data: { buildId: 7 } });
-
-    expect(enqueueBuildJob).toHaveBeenCalled();
-  });
-
-  it('processBuildQueue skips torn-down PR-less builds before importing yaml', async () => {
-    const build = pipelineBuild({ status: BuildStatus.TEARING_DOWN });
-    const { service } = makePipelineService(build);
-    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
-    const resolveAndDeploy = jest.fn().mockResolvedValue(undefined);
-    (service.db.services as any).BuildService = { resolveAndDeployBuild: resolveAndDeploy };
-
-    await service.processBuildQueue({ data: { buildId: 7 } });
-
-    expect(importYaml).not.toHaveBeenCalled();
-    expect(resolveAndDeploy).not.toHaveBeenCalled();
-  });
-
-  it('processBuildQueue lets a re-enabled open PR reclaim and recreate a torn-down build', async () => {
-    const build = pipelineBuild({
-      pullRequestId: 55,
-      pullRequest: { status: 'open', deployOnUpdate: true, $fetchGraph: jest.fn() },
-    });
-    const { service } = makePipelineService(build);
-    jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
-    jest.spyOn(service as any, 'claimDeploymentRun').mockResolvedValue('recreate-run');
-    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
-    const resolveAndDeploy = jest.spyOn(service, 'resolveAndDeployBuild').mockResolvedValue(build);
-
-    await service.processBuildQueue({ data: { buildId: 7 } });
-
-    expect(resolveAndDeploy).toHaveBeenCalledWith(
-      build,
-      true,
-      undefined,
-      undefined,
-      expect.objectContaining({
-        deploymentLockAlreadyHeld: true,
-        runAlreadyClaimed: true,
-        runUUID: 'recreate-run',
-      })
-    );
-  });
-
-  it.each([
-    { pullRequest: { status: 'open', deployOnUpdate: false }, label: 'label-disabled' },
-    { pullRequest: { status: 'closed', deployOnUpdate: true }, label: 'closed' },
-  ])('processBuildQueue fails closed for a $label PR', async ({ pullRequest }) => {
-    const build = pipelineBuild({
-      status: BuildStatus.DEPLOYED,
-      pullRequestId: 55,
-      pullRequest: { ...pullRequest, $fetchGraph: jest.fn() },
-    });
-    const { service } = makePipelineService(build);
-    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
-
-    await service.processBuildQueue({ data: { buildId: 7 } });
-
-    expect(importYaml).not.toHaveBeenCalled();
-  });
-});
-
-describe('serialized build setup and deploy workers', () => {
-  it('serializes YAML import through deploy completion for distinct triggers on one build', async () => {
-    const { service } = makeService();
-    const build: any = {
-      id: 7,
-      uuid: 'pr-env-123456',
-      status: BuildStatus.DEPLOYED,
-      pullRequestId: 55,
-      pullRequest: { status: 'open', deployOnUpdate: true },
-      environment: { id: 5 },
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    };
-    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
-    jest
-      .spyOn(service as any, 'claimDeploymentRun')
-      .mockImplementation(async (_build: any, requested: string) => requested);
-    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
-    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
-
-    let releaseFirst!: () => void;
-    const firstCanFinish = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let firstStarted!: () => void;
-    const firstDidStart = new Promise<void>((resolve) => {
-      firstStarted = resolve;
-    });
-    const resolveAndDeploy = jest
-      .spyOn(service, 'resolveAndDeployBuild')
-      .mockImplementation(async (_build, _enabled, _repo, sourceRef) => {
-        if (sourceRef === 'sha-a') {
-          firstStarted();
-          await firstCanFinish;
-        }
-        return build;
-      });
-
-    let lockTail = Promise.resolve<unknown>(undefined);
-    jest.spyOn(service, 'withBuildDeploymentLock').mockImplementation((_buildId, action) => {
-      const run = lockTail.then(action);
-      lockTail = run.then(
-        () => undefined,
-        () => undefined
-      );
-      return run;
-    });
-
-    const first = service.processBuildQueue({
-      data: { buildId: 7, runUUID: 'run-a', triggerRef: 'sha-a', sourceRef: 'sha-a' },
-    });
-    await firstDidStart;
-    const second = service.processBuildQueue({
-      data: { buildId: 7, runUUID: 'run-b', triggerRef: 'sha-b', sourceRef: 'sha-b' },
-    });
-
-    await Promise.resolve();
-    expect(importYaml).toHaveBeenCalledTimes(1);
-    expect(resolveAndDeploy).toHaveBeenCalledTimes(1);
-
-    releaseFirst();
-    await Promise.all([first, second]);
-
-    expect(importYaml.mock.calls.map((call) => (call[3] as { sourceRef?: string } | undefined)?.sourceRef)).toEqual([
-      'sha-a',
-      'sha-b',
-    ]);
-    expect(resolveAndDeploy.mock.calls.map((call) => call[3])).toEqual(['sha-a', 'sha-b']);
-  });
-
-  it('skips a delayed older trigger before YAML import after a newer sequence claimed the scope', async () => {
-    const { service } = makeService();
-    const build: any = {
-      id: 7,
-      uuid: 'pr-env-123456',
-      status: BuildStatus.DEPLOYED,
-      pullRequestId: 55,
-      pullRequest: { status: 'open', deployOnUpdate: true },
-      environment: { id: 5 },
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    };
-    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
-    jest.spyOn(service as any, 'resolveEffectiveSourceRef').mockResolvedValue('old-sha');
-    jest.spyOn(service as any, 'claimTriggerSequence').mockResolvedValue(false);
-    const claimRun = jest.spyOn(service as any, 'claimDeploymentRun');
-    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile');
-
-    await service.processBuildQueue({
-      data: {
-        buildId: 7,
-        githubRepositoryId: 42,
-        sourceGithubRepositoryId: 42,
-        sourceBranch: 'main',
-        triggerSequence: '101',
-        triggerRef: 'old-sha',
-        sourceRef: 'old-sha',
-      },
-    });
-
-    expect(claimRun).not.toHaveBeenCalled();
-    expect(importYaml).not.toHaveBeenCalled();
-  });
-
-  it('converges a stale pushed source to the live branch head instead of dropping the push', async () => {
-    const { service } = makeService();
-    const build: any = {
-      id: 7,
-      uuid: 'api-env-123456',
-      status: BuildStatus.DEPLOYED,
-      deployEnabled: true,
-      deletedAt: null,
-      pullRequest: null,
-      pullRequestId: null,
-      environment: { id: 5 },
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    };
-    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
-    const resolveRef = jest.spyOn(service as any, 'resolveEffectiveSourceRef').mockResolvedValue('newest-sha');
-    const claimSequence = jest.spyOn(service as any, 'claimTriggerSequence').mockResolvedValue(true);
-    jest.spyOn(service as any, 'claimDeploymentRun').mockResolvedValue('run-1');
-    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
-    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
-    const resolveAndDeploy = jest.spyOn(service, 'resolveAndDeployBuild').mockResolvedValue(build);
-
-    await service.processBuildQueue({
-      data: {
-        buildId: 7,
-        sourceGithubRepositoryId: 42,
-        sourceBranch: 'Main',
-        sourceRef: 'older-sha',
-        triggerSequence: '101',
-      },
-    });
-
-    expect(resolveRef).toHaveBeenCalledWith(42, 'Main', 'older-sha');
-    expect(claimSequence).toHaveBeenCalled();
-    expect(importYaml).toHaveBeenCalledWith(
-      build.environment,
-      build,
-      undefined,
-      expect.objectContaining({ sourceRef: 'newest-sha', sourceBranch: 'Main' })
-    );
-    expect(resolveAndDeploy).toHaveBeenCalledWith(build, true, undefined, 'newest-sha', expect.any(Object));
-  });
-
-  it('rethrows lock acquisition failures so BullMQ retries instead of dropping the trigger', async () => {
-    const { service } = makeService();
-    jest.spyOn(service, 'withBuildDeploymentLock').mockRejectedValue(new Error('lock acquisition timed out'));
-
-    await expect(service.processBuildQueue({ data: { buildId: 7 } })).rejects.toThrow('lock acquisition timed out');
-  });
-
+describe('build setup authority', () => {
   it('re-reads PR authority under the setup lock before importing YAML', async () => {
     const { service } = makeService();
     const build: any = {
@@ -3709,216 +3458,6 @@ describe('serialized build setup and deploy workers', () => {
         pullRequest: { status: 'open', deployOnUpdate: false },
       })
     ).toBe('deploy_disabled');
-  });
-});
-
-describe('resolveAndDeployBuild teardown-ownership abort', () => {
-  function makeDeployRunService(
-    currentRow: (patchedRunUUID: string | null) => any,
-    { claimResult = 1 }: { claimResult?: number } = {}
-  ) {
-    const { service, models, services } = makeService();
-    let patchedRunUUID: string | null = null;
-    const build: any = {
-      id: 7,
-      uuid: 'api-env-123456',
-      namespace: 'env-api-env-123456',
-      branchName: 'main',
-      configSha: 'abc',
-      githubRepositoryId: 42,
-      pullRequest: null,
-      pullRequestId: null,
-      status: BuildStatus.DEPLOYED,
-      deletedAt: null,
-      deployEnabled: true,
-      environment: { id: 5 },
-      $query: jest.fn(() => ({
-        patch: jest.fn(async (p: any) => {
-          if (p?.runUUID) patchedRunUUID = p.runUUID;
-        }),
-      })),
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-      $setRelated: jest.fn(),
-    };
-    const claimChain: any = {
-      where: jest.fn(() => claimChain),
-      whereNotIn: jest.fn(() => claimChain),
-      whereNull: jest.fn(() => claimChain),
-      then: (resolve: any, reject: any) => Promise.resolve(claimResult).then(resolve, reject),
-    };
-    const claimPatch = jest.fn((p: any) => {
-      if (p?.runUUID && claimResult > 0) patchedRunUUID = p.runUUID;
-      return claimChain;
-    });
-    (models.Build.query as jest.Mock).mockReturnValue({
-      findById: jest.fn(() => ({
-        select: jest.fn(async () => {
-          const current: any = {
-            id: build.id,
-            pullRequestId: build.pullRequestId,
-            status: build.status,
-            deletedAt: build.deletedAt,
-            deployEnabled: build.deployEnabled,
-            ...currentRow(patchedRunUUID),
-          };
-          current.$fetchGraph = jest.fn(async () => {
-            current.pullRequest = build.pullRequest;
-          });
-          return current;
-        }),
-      })),
-      patch: claimPatch,
-    });
-    const { Repository: RepositoryMock } = jest.requireMock('server/models');
-    (RepositoryMock as any).query = jest.fn(() => ({
-      findOne: jest.fn(() => ({
-        whereNull: jest.fn().mockResolvedValue({ fullName: 'org/repo' }),
-      })),
-    }));
-    (services.Deploy.findOrCreateDeploys as jest.Mock).mockResolvedValue([{ id: 1 }]);
-    (service.db.services as any).BuildService = service;
-    jest.spyOn(service as any, 'markConfigurationsAsBuilt').mockResolvedValue(undefined);
-    const updateStatus = jest
-      .spyOn(service as any, 'updateStatusAndComment')
-      .mockResolvedValue(undefined) as jest.SpyInstance;
-    const buildImages = jest.spyOn(service as any, 'buildImages').mockResolvedValue(true) as jest.SpyInstance;
-    jest.spyOn(service as any, 'deployCLIServices').mockResolvedValue(true);
-    const applyManifests = jest
-      .spyOn(service as any, 'generateAndApplyManifests')
-      .mockResolvedValue(true) as jest.SpyInstance;
-    const recordFailure = jest
-      .spyOn(service as any, 'recordBuildFailure')
-      .mockResolvedValue(undefined) as jest.SpyInstance;
-    return {
-      service,
-      models,
-      build,
-      claimChain,
-      claimPatch,
-      buildImages,
-      applyManifests,
-      updateStatus,
-      recordFailure,
-    };
-  }
-
-  it('aborts the manifest apply when teardown took runUUID ownership mid-flight', async () => {
-    const { service, build, applyManifests, recordFailure, updateStatus } = makeDeployRunService(() => ({
-      runUUID: 'teardown-owner',
-      status: BuildStatus.TEARING_DOWN,
-    }));
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(applyManifests).not.toHaveBeenCalled();
-    expect(recordFailure).not.toHaveBeenCalled();
-    expect(updateStatus).not.toHaveBeenCalledWith(build, BuildStatus.DEPLOYED, expect.any(String), true, true);
-  });
-
-  it('aborts the manifest apply when an API environment is paused mid-run', async () => {
-    const { service, build, applyManifests, recordFailure } = makeDeployRunService((patchedRunUUID) => ({
-      runUUID: patchedRunUUID,
-      status: BuildStatus.DEPLOYING,
-      deployEnabled: false,
-    }));
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(applyManifests).not.toHaveBeenCalled();
-    expect(recordFailure).not.toHaveBeenCalled();
-  });
-
-  it('applies manifests when the run still owns the build', async () => {
-    const { service, build, applyManifests, updateStatus } = makeDeployRunService((patchedRunUUID) => ({
-      runUUID: patchedRunUUID,
-      status: 'deploying',
-    }));
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(applyManifests).toHaveBeenCalled();
-    expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.DEPLOYED, expect.any(String), true, true);
-  });
-
-  it('passes a concrete repository id through deploy and environment-variable resolution', async () => {
-    const { service, build } = makeDeployRunService((patchedRunUUID) => ({
-      runUUID: patchedRunUUID,
-      status: BuildStatus.BUILDING,
-    }));
-    const findOrCreateDeploys = service.db.services.Deploy.findOrCreateDeploys as jest.Mock;
-
-    await service.resolveAndDeployBuild(build, false, 42, 'commit-ref');
-
-    expect(findOrCreateDeploys).toHaveBeenCalledWith(build.environment, build, 42, 'commit-ref', undefined);
-  });
-
-  it('rechecks ownership inside the apply lock when teardown starts during manifest deployment', async () => {
-    let ownershipReads = 0;
-    const { service, build, applyManifests, updateStatus, recordFailure } = makeDeployRunService((patchedRunUUID) => {
-      ownershipReads++;
-      return ownershipReads >= 5
-        ? { runUUID: 'teardown-owner', status: BuildStatus.TEARING_DOWN, deployEnabled: false }
-        : { runUUID: patchedRunUUID, status: BuildStatus.DEPLOYING, deployEnabled: true, deletedAt: null };
-    });
-    const unlock = jest.fn().mockResolvedValue(undefined);
-    (service as any).redlock = {
-      lock: jest.fn().mockResolvedValue({ unlock, extend: jest.fn() }),
-    };
-    applyManifests.mockResolvedValue(true);
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(applyManifests).toHaveBeenCalledTimes(1);
-    expect((service as any).redlock.lock).toHaveBeenCalledWith('build-deployment.7', 15 * 60 * 1000);
-    expect(unlock).toHaveBeenCalledTimes(1);
-    expect(updateStatus).not.toHaveBeenCalledWith(build, BuildStatus.DEPLOYED, expect.any(String), true, true);
-    expect(recordFailure).not.toHaveBeenCalled();
-  });
-
-  it('aborts the whole run when teardown completed before the ownership claim', async () => {
-    const { service, build, claimChain, buildImages, applyManifests, updateStatus, recordFailure } =
-      makeDeployRunService(() => ({ runUUID: 'irrelevant', status: BuildStatus.TORN_DOWN }), { claimResult: 0 });
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(claimChain.whereNotIn).toHaveBeenCalledWith('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN]);
-    expect(claimChain.whereNull).toHaveBeenCalledWith('deletedAt');
-    expect(claimChain.where).toHaveBeenCalledWith('deployEnabled', true);
-    expect(buildImages).not.toHaveBeenCalled();
-    expect(applyManifests).not.toHaveBeenCalled();
-    expect(updateStatus).not.toHaveBeenCalled();
-    expect(recordFailure).not.toHaveBeenCalled();
-  });
-
-  it('claims PR builds conditionally and honors current open/label authority', async () => {
-    const { service, models, build, claimChain, claimPatch, applyManifests } = makeDeployRunService(
-      (patchedRunUUID) => ({
-        runUUID: patchedRunUUID,
-        status: BuildStatus.DEPLOYING,
-      })
-    );
-    build.pullRequestId = 55;
-    build.pullRequest = {
-      branchName: 'feature-1',
-      fullName: 'org/repo',
-      latestCommit: 'sha-1',
-      status: 'open',
-      deployOnUpdate: true,
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    };
-    build.branchName = null;
-    build.githubRepositoryId = null;
-
-    await service.resolveAndDeployBuild(build, true);
-
-    expect(claimPatch).toHaveBeenCalledWith({
-      runUUID: expect.any(String),
-      status: BuildStatus.PENDING,
-      statusMessage: null,
-    });
-    expect(claimChain.where).not.toHaveBeenCalledWith('deployEnabled', true);
-    expect(models.Deploy.query).not.toHaveBeenCalled();
-    expect(applyManifests).toHaveBeenCalled();
   });
 });
 
@@ -3963,7 +3502,15 @@ describe('recordBuildFailure teardown ownership', () => {
 
     await (service as any).recordBuildFailure(build, BuildStatus.ERROR, 'new-run', new Error('boom'), 'fallback');
 
-    expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.ERROR, 'new-run', true, true, expect.any(Error));
+    expect(updateStatus).toHaveBeenCalledWith(
+      build,
+      BuildStatus.ERROR,
+      'new-run',
+      true,
+      true,
+      expect.any(Error),
+      undefined
+    );
   });
 
   it('re-stamps PR builds unconditionally', async () => {

@@ -72,14 +72,16 @@ export default class IngressService extends BaseService {
       const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, true);
       const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
       try {
-        configurations.forEach(async (configuration) => {
-          await shellPromise(
-            `kubectl delete ingress ingress-${configuration.deployUUID} --namespace ${namespace}`
-          ).catch((error) => {
-            getLogger({ stage: LogStage.INGRESS_PROCESSING }).warn(`${error}`);
-            return null;
-          });
-        });
+        await Promise.all(
+          configurations.map((configuration) =>
+            shellPromise(`kubectl delete ingress ingress-${configuration.deployUUID} --namespace ${namespace}`).catch(
+              (error) => {
+                getLogger({ stage: LogStage.INGRESS_PROCESSING }).warn(`${error}`);
+                return null;
+              }
+            )
+          )
+        );
         getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: cleaned up');
       } catch (e) {
         getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error: e }, 'Ingress: cleanup failed');
@@ -88,9 +90,19 @@ export default class IngressService extends BaseService {
   };
 
   createOrUpdateIngressForBuild = async (job) => {
-    const { buildId, buildUuid, sender, correlationId, _ddTraceContext } = job.data;
+    const { buildId, buildUuid, runUUID, expectedGeneration, sender, correlationId, _ddTraceContext } = job.data;
 
     return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
+      const isCurrent = async () => {
+        if (!runUUID) return true;
+        let authority = this.db.models.Build.query().findOne({ id: buildId, runUUID }).whereNull('deletedAt');
+        if (expectedGeneration != null) authority = authority.where('desiredGeneration', expectedGeneration);
+        return Boolean(await authority);
+      };
+      if (!(await isCurrent())) {
+        getLogger({ buildId }).info('Ingress: skipped reason=superseded');
+        return;
+      }
       getLogger({ stage: LogStage.INGRESS_PROCESSING }).info('Ingress: creating');
 
       // We just want to create/update ingress for active services only
@@ -109,9 +121,22 @@ export default class IngressService extends BaseService {
           }
         );
       });
-      manifests.forEach(async (manifest, idx) => {
-        await this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace, buildId);
-      });
+      const apply = () =>
+        Promise.all(
+          manifests.map((manifest, idx) =>
+            this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace, buildId, runUUID, expectedGeneration)
+          )
+        );
+
+      if (runUUID && this.db.services.BuildService.withCurrentBuildPromotionLock) {
+        const result = await this.db.services.BuildService.withCurrentBuildPromotionLock(buildId, isCurrent, apply);
+        if (!result.admitted) {
+          getLogger({ buildId }).info('Ingress: skipped at promotion reason=superseded');
+          return;
+        }
+      } else {
+        await apply();
+      }
 
       getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: created');
     });
@@ -192,32 +217,52 @@ export default class IngressService extends BaseService {
    * @param manifest the manifest to apply
    * @param ingressName a name for the manifest for tmp directory namespacing
    */
-  private applyManifests = async (manifest, ingressName, namespace: string, buildId?: number) => {
+  private applyManifests = async (
+    manifest,
+    ingressName,
+    namespace: string,
+    buildId?: number,
+    runUUID?: string,
+    expectedGeneration?: number
+  ) => {
     try {
       const localPath = `${MANIFEST_PATH}/global-ingress/${ingressName}-ingress.yaml`;
       await fs.promises.mkdir(`${MANIFEST_PATH}/global-ingress/`, {
         recursive: true,
       });
       await fs.promises.writeFile(localPath, manifest, 'utf8');
-      await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`);
+      await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace} --request-timeout=60s`, {
+        timeout: 90_000,
+      });
     } catch (error) {
       getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Ingress: manifest apply failed');
       if (buildId !== undefined) {
-        await this.recordIngressFailureOnBuild(buildId, error).catch(() => undefined);
+        await this.recordIngressFailureOnBuild(buildId, error, runUUID, expectedGeneration).catch(() => undefined);
       }
     }
   };
 
   // Surface broken routing in the build row; the build otherwise reports deployed with no DB trace of the failure.
-  private recordIngressFailureOnBuild = async (buildId: number, error: unknown) => {
+  private recordIngressFailureOnBuild = async (
+    buildId: number,
+    error: unknown,
+    runUUID?: string,
+    expectedGeneration?: number
+  ) => {
     const note = `Ingress apply failed: ${(error as Error)?.message || String(error)}`
       .replace(/\s+/g, ' ')
       .slice(0, 300);
-    const build = await this.db.models.Build.query().findById(buildId);
+    let buildRead = this.db.models.Build.query().findById(buildId).whereNull('deletedAt');
+    if (runUUID) buildRead = buildRead.where('runUUID', runUUID);
+    if (expectedGeneration != null) buildRead = buildRead.where('desiredGeneration', expectedGeneration);
+    const build = await buildRead;
     if (!build || build.statusMessage?.includes(note)) {
       return;
     }
     const statusMessage = [build.statusMessage, note].filter(Boolean).join(' | ').slice(-500);
-    await build.$query().patch({ statusMessage });
+    let buildPatch = this.db.models.Build.query().patch({ statusMessage }).where({ id: buildId });
+    if (runUUID) buildPatch = buildPatch.where('runUUID', runUUID);
+    if (expectedGeneration != null) buildPatch = buildPatch.where('desiredGeneration', expectedGeneration);
+    await buildPatch;
   };
 }

@@ -38,21 +38,27 @@ export async function buildWithNative(deploy: Deploy, options: NativeBuildOption
         getLogger().info('Build: starting (native)');
 
         try {
-          await deploy.$fetchGraph('[build.[pullRequest]]');
+          let serviceAccountName = options.serviceAccount;
+          if (!serviceAccountName) {
+            // Direct/legacy callers retain the old self-contained setup path.
+            // Reconciliation prepares this once per scope under its short
+            // native-mutation gate and passes the resulting account here.
+            await deploy.$fetchGraph('[build.[pullRequest]]');
 
-          if (!deploy.build) {
-            throw new Error('Build: namespace setup requires build metadata');
+            if (!deploy.build) {
+              throw new Error('Build: namespace setup requires build metadata');
+            }
+
+            await createOrUpdateNamespace({
+              name: options.namespace,
+              buildUUID: deploy.build.uuid,
+              staticEnv: deploy.build.isStatic,
+              pullRequest: deploy.build.pullRequest,
+              waitForReady: true,
+            });
+
+            serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
           }
-
-          await createOrUpdateNamespace({
-            name: options.namespace,
-            buildUUID: deploy.build.uuid,
-            staticEnv: deploy.build.isStatic,
-            pullRequest: deploy.build.pullRequest,
-            waitForReady: true,
-          });
-
-          const serviceAccountName = await ensureServiceAccountForJob(options.namespace, 'build');
 
           const buildOptions = {
             ...options,

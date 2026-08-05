@@ -107,10 +107,9 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
       const buildId = build.id;
       const runUUID = nanoid();
-      await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await buildService.enqueueResolveAndDeployBuild({
         buildId,
         runUUID,
-        correlationId,
       });
 
       getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: redeploy queued');

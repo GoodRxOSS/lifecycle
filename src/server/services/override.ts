@@ -15,7 +15,7 @@
  */
 
 import BaseService from './_service';
-import { extractContextForQueue, getLogger, updateLogContext } from 'server/lib/logger';
+import { getLogger, updateLogContext } from 'server/lib/logger';
 import { isDeployEnabled } from 'server/lib/buildSource';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { Build, Deploy, PullRequest } from 'server/models';
@@ -528,9 +528,6 @@ export default class OverrideService extends BaseService {
     await buildService.enqueueResolveAndDeployBuild({
       buildId: build.id,
       runUUID: runUuid,
-      // Use the unique run id as the trigger so an explicit redeploy is never coalesced into a prior deploy.
-      triggerRef: runUuid,
-      ...extractContextForQueue(),
     });
     return true;
   }

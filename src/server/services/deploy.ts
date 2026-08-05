@@ -42,6 +42,7 @@ import { fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/
 import { isNativeBuilderEngine } from 'server/lib/buildEngines';
 import { SecretProvidersConfig } from 'server/services/types/globalConfig';
 import { createOrUpdateNamespace } from 'server/lib/kubernetes';
+import { AuthorityLockLostError, type AuthorityLockResult } from 'server/lib/authorityLock';
 
 export interface DeployOptions {
   ownerId?: number;
@@ -78,7 +79,8 @@ export default class DeployService extends BaseService {
     build: Build,
     githubRepositoryId?: number,
     sourceRef?: string | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId
   ): Promise<Deploy[]> {
     await build?.$fetchGraph('[deployables.[repository]]');
 
@@ -147,12 +149,12 @@ export default class DeployService extends BaseService {
         if (isTargetSource && [DeployTypes.HELM, DeployTypes.GITHUB, DeployTypes.CODEFRESH].includes(deployable.type)) {
           try {
             const sha =
-              this.getApiBuildSourceRef(
+              this.getPinnedBuildSourceRef(
                 build,
                 deployableRepositoryId,
                 effectiveBranch,
                 sourceRef,
-                githubRepositoryId,
+                sourceGithubRepositoryId,
                 sourceBranch
               ) ?? (await getShaForDeploy(deploy));
             patchFields.sha = sha;
@@ -246,13 +248,11 @@ export default class DeployService extends BaseService {
     }
   }
 
-  async deployAurora(deploy: Deploy): Promise<boolean> {
+  async deployAurora(deploy: Deploy, runUUID: string): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
-      let runUUID = deploy.runUUID;
       try {
         await deploy.reload();
         await deploy.$fetchGraph('[build, deployable]');
-        runUUID = deploy.runUUID;
 
         if (!deploy.deployable) {
           getLogger().error('Aurora: deployable missing for=restore');
@@ -267,7 +267,7 @@ export default class DeployService extends BaseService {
         const existingDbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
         if (existingDbEndpoint) {
           getLogger().info('Aurora: skipped reason=exists');
-          await deploy.$query().patch({
+          await this.patchDeployForRun(deploy, runUUID, {
             cname: existingDbEndpoint,
             status: DeployStatus.BUILT,
           });
@@ -275,34 +275,32 @@ export default class DeployService extends BaseService {
         }
 
         const uuid = nanoid();
-        runUUID = nanoid();
-        await deploy.$query().patch({
+        const current = await this.patchDeployForRun(deploy, runUUID, {
           status: DeployStatus.BUILDING,
           buildLogs: uuid,
-          runUUID,
         });
-        deploy.runUUID = runUUID;
+        if (!current) {
+          getLogger().info('Aurora: skipped reason=superseded');
+          return true;
+        }
         getLogger().info('Aurora: restoring');
         await cli.cliDeploy(deploy);
 
         const dbEndpoint = await this.findExistingAuroraDatabase(deploy.build.uuid, deploy.deployable.name);
         if (dbEndpoint) {
-          await deploy.$query().patch({
+          await this.patchDeployForRun(deploy, runUUID, {
             cname: dbEndpoint,
           });
         }
 
-        await deploy.reload();
-        if (deploy.buildLogs === uuid) {
-          await deploy.$query().patch({
-            status: DeployStatus.BUILT,
-          });
-        }
+        await this.patchDeployForRun(deploy, runUUID, {
+          status: DeployStatus.BUILT,
+        });
         getLogger().info('Aurora: restored');
         return true;
       } catch (e) {
         getLogger().error({ error: e }, 'Aurora: cluster restore failed');
-        return this.recordDeployFailure(deploy, runUUID || deploy.runUUID, {
+        return this.recordDeployFailure(deploy, runUUID, {
           status: DeployStatus.ERROR,
           error: e,
           fallbackMessage: 'Aurora restore failed.',
@@ -313,18 +311,13 @@ export default class DeployService extends BaseService {
 
   async deployCodefresh(
     deploy: Deploy,
+    runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
     sourceBranch?: string | null
   ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       let result: boolean = false;
-
-      const runUUID = nanoid();
-      await deploy.$query().patch({
-        runUUID,
-      });
-      deploy.runUUID = runUUID;
 
       await deploy.reload();
       await deploy.$fetchGraph('[deployable.[repository], build]');
@@ -357,15 +350,19 @@ export default class DeployService extends BaseService {
           let buildLogs: string;
           let codefreshBuildId: string;
           try {
-            await deploy.$query().patch({
+            const current = await this.patchDeployForRun(deploy, runUUID, {
               buildLogs: null,
               buildPipelineId: null,
               buildOutput: null,
               deployPipelineId: null,
               deployOutput: null,
             });
+            if (!current) {
+              getLogger().info('Codefresh: skipped reason=superseded');
+              return true;
+            }
 
-            const pinnedSourceRef = this.getApiBuildSourceRef(
+            const pinnedSourceRef = this.getPinnedBuildSourceRef(
               build,
               deploy.githubRepositoryId,
               deploy.branchName,
@@ -439,15 +436,16 @@ export default class DeployService extends BaseService {
 
   async deployCLI(
     deploy: Deploy,
+    runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
     sourceBranch?: string | null
   ): Promise<boolean> {
     if (deploy.deployable != null) {
       if (deploy.deployable.type === DeployTypes.AURORA_RESTORE) {
-        return this.deployAurora(deploy);
+        return this.deployAurora(deploy, runUUID);
       } else if (deploy.deployable.type === DeployTypes.CODEFRESH) {
-        return this.deployCodefresh(deploy, sourceRef, sourceGithubRepositoryId, sourceBranch);
+        return this.deployCodefresh(deploy, runUUID, sourceRef, sourceGithubRepositoryId, sourceBranch);
       }
     }
   }
@@ -459,17 +457,19 @@ export default class DeployService extends BaseService {
   async buildImage(
     deploy: Deploy,
     _index: number,
+    runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    expectedGeneration?: number,
+    nativeServiceAccount?: string
   ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
-      const runUUID = deploy.runUUID ?? nanoid();
       try {
-        await deploy.$query().patch({
-          runUUID,
-        });
-        deploy.runUUID = runUUID;
+        if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+          getLogger().info('Image: skipped reason=superseded');
+          return true;
+        }
 
         await deploy.$fetchGraph('[build.[environment], deployable]');
         const { deployable } = deploy;
@@ -481,7 +481,9 @@ export default class DeployService extends BaseService {
               runUUID,
               sourceRef,
               sourceGithubRepositoryId,
-              sourceBranch
+              sourceBranch,
+              expectedGeneration,
+              nativeServiceAccount
             );
           case DeployTypes.DOCKER:
             await this.patchAndUpdateActivityFeed(
@@ -504,7 +506,9 @@ export default class DeployService extends BaseService {
                   runUUID,
                   sourceRef,
                   sourceGithubRepositoryId,
-                  sourceBranch
+                  sourceBranch,
+                  expectedGeneration,
+                  nativeServiceAccount
                 );
               }
 
@@ -539,6 +543,7 @@ export default class DeployService extends BaseService {
               );
               return true;
             } catch (error) {
+              if (error instanceof AuthorityLockLostError) throw error;
               getLogger().warn({ error }, 'Helm: deployment processing failed');
               return false;
             }
@@ -548,7 +553,15 @@ export default class DeployService extends BaseService {
             return false;
         }
       } catch (e) {
+        if (e instanceof AuthorityLockLostError) throw e;
         getLogger().error({ error: e }, 'Docker: build error');
+        if (
+          expectedGeneration != null &&
+          !(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration).catch(() => false))
+        ) {
+          getLogger().info('Docker: failure ignored reason=superseded');
+          return true;
+        }
         return this.recordDeployFailure(deploy, runUUID, {
           status: DeployStatus.BUILD_FAILED,
           error: e,
@@ -560,7 +573,7 @@ export default class DeployService extends BaseService {
 
   async recordDeployFailure(
     deploy: Deploy,
-    runUUID: string | null | undefined,
+    runUUID: string,
     {
       status,
       error,
@@ -571,26 +584,19 @@ export default class DeployService extends BaseService {
       fallbackMessage: string;
     }
   ): Promise<false> {
-    const activeRunUUID = runUUID || deploy.runUUID || nanoid();
-
-    if (deploy.runUUID !== activeRunUUID) {
-      await deploy.$query().patch({ runUUID: activeRunUUID });
-      deploy.runUUID = activeRunUUID;
-    }
-
     await this.patchAndUpdateActivityFeed(
       deploy,
       {
         status,
         statusMessage: statusMessageFromError(error, fallbackMessage),
       },
-      activeRunUUID
+      runUUID
     );
 
     return false;
   }
 
-  private getApiBuildSourceRef(
+  private getPinnedBuildSourceRef(
     build: Build | null | undefined,
     deployGithubRepositoryId: number | null | undefined,
     deployBranchName: string | null | undefined,
@@ -599,7 +605,6 @@ export default class DeployService extends BaseService {
     sourceBranch?: string | null
   ): string | null {
     if (
-      build?.triggerType === 'api' &&
       sourceRef &&
       sourceGithubRepositoryId != null &&
       deployGithubRepositoryId != null &&
@@ -635,7 +640,7 @@ export default class DeployService extends BaseService {
     sourceGithubRepositoryId?: number | null,
     sourceBranch?: string | null
   ): Promise<string> {
-    const pinned = this.getApiBuildSourceRef(
+    const pinned = this.getPinnedBuildSourceRef(
       deploy.build,
       deploy.githubRepositoryId,
       deploy.branchName,
@@ -669,6 +674,55 @@ export default class DeployService extends BaseService {
     );
   }
 
+  private async patchDeployForRun(
+    deploy: Deploy,
+    runUUID: string,
+    params: Objection.PartialModelObject<Deploy>
+  ): Promise<boolean> {
+    const updated = await this.db.models.Deploy.query().where({ id: deploy.id, runUUID }).patch(params);
+    if (!updated) {
+      getLogger().debug(`Deploy: stale write skipped deployId=${deploy.id} runUUID=${runUUID}`);
+      return false;
+    }
+    return true;
+  }
+
+  private async isDeployRunCurrent(deploy: Deploy, runUUID: string): Promise<boolean> {
+    const current = await this.db.models.Deploy.query().findOne({ id: deploy.id, runUUID }).select('id');
+    return Boolean(current);
+  }
+
+  private async isBuildRunCurrent(
+    buildId: number | null | undefined,
+    runUUID: string,
+    expectedGeneration?: number
+  ): Promise<boolean> {
+    if (!buildId) return false;
+    let current = this.db.models.Build.query().findOne({ id: buildId, runUUID }).whereNull('deletedAt');
+    if (expectedGeneration != null) current = current.where('desiredGeneration', expectedGeneration);
+    return Boolean(await current);
+  }
+
+  private async isDeploymentRunCurrent(deploy: Deploy, runUUID: string, expectedGeneration?: number): Promise<boolean> {
+    if (!(await this.isDeployRunCurrent(deploy, runUUID))) return false;
+    return expectedGeneration == null || this.isBuildRunCurrent(deploy.buildId, runUUID, expectedGeneration);
+  }
+
+  private async withDeploySecretMutation<T>(
+    deploy: Deploy,
+    runUUID: string,
+    expectedGeneration: number | undefined,
+    action: () => Promise<T>
+  ): Promise<AuthorityLockResult<T>> {
+    const isCurrent = () => this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration);
+    const gate = this.db.services?.BuildService?.withCurrentDeploySecretMutationLock;
+    if (typeof gate === 'function') {
+      return gate.call(this.db.services.BuildService, deploy.id, isCurrent, action);
+    }
+    if (!(await isCurrent())) return { admitted: false };
+    return { admitted: true, value: await action() };
+  }
+
   public async patchAndUpdateActivityFeed(
     deploy: Deploy,
     params: Objection.PartialModelObject<Deploy>,
@@ -677,18 +731,14 @@ export default class DeployService extends BaseService {
   ) {
     let build: Build;
     try {
-      const id = deploy?.id;
       const failureStatuses = [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED];
       const status = params.status as DeployStatus;
       const fallbackStatusMessage =
         !params.statusMessage && failureStatuses.includes(status) ? fallbackDeployStatusMessage(status) : '';
       const patchParams = fallbackStatusMessage ? { ...params, statusMessage: fallbackStatusMessage } : params;
 
-      await this.db.models.Deploy.query().where({ id, runUUID }).patch(patchParams);
-      if (deploy.runUUID !== runUUID) {
-        getLogger().debug(`runUUID mismatch: deployRunUUID=${deploy.runUUID} providedRunUUID=${runUUID}`);
-        return;
-      }
+      const updated = await this.patchDeployForRun(deploy, runUUID, patchParams);
+      if (!updated) return;
 
       await deploy.$fetchGraph('build.pullRequest');
       build = deploy?.build;
@@ -766,7 +816,19 @@ export default class DeployService extends BaseService {
       );
   }
 
-  private async patchDeployWithTag({ tag, deploy, initTag, ecrDomain }) {
+  private async patchDeployWithTag({
+    tag,
+    deploy,
+    initTag,
+    ecrDomain,
+    runUUID,
+  }: {
+    tag: string;
+    deploy: Deploy;
+    initTag: string;
+    ecrDomain: string;
+    runUUID: string;
+  }) {
     await deploy.$fetchGraph('[build, deployable]');
     const { deployable } = deploy;
     let ecrRepo = deployable?.ecr as string;
@@ -776,22 +838,16 @@ export default class DeployService extends BaseService {
 
     const dockerImage = codefresh.getRepositoryTag({ tag, ecrRepo, ecrDomain });
 
-    if (deployable?.initDockerfilePath) {
-      const initDockerImage = codefresh.getRepositoryTag({ tag: initTag, ecrRepo, ecrDomain });
-      await deploy
-        .$query()
-        .patch({
-          initDockerImage,
-        })
-        .catch((error) => {
-          getLogger().warn({ error }, 'Deploy: tag patch failed');
-        });
-    }
-
-    await deploy.$query().patch({
+    const initDockerImage = deployable?.initDockerfilePath
+      ? codefresh.getRepositoryTag({ tag: initTag, ecrRepo, ecrDomain })
+      : undefined;
+    await this.patchDeployForRun(deploy, runUUID, {
       status: DeployStatus.BUILT,
       dockerImage,
       statusMessage: 'Successfully built image',
+      ...(initDockerImage ? { initDockerImage } : {}),
+    }).catch((error) => {
+      getLogger().warn({ error }, 'Deploy: tag patch failed');
     });
   }
 
@@ -800,11 +856,13 @@ export default class DeployService extends BaseService {
     serviceName,
     secretProviders,
     runUUID,
+    expectedGeneration,
   }: {
     deploy: Deploy;
     serviceName: string;
     secretProviders: SecretProvidersConfig | undefined;
     runUUID: string;
+    expectedGeneration?: number;
   }): Promise<SyncedServiceExternalSecrets | false> {
     const emptyResult = { secretNames: [], buildSecretEnvKeys: new Set<string>() };
 
@@ -844,7 +902,9 @@ export default class DeployService extends BaseService {
       getLogger().error(
         `Build: secret env conflict service=${serviceName} keys=[${Array.from(conflictingSecretEnvKeys).join(', ')}]`
       );
-      await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      if (await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration)) {
+        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      }
       return false;
     }
 
@@ -856,22 +916,36 @@ export default class DeployService extends BaseService {
 
     await deploy.$fetchGraph('[build.[pullRequest]]');
 
-    await createOrUpdateNamespace({
-      name: deploy.build.namespace,
-      buildUUID: deploy.build.uuid,
-      staticEnv: deploy.build.isStatic,
-      pullRequest: deploy.build.pullRequest,
-      waitForReady: true,
-    });
-
     const secretProcessor = new SecretProcessor(secretProviders);
 
-    const secretResult = await secretProcessor.processEnvSecrets({
-      env: envToProcess,
-      serviceName,
-      namespace: deploy.build.namespace,
-      buildUuid: deploy.uuid,
+    // Reconciliation prepared the namespace under its short configuration
+    // lock. Keep the legacy/direct path self-contained without putting C's
+    // build behind an older generation's long native promotion.
+    if (expectedGeneration == null) {
+      await createOrUpdateNamespace({
+        name: deploy.build.namespace,
+        buildUUID: deploy.build.uuid,
+        staticEnv: deploy.build.isStatic,
+        pullRequest: deploy.build.pullRequest,
+        waitForReady: true,
+      });
+    }
+
+    // Native build and native Helm write the same per-service ExternalSecrets.
+    // Serialize only that short write; provider convergence waits outside it.
+    const mutation = await this.withDeploySecretMutation(deploy, runUUID, expectedGeneration, () => {
+      return secretProcessor.processEnvSecrets({
+        env: envToProcess,
+        serviceName,
+        namespace: deploy.build.namespace,
+        buildUuid: deploy.uuid,
+      });
     });
+    if (!mutation.admitted) {
+      getLogger({ deployId: deploy.id }).info('Build: external-secret mutation skipped reason=superseded');
+      return false;
+    }
+    const secretResult = mutation.value;
 
     const buildSecretEnvKeys = new Set(
       secretResult.secretRefs.filter((ref) => buildSecretRefKeys.has(ref.envKey)).map((ref) => ref.envKey)
@@ -907,7 +981,9 @@ export default class DeployService extends BaseService {
       return { secretNames, buildSecretEnvKeys };
     } catch (error) {
       getLogger().error({ error }, `Build: secret sync failed service=${serviceName}`);
-      await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      if (await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration)) {
+        await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+      }
       return false;
     }
   }
@@ -931,7 +1007,9 @@ export default class DeployService extends BaseService {
     runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    expectedGeneration?: number,
+    nativeServiceAccount?: string
   ) {
     const { build, deployable } = deploy;
     const uuid = build?.uuid;
@@ -1004,6 +1082,10 @@ export default class DeployService extends BaseService {
         // if this deploy has any env vars that depend on other builds, we need to wait for those builds to finish
         // and update the env vars in this deploy before we can build the image
         await this.waitAndResolveForBuildDependentEnvVars(deploy, envVariables, runUUID);
+        if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+          getLogger().info('Image: stopped after dependency wait reason=superseded');
+          return true;
+        }
 
         await deploy.reload();
         await this.patchAndUpdateActivityFeed(
@@ -1044,10 +1126,15 @@ export default class DeployService extends BaseService {
             serviceName: deployable.name,
             secretProviders,
             runUUID,
+            expectedGeneration,
           });
 
           if (!syncedExternalSecrets) {
             return false;
+          }
+          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+            getLogger().info('Image: stopped after secret sync reason=superseded');
+            return true;
           }
 
           const filteredEnvVars =
@@ -1071,6 +1158,7 @@ export default class DeployService extends BaseService {
             podAnnotations: deployable.builder?.podAnnotations,
             secretRefs: syncedExternalSecrets.secretNames,
             secretEnvKeys: Array.from(syncedExternalSecrets.buildSecretEnvKeys),
+            ...(nativeServiceAccount ? { serviceAccount: nativeServiceAccount } : {}),
           };
 
           if (!initDockerfilePath) {
@@ -1078,15 +1166,27 @@ export default class DeployService extends BaseService {
           }
 
           const result = await buildWithNative(deploy, nativeOptions);
+          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+            getLogger().info('Image: stopped after native build reason=superseded');
+            return true;
+          }
 
           // Persist build logs so failures stay diagnosable after the build job pod is gone.
           if (result.logs) {
-            await deploy.$query().patch({ buildOutput: result.logs.slice(-65536) });
+            await this.patchDeployForRun(deploy, runUUID, { buildOutput: result.logs.slice(-65536) });
+          }
+          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+            getLogger().info('Image: result ignored reason=superseded');
+            return true;
           }
 
           if (result.success) {
-            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
             if (buildOptions?.afterBuildPipelineId) {
+              if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+                getLogger().info('After-build pipeline: skipped reason=superseded');
+                return true;
+              }
               const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
 
               const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
@@ -1109,13 +1209,17 @@ export default class DeployService extends BaseService {
         const buildPipelineId = await codefresh.buildImage(buildOptions);
         const buildLogs = `https://g.codefresh.io/build/${buildPipelineId}`;
         await this.patchAndUpdateActivityFeed(deploy, { buildLogs }, runUUID);
-        await deploy.$query().patch({ buildPipelineId });
+        await this.patchDeployForRun(deploy, runUUID, { buildPipelineId });
         const buildSuccess = await codefresh.waitForImage(buildPipelineId);
         const buildOutput = await codefresh.getLogs(buildPipelineId);
-        await deploy.$query().patch({ buildOutput });
+        if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+          getLogger().info('Image: Codefresh result ignored reason=superseded');
+          return true;
+        }
+        await this.patchDeployForRun(deploy, runUUID, { buildOutput });
 
         if (buildSuccess) {
-          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+          await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
           getLogger().info('Image: built');
           return true;
         } else {
@@ -1131,13 +1235,18 @@ export default class DeployService extends BaseService {
             serviceName: deployable.name,
             secretProviders,
             runUUID,
+            expectedGeneration,
           });
 
           if (!syncedExternalSecrets) {
             return false;
           }
+          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+            getLogger().info('Image: stopped after secret sync reason=superseded');
+            return true;
+          }
         }
-        await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain });
+        await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
         await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILT }, runUUID);
         return true;
       }
@@ -1223,7 +1332,7 @@ export default class DeployService extends BaseService {
 
     await Promise.all(pipelinePromises);
 
-    await deploy.$query().patch({
+    await this.patchDeployForRun(deploy, runUUID, {
       env: {
         ...envVariables,
         ...extractedValues,
