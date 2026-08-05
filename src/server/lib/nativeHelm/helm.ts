@@ -365,7 +365,7 @@ export async function nativeHelmDeploy(
   const localPath = `${MANIFEST_PATH}/helm/${deploy.uuid}-helm-${shortSha}`;
   await fs.promises.mkdir(`${MANIFEST_PATH}/helm/`, { recursive: true });
   await fs.promises.writeFile(localPath, manifest, 'utf8');
-  await shellPromise(`kubectl apply -f ${localPath} --request-timeout=60s`, { timeout: 90_000 });
+  await shellPromise(`kubectl apply -f ${localPath}`, { timeout: 90_000 });
 
   const jobResult = await waitForJobAndGetLogs(jobName, namespace, `[HELM ${deploy.uuid}]`);
 

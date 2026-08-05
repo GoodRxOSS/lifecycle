@@ -1804,9 +1804,10 @@ describe('Native Helm', () => {
       expect(waitForSecretSync).toHaveBeenCalledWith({ 'sample-secret': ['TOKEN'] }, 'testns', 60000, {
         'sample-secret': 'sync-c',
       });
-      expect(shellPromise).toHaveBeenCalledWith(expect.stringContaining('--request-timeout=60s'), {
+      expect(shellPromise).toHaveBeenCalledWith(expect.stringContaining('kubectl apply -f '), {
         timeout: 90_000,
       });
+      expect(shellPromise).not.toHaveBeenCalledWith(expect.stringContaining('--request-timeout'), expect.anything());
       expect(outputPatch.where).toHaveBeenCalledWith({ id: 42, runUUID: 'run-c' });
       expect(archiveLogs).toHaveBeenCalledWith(expect.objectContaining({ jobName: expectedJobName }), 'helm logs');
       expect(result).toEqual({

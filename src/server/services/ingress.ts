@@ -231,7 +231,7 @@ export default class IngressService extends BaseService {
         recursive: true,
       });
       await fs.promises.writeFile(localPath, manifest, 'utf8');
-      await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace} --request-timeout=60s`, {
+      await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`, {
         timeout: 90_000,
       });
     } catch (error) {

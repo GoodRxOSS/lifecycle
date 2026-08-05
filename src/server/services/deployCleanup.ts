@@ -280,7 +280,7 @@ export default class DeployCleanupService extends BaseService {
         shellPromise(
           `kubectl delete ${resourceType} ${filteredNames.map(shellQuote).join(' ')} --namespace ${shellQuote(
             namespace
-          )} --ignore-not-found --request-timeout=60s`,
+          )} --ignore-not-found`,
           { timeout: 90_000 }
         ),
     };
@@ -294,7 +294,7 @@ export default class DeployCleanupService extends BaseService {
         shellPromise(
           `kubectl delete ${resourceType} --namespace ${shellQuote(namespace)} -l ${shellQuote(
             selector
-          )} --ignore-not-found --request-timeout=60s`,
+          )} --ignore-not-found`,
           { timeout: 90_000 }
         ),
     };
@@ -352,7 +352,7 @@ export default class DeployCleanupService extends BaseService {
             shellPromise(
               `kubectl delete externalsecret ${shellQuote(secretName)} --namespace ${shellQuote(
                 namespace
-              )} --ignore-not-found --request-timeout=60s`,
+              )} --ignore-not-found`,
               { timeout: 90_000 }
             ),
         },
@@ -361,9 +361,7 @@ export default class DeployCleanupService extends BaseService {
           resourceType: 'secret',
           run: () =>
             shellPromise(
-              `kubectl delete secret ${shellQuote(secretName)} --namespace ${shellQuote(
-                namespace
-              )} --ignore-not-found --request-timeout=60s`,
+              `kubectl delete secret ${shellQuote(secretName)} --namespace ${shellQuote(namespace)} --ignore-not-found`,
               { timeout: 90_000 }
             ),
         },

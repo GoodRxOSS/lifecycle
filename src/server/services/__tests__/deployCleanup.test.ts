@@ -124,16 +124,16 @@ describe('DeployCleanupService', () => {
     const joinedCommands = commands.join('\n');
 
     expect(commands).toContain(
-      "kubectl delete deployment 'old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete deployment 'old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
     );
     expect(commands).toContain(
-      "kubectl delete service 'old-api-build-1' 'internal-lb-old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete service 'old-api-build-1' 'internal-lb-old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
     );
     expect(commands).toContain(
-      "kubectl delete ingress 'ingress-old-api-build-1' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete ingress 'ingress-old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
     );
     expect(commands).toContain(
-      "kubectl delete pvc 'old-api-build-1-data-claim' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete pvc 'old-api-build-1-data-claim' --namespace 'env-build-1' --ignore-not-found"
     );
     expect(commands).toContain("helm uninstall 'old-api-build-1' --namespace 'env-build-1' --timeout 5m");
     expect(joinedCommands).toContain('deploy_uuid=old-api-build-1');
@@ -141,11 +141,12 @@ describe('DeployCleanupService', () => {
     expect(joinedCommands).toContain('deployable-id=9');
     expect(joinedCommands).not.toContain('service=old-api');
     expect(joinedCommands).toContain(
-      "kubectl delete externalsecret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete externalsecret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found"
     );
     expect(joinedCommands).toContain(
-      "kubectl delete secret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found --request-timeout=60s"
+      "kubectl delete secret 'old-api-aws-secrets' --namespace 'env-build-1' --ignore-not-found"
     );
+    expect(joinedCommands).not.toContain('--request-timeout');
 
     for (const [command, options] of mockShellPromise.mock.calls) {
       if (String(command).startsWith('kubectl ')) expect(options).toEqual({ timeout: 90_000 });
