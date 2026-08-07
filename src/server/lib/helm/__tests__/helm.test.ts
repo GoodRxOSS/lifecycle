@@ -124,6 +124,33 @@ describe('Helm tests', () => {
     expect(metadata).toEqual(expectedMetadata);
   });
 
+  test('constructHelmDeploysBuildMetaData hydrates an unloaded pull request on an existing build', async () => {
+    const deploy = {
+      build: {
+        uuid: '123',
+        pullRequestId: 42,
+      },
+      $fetchGraph: jest.fn(async () => {
+        deploy.build.pullRequest = {
+          branchName: 'feature/branch',
+          fullName: 'user/repo',
+          latestCommit: 'abc123',
+        };
+      }),
+    } as any;
+
+    const metadata = await constructHelmDeploysBuildMetaData([deploy]);
+
+    expect(deploy.$fetchGraph).toHaveBeenCalledWith('build.pullRequest');
+    expect(metadata).toEqual({
+      uuid: '123',
+      branchName: 'feature/branch',
+      fullName: 'user/repo',
+      sha: 'abc123',
+      error: '',
+    });
+  });
+
   test('constructHelmDeploysBuildMetaData should handle missing build or pull request', async () => {
     const deploys = [
       {

@@ -500,7 +500,7 @@ export const constructHelmDeploysBuildMetaData = async (deploys: Deploy[]) => {
   try {
     const deploy = deploys?.[0];
     let build = deploy?.build;
-    if (!build) {
+    if (!build || (build.pullRequestId != null && build.pullRequest == null)) {
       await deploy?.$fetchGraph('build.pullRequest');
     }
     build = deploy?.build;
