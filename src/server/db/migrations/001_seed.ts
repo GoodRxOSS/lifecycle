@@ -340,6 +340,7 @@ export async function up(knex: Knex): Promise<any> {
       "ingressAnnotations" json DEFAULT '{}'::json,
       "appShort" varchar(255) DEFAULT NULL::character varying,
       helm json DEFAULT '{}'::json,
+      "requires" text[] NOT NULL DEFAULT ARRAY[]::text[],
       "deploymentDependsOn" text[] DEFAULT ARRAY[]::text[],
       builder jsonb DEFAULT '{}'::jsonb,
       "ecr" varchar(255) default NULL::character varying,

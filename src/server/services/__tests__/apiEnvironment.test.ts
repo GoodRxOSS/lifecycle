@@ -1021,12 +1021,46 @@ describe('sweepExpiredApiEnvironments', () => {
       whereNotIn: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockResolvedValue(expired),
     };
-    const stuckChain: any = {
+    const apiTeardownScope: any = {
       where: jest.fn().mockReturnThis(),
       whereIn: jest.fn().mockReturnThis(),
+    };
+    const pullRequestTeardownState: any = {
+      where: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+    };
+    const pullRequestTeardownScope: any = {
+      where: jest.fn((condition: unknown) => {
+        if (typeof condition === 'function') condition(pullRequestTeardownState);
+        return pullRequestTeardownScope;
+      }),
+      whereNotNull: jest.fn().mockReturnThis(),
+      whereNot: jest.fn().mockReturnThis(),
+    };
+    const teardownScope: any = {
+      where: jest.fn((callback: (builder: any) => void) => {
+        callback(apiTeardownScope);
+        return teardownScope;
+      }),
+      orWhere: jest.fn((callback: (builder: any) => void) => {
+        callback(pullRequestTeardownScope);
+        return teardownScope;
+      }),
+    };
+    const stuckChain: any = {
+      where: jest.fn((condition: unknown) => {
+        if (typeof condition === 'function') condition(teardownScope);
+        return stuckChain;
+      }),
       whereNull: jest.fn().mockResolvedValue(stuck),
     };
-    return { expiredChain, stuckChain };
+    return {
+      expiredChain,
+      stuckChain,
+      apiTeardownScope,
+      pullRequestTeardownScope,
+      pullRequestTeardownState,
+    };
   };
 
   it('enqueues deletion only for expired live API builds', async () => {
@@ -1071,26 +1105,41 @@ describe('sweepExpiredApiEnvironments', () => {
     expect(result).toEqual({ expired: 2, stuckTeardowns: 0, enqueued: 1 });
   });
 
-  it('re-enqueues teardown for API builds stuck in tearing_down beyond the grace window', async () => {
-    const stuck = [{ id: 9, uuid: 'stuck-env-999999' }];
-    const { expiredChain, stuckChain } = sweepChains([], stuck);
+  it('re-enqueues stuck API teardown and both phases of PR teardown beyond the grace window', async () => {
+    const stuck = [
+      { id: 9, uuid: 'stuck-env-999999' },
+      { id: 10, uuid: 'stuck-pr-101010', pullRequestId: 44 },
+      { id: 11, uuid: 'claimed-pr-111111', pullRequestId: 45, runUUID: 'build-teardown-11' },
+    ];
+    const { expiredChain, stuckChain, apiTeardownScope, pullRequestTeardownScope, pullRequestTeardownState } =
+      sweepChains([], stuck);
     const { service, models } = makeService();
     (models.Build.query as jest.Mock).mockReturnValueOnce(expiredChain).mockReturnValueOnce(stuckChain);
     const enqueue = jest.spyOn(service, 'enqueueBuildDeletion').mockResolvedValue();
 
     const result = await service.sweepExpiredApiEnvironments();
 
-    expect(stuckChain.where).toHaveBeenCalledWith('triggerType', 'api');
-    expect(stuckChain.whereIn).toHaveBeenCalledWith('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN]);
+    expect(apiTeardownScope.where).toHaveBeenCalledWith('triggerType', 'api');
+    expect(apiTeardownScope.whereIn).toHaveBeenCalledWith('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN]);
+    expect(pullRequestTeardownScope.whereNotNull).toHaveBeenCalledWith('pullRequestId');
+    expect(pullRequestTeardownScope.whereNot).toHaveBeenCalledWith('status', BuildStatus.TORN_DOWN);
+    expect(pullRequestTeardownState.where).toHaveBeenCalledWith('status', BuildStatus.TEARING_DOWN);
+    expect(pullRequestTeardownState.orWhereRaw).toHaveBeenCalledWith('?? = concat(?, ??)', [
+      'runUUID',
+      'build-teardown-',
+      'id',
+    ]);
     expect(stuckChain.where).toHaveBeenCalledWith(
       'updatedAt',
       '<=',
       new Date(NOW.getTime() - 15 * 60 * 1000).toISOString()
     );
     expect(stuckChain.whereNull).toHaveBeenCalledWith('deletedAt');
-    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledTimes(3);
     expect(enqueue).toHaveBeenCalledWith(stuck[0], 'teardown_stuck');
-    expect(result).toEqual({ expired: 0, stuckTeardowns: 1, enqueued: 1 });
+    expect(enqueue).toHaveBeenCalledWith(stuck[1], 'teardown_stuck');
+    expect(enqueue).toHaveBeenCalledWith(stuck[2], 'teardown_stuck');
+    expect(result).toEqual({ expired: 0, stuckTeardowns: 3, enqueued: 3 });
   });
 });
 
@@ -1145,6 +1194,25 @@ describe('enqueueBuildDeletion', () => {
     expect(queueAdd.mock.calls.map((call) => call[1].teardownRunUUID)).toEqual([
       'build-teardown-7',
       'build-teardown-7',
+    ]);
+  });
+
+  it('does not coalesce PR teardown recovery with an authoritative destroy', async () => {
+    const { service, queueAdd } = makeService();
+    const build = {
+      id: 7,
+      uuid: 'pr-env-123456',
+      status: BuildStatus.DEPLOYED,
+      pullRequestId: 55,
+      runUUID: 'build-teardown-7',
+    } as any;
+
+    await service.enqueueBuildDeletion(build, 'teardown_stuck');
+    await service.enqueueBuildDeletion(build, 'manual_destroy');
+
+    expect(queueAdd.mock.calls.map((call) => call[2].jobId)).toEqual([
+      expect.stringMatching(/^build-delete-7-conditional-/),
+      'build-delete-7-authoritative',
     ]);
   });
 
@@ -3026,6 +3094,52 @@ describe('processDeleteQueue', () => {
     );
   });
 
+  it('holds deployment authority while acquiring promotion and running cleanup', async () => {
+    const build = { id: 3, uuid: 'x', expiresAt: null };
+    const { service, deleteBuild } = makeDeleteQueueService(build);
+    const events: string[] = [];
+    const deploymentLock: any = {
+      extend: jest.fn().mockResolvedValue(undefined),
+      unlock: jest.fn(async () => events.push('unlock:deployment')),
+    };
+    const promotionLock: any = {
+      extend: jest.fn().mockResolvedValue(undefined),
+      unlock: jest.fn(async () => events.push('unlock:promotion')),
+    };
+    const plainLock = jest.fn();
+    const lockWithOptions = jest.fn(async (resource: string) => {
+      events.push(`lock:${resource}`);
+      return resource === 'build-deployment.3' ? deploymentLock : promotionLock;
+    });
+    (service as any).redlock = { lock: plainLock, lockWithOptions };
+    deleteBuild.mockImplementation(async () => {
+      events.push('cleanup');
+    });
+
+    await service.processDeleteQueue(deleteJob('api_delete'));
+
+    expect(events).toEqual([
+      'lock:build-deployment.3',
+      'lock:build-promotion.3',
+      'cleanup',
+      'unlock:promotion',
+      'unlock:deployment',
+    ]);
+    expect(plainLock).not.toHaveBeenCalled();
+    expect(lockWithOptions).toHaveBeenNthCalledWith(
+      1,
+      'build-deployment.3',
+      15 * 60 * 1000,
+      expect.objectContaining({ retryCount: 4 })
+    );
+    expect(lockWithOptions).toHaveBeenNthCalledWith(
+      2,
+      'build-promotion.3',
+      15 * 60 * 1000,
+      expect.objectContaining({ retryCount: 4 })
+    );
+  });
+
   it('serializes an expiry claim ahead of a concurrent extension so teardown wins cleanly', async () => {
     const sharedBuild: any = {
       id: 3,
@@ -3074,7 +3188,7 @@ describe('processDeleteQueue', () => {
     };
     (models.Build.query as jest.Mock).mockImplementation(() => ({
       findById: jest.fn(() => deleteLock),
-      findOne: jest.fn(() => extensionLock),
+      findOne: jest.fn((identity: any) => (identity.id === sharedBuild.id ? sharedBuild : extensionLock)),
       patchAndFetchById: jest.fn(),
     }));
     const deleteBuild = jest.fn().mockResolvedValue(undefined);
@@ -3117,9 +3231,68 @@ describe('processDeleteQueue', () => {
 
     await service.processDeleteQueue(deleteJob('pull_request_closed'));
 
-    expect(build.$fetchGraph).toHaveBeenCalledWith('pullRequest', expect.objectContaining({ transaction: {} }));
+    expect(build.$fetchGraph).toHaveBeenCalledWith('pullRequest');
     expect(claimPatch).not.toHaveBeenCalled();
     expect(deleteBuild).not.toHaveBeenCalled();
+  });
+
+  it('cancels a claimed PR deletion when the PR reopens while promotion is busy', async () => {
+    const build = {
+      id: 3,
+      uuid: 'x',
+      pullRequestId: 44,
+      pullRequest: { status: 'closed', deployOnUpdate: true },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const { service, deleteBuild, claimPatch } = makeDeleteQueueService(build);
+    const deploymentLock = {
+      extend: jest.fn().mockResolvedValue(undefined),
+      unlock: jest.fn().mockResolvedValue(undefined),
+    };
+    let promotionAttempted!: () => void;
+    const promotionWasAttempted = new Promise<void>((resolve) => {
+      promotionAttempted = resolve;
+    });
+    (service as any).redlock = {
+      lock: jest.fn(),
+      lockWithOptions: jest.fn(async (resource: string) => {
+        if (resource === 'build-deployment.3') return deploymentLock;
+        build.pullRequest.status = 'open';
+        promotionAttempted();
+        throw new Error('promotion busy');
+      }),
+    };
+
+    const processing = service.processDeleteQueue(deleteJob('pull_request_closed'));
+    await promotionWasAttempted;
+    await jest.advanceTimersByTimeAsync(250);
+    await expect(processing).resolves.toBeUndefined();
+
+    expect(claimPatch).toHaveBeenCalledWith({ runUUID: 'build-teardown-3' });
+    expect(build.status).toBe(BuildStatus.DEPLOYED);
+    expect(deleteBuild).not.toHaveBeenCalled();
+    expect(deploymentLock.unlock).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes a same-owner PR teardown retry after cleanup was admitted and the PR reopened', async () => {
+    const build = {
+      id: 3,
+      uuid: 'x',
+      status: BuildStatus.TEARING_DOWN,
+      runUUID: 'build-teardown-3',
+      pullRequestId: 44,
+      pullRequest: { status: 'open', deployOnUpdate: true },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const { service, deleteBuild, claimPatch } = makeDeleteQueueService(build);
+
+    await service.processDeleteQueue(deleteJob('pull_request_closed'));
+
+    expect(claimPatch).not.toHaveBeenCalled();
+    expect(deleteBuild).toHaveBeenCalledWith(
+      build,
+      expect.objectContaining({ reason: 'pull_request_closed', runUUID: 'build-teardown-3' })
+    );
   });
 
   it('keeps a manual destroy authoritative after a PR is re-enabled', async () => {
@@ -3162,6 +3335,55 @@ describe('processDeleteQueue', () => {
     expect(deleteBuild).not.toHaveBeenCalled();
   });
 
+  it('does not let a stale stuck-teardown job claim a live build', async () => {
+    const build = { id: 3, uuid: 'x', status: BuildStatus.DEPLOYED, runUUID: 'run-c', expiresAt: null };
+    const { service, deleteBuild, expiryLock, claimPatch } = makeDeleteQueueService(build);
+
+    await service.processDeleteQueue(deleteJob('teardown_stuck'));
+
+    expect(expiryLock.forUpdate).not.toHaveBeenCalled();
+    expect(claimPatch).not.toHaveBeenCalled();
+    expect(deleteBuild).not.toHaveBeenCalled();
+  });
+
+  it('resumes a stuck PR teardown claim that failed before publishing tearing_down', async () => {
+    const build = {
+      id: 3,
+      uuid: 'x',
+      status: BuildStatus.DEPLOYED,
+      runUUID: 'build-teardown-3',
+      pullRequestId: 44,
+      pullRequest: { status: 'closed', deployOnUpdate: true },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const { service, deleteBuild } = makeDeleteQueueService(build);
+
+    await service.processDeleteQueue(deleteJob('teardown_stuck'));
+
+    expect(deleteBuild).toHaveBeenCalledWith(
+      build,
+      expect.objectContaining({ reason: 'teardown_stuck', runUUID: 'build-teardown-3' })
+    );
+  });
+
+  it('cancels a stuck pre-status PR teardown claim after deploy authority returns', async () => {
+    const build = {
+      id: 3,
+      uuid: 'x',
+      status: BuildStatus.DEPLOYED,
+      runUUID: 'build-teardown-3',
+      pullRequestId: 44,
+      pullRequest: { status: 'open', deployOnUpdate: true },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const { service, deleteBuild, expiryLock } = makeDeleteQueueService(build);
+
+    await service.processDeleteQueue(deleteJob('teardown_stuck'));
+
+    expect(expiryLock.forUpdate).not.toHaveBeenCalled();
+    expect(deleteBuild).not.toHaveBeenCalled();
+  });
+
   it('lets only one concurrent delete job clean up before the vanity name can be reused', async () => {
     const sharedBuild: any = {
       id: 3,
@@ -3191,7 +3413,10 @@ describe('processDeleteQueue', () => {
       whereNull: jest.fn().mockReturnThis(),
       forUpdate: jest.fn(async () => (sharedBuild.deletedAt ? undefined : sharedBuild)),
     };
-    (models.Build.query as jest.Mock).mockImplementation(() => ({ findById: jest.fn(() => lock) }));
+    (models.Build.query as jest.Mock).mockImplementation(() => ({
+      findById: jest.fn(() => lock),
+      findOne: jest.fn().mockResolvedValue(sharedBuild),
+    }));
 
     let finishCleanup!: () => void;
     const cleanupCanFinish = new Promise<void>((resolve) => {
@@ -3354,6 +3579,50 @@ describe('deleteBuild teardown ownership', () => {
     expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.TEARING_DOWN, 'run-before', true, true);
   });
 
+  it.each(['pull_request_closed', 'teardown_stuck'])(
+    'cancels %s PR cleanup when authority returns before teardown starts',
+    async (reason) => {
+      const { service, updateStatus } = makeTeardownService();
+      const { build } = makeTeardownBuild({
+        pullRequestId: 55,
+        pullRequest: { status: 'open', deployOnUpdate: true },
+        runUUID: 'build-teardown-7',
+        idempotencyKey: null,
+      });
+      const kubernetes = jest.requireMock('server/lib/kubernetes');
+
+      await service.deleteBuild(build, {
+        reason,
+        runUUID: 'build-teardown-7',
+        deploymentLockAlreadyHeld: true,
+      });
+
+      expect(updateStatus).not.toHaveBeenCalled();
+      expect(kubernetes.deleteNamespace).not.toHaveBeenCalled();
+    }
+  );
+
+  it('finishes conditional PR cleanup after the same owner published tearing_down', async () => {
+    const { service, updateStatus } = makeTeardownService();
+    const { build } = makeTeardownBuild({
+      status: BuildStatus.TEARING_DOWN,
+      pullRequestId: 55,
+      pullRequest: { status: 'open', deployOnUpdate: true },
+      runUUID: 'build-teardown-7',
+      idempotencyKey: null,
+    });
+    const kubernetes = jest.requireMock('server/lib/kubernetes');
+
+    await service.deleteBuild(build, {
+      reason: 'pull_request_closed',
+      runUUID: 'build-teardown-7',
+      deploymentLockAlreadyHeld: true,
+    });
+
+    expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.TEARING_DOWN, 'build-teardown-7', true, true);
+    expect(kubernetes.deleteNamespace).toHaveBeenCalledWith('env-api-env-123456');
+  });
+
   it('soft-deletes torn-down API environments so the vanity uuid is released', async () => {
     const { service } = makeTeardownService();
     const { build, patch } = makeTeardownBuild({ kind: 'environment', triggerType: 'api' });
@@ -3433,12 +3702,33 @@ describe('build setup authority', () => {
     };
     jest.spyOn(service as any, 'findOrCreateBuild').mockResolvedValue(build);
     jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
-    const lock = jest.spyOn(service, 'withBuildDeploymentLock');
+    const lock = jest.spyOn(service as any, 'withCurrentBuildDeploymentLock');
     const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
 
     await service.createBuild({ id: 5 } as any, { pullRequestId: 55, repositoryId: 1 }, {} as any);
 
-    expect(lock).toHaveBeenCalledWith(7, expect.any(Function));
+    expect(lock).toHaveBeenCalledWith(7, expect.any(Function), expect.any(Function));
+    expect(importYaml).not.toHaveBeenCalled();
+  });
+
+  it('does not enter the legacy lock retry budget while PR teardown is active', async () => {
+    const { service } = makeService();
+    const build: any = {
+      id: 7,
+      uuid: 'pr-env-123456',
+      status: BuildStatus.TEARING_DOWN,
+      pullRequestId: 55,
+      pullRequest: { status: 'open', deployOnUpdate: true },
+    };
+    jest.spyOn(service as any, 'findOrCreateBuild').mockResolvedValue(build);
+    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
+    const lockWithOptions = jest.fn();
+    (service as any).redlock = { lock: jest.fn(), lockWithOptions };
+    const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
+
+    await service.createBuild({ id: 5 } as any, { pullRequestId: 55, repositoryId: 1 }, {} as any);
+
+    expect(lockWithOptions).not.toHaveBeenCalled();
     expect(importYaml).not.toHaveBeenCalled();
   });
 
@@ -3458,6 +3748,24 @@ describe('build setup authority', () => {
         pullRequest: { status: 'open', deployOnUpdate: false },
       })
     ).toBe('deploy_disabled');
+  });
+
+  it('blocks PR setup and deployment only while teardown is in progress', () => {
+    const { service } = makeService();
+    const pullRequest = { status: 'open', deployOnUpdate: true };
+
+    expect(
+      (service as any).buildSetupBlockReason({ status: BuildStatus.TEARING_DOWN, pullRequestId: 55, pullRequest })
+    ).toBe('tearing_down');
+    expect(
+      (service as any).deploymentBlockReason({ status: BuildStatus.TEARING_DOWN, pullRequestId: 55, pullRequest })
+    ).toBe('tearing_down');
+    expect(
+      (service as any).buildSetupBlockReason({ status: BuildStatus.TORN_DOWN, pullRequestId: 55, pullRequest })
+    ).toBeNull();
+    expect(
+      (service as any).deploymentBlockReason({ status: BuildStatus.TORN_DOWN, pullRequestId: 55, pullRequest })
+    ).toBeNull();
   });
 });
 

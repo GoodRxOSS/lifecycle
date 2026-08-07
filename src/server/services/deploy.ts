@@ -1166,39 +1166,95 @@ export default class DeployService extends BaseService {
           }
 
           const result = await buildWithNative(deploy, nativeOptions);
-          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
-            getLogger().info('Image: stopped after native build reason=superseded');
-            return true;
+          let runIsCurrent = await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration);
+          const nativeBuildResult = result.success ? 'success' : 'failure';
+          if (!runIsCurrent) {
+            getLogger().info(`Image: native result publication skipped reason=superseded result=${nativeBuildResult}`);
           }
 
           // Persist build logs so failures stay diagnosable after the build job pod is gone.
-          if (result.logs) {
+          if (runIsCurrent && result.logs) {
             await this.patchDeployForRun(deploy, runUUID, { buildOutput: result.logs.slice(-65536) });
           }
-          if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
-            getLogger().info('Image: result ignored reason=superseded');
-            return true;
+          if (runIsCurrent) {
+            runIsCurrent = await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration);
+            if (!runIsCurrent) {
+              getLogger().info(
+                `Image: native result publication skipped reason=superseded result=${nativeBuildResult}`
+              );
+            }
           }
 
           if (result.success) {
-            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
+            if (runIsCurrent) {
+              await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
+              runIsCurrent = await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration);
+            }
+
             if (buildOptions?.afterBuildPipelineId) {
-              if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
-                getLogger().info('After-build pipeline: skipped reason=superseded');
-                return true;
-              }
+              // This pipeline belongs to the produced image. A newer live generation may detach it,
+              // while teardown or deletion must suppress new external work.
               const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
+
+              if (!runIsCurrent) {
+                let hasLiveSuccessor = false;
+                try {
+                  hasLiveSuccessor = await this.db.services.BuildService.isSupersededByNewerLiveDeploymentGeneration(
+                    deploy.buildId,
+                    expectedGeneration
+                  );
+                } catch (error) {
+                  getLogger({ error }).warn('Codefresh: after-build successor check failed');
+                }
+
+                if (!hasLiveSuccessor) {
+                  const skippedLog = {
+                    afterBuildPipelineId: buildOptions.afterBuildPipelineId,
+                    imageTag: ecrRepoTag,
+                  };
+                  getLogger(skippedLog).info(
+                    `Codefresh: after-build pipeline skipped reason=no_live_successor ` +
+                      `afterBuildPipelineId=${skippedLog.afterBuildPipelineId} imageTag=${skippedLog.imageTag}`
+                  );
+                  return true;
+                }
+              }
 
               const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
                 ...deploy.env,
                 ...{ TAG: ecrRepoTag },
                 ...{ branch: branchName },
               });
+              const afterBuildLog = {
+                afterBuildPipelineId: buildOptions.afterBuildPipelineId,
+                pipelineId: afterbuildPipeline,
+                imageTag: ecrRepoTag,
+              };
+              const afterBuildLogDetails =
+                `afterBuildPipelineId=${afterBuildLog.afterBuildPipelineId} ` +
+                `pipelineId=${afterBuildLog.pipelineId} imageTag=${afterBuildLog.imageTag}`;
+              const afterBuildLogger = getLogger(afterBuildLog);
+              afterBuildLogger.info(`Codefresh: after-build pipeline triggered ${afterBuildLogDetails}`);
+
+              if (!runIsCurrent || !(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+                afterBuildLogger.info(
+                  `Codefresh: after-build pipeline detached reason=superseded ${afterBuildLogDetails}`
+                );
+                return true;
+              }
+
               const completed = await codefresh.waitForImage(afterbuildPipeline);
-              if (!completed) return false;
+              if (!completed) {
+                afterBuildLogger.warn(
+                  `Codefresh: after-build pipeline completed result=failure ${afterBuildLogDetails}`
+                );
+                return false;
+              }
+              afterBuildLogger.info(`Codefresh: after-build pipeline completed result=success ${afterBuildLogDetails}`);
             }
             return true;
           } else {
+            if (!runIsCurrent) return true;
             await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
             return false;
           }

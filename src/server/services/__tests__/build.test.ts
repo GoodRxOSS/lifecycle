@@ -1239,6 +1239,78 @@ describe('BuildService deployment reconciliation', () => {
     mockAcceptDeploymentIntent.mockResolvedValue({ accepted: true, generation: 1, scopeKey: 'all' });
   });
 
+  test.each([
+    ['a newer live PR generation', createBuild({ desiredGeneration: 8, runUUID: 'run-c', pullRequestId: 11 }), 7, true],
+    [
+      'a newer live static generation',
+      createBuild({
+        desiredGeneration: 8,
+        runUUID: 'run-c',
+        pullRequest: null,
+        pullRequestId: null,
+        deployEnabled: true,
+        isStatic: true,
+      }),
+      7,
+      true,
+    ],
+    ['the same generation', createBuild({ desiredGeneration: 7, runUUID: 'other-run' }), 7, false],
+    [
+      'a closed PR',
+      createBuild({
+        desiredGeneration: 8,
+        runUUID: 'run-c',
+        pullRequestId: 11,
+        pullRequest: { status: 'closed', deployOnUpdate: true },
+      }),
+      7,
+      false,
+    ],
+    [
+      'a deploy-disabled PR',
+      createBuild({
+        desiredGeneration: 8,
+        runUUID: 'run-c',
+        pullRequestId: 11,
+        pullRequest: { status: 'open', deployOnUpdate: false },
+      }),
+      7,
+      false,
+    ],
+    [
+      'an API teardown',
+      createBuild({
+        desiredGeneration: 8,
+        runUUID: 'build-teardown-1',
+        status: BuildStatus.TEARING_DOWN,
+        pullRequest: null,
+        pullRequestId: null,
+        deployEnabled: false,
+      }),
+      7,
+      false,
+    ],
+    [
+      'a PR teardown owner before status publication',
+      createBuild({
+        desiredGeneration: 8,
+        runUUID: 'build-teardown-1',
+        pullRequestId: 11,
+      }),
+      7,
+      false,
+    ],
+    ['a deleted Build', createBuild({ desiredGeneration: 8, deletedAt: '2026-08-06T00:00:00Z' }), 7, false],
+    ['a stale run without a generation', createBuild({ desiredGeneration: 8 }), undefined, false],
+  ])('permits stale after-build only for %s', async (_case, build, expectedGeneration, expected) => {
+    const { service } = serviceHarness();
+    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
+
+    await expect(
+      service.isSupersededByNewerLiveDeploymentGeneration(1, expectedGeneration as number | undefined)
+    ).resolves.toBe(expected);
+  });
+
   test('signals only the exact durable generation accepted by the mailbox', async () => {
     const { service, add } = serviceHarness();
 
@@ -1657,6 +1729,47 @@ describe('BuildService deployment reconciliation', () => {
     await a;
   });
 
+  test('a superseded image phase cannot enter deployment rollout', async () => {
+    const { service } = serviceHarness();
+    const build = createBuild({ id: 1, runUUID: 'run-a' });
+    const isCurrent = jest
+      .spyOn(service as any, 'isDeploymentRunCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    jest.spyOn(service, 'buildImages').mockResolvedValue(true);
+    jest.spyOn(service, 'deployCLIServices').mockResolvedValue(true);
+    const updateStatus = jest.spyOn(service, 'updateStatusAndComment').mockResolvedValue(undefined);
+    const applyManifests = jest.spyOn(service, 'generateAndApplyManifests').mockResolvedValue(true);
+
+    const result = await (service as any).executeDeploymentScope(
+      {
+        build,
+        runUUID: 'run-a',
+        githubRepositoryId: 100,
+        sourceGithubRepositoryId: 100,
+        sourceRef: 'commit-a',
+        sourceBranch: 'main',
+      },
+      7
+    );
+
+    expect(result).toBeNull();
+    expect(isCurrent).toHaveBeenCalledTimes(2);
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(applyManifests).not.toHaveBeenCalled();
+  });
+
+  test('leaves the latest generation pending while PR teardown is in progress', async () => {
+    const { service, build, markObserved, job } = reconciliationWorkerHarness();
+    build.status = BuildStatus.TEARING_DOWN;
+
+    await expect(service.processDeploymentReconciliationQueue(job(0))).resolves.toBeUndefined();
+
+    expect((service as any).claimDeploymentRun).not.toHaveBeenCalled();
+    expect((service as any).deploymentReconciliationScopes).not.toHaveBeenCalled();
+    expect(markObserved).not.toHaveBeenCalled();
+  });
+
   test('retries an intermediate generic reconciliation failure without publishing a terminal error', async () => {
     const { service, failure, recordFailure, markObserved, job } = reconciliationWorkerHarness();
 
@@ -1993,6 +2106,18 @@ describe('BuildService focused changed-line coverage', () => {
       'initDockerImage',
       'env',
       'initEnv'
+    );
+    expect(graphSelect).toHaveBeenCalledWith(
+      'name',
+      'type',
+      'dockerfilePath',
+      'requires',
+      'deploymentDependsOn',
+      'dependsOnDeployableName',
+      'builder',
+      'ecr',
+      'grpc',
+      'hostPortMapping'
     );
   });
 

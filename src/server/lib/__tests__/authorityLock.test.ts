@@ -43,6 +43,41 @@ describe('withAuthorityLock', () => {
     expect(acquired.unlock).toHaveBeenCalledTimes(1);
   });
 
+  test('continues past the legacy 120-attempt contention budget while authority remains current', async () => {
+    jest.useFakeTimers();
+    const acquired = { extend: jest.fn(), unlock: jest.fn().mockResolvedValue(undefined) };
+    const lock = jest.fn();
+    let attempts = 0;
+    const lockWithOptions = jest.fn(async () => {
+      attempts += 1;
+      if (attempts <= 121) throw new Error('busy');
+      return acquired;
+    });
+    const action = jest.fn().mockResolvedValue('done');
+
+    const result = withAuthorityLock({
+      redlock: { lock, lockWithOptions } as any,
+      resource: 'build-deployment.1',
+      ttlMs: 60_000,
+      isCurrent: jest.fn().mockResolvedValue(true),
+      action,
+    });
+
+    await jest.advanceTimersByTimeAsync(121 * 250);
+
+    await expect(result).resolves.toEqual({ admitted: true, value: 'done' });
+    expect(lockWithOptions.mock.calls).toEqual(
+      Array.from({ length: 122 }, () => [
+        'build-deployment.1',
+        60_000,
+        { retryCount: 4, retryDelay: 1000, retryJitter: 200 },
+      ])
+    );
+    expect(lock).not.toHaveBeenCalled();
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(acquired.unlock).toHaveBeenCalledTimes(1);
+  });
+
   test('leaves without executing when superseded while waiting', async () => {
     jest.useFakeTimers();
     const isCurrent = jest.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);

@@ -29,20 +29,25 @@ const mockCodefreshBuildImage = jest.fn();
 const mockCodefreshGetLogs = jest.fn();
 const mockCodefreshGetRepositoryTag = jest.fn();
 const mockCodefreshTagExists = jest.fn();
+const mockCodefreshTriggerPipeline = jest.fn();
 const mockCodefreshWaitForImage = jest.fn();
 const mockBuildWithNative = jest.fn();
 const mockGlobalConfigGetAllConfigs = jest.fn();
 const mockGlobalConfigGetOrgChartName = jest.fn();
 const mockCreateOrUpdateNamespace = jest.fn();
+const mockIsSupersededByNewerLiveDeploymentGeneration = jest.fn();
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+const mockGetLogger = jest.fn(() => ({
+  error: jest.fn(),
+  info: mockLoggerInfo,
+  warn: mockLoggerWarn,
+  debug: jest.fn(),
+  child: jest.fn().mockReturnThis(),
+}));
 
 jest.mock('server/lib/logger', () => ({
-  getLogger: jest.fn(() => ({
-    error: jest.fn(),
-    info: jest.fn(),
-    warn: jest.fn(),
-    debug: jest.fn(),
-    child: jest.fn().mockReturnThis(),
-  })),
+  getLogger: (...args: any[]) => mockGetLogger(...args),
   withLogContext: jest.fn((ctx, fn) => fn()),
   extractContextForQueue: jest.fn(() => ({})),
   LogStage: {},
@@ -63,6 +68,7 @@ jest.mock('server/lib/codefresh', () => ({
   getLogs: (...args: any[]) => mockCodefreshGetLogs(...args),
   getRepositoryTag: (...args: any[]) => mockCodefreshGetRepositoryTag(...args),
   tagExists: (...args: any[]) => mockCodefreshTagExists(...args),
+  triggerPipeline: (...args: any[]) => mockCodefreshTriggerPipeline(...args),
   waitForImage: (...args: any[]) => mockCodefreshWaitForImage(...args),
 }));
 
@@ -126,9 +132,12 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     mockCodefreshGetLogs.mockReset();
     mockCodefreshGetRepositoryTag.mockReset();
     mockCodefreshTagExists.mockReset();
+    mockCodefreshTriggerPipeline.mockReset();
     mockCodefreshWaitForImage.mockReset();
     mockBuildWithNative.mockReset();
     mockCreateOrUpdateNamespace.mockReset();
+    mockIsSupersededByNewerLiveDeploymentGeneration.mockReset();
+    mockIsSupersededByNewerLiveDeploymentGeneration.mockResolvedValue(false);
     mockGlobalConfigGetOrgChartName.mockResolvedValue('org-chart');
     mockGlobalConfigGetAllConfigs.mockResolvedValue({
       lifecycleDefaults: {
@@ -154,7 +163,12 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           query: jest.fn(() => ({ where: conditionalDeployWhere, findOne: currentDeployFindOne })),
         },
       },
-      services: {},
+      services: {
+        BuildService: {
+          isSupersededByNewerLiveDeploymentGeneration: (...args: any[]) =>
+            mockIsSupersededByNewerLiveDeploymentGeneration(...args),
+        },
+      },
     };
 
     mockRedis = {};
@@ -618,6 +632,62 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
   });
 
   describe('failure boundaries', () => {
+    const createNativeAfterBuildDeploy = () => ({
+      id: 17,
+      buildId: 91,
+      uuid: 'sample-service-build',
+      branchName: 'feature-branch',
+      env: {
+        FEATURE_FLAG: 'enabled',
+      },
+      initEnv: {},
+      dockerImage: 'old-image',
+      build: {
+        id: 91,
+        uuid: 'sample-build',
+        namespace: 'env-sample',
+        isStatic: false,
+        commentRuntimeEnv: {},
+        enabledFeatures: [],
+        pullRequest: {
+          githubLogin: 'sample-user',
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      },
+      deployable: {
+        name: 'sample-service',
+        type: DeployTypes.GITHUB,
+        dockerfilePath: './Dockerfile',
+        initDockerfilePath: null,
+        ecr: 'sample/app-images',
+        afterBuildPipelineId: 'sample/after-build',
+        builder: {
+          engine: 'buildkit',
+        },
+        repository: {
+          fullName: 'example-org/example-repo',
+        },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+
+    const prepareNativeAfterBuildTest = (isCurrent: () => boolean) => {
+      (github.getSHAForBranch as jest.Mock).mockResolvedValue('abcdef1234567890');
+      mockCodefreshTagExists.mockResolvedValue(false);
+      mockCodefreshTriggerPipeline.mockResolvedValue('after-build-run');
+      mockCodefreshWaitForImage.mockResolvedValue(true);
+      jest.spyOn(deployService as any, 'isDeploymentRunCurrent').mockImplementation(async () => isCurrent());
+      jest.spyOn(deployService as any, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+      jest.spyOn(deployService as any, 'syncServiceExternalSecrets').mockResolvedValue({
+        secretNames: [],
+        buildSecretEnvKeys: new Set(),
+      });
+      jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      return jest.spyOn(deployService as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+    };
+
     test('buildImage treats a stale run as a superseded no-op before starting work', async () => {
       currentDeploySelect.mockResolvedValue(undefined);
       const deploy = {
@@ -834,6 +904,229 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(conditionalDeployPatch).toHaveBeenCalledWith({ buildPipelineId: 'codefresh-build-123' });
       expect(conditionalDeployPatch).toHaveBeenCalledWith({ buildOutput: 'codefresh logs' });
       expect(patchSpy).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+    });
+
+    test('native builds invoke and wait for their configured after-build pipeline while current', async () => {
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => true);
+      mockBuildWithNative.mockResolvedValue({ success: true });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-1',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(patchTagSpy).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshTriggerPipeline).toHaveBeenCalledWith(
+        'sample/after-build',
+        'cli',
+        expect.objectContaining({
+          FEATURE_FLAG: 'enabled',
+          TAG: expect.stringMatching(
+            /^123456789012\.dkr\.ecr\.us-west-2\.amazonaws\.com\/sample\/app-images:lfc-abcdef1-/
+          ),
+          branch: 'feature-branch',
+        })
+      );
+      expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
+      expect(mockGetLogger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          afterBuildPipelineId: 'sample/after-build',
+          pipelineId: 'after-build-run',
+          imageTag: expect.stringContaining('/sample/app-images:lfc-abcdef1-'),
+        })
+      );
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^Codefresh: after-build pipeline completed result=success afterBuildPipelineId=sample\/after-build pipelineId=after-build-run imageTag=.*\/sample\/app-images:lfc-abcdef1-/
+        )
+      );
+    });
+
+    test('a superseded native build still invokes its after-build pipeline without publishing stale image state', async () => {
+      let current = true;
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => current);
+      mockIsSupersededByNewerLiveDeploymentGeneration.mockResolvedValue(true);
+      mockBuildWithNative.mockImplementation(async () => {
+        current = false;
+        return { success: true, logs: 'native build completed' };
+      });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-a',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
+      expect(mockIsSupersededByNewerLiveDeploymentGeneration).toHaveBeenCalledWith(91, 7);
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+      expect(patchTagSpy).not.toHaveBeenCalled();
+      expect(conditionalDeployPatch).not.toHaveBeenCalled();
+      expect(mockGetLogger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          afterBuildPipelineId: 'sample/after-build',
+          pipelineId: 'after-build-run',
+        })
+      );
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^Codefresh: after-build pipeline detached reason=superseded afterBuildPipelineId=sample\/after-build pipelineId=after-build-run imageTag=/
+        )
+      );
+    });
+
+    test('a native build superseded by teardown does not invoke its after-build pipeline', async () => {
+      let current = true;
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => current);
+      mockBuildWithNative.mockImplementation(async () => {
+        current = false;
+        return { success: true, logs: 'native build completed' };
+      });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-a',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(mockIsSupersededByNewerLiveDeploymentGeneration).toHaveBeenCalledWith(91, 7);
+      expect(mockCodefreshTriggerPipeline).not.toHaveBeenCalled();
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+      expect(patchTagSpy).not.toHaveBeenCalled();
+      expect(conditionalDeployPatch).not.toHaveBeenCalled();
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^Codefresh: after-build pipeline skipped reason=no_live_successor afterBuildPipelineId=sample\/after-build imageTag=/
+        )
+      );
+    });
+
+    test('a stale native build fails closed when live-successor authority cannot be read', async () => {
+      let current = true;
+      const deploy = createNativeAfterBuildDeploy();
+      prepareNativeAfterBuildTest(() => current);
+      mockIsSupersededByNewerLiveDeploymentGeneration.mockRejectedValue(new Error('database unavailable'));
+      mockBuildWithNative.mockImplementation(async () => {
+        current = false;
+        return { success: true };
+      });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-a',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(mockCodefreshTriggerPipeline).not.toHaveBeenCalled();
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Codefresh: after-build successor check failed');
+    });
+
+    test('a native after-build pipeline is left detached when superseded during its trigger', async () => {
+      let current = true;
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => current);
+      mockBuildWithNative.mockResolvedValue({ success: true });
+      mockCodefreshTriggerPipeline.mockImplementation(async () => {
+        current = false;
+        return 'after-build-run';
+      });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-a',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(patchTagSpy).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+    });
+
+    test('a failed superseded native build neither invokes the after-build pipeline nor publishes failure', async () => {
+      let current = true;
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => current);
+      mockBuildWithNative.mockImplementation(async () => {
+        current = false;
+        return { success: false, logs: 'native build failed' };
+      });
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-a',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(true);
+      expect(mockCodefreshTriggerPipeline).not.toHaveBeenCalled();
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+      expect(patchTagSpy).not.toHaveBeenCalled();
+      expect(deployService.patchAndUpdateActivityFeed).not.toHaveBeenCalledWith(
+        deploy,
+        { status: DeployStatus.BUILD_FAILED },
+        'run-a'
+      );
+    });
+
+    test('a current native after-build pipeline failure still fails the image phase', async () => {
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => true);
+      mockBuildWithNative.mockResolvedValue({ success: true });
+      mockCodefreshWaitForImage.mockResolvedValue(false);
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-1',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(false);
+      expect(patchTagSpy).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
+      expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
+      expect(mockGetLogger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          afterBuildPipelineId: 'sample/after-build',
+          pipelineId: 'after-build-run',
+        })
+      );
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^Codefresh: after-build pipeline completed result=failure afterBuildPipelineId=sample\/after-build pipelineId=after-build-run imageTag=/
+        )
+      );
     });
 
     test('buildImageForHelmAndGithub syncs external secrets when native image tag already exists', async () => {

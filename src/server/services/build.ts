@@ -89,6 +89,10 @@ const PR_AUTHORITY_REVALIDATED_DELETE_REASONS = new Set([
   'ttl_closed_pull_request',
 ]);
 
+function requiresPrDeletionAuthorityRevalidation(reason?: string): boolean {
+  return reason === 'teardown_stuck' || PR_AUTHORITY_REVALIDATED_DELETE_REASONS.has(reason ?? '');
+}
+
 /**
  * Every delete reason for one Build converges on the same durable ownership
  * token. BullMQ keeps the first payload when a deterministic jobId is already
@@ -539,7 +543,18 @@ export default class BuildService extends BaseService {
         );
       })
       .modifyGraph('deploys.deployable', (b) => {
-        b.select('name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr', 'grpc', 'hostPortMapping');
+        b.select(
+          'name',
+          'type',
+          'dockerfilePath',
+          'requires',
+          'deploymentDependsOn',
+          'dependsOnDeployableName',
+          'builder',
+          'ecr',
+          'grpc',
+          'hostPortMapping'
+        );
       })
       .modifyGraph('deploys.repository', (b) => {
         b.select('fullName');
@@ -1867,7 +1882,10 @@ export default class BuildService extends BaseService {
         : buildTeardownRunUUID(build.id);
     // Conditional cleanup never reuses a jobId: BullMQ would swallow a fresh close enqueued while a
     // prior job (about to decide authority_restored) still exists; claim-time revalidation absorbs duplicates.
-    const jobId = PR_AUTHORITY_REVALIDATED_DELETE_REASONS.has(reason)
+    const usesConditionalJobId =
+      PR_AUTHORITY_REVALIDATED_DELETE_REASONS.has(reason) ||
+      (reason === 'teardown_stuck' && build.pullRequestId != null);
+    const jobId = usesConditionalJobId
       ? `build-delete-${build.id}-conditional-${nanoid()}`
       : `build-delete-${build.id}-authoritative`;
     await this.deleteQueue.add(
@@ -1971,11 +1989,25 @@ export default class BuildService extends BaseService {
       .whereNotIn('status', [BuildStatus.TORN_DOWN, BuildStatus.TEARING_DOWN])
       .whereNull('deletedAt');
 
-    // A teardown whose delete job exhausted its retries would otherwise strand cleanup or identity release,
-    // leaking the namespace or locking the vanity uuid; updatedAt bumps on every teardown attempt.
+    // A teardown whose delete job exhausted its retries would otherwise strand cleanup or identity release;
+    // updatedAt bumps on every teardown attempt.
     const stuckTeardowns = await this.db.models.Build.query()
-      .where('triggerType', 'api')
-      .whereIn('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN])
+      .where((builder) => {
+        builder
+          .where((apiBuilds) => {
+            apiBuilds.where('triggerType', 'api').whereIn('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN]);
+          })
+          .orWhere((pullRequestBuilds) => {
+            pullRequestBuilds
+              .whereNotNull('pullRequestId')
+              .whereNot('status', BuildStatus.TORN_DOWN)
+              .where((teardown) => {
+                teardown
+                  .where('status', BuildStatus.TEARING_DOWN)
+                  .orWhereRaw('?? = concat(?, ??)', ['runUUID', 'build-teardown-', 'id']);
+              });
+          });
+      })
       .where('updatedAt', '<=', new Date(now.getTime() - TEARDOWN_RETRY_GRACE_MS).toISOString())
       .whereNull('deletedAt');
 
@@ -2477,7 +2509,7 @@ export default class BuildService extends BaseService {
       // After a build is susccessfully created or retrieved,
       // we need to create or update the deployables to be used for build and deploy.
       if (build && options != null) {
-        await this.withBuildDeploymentLock(build.id, async () => {
+        const prepareBuild = async () => {
           // A close webhook can queue teardown while the open/reopen handler is
           // still importing YAML. Re-read after the shared lock so setup cannot
           // steal run ownership from deletion or revive a closed PR.
@@ -2530,7 +2562,13 @@ export default class BuildService extends BaseService {
                 : 'Build setup failed before deploys could be created.'
             );
           }
-        });
+        };
+
+        await this.withCurrentBuildDeploymentLock(
+          build.id,
+          async () => this.buildSetupBlockReason(await this.loadBuildDeploymentAuthority(build.id)) == null,
+          prepareBuild
+        );
       } else {
         throw new Error('Missing build or deployment options from environment.');
       }
@@ -2551,12 +2589,11 @@ export default class BuildService extends BaseService {
     if (build.deletedAt != null) return 'build_deleted';
 
     if (build.pullRequest || build.pullRequestId != null) {
+      if (build.status === BuildStatus.TEARING_DOWN) return 'tearing_down';
       if (!build.pullRequest) return 'pull_request_missing';
       if (build.pullRequest.status !== PullRequestStatus.OPEN) return 'pull_request_closed';
       if (!isDeployEnabled(build)) return 'deploy_disabled';
-      // Re-adding the deploy label to an open PR historically recreates an
-      // environment after teardown. The current PR authority may reclaim that
-      // row; API environments remain terminal below.
+      // Re-adding the deploy label to an open PR may reclaim the row after teardown completes.
       return null;
     }
 
@@ -2564,10 +2601,11 @@ export default class BuildService extends BaseService {
     return build.deployEnabled === true ? null : 'deploy_disabled';
   }
 
-  /** PR setup is allowed without a deploy label, but never after close/teardown. */
+  /** PR setup is allowed without a deploy label, but not while teardown is active or the PR is closed. */
   private buildSetupBlockReason(build: Build | null | undefined): string | null {
     if (!build) return 'build_missing';
     if (build.deletedAt != null) return 'build_deleted';
+    if (build.status === BuildStatus.TEARING_DOWN) return 'tearing_down';
     if (!build.pullRequest) return 'pull_request_missing';
     return build.pullRequest.status === PullRequestStatus.OPEN ? null : 'pull_request_closed';
   }
@@ -2576,6 +2614,26 @@ export default class BuildService extends BaseService {
     const build = await this.db.models.Build.query().findOne({ id: buildId });
     await build?.$fetchGraph('[pullRequest.[repository], environment]');
     return build ?? null;
+  }
+
+  /**
+   * Prove that stale work lost authority to a newer live deployment intent,
+   * rather than teardown, deletion, or another non-deployment owner.
+   */
+  async isSupersededByNewerLiveDeploymentGeneration(buildId: number, expectedGeneration?: number): Promise<boolean> {
+    if (expectedGeneration == null || !Number.isSafeInteger(expectedGeneration)) return false;
+
+    const current = await this.loadBuildDeploymentAuthority(buildId);
+    const desiredGeneration = Number(current?.desiredGeneration);
+    return Boolean(
+      current &&
+        Number.isSafeInteger(desiredGeneration) &&
+        desiredGeneration > expectedGeneration &&
+        current.status !== BuildStatus.TEARING_DOWN &&
+        current.status !== BuildStatus.TORN_DOWN &&
+        current.runUUID !== buildTeardownRunUUID(buildId) &&
+        this.deploymentBlockReason(current) == null
+    );
   }
 
   private async isBuildSetupRunCurrent(buildId: number, runUUID: string): Promise<boolean> {
@@ -2808,14 +2866,6 @@ export default class BuildService extends BaseService {
     return this.runWithRenewableLock(resource, lock, action);
   }
 
-  private async withBuildPromotionLock<T>(buildId: number, action: () => Promise<T>): Promise<T> {
-    if (!this.redlock?.lock) return action();
-
-    const resource = `build-promotion.${buildId}`;
-    const lock = await this.redlock.lock(resource, BUILD_DEPLOYMENT_LOCK_TTL_MS);
-    return this.runWithRenewableLock(resource, lock, action);
-  }
-
   /**
    * Waits only at the irreducible native-mutation boundary. Unlike the global
    * Redlock retry budget, this wait ends when the caller loses generation
@@ -2864,6 +2914,21 @@ export default class BuildService extends BaseService {
       isCurrent,
       action,
       onWait: (error) => getLogger({ error, buildId }).warn('Build reconciliation: waiting for configuration mutation'),
+    });
+  }
+
+  private async withCurrentBuildDeletionLock<T>(
+    buildId: number,
+    isCurrent: () => Promise<boolean>,
+    action: () => Promise<T>
+  ): Promise<AuthorityLockResult<T>> {
+    return withAuthorityLock({
+      redlock: this.redlock,
+      resource: `build-deployment.${buildId}`,
+      ttlMs: BUILD_DEPLOYMENT_LOCK_TTL_MS,
+      isCurrent,
+      action,
+      onWait: (error) => getLogger({ error, buildId }).warn('Build deletion: waiting for deployment mutation'),
     });
   }
 
@@ -2995,18 +3060,6 @@ export default class BuildService extends BaseService {
         updateLogContext({ buildUuid: build.uuid });
       }
 
-      if (PR_AUTHORITY_REVALIDATED_DELETE_REASONS.has(options.reason ?? '') && build.pullRequestId != null) {
-        await build.$fetchGraph('pullRequest');
-        if (
-          build.pullRequest != null &&
-          build.pullRequest.status === PullRequestStatus.OPEN &&
-          isDeployEnabled(build)
-        ) {
-          getLogger().info('Build: delete skipped reason=pr_authority_restored');
-          return;
-        }
-      }
-
       // PR-less teardown closes the deploy gate and takes runUUID ownership so queued or in-flight
       // deploy runs abort instead of resurrecting the environment (PR builds get this from the label kill-switch).
       let teardownRunUUID = options.runUUID ?? build.runUUID;
@@ -3030,6 +3083,22 @@ export default class BuildService extends BaseService {
       if (build.status === BuildStatus.TORN_DOWN) {
         await this.releaseBuildIdentity(build);
         return;
+      }
+
+      if (
+        build.status !== BuildStatus.TEARING_DOWN &&
+        requiresPrDeletionAuthorityRevalidation(options.reason) &&
+        build.pullRequestId != null
+      ) {
+        await build.$fetchGraph('pullRequest');
+        if (
+          build.pullRequest != null &&
+          build.pullRequest.status === PullRequestStatus.OPEN &&
+          isDeployEnabled(build)
+        ) {
+          getLogger().info('Build: delete skipped reason=pr_authority_restored');
+          return;
+        }
       }
 
       await build.$fetchGraph('[services, deploys.[build]]');
@@ -3679,20 +3748,87 @@ export default class BuildService extends BaseService {
     },
   });
 
+  private async loadBuildDeletionAuthority(buildId: number): Promise<Build | null> {
+    const build = await this.db.models.Build.query().findOne({ id: buildId });
+    if (build?.pullRequestId != null) {
+      await build.$fetchGraph('pullRequest');
+    }
+    return build ?? null;
+  }
+
+  private async isBuildDeletionRequestCurrent(
+    buildId: number,
+    reason: string | undefined,
+    teardownRunUUID: string
+  ): Promise<boolean> {
+    const build = await this.loadBuildDeletionAuthority(buildId);
+    if (!build || build.deletedAt != null) return false;
+
+    if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) {
+      return build.runUUID === teardownRunUUID;
+    }
+    if (reason === 'teardown_stuck' && (build.pullRequestId == null || build.runUUID !== teardownRunUUID)) return false;
+    if (reason === 'lease_expired') {
+      return (
+        build.kind === BuildKind.ENVIRONMENT && build.triggerType === 'api' && isExpired(new Date(), build.expiresAt)
+      );
+    }
+    if (
+      requiresPrDeletionAuthorityRevalidation(reason) &&
+      build.pullRequestId != null &&
+      build.pullRequest?.status === PullRequestStatus.OPEN &&
+      isDeployEnabled(build)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private async isClaimedBuildDeletionCurrent(
+    buildId: number,
+    reason: string | undefined,
+    teardownRunUUID: string
+  ): Promise<boolean> {
+    const build = await this.loadBuildDeletionAuthority(buildId);
+    if (!build || build.deletedAt != null || build.runUUID !== teardownRunUUID) return false;
+    if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) return true;
+    if (reason === 'teardown_stuck' && build.pullRequestId == null) return false;
+    return !(
+      requiresPrDeletionAuthorityRevalidation(reason) &&
+      build.pullRequestId != null &&
+      build.pullRequest?.status === PullRequestStatus.OPEN &&
+      isDeployEnabled(build)
+    );
+  }
+
   private async claimBuildForDeletion(
     buildId: number,
     reason: string | undefined,
     teardownRunUUID: string
   ): Promise<{
     build: Build | null;
-    outcome: 'claimed' | 'already_claimed' | 'lease_extended' | 'authority_restored' | 'missing';
+    outcome: 'claimed' | 'already_claimed' | 'lease_extended' | 'authority_restored' | 'stale' | 'missing';
   }> {
     return this.db.models.Build.transact(async (trx) => {
       const build = await this.db.models.Build.query(trx).findById(buildId).whereNull('deletedAt').forUpdate();
 
       if (!build) return { build: null, outcome: 'missing' };
 
-      if (PR_AUTHORITY_REVALIDATED_DELETE_REASONS.has(reason ?? '') && build.pullRequestId != null) {
+      if (reason === 'lease_expired' && (build.kind !== BuildKind.ENVIRONMENT || build.triggerType !== 'api')) {
+        return { build: null, outcome: 'missing' };
+      }
+
+      // Once cleanup has published TEARING_DOWN, the same owner must finish even if PR authority returns.
+      if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) {
+        return build.runUUID === teardownRunUUID
+          ? { build, outcome: 'claimed' }
+          : { build: null, outcome: 'already_claimed' };
+      }
+      if (reason === 'teardown_stuck' && (build.pullRequestId == null || build.runUUID !== teardownRunUUID)) {
+        return { build: null, outcome: 'stale' };
+      }
+
+      if (requiresPrDeletionAuthorityRevalidation(reason) && build.pullRequestId != null) {
         await build.$fetchGraph('pullRequest', { transaction: trx } as any);
         // Close/disable cleanup is asynchronous. A later reopen/re-enable event
         // is authoritative, even when BullMQ coalesced multiple reasons onto the
@@ -3704,17 +3840,6 @@ export default class BuildService extends BaseService {
         ) {
           return { build: null, outcome: 'authority_restored' };
         }
-      }
-
-      if (reason === 'lease_expired' && (build.kind !== BuildKind.ENVIRONMENT || build.triggerType !== 'api')) {
-        return { build: null, outcome: 'missing' };
-      }
-
-      // A retry must be able to finish cleanup (or identity release) once teardown owns the row.
-      if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) {
-        return build.runUUID === teardownRunUUID
-          ? { build, outcome: 'claimed' }
-          : { build: null, outcome: 'already_claimed' };
       }
 
       // Extension takes the same row lock, so whichever transaction commits first wins deterministically.
@@ -3745,42 +3870,76 @@ export default class BuildService extends BaseService {
 
     return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
       try {
-        await this.withBuildDeploymentLock(buildId, async () => {
-          const claim = await this.claimBuildForDeletion(buildId, reason, activeTeardownRunUUID);
-          if (claim.outcome === 'lease_extended') {
-            getLogger().info('Build: delete skipped reason=lease_extended');
-            return;
-          }
-          if (claim.outcome === 'already_claimed') {
-            getLogger().info('Build: delete skipped reason=teardown_owned');
-            return;
-          }
-          if (claim.outcome === 'authority_restored') {
-            getLogger().info('Build: delete skipped reason=pr_authority_restored');
-            return;
-          }
-          const build = claim.build;
+        let deploymentActionFinished = false;
+        const deployment = await this.withCurrentBuildDeletionLock(
+          buildId,
+          () =>
+            deploymentActionFinished
+              ? Promise.resolve(true)
+              : this.isBuildDeletionRequestCurrent(buildId, reason, activeTeardownRunUUID),
+          async () => {
+            try {
+              const claim = await this.claimBuildForDeletion(buildId, reason, activeTeardownRunUUID);
+              if (claim.outcome === 'lease_extended') {
+                getLogger().info('Build: delete skipped reason=lease_extended');
+                return;
+              }
+              if (claim.outcome === 'already_claimed') {
+                getLogger().info('Build: delete skipped reason=teardown_owned');
+                return;
+              }
+              if (claim.outcome === 'authority_restored') {
+                getLogger().info('Build: delete skipped reason=pr_authority_restored');
+                return;
+              }
+              if (claim.outcome === 'stale') {
+                getLogger().info('Build: delete skipped reason=teardown_no_longer_active');
+                return;
+              }
+              const build = claim.build;
 
-          if (build?.uuid) {
-            updateLogContext({ buildUuid: build.uuid });
-          }
+              if (build?.uuid) {
+                updateLogContext({ buildUuid: build.uuid });
+              }
 
-          if (!build) {
-            getLogger({ stage: LogStage.CLEANUP_FAILED }).warn(`Build: not found for deletion buildId=${buildId}`);
-            return;
-          }
+              if (!build) {
+                getLogger({ stage: LogStage.CLEANUP_FAILED }).warn(`Build: not found for deletion buildId=${buildId}`);
+                return;
+              }
 
-          getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Build: deleting');
-          await this.withBuildPromotionLock(buildId, () =>
-            this.db.services.BuildService.deleteBuild(build, {
-              rethrow: true,
-              runUUID: activeTeardownRunUUID,
-              reason,
-              deploymentLockAlreadyHeld: true,
-            })
-          );
-          getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Build: deleted');
-        });
+              let cleanupActionFinished = false;
+              const promotion = await this.withCurrentBuildPromotionLock(
+                buildId,
+                () =>
+                  cleanupActionFinished
+                    ? Promise.resolve(true)
+                    : this.isClaimedBuildDeletionCurrent(buildId, reason, activeTeardownRunUUID),
+                async () => {
+                  try {
+                    getLogger({ stage: LogStage.CLEANUP_STARTING }).info('Build: deleting');
+                    await this.db.services.BuildService.deleteBuild(build, {
+                      rethrow: true,
+                      runUUID: activeTeardownRunUUID,
+                      reason,
+                      deploymentLockAlreadyHeld: true,
+                    });
+                    getLogger({ stage: LogStage.CLEANUP_COMPLETE }).info('Build: deleted');
+                  } finally {
+                    cleanupActionFinished = true;
+                  }
+                }
+              );
+              if (!promotion.admitted && !cleanupActionFinished) {
+                getLogger().info('Build: delete skipped reason=teardown_authority_lost');
+              }
+            } finally {
+              deploymentActionFinished = true;
+            }
+          }
+        );
+        if (!deployment.admitted && !deploymentActionFinished) {
+          getLogger().info('Build: delete skipped reason=request_no_longer_current');
+        }
       } catch (error) {
         getLogger({ stage: LogStage.CLEANUP_FAILED }).error(
           { error },
@@ -4049,6 +4208,12 @@ export default class BuildService extends BaseService {
 
               const blocked = this.deploymentBlockReason(build);
               if (blocked) {
+                if (blocked === 'tearing_down') {
+                  getLogger({ buildId, generation: claim.generation }).info(
+                    'Build reconciliation: deferred reason=tearing_down'
+                  );
+                  return;
+                }
                 getLogger({ buildId, generation: claim.generation }).info(
                   `Build reconciliation: observed without execution reason=${blocked}`
                 );

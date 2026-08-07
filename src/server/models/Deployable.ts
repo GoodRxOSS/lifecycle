@@ -35,6 +35,7 @@ export default class Deployable extends Service {
   appShort?: string;
   ecr?: string;
   helm: Helm;
+  requires: string[];
   deploymentDependsOn: string[];
   builder: Builder;
   envLens?: boolean;

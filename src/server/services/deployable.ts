@@ -108,6 +108,7 @@ export interface DeployableAttributes {
   commentBranchName?: string;
   ingressAnnotations?: Record<string, any>;
   helm?: Helm;
+  requires?: string[];
   deploymentDependsOn?: string[];
   builder?: Builder;
   envLens?: boolean;
@@ -278,6 +279,13 @@ export default class DeployableService extends BaseService {
           active,
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
+          requires: [
+            ...new Set(
+              (service.requires ?? [])
+                .map((requiredService) => requiredService.name?.trim())
+                .filter((name): name is string => Boolean(name))
+            ),
+          ],
           deploymentDependsOn: service.deploymentDependsOn || [],
           builder: YamlService.getEffectiveBuilder(service, buildDefaults?.engine) ?? {},
           envLens: await YamlService.getEnvLens(service),

@@ -4970,7 +4970,9 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             name: { type: 'string', example: 'web' },
             type: { type: 'string', enum: Object.values(DeployTypes) },
             dockerfilePath: { type: 'string', example: 'Dockerfile' },
-            deploymentDependsOn: { type: 'string', example: '{redis}' },
+            requires: { type: 'array', items: { type: 'string' }, example: ['postgres', 'redis'] },
+            deploymentDependsOn: { type: 'array', items: { type: 'string' }, example: ['redis'] },
+            dependsOnDeployableName: { type: 'string', nullable: true, example: 'web' },
             builder: {
               type: 'object',
               properties: {
@@ -4981,7 +4983,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             grpc: { type: 'boolean', example: true },
             hostPortMapping: { type: 'object', example: { '80': 8080 } },
           },
-          required: ['name', 'type', 'dockerfilePath', 'deploymentDependsOn', 'builder', 'ecr'],
+          required: ['name', 'type', 'dockerfilePath', 'requires', 'deploymentDependsOn', 'builder', 'ecr'],
         },
 
         /**
