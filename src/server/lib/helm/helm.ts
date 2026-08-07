@@ -256,9 +256,12 @@ export async function helmDeployStep(deploy: Deploy): Promise<Record<string, any
  *
  * @param {Deploy[]} deploys - An array of deploy objects.
  */
-export async function deployHelm(deploys: Deploy[]) {
+export async function deployHelm(
+  deploys: Deploy[],
+  options: import('server/lib/nativeHelm/helm').HelmDeploymentExecutionOptions = {}
+) {
   const { deployHelm: nativeDeployHelm } = await import('server/lib/nativeHelm/helm');
-  return await nativeDeployHelm(deploys);
+  return await nativeDeployHelm(deploys, options);
 }
 /**
  * Generates the Codefresh YAML configuration for Helm deployment, stores it in a temporary file,
@@ -497,7 +500,7 @@ export const constructHelmDeploysBuildMetaData = async (deploys: Deploy[]) => {
   try {
     const deploy = deploys?.[0];
     let build = deploy?.build;
-    if (!build) {
+    if (!build || (build.pullRequestId != null && build.pullRequest == null)) {
       await deploy?.$fetchGraph('build.pullRequest');
     }
     build = deploy?.build;

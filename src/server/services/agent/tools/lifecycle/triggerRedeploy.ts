@@ -73,11 +73,9 @@ export class TriggerRedeployTool extends BaseTool {
         return this.createErrorResult(`Build not found for ${buildUuid}`, 'BUILD_NOT_FOUND');
       }
 
-      const correlationId = `agent-redeploy-${Date.now()}-${nanoid(8)}`;
-      await new BuildService().resolveAndDeployBuildQueue.add('resolve-deploy', {
+      await new BuildService().enqueueResolveAndDeployBuild({
         buildId: build.id,
         runUUID: nanoid(),
-        correlationId,
       });
 
       const { default: EnvironmentWatchService } = await import('server/services/agent/EnvironmentWatchService');

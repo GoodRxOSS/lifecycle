@@ -28,7 +28,7 @@ jest.mock('server/models/Build', () => ({
 jest.mock('server/services/build', () => ({
   __esModule: true,
   default: class MockBuildService {
-    resolveAndDeployBuildQueue = { add: mockQueueAdd };
+    enqueueResolveAndDeployBuild = (...args: unknown[]) => mockQueueAdd(...args);
   },
 }));
 
@@ -67,6 +67,7 @@ describe('TriggerRedeployTool', () => {
     const result = await tool.execute({ reason: 'transient failure' });
 
     expect(result.success).toBe(true);
+    expect(mockQueueAdd).toHaveBeenCalledWith(expect.objectContaining({ buildId: 11, runUUID: expect.any(String) }));
     expect(mockScheduleEnvironmentWatch).toHaveBeenCalledWith(
       expect.objectContaining({
         buildUuid: 'build-1',

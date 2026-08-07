@@ -247,7 +247,6 @@ export default class GithubService extends Service {
           } else {
             await this.db.services.BuildService.enqueueResolveAndDeployBuild({
               buildId: build.id,
-              ...extractContextForQueue(),
             });
           }
         } else if (pullRequestState?.deployOnUpdate) {
@@ -371,7 +370,6 @@ export default class GithubService extends Service {
       }
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId,
-        ...extractContextForQueue(),
       });
     } catch (error) {
       getLogger().error({ error }, `Label: webhook processing failed`);
@@ -544,7 +542,12 @@ export default class GithubService extends Service {
         .whereNot('status', 'torn_down')
         .withGraphFetched('[build.[pullRequest], deployable]');
 
-      await this.enqueueAutoTrackedApiBuilds(githubRepositoryId, branchName, deployTriggerRef).catch((error) => {
+      await this.enqueueAutoTrackedApiBuilds(
+        githubRepositoryId,
+        branchName,
+        deployTriggerRef,
+        !this.isVoidCommit(previousCommit) ? previousCommit : null
+      ).catch((error) => {
         getLogger({ error, githubRepositoryId, branchName }).error('Push: API auto-track processing failed');
       });
 
@@ -554,6 +557,7 @@ export default class GithubService extends Service {
           githubRepositoryId,
           branchName,
           headCommit: deployTriggerRef ?? null,
+          beforeCommit: !this.isVoidCommit(previousCommit) ? previousCommit : null,
         });
         return;
       }
@@ -678,14 +682,10 @@ export default class GithubService extends Service {
         await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId,
           ...(hasFailedDeploys && build.pullRequest != null ? {} : { githubRepositoryId }),
-          // The pushed commit is the deploy trigger. It keeps back-to-back pushes to the same branch from collapsing
-          // onto one dedupe key (which would silently drop the later commit), while a redelivered webhook for the
-          // same commit still coalesces.
-          ...(deployTriggerRef ? { triggerRef: deployTriggerRef } : {}),
           ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
+          ...(!this.isVoidCommit(previousCommit) ? { sourceBeforeRef: previousCommit } : {}),
           sourceGithubRepositoryId: githubRepositoryId,
           sourceBranch: branchName,
-          ...extractContextForQueue(),
         });
       }
     } catch (error) {
@@ -701,7 +701,8 @@ export default class GithubService extends Service {
   private enqueueAutoTrackedApiBuilds = async (
     githubRepositoryId: number,
     branchName: string,
-    deployTriggerRef?: string | null
+    deployTriggerRef?: string | null,
+    sourceBeforeRef?: string | null
   ) => {
     const autoTrackedBuilds = await this.db.models.Build.query()
       .where('triggerType', 'api')
@@ -719,11 +720,10 @@ export default class GithubService extends Service {
       getLogger().info(`Push: deploying api environment uuid=${build.uuid} branch=${branchName}`);
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build.id,
-        ...(deployTriggerRef ? { triggerRef: deployTriggerRef } : {}),
         ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
+        ...(sourceBeforeRef ? { sourceBeforeRef } : {}),
         sourceGithubRepositoryId: githubRepositoryId,
         sourceBranch: branchName,
-        ...extractContextForQueue(),
       });
     }
   };
@@ -738,10 +738,12 @@ export default class GithubService extends Service {
     githubRepositoryId,
     branchName,
     headCommit,
+    beforeCommit,
   }: {
     githubRepositoryId: number;
     branchName: string;
     headCommit?: string | null;
+    beforeCommit?: string | null;
   }): Promise<void> => {
     try {
       const build = await this.db.models.Build.query()
@@ -766,11 +768,10 @@ export default class GithubService extends Service {
       getLogger().info(`Push: redeploying reason=staticEnv`);
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build?.id,
-        // The pushed commit is the deploy trigger, so a later push to the tracked branch is not coalesced onto an
-        // in-flight or recent deploy of an earlier commit. Static envs rebuild on every tracked-branch push by
-        // design, so this only prevents wrongly dropping a distinct commit.
-        ...(headCommit ? { triggerRef: headCommit } : {}),
-        ...extractContextForQueue(),
+        ...(headCommit ? { sourceRef: headCommit } : {}),
+        ...(beforeCommit ? { sourceBeforeRef: beforeCommit } : {}),
+        sourceGithubRepositoryId: githubRepositoryId,
+        sourceBranch: branchName,
       });
     } catch (error) {
       getLogger({}).error(

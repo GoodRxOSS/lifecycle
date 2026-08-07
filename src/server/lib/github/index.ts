@@ -36,6 +36,8 @@ export interface ChangedFilesForPushResult {
   reason?: string;
 }
 
+export type CommitComparisonStatus = 'ahead' | 'behind' | 'diverged' | 'identical';
+
 interface PushPayloadCommitFiles {
   added?: string[];
   removed?: string[];
@@ -279,6 +281,23 @@ export async function getSHAForBranch(branchName: string, owner: string, name: s
     }).warn('GitHub: SHA fetch failed');
     throw new Error(error?.message || 'Unable to retrieve SHA from branch');
   }
+}
+
+export async function compareCommits({
+  fullName,
+  base,
+  head,
+}: {
+  fullName: string;
+  base: string;
+  head: string;
+}): Promise<CommitComparisonStatus> {
+  const response = await cacheRequest(`GET /repos/${fullName}/compare/${base}...${head}`);
+  const status = response?.data?.status;
+  if (!['ahead', 'behind', 'diverged', 'identical'].includes(status)) {
+    throw new Error(`GitHub compare returned an invalid status for ${fullName}`);
+  }
+  return status as CommitComparisonStatus;
 }
 
 export async function getChangedFilesForPush({

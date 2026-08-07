@@ -59,6 +59,14 @@ import {
   buildHelmSecretVolumeMounts,
   HelmSecretSetFile,
 } from 'server/lib/helm/secretValueRefs';
+import { AuthorityLockLostError, type AuthorityLockResult } from 'server/lib/authorityLock';
+import { DeploymentSupersededError } from 'server/lib/deploymentReconciliation/errors';
+
+export type HelmSecretMutationGate = <T>(deploy: Deploy, action: () => Promise<T>) => Promise<AuthorityLockResult<T>>;
+
+export interface HelmDeploymentExecutionOptions {
+  secretMutationGate?: HelmSecretMutationGate;
+}
 
 export interface JobResult {
   completed: boolean;
@@ -278,7 +286,8 @@ export async function generateHelmManifest(
 async function processNativeHelmSecrets(
   deploy: Deploy,
   namespace: string,
-  helmConfig: HelmConfiguration
+  helmConfig: HelmConfiguration,
+  secretMutationGate?: HelmSecretMutationGate
 ): Promise<void> {
   const deployable = requireDeployable(deploy);
   const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
@@ -293,13 +302,19 @@ async function processNativeHelmSecrets(
   }
 
   const secretProcessor = new SecretProcessor(globalConfig.secretProviders);
-  const secretResult = await secretProcessor.processSecretRefs({
-    secretRefs,
-    serviceName: deployable.name,
-    namespace,
-    buildUuid: deploy.uuid,
-    strict: true,
-  });
+  const processSecrets = () =>
+    secretProcessor.processSecretRefs({
+      secretRefs,
+      serviceName: deployable.name,
+      namespace,
+      buildUuid: deploy.uuid,
+      strict: true,
+    });
+  const mutation = secretMutationGate
+    ? await secretMutationGate(deploy, processSecrets)
+    : ({ admitted: true, value: await processSecrets() } as const);
+  if (!mutation.admitted) throw new DeploymentSupersededError();
+  const secretResult = mutation.value;
   const secretNames = Object.keys(secretResult.expectedKeysPerSecret);
 
   if (secretNames.length === 0) {
@@ -320,7 +335,10 @@ async function processNativeHelmSecrets(
   );
 }
 
-export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOptions): Promise<JobResult> {
+export async function nativeHelmDeploy(
+  deploy: Deploy,
+  options: HelmDeployOptions & HelmDeploymentExecutionOptions
+): Promise<JobResult> {
   await deploy.$fetchGraph('build.pullRequest.repository');
   await deploy.$fetchGraph('deployable.repository');
 
@@ -340,18 +358,22 @@ export async function nativeHelmDeploy(deploy: Deploy, options: HelmDeployOption
   });
   const helmConfig = await getHelmConfiguration(deploy);
 
-  await processNativeHelmSecrets(deploy, namespace, helmConfig);
+  await processNativeHelmSecrets(deploy, namespace, helmConfig, options.secretMutationGate);
 
   const manifest = await generateHelmManifest(deploy, jobName, options, helmConfig);
 
   const localPath = `${MANIFEST_PATH}/helm/${deploy.uuid}-helm-${shortSha}`;
   await fs.promises.mkdir(`${MANIFEST_PATH}/helm/`, { recursive: true });
   await fs.promises.writeFile(localPath, manifest, 'utf8');
-  await shellPromise(`kubectl apply -f ${localPath}`);
+  await shellPromise(`kubectl apply -f ${localPath}`, { timeout: 90_000 });
 
   const jobResult = await waitForJobAndGetLogs(jobName, namespace, `[HELM ${deploy.uuid}]`);
 
-  await deploy.$query().patch({ buildOutput: jobResult.logs });
+  let outputPatch = deploy.$query().patch({ buildOutput: jobResult.logs });
+  if (deploy.id != null && deploy.runUUID) {
+    outputPatch = outputPatch.where({ id: deploy.id, runUUID: deploy.runUUID });
+  }
+  await outputPatch;
 
   const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
   if (globalConfig.logArchival?.enabled) {
@@ -403,7 +425,7 @@ export async function shouldUseNativeHelm(deploy: Deploy): Promise<boolean> {
   return false;
 }
 
-export async function deployNativeHelm(deploy: Deploy): Promise<void> {
+export async function deployNativeHelm(deploy: Deploy, options: HelmDeploymentExecutionOptions = {}): Promise<void> {
   const deployable = requireDeployable(deploy);
   const { build } = deploy;
 
@@ -416,6 +438,7 @@ export async function deployNativeHelm(deploy: Deploy): Promise<void> {
 
   const jobResult = await nativeHelmDeploy(deploy, {
     namespace: build.namespace,
+    ...options,
   });
 
   if (jobResult.status !== 'succeeded') {
@@ -485,7 +508,7 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
   }
 }
 
-export async function deployHelm(deploys: Deploy[]): Promise<void> {
+export async function deployHelm(deploys: Deploy[], options: HelmDeploymentExecutionOptions = {}): Promise<void> {
   if (deploys?.length === 0) return;
 
   getLogger().info(`Helm: deploying services=${deploys.map((d) => d.deployable?.name || d.uuid).join(',')}`);
@@ -520,7 +543,7 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
               );
 
               if (useNative) {
-                await deployNativeHelm(deploy);
+                await deployNativeHelm(deploy, options);
               } else {
                 await deployCodefreshHelm(deploy, deployService, runUUID);
               }
@@ -536,6 +559,7 @@ export async function deployHelm(deploys: Deploy[]): Promise<void> {
 
               await trackHelmDeploymentMetrics(deploy, 'success', Date.now() - startTime);
             } catch (error) {
+              if (error instanceof DeploymentSupersededError || error instanceof AuthorityLockLostError) throw error;
               const errorMessage = error instanceof Error ? error.message : String(error);
               await trackHelmDeploymentMetrics(deploy, 'failure', Date.now() - startTime, errorMessage);
 

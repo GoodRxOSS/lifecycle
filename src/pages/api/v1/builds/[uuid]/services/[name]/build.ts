@@ -15,11 +15,7 @@
  */
 
 import { NextApiRequest, NextApiResponse } from 'next/types';
-import { withLogContext, getLogger, extractContextForQueue, LogStage } from 'server/lib/logger';
-import GithubService from 'server/services/github';
-import { Build } from 'server/models';
-import DeployService from 'server/services/deploy';
-import { DeployStatus } from 'shared/constants';
+import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import { nanoid } from 'nanoid';
 import BuildService from 'server/services/build';
 
@@ -102,55 +98,40 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
   return withLogContext({ correlationId, buildUuid: uuid as string }, async () => {
     try {
-      const githubService = new GithubService();
-      const build: Build = await githubService.db.models.Build.query()
+      const buildService = new BuildService();
+      const build = await buildService.db.models.Build.query()
         .findOne({
           uuid,
         })
         .withGraphFetched('deploys.deployable');
-
-      const buildId = build.id;
 
       if (!build) {
         getLogger().debug(`Build not found`);
         return res.status(404).json({ error: `Build not found for ${uuid}` });
       }
 
-      const deploy = build.deploys.find((deploy) => deploy.deployable.name === name);
+      const deploy = build.deploys?.find((candidate) => candidate.deployable?.name === name);
 
-      if (!deploy) {
+      if (!deploy?.deployable) {
         getLogger().debug(`Deployable not found: service=${name}`);
         res.status(404).json({ error: `${name} service is not found in ${uuid} build.` });
         return;
       }
 
-      const githubRepositoryId = deploy.deployable.repositoryId;
+      const githubRepositoryId =
+        deploy.deployable.resolvedFromRepositoryId ?? deploy.deployable.repositoryId ?? deploy.githubRepositoryId;
+      if (githubRepositoryId == null) {
+        throw new Error(`Cannot redeploy ${name}: source repository is unknown.`);
+      }
 
       const runUUID = nanoid();
-      const buildService = new BuildService();
-      await buildService.resolveAndDeployBuildQueue.add('resolve-deploy', {
-        buildId,
-        githubRepositoryId,
+      await buildService.enqueueResolveAndDeployBuild({
+        buildId: build.id,
+        githubRepositoryId: Number(githubRepositoryId),
         runUUID,
-        ...extractContextForQueue(),
       });
 
       getLogger({ stage: LogStage.BUILD_QUEUED }).info(`Build: service redeploy queued service=${name}`);
-
-      const deployService = new DeployService();
-
-      await deploy.$query().patchAndFetch({
-        runUUID,
-      });
-
-      await deployService.patchAndUpdateActivityFeed(
-        deploy,
-        {
-          status: DeployStatus.QUEUED,
-        },
-        runUUID,
-        githubRepositoryId
-      );
       return res.status(200).json({
         status: 'success',
         message: `Redeploy for service ${name} in build ${uuid} has been queued`,

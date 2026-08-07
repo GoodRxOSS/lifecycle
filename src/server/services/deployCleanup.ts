@@ -28,6 +28,7 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 
 export type DeployCleanupMode = 'infra' | 'service';
+type NativeMutationGate = <T>(action: () => Promise<T>) => Promise<T>;
 
 interface CleanupTask {
   name: string;
@@ -163,7 +164,10 @@ export default class DeployCleanupService extends BaseService {
     });
   }
 
-  async cleanupDeploy(deployOrId: Deploy | number, { mode }: { mode: DeployCleanupMode }): Promise<boolean> {
+  async cleanupDeploy(
+    deployOrId: Deploy | number,
+    { mode, nativeMutationGate }: { mode: DeployCleanupMode; nativeMutationGate?: NativeMutationGate }
+  ): Promise<boolean> {
     const deploy = await this.resolveDeploy(deployOrId);
     if (!deploy) {
       getLogger({ deployId: deployOrId, mode }).warn('Deploy cleanup: deploy not found');
@@ -183,19 +187,24 @@ export default class DeployCleanupService extends BaseService {
     const { namespace, serviceName, deployType } = metadata;
     return withLogContext({ deployUuid: deploy.uuid, serviceName }, async () => {
       const metrics = this.metricsFor(deploy, mode);
-      const tasks = [
+      const nativeTasks = [
         ...this.buildKubernetesTasks(deploy, namespace),
         ...this.buildSecretTasks(deploy, namespace, serviceName),
         this.buildHelmTask(deploy, namespace, deployType),
-        this.buildCliTask(deploy, deployType),
       ].filter(Boolean) as CleanupTask[];
+      const providerTasks = [this.buildCliTask(deploy, deployType)].filter(Boolean) as CleanupTask[];
+      const tasks = [...nativeTasks, ...providerTasks];
 
       getLogger({ mode, taskCount: tasks.length }).info('Deploy cleanup: targeted teardown started');
 
-      const results: boolean[] = [];
-      for (const task of tasks) {
-        results.push(await this.runTask(task, deploy, metrics, mode));
-      }
+      const runTasks = async (selectedTasks: CleanupTask[]) => {
+        const results: boolean[] = [];
+        for (const task of selectedTasks) results.push(await this.runTask(task, deploy, metrics, mode));
+        return results;
+      };
+      const results = nativeMutationGate
+        ? (await Promise.all([nativeMutationGate(() => runTasks(nativeTasks)), runTasks(providerTasks)])).flat()
+        : await runTasks(tasks);
 
       const success = results.every(Boolean);
       metrics.increment('deploy', { mode, result: success ? 'complete' : 'partial_failure' });
@@ -271,7 +280,8 @@ export default class DeployCleanupService extends BaseService {
         shellPromise(
           `kubectl delete ${resourceType} ${filteredNames.map(shellQuote).join(' ')} --namespace ${shellQuote(
             namespace
-          )} --ignore-not-found`
+          )} --ignore-not-found`,
+          { timeout: 90_000 }
         ),
     };
   }
@@ -284,7 +294,8 @@ export default class DeployCleanupService extends BaseService {
         shellPromise(
           `kubectl delete ${resourceType} --namespace ${shellQuote(namespace)} -l ${shellQuote(
             selector
-          )} --ignore-not-found`
+          )} --ignore-not-found`,
+          { timeout: 90_000 }
         ),
     };
   }
@@ -341,7 +352,8 @@ export default class DeployCleanupService extends BaseService {
             shellPromise(
               `kubectl delete externalsecret ${shellQuote(secretName)} --namespace ${shellQuote(
                 namespace
-              )} --ignore-not-found`
+              )} --ignore-not-found`,
+              { timeout: 90_000 }
             ),
         },
         {
@@ -349,7 +361,8 @@ export default class DeployCleanupService extends BaseService {
           resourceType: 'secret',
           run: () =>
             shellPromise(
-              `kubectl delete secret ${shellQuote(secretName)} --namespace ${shellQuote(namespace)} --ignore-not-found`
+              `kubectl delete secret ${shellQuote(secretName)} --namespace ${shellQuote(namespace)} --ignore-not-found`,
+              { timeout: 90_000 }
             ),
         },
       ];
@@ -364,7 +377,10 @@ export default class DeployCleanupService extends BaseService {
     return {
       name: 'helm-uninstall',
       resourceType: 'helm-release',
-      run: () => shellPromise(`helm uninstall ${shellQuote(deploy.uuid)} --namespace ${shellQuote(namespace)}`),
+      run: () =>
+        shellPromise(`helm uninstall ${shellQuote(deploy.uuid)} --namespace ${shellQuote(namespace)} --timeout 5m`, {
+          timeout: 360_000,
+        }),
     };
   }
 

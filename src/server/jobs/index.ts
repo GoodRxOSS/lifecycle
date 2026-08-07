@@ -76,6 +76,7 @@ export default function bootstrapJobs(services: IServices) {
   services.BuildService.setupApiEnvironmentExpiryJob().catch((error) =>
     getLogger().error({ error }, 'Jobs: api environment expiry setup failed')
   );
+  services.BuildService.setupDeploymentReconciliationSweep();
 
   const apiEnvCreateWorker = queueManager.registerWorker(
     QUEUE_NAMES.API_ENV_CREATE,
@@ -163,6 +164,15 @@ export default function bootstrapJobs(services: IServices) {
     connection: redisClient.getConnection(),
     concurrency: 125,
   });
+
+  queueManager.registerWorker(
+    QUEUE_NAMES.DEPLOYMENT_RECONCILIATION,
+    services.BuildService.processDeploymentReconciliationQueue,
+    {
+      connection: redisClient.getConnection(),
+      concurrency: 125,
+    }
+  );
 
   queueManager.registerWorker(QUEUE_NAMES.GITHUB_DEPLOYMENT, services.GithubService.processGithubDeployment, {
     connection: redisClient.getConnection(),

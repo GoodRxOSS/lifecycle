@@ -241,7 +241,7 @@ describe('deployable source seam (PR vs API build)', () => {
     jest.spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig').mockResolvedValue(undefined);
     const build: any = {
       id: 9,
-      triggerType: 'api',
+      triggerType: 'github_pr',
       githubRepositoryId: 42,
       branchName: 'main',
       configSha: 'root-config-sha',
@@ -274,6 +274,41 @@ describe('deployable source seam (PR vs API build)', () => {
       null,
       build
     );
+  });
+
+  it('pins a root full-scope import to the delivered source SHA independently of its target selector', async () => {
+    const service = makeService();
+    const repository = { githubRepositoryId: 42, fullName: 'org/root' };
+    mockFetchLifecycleConfigByRepository.mockResolvedValue(null);
+    const build: any = {
+      id: 9,
+      triggerType: 'github_pr',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const pullRequest: any = {
+      branchName: 'main',
+      repository,
+      build,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      pullRequest,
+      build,
+      undefined,
+      'root-push-sha',
+      'main',
+      42
+    );
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-push-sha');
   });
 
   it('targets a same-repository dependency by its exact effective branch and preserves the configured branch', async () => {

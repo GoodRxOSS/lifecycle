@@ -113,4 +113,36 @@ describe('buildWithNative', () => {
       'buildkit'
     );
   });
+
+  it('uses reconciliation-prepared service account without repeating namespace setup', async () => {
+    const deploy = {
+      deployable: { name: 'sample-service', builder: { engine: 'buildkit' } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const options = {
+      ecrRepo: 'sample-repo',
+      ecrDomain: 'registry.example.com',
+      envVars: {},
+      dockerfilePath: 'Dockerfile',
+      tag: 'sample-tag',
+      revision: 'abcdef1234567890',
+      repo: 'example-org/example-repo',
+      branch: 'main',
+      namespace: 'env-build123',
+      buildId: '1',
+      buildUuid: 'build123',
+      deployUuid: 'deploy123',
+      serviceAccount: 'prepared-build-sa',
+    };
+
+    await buildWithNative(deploy as any, options);
+
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(mockEnsureServiceAccountForJob).not.toHaveBeenCalled();
+    expect(mockBuildWithEngine).toHaveBeenCalledWith(
+      deploy,
+      expect.objectContaining({ serviceAccount: 'prepared-build-sa' }),
+      'buildkit'
+    );
+  });
 });

@@ -1048,7 +1048,26 @@ describe('Github Service - handlePushWebhook', () => {
       );
     });
 
-    test('forwards the pushed commit as triggerRef so distinct commits are not coalesced', async () => {
+    test('keeps a tracked static service push scoped to the changed repository', async () => {
+      const buildId = 100;
+      const mockDeploy = createMockDeploy(buildId, DeployStatus.READY);
+      (mockDeploy.build as any).isStatic = true;
+      mockDb.models.Deploy.query.mockReturnValue(createAllDeploysQuery([mockDeploy]));
+
+      await githubService.handlePushWebhook(createMockPushEvent());
+
+      expect(mockDb.services.BuildService.enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buildId,
+          githubRepositoryId: 12345,
+          sourceGithubRepositoryId: 12345,
+          sourceBranch: 'main',
+          sourceRef: 'abc123def456',
+        })
+      );
+    });
+
+    test('forwards the pushed commit as the immutable source ref', async () => {
       const buildId = 100;
       const mockDeploy = createMockDeploy(buildId);
 
@@ -1058,8 +1077,7 @@ describe('Github Service - handlePushWebhook', () => {
         return queryCount === 1 ? createAllDeploysQuery([mockDeploy]) : createFailedDeploysQuery([]);
       });
 
-      // Keep the default void `before` so the deploy routes directly without changed-files setup; triggerRef
-      // derives only from the pushed head commit (`after`).
+      // Keep the default void `before` so the deploy routes directly without changed-files setup.
       const pushEvent = {
         ...createMockPushEvent(),
         after: 'head-commit-sha',
@@ -1069,11 +1087,11 @@ describe('Github Service - handlePushWebhook', () => {
 
       expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
         'resolve-deploy',
-        expect.objectContaining({ buildId, triggerRef: 'head-commit-sha' })
+        expect.objectContaining({ buildId, sourceRef: 'head-commit-sha' })
       );
     });
 
-    test('omits triggerRef when the pushed head commit is void', async () => {
+    test('omits sourceRef when the pushed head commit is void', async () => {
       const buildId = 100;
       const mockDeploy = createMockDeploy(buildId);
 
@@ -1092,10 +1110,10 @@ describe('Github Service - handlePushWebhook', () => {
       await githubService.handlePushWebhook(pushEvent);
 
       const addCall = mockDb.services.BuildService.resolveAndDeployBuildQueue.add.mock.calls[0];
-      expect(addCall[1]).not.toHaveProperty('triggerRef');
+      expect(addCall[1]).not.toHaveProperty('sourceRef');
     });
 
-    test('forwards the pushed commit as triggerRef for static environments', async () => {
+    test('forwards the pushed commit as sourceRef for static environments', async () => {
       const buildId = 701;
       const repoBuilder = {
         from: jest.fn().mockReturnThis(),
@@ -1133,9 +1151,20 @@ describe('Github Service - handlePushWebhook', () => {
 
       await githubService.handlePushWebhook(pushEvent);
 
+      const request = mockDb.services.BuildService.enqueueResolveAndDeployBuild.mock.calls[0][0];
+      expect(request).toEqual(
+        expect.objectContaining({
+          buildId,
+          sourceGithubRepositoryId: 12345,
+          sourceBranch: 'main',
+          sourceRef: 'static-head-sha',
+          sourceBeforeRef: 'previous-commit',
+        })
+      );
+      expect(request).not.toHaveProperty('githubRepositoryId');
       expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
         'resolve-deploy',
-        expect.objectContaining({ buildId, triggerRef: 'static-head-sha' })
+        expect.objectContaining({ buildId, sourceRef: 'static-head-sha' })
       );
     });
 

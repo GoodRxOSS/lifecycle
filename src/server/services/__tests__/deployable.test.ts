@@ -254,6 +254,7 @@ describe('Deployable Service', () => {
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
+        requires: ['github-db', 'test-db'],
         deploymentDependsOn: [],
         helm: undefined,
       });
@@ -419,6 +420,7 @@ describe('Deployable Service', () => {
         active: undefined,
         defaultBranchName: 'unit-test',
         dependsOnDeployableName: undefined,
+        requires: ['github-db', 'test-db'],
         deploymentDependsOn: [],
         helm: undefined,
       });

@@ -108,6 +108,7 @@ export interface DeployableAttributes {
   commentBranchName?: string;
   ingressAnnotations?: Record<string, any>;
   helm?: Helm;
+  requires?: string[];
   deploymentDependsOn?: string[];
   builder?: Builder;
   envLens?: boolean;
@@ -278,6 +279,13 @@ export default class DeployableService extends BaseService {
           active,
           dependsOnDeployableName,
           helm: await YamlService.getHelmConfigFromYaml(service),
+          requires: [
+            ...new Set(
+              (service.requires ?? [])
+                .map((requiredService) => requiredService.name?.trim())
+                .filter((name): name is string => Boolean(name))
+            ),
+          ],
           deploymentDependsOn: service.deploymentDependsOn || [],
           builder: YamlService.getEffectiveBuilder(service, buildDefaults?.engine) ?? {},
           envLens: await YamlService.getEnvLens(service),
@@ -423,7 +431,8 @@ export default class DeployableService extends BaseService {
     build?: Build,
     filterGithubRepositoryId?: number,
     sourceRef?: string | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId
   ): Promise<boolean> {
     try {
       let allReferencedYamlConfigsResolved = true;
@@ -458,6 +467,15 @@ export default class DeployableService extends BaseService {
         (repository?.githubRepositoryId != null &&
           Number(repository.githubRepositoryId) === Number(filterGithubRepositoryId) &&
           (sourceBranch == null || branchName === sourceBranch));
+      const matchesDeliveredSource = (
+        repository: Repository | null | undefined,
+        branchName: string | null | undefined
+      ) =>
+        sourceGithubRepositoryId != null &&
+        repository?.githubRepositoryId != null &&
+        Number(repository.githubRepositoryId) === Number(sourceGithubRepositoryId) &&
+        sourceBranch != null &&
+        branchName === sourceBranch;
 
       const attribution = async (
         services: YamlService.DependencyService[],
@@ -525,11 +543,7 @@ export default class DeployableService extends BaseService {
                   }
 
                   const sourceRefTargetsDependency =
-                    sourceBuild?.triggerType === 'api' &&
-                    sourceRef != null &&
-                    filterGithubRepositoryId != null &&
-                    sourceBranch != null &&
-                    targetsSource(repository, branchName);
+                    sourceRef != null && matchesDeliveredSource(repository, branchName);
                   if (filterGithubRepositoryId != null && !targetsSource(repository, branchName)) {
                     getLogger({ buildUUID, service: yamlEnvService.name, branchName }).debug(
                       'Skipping remote YAML fetch outside filtered source branch'
@@ -636,12 +650,8 @@ export default class DeployableService extends BaseService {
         rootBranch != null &&
         rootBaseConfigRef != null
       ) {
-        const sourceRefTargetsRoot =
-          filterGithubRepositoryId != null && sourceBranch != null && targetsSource(sourceRepository, rootBranch);
-        const rootConfigRef =
-          sourceBuild?.triggerType === 'api' && sourceRefTargetsRoot
-            ? sourceRef ?? rootBaseConfigRef
-            : rootBaseConfigRef;
+        const sourceRefTargetsRoot = sourceRef != null && matchesDeliveredSource(sourceRepository, rootBranch);
+        const rootConfigRef = sourceRefTargetsRoot ? sourceRef : rootBaseConfigRef;
         const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
           sourceRepository,
           rootConfigRef
@@ -739,7 +749,8 @@ export default class DeployableService extends BaseService {
     build?: Build,
     filterGithubRepositoryId?: number,
     sourceRef?: string | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId
   ): Promise<DeployableReconciliationResult> {
     // We are going to ingest all the database and yaml configuration and process in the memory before writes into the database
     let deployables: Deployable[] = [];
@@ -765,7 +776,8 @@ export default class DeployableService extends BaseService {
           build,
           filterGithubRepositoryId,
           sourceRef,
-          sourceBranch
+          sourceBranch,
+          sourceGithubRepositoryId
         );
 
         // Finally, Upsert the deployables into the database

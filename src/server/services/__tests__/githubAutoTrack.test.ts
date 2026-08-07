@@ -82,10 +82,10 @@ describe('enqueueAutoTrackedApiBuilds', () => {
 
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({ buildId: 1, triggerRef: 'sha123', sourceBranch: 'Main' })
+      expect.objectContaining({ buildId: 1, sourceRef: 'sha123', sourceBranch: 'Main' })
     );
     expect(enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({ buildId: 2, triggerRef: 'sha123', sourceBranch: 'Main' })
+      expect.objectContaining({ buildId: 2, sourceRef: 'sha123', sourceBranch: 'Main' })
     );
   });
 
@@ -129,7 +129,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       repository: { id: 42, full_name: 'org/repo' },
     } as any);
 
-    expect(autoTrack).toHaveBeenCalledWith(42, 'main', 'sha123');
+    expect(autoTrack).toHaveBeenCalledWith(42, 'main', 'sha123', 'aaaa111');
   });
 
   it('continues the existing PR redeploy flow when the API auto-track lookup fails', async () => {
@@ -184,7 +184,6 @@ describe('handlePushWebhook auto-track wiring', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
       expect.objectContaining({
         buildId: 7,
-        triggerRef: 'sha123',
         sourceRef: 'sha123',
         sourceGithubRepositoryId: 42,
         sourceBranch: 'main',
@@ -251,7 +250,6 @@ describe('handlePushWebhook auto-track wiring', () => {
         buildId: 8,
         githubRepositoryId: 99,
         sourceGithubRepositoryId: 99,
-        triggerRef: 'dependency-sha',
         sourceRef: 'dependency-sha',
         sourceBranch: 'main',
       })
@@ -406,7 +404,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       repository: { id: 42, full_name: 'org/repo' },
     } as any);
 
-    expect(autoTrack).toHaveBeenCalledWith(42, 'main', 'sha123');
+    expect(autoTrack).toHaveBeenCalledWith(42, 'main', 'sha123', 'aaaa111');
     expect(db.services.BuildService.enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
   });
 
@@ -441,7 +439,6 @@ describe('handlePushWebhook auto-track wiring', () => {
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         buildId: 1,
-        triggerRef: 'sha123',
         sourceRef: 'sha123',
         sourceGithubRepositoryId: 42,
         sourceBranch: 'main',

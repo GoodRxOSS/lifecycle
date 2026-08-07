@@ -68,7 +68,9 @@ describe('bootstrapJobs API-environment wiring', () => {
     const handleApiEnvironmentCreateFailure = jest.fn();
     const processApiEnvironmentCreateQueue = jest.fn();
     const processApiEnvironmentExpiryQueue = jest.fn();
+    const processDeploymentReconciliationQueue = jest.fn();
     const setupApiEnvironmentExpiryJob = jest.fn().mockResolvedValue(undefined);
+    const setupDeploymentReconciliationSweep = jest.fn();
 
     const services: any = {
       GithubService: { processWebhooks: jest.fn() },
@@ -78,12 +80,14 @@ describe('bootstrapJobs API-environment wiring', () => {
       SitesService: { setupSitesCleanupJob: jest.fn(), processSitesCleanupQueue: jest.fn() },
       BuildService: {
         setupApiEnvironmentExpiryJob,
+        setupDeploymentReconciliationSweep,
         processApiEnvironmentCreateQueue,
         handleApiEnvironmentCreateFailure,
         processApiEnvironmentExpiryQueue,
         processDeleteQueue: jest.fn(),
         processResolveAndDeployBuildQueue: jest.fn(),
         processBuildQueue: jest.fn(),
+        processDeploymentReconciliationQueue,
       },
       Webhook: { processWebhookQueue: jest.fn() },
       Ingress: { createOrUpdateIngressForBuild: jest.fn(), ingressCleanupForBuild: jest.fn() },
@@ -95,11 +99,14 @@ describe('bootstrapJobs API-environment wiring', () => {
 
     const createWorker = registeredWorkers.find((w) => w.queue === QUEUE_NAMES.API_ENV_CREATE);
     const expiryWorker = registeredWorkers.find((w) => w.queue === QUEUE_NAMES.API_ENV_EXPIRY);
+    const reconciliationWorker = registeredWorkers.find((w) => w.queue === QUEUE_NAMES.DEPLOYMENT_RECONCILIATION);
 
     expect(createWorker?.handler).toBe(processApiEnvironmentCreateQueue);
     expect(expiryWorker?.handler).toBe(processApiEnvironmentExpiryQueue);
+    expect(reconciliationWorker?.handler).toBe(processDeploymentReconciliationQueue);
     expect(workerOnHandlers[QUEUE_NAMES.API_ENV_CREATE]?.failed).toBe(handleApiEnvironmentCreateFailure);
     expect(setupApiEnvironmentExpiryJob).toHaveBeenCalled();
+    expect(setupDeploymentReconciliationSweep).toHaveBeenCalled();
 
     const ownerSweepWorker = registeredWorkers.find((w) => w.queue === QUEUE_NAMES.API_TOKEN_OWNER_SWEEP);
     expect(ownerSweepWorker?.handler).toBe(processApiTokenOwnerSweep);

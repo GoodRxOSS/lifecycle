@@ -43,7 +43,7 @@ describe('enqueueRedeployIfEnabled PR-less gate (F1 site)', () => {
 
     expect(queued).toBe(true);
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
-      expect.objectContaining({ buildId: 9, triggerRef: 'run-1' })
+      expect.objectContaining({ buildId: 9, runUUID: 'run-1' })
     );
   });
 
