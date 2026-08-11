@@ -1239,76 +1239,43 @@ describe('BuildService deployment reconciliation', () => {
     mockAcceptDeploymentIntent.mockResolvedValue({ accepted: true, generation: 1, scopeKey: 'all' });
   });
 
-  test.each([
-    ['a newer live PR generation', createBuild({ desiredGeneration: 8, runUUID: 'run-c', pullRequestId: 11 }), 7, true],
-    [
-      'a newer live static generation',
-      createBuild({
-        desiredGeneration: 8,
-        runUUID: 'run-c',
-        pullRequest: null,
-        pullRequestId: null,
-        deployEnabled: true,
-        isStatic: true,
-      }),
-      7,
-      true,
-    ],
-    ['the same generation', createBuild({ desiredGeneration: 7, runUUID: 'other-run' }), 7, false],
-    [
-      'a closed PR',
-      createBuild({
-        desiredGeneration: 8,
-        runUUID: 'run-c',
-        pullRequestId: 11,
-        pullRequest: { status: 'closed', deployOnUpdate: true },
-      }),
-      7,
-      false,
-    ],
-    [
-      'a deploy-disabled PR',
-      createBuild({
-        desiredGeneration: 8,
-        runUUID: 'run-c',
-        pullRequestId: 11,
-        pullRequest: { status: 'open', deployOnUpdate: false },
-      }),
-      7,
-      false,
-    ],
-    [
-      'an API teardown',
-      createBuild({
-        desiredGeneration: 8,
-        runUUID: 'build-teardown-1',
-        status: BuildStatus.TEARING_DOWN,
-        pullRequest: null,
-        pullRequestId: null,
-        deployEnabled: false,
-      }),
-      7,
-      false,
-    ],
-    [
-      'a PR teardown owner before status publication',
-      createBuild({
-        desiredGeneration: 8,
-        runUUID: 'build-teardown-1',
-        pullRequestId: 11,
-      }),
-      7,
-      false,
-    ],
-    ['a deleted Build', createBuild({ desiredGeneration: 8, deletedAt: '2026-08-06T00:00:00Z' }), 7, false],
-    ['a stale run without a generation', createBuild({ desiredGeneration: 8 }), undefined, false],
-  ])('permits stale after-build only for %s', async (_case, build, expectedGeneration, expected) => {
+  const deploymentScopeHarness = (buildImagesResult: boolean) => {
     const { service } = serviceHarness();
-    jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue(build);
+    const build = createBuild({ id: 1, runUUID: 'run-current', namespace: 'env-sample' });
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    const buildImages = jest.spyOn(service as any, 'buildImages').mockResolvedValue(buildImagesResult);
+    jest.spyOn(service as any, 'deployCLIServices').mockResolvedValue(true);
+    const updateStatus = jest.spyOn(service as any, 'updateStatusAndComment').mockResolvedValue(undefined);
+    const applyManifests = jest.spyOn(service as any, 'generateAndApplyManifests').mockResolvedValue(true);
+    const preparation = {
+      build,
+      runUUID: 'run-current',
+      githubRepositoryId: 100,
+      sourceGithubRepositoryId: 100,
+      sourceRef: 'commit-a',
+      sourceBranch: 'main',
+    };
+    return { service, preparation, buildImages, updateStatus, applyManifests };
+  };
 
-    await expect(
-      service.isSupersededByNewerLiveDeploymentGeneration(1, expectedGeneration as number | undefined)
-    ).resolves.toBe(expected);
+  test('a failed image phase reports ERROR and never reaches manifest apply', async () => {
+    const { service, preparation, buildImages, updateStatus, applyManifests } = deploymentScopeHarness(false);
+
+    const result = await (service as any).executeDeploymentScope(preparation, 7);
+
+    expect(result).toEqual({ status: BuildStatus.ERROR });
+    expect(buildImages).toHaveBeenCalledTimes(1);
+    expect(updateStatus).not.toHaveBeenCalled();
+    expect(applyManifests).not.toHaveBeenCalled();
+  });
+
+  test('a successful image phase proceeds to manifest apply and reports DEPLOYED', async () => {
+    const { service, preparation, applyManifests } = deploymentScopeHarness(true);
+
+    const result = await (service as any).executeDeploymentScope(preparation, 7);
+
+    expect(result).toEqual({ status: BuildStatus.DEPLOYED });
+    expect(applyManifests).toHaveBeenCalledTimes(1);
   });
 
   test('signals only the exact durable generation accepted by the mailbox', async () => {
