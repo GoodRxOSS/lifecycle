@@ -928,6 +928,20 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         })
       );
       expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        status: DeployStatus.BUILDING,
+        statusMessage: 'Running after-build pipeline...',
+        buildLogs: null,
+      });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        buildLogs: 'https://g.codefresh.io/build/after-build-run',
+      });
+      const runningPatchIndex = conditionalDeployPatch.mock.calls.findIndex(
+        ([params]) => params.buildLogs === 'https://g.codefresh.io/build/after-build-run'
+      );
+      expect(conditionalDeployPatch.mock.invocationCallOrder[runningPatchIndex]).toBeLessThan(
+        mockCodefreshWaitForImage.mock.invocationCallOrder[0]
+      );
       expect(mockGetLogger).toHaveBeenCalledWith(
         expect.objectContaining({
           afterBuildPipelineId: 'sample/after-build',
@@ -965,7 +979,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
       expect(patchTagSpy).not.toHaveBeenCalled();
       expect(conditionalDeployPatch).toHaveBeenCalledTimes(1);
-      expect(conditionalDeployPatch).toHaveBeenCalledWith({ afterBuildCompletionKey: null });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({ afterBuildCompletionKey: null, buildLogs: null });
       expect(mockLoggerInfo).toHaveBeenCalledWith(
         'Image: native result publication skipped reason=superseded result=success'
       );
@@ -976,6 +990,7 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       const deploy = createNativeAfterBuildDeploy();
       const patchTagSpy = prepareNativeAfterBuildTest(() => current);
       mockBuildWithNative.mockResolvedValue({ success: true });
+      conditionalDeployPatch.mockImplementation(async () => (current ? 1 : 0));
       mockCodefreshTriggerPipeline.mockImplementation(async () => {
         current = false;
         return 'after-build-run';
@@ -994,6 +1009,12 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
       expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
       expect(patchTagSpy).not.toHaveBeenCalled();
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        buildLogs: 'https://g.codefresh.io/build/after-build-run',
+      });
+      expect(
+        conditionalDeployWhere.mock.calls.every(([where]) => where.id === deploy.id && where.runUUID === 'run-a')
+      ).toBe(true);
     });
 
     test('a failed superseded native build neither invokes the after-build pipeline nor publishes failure', async () => {
@@ -1044,9 +1065,15 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(patchTagSpy).not.toHaveBeenCalled();
       expect(deployService.patchAndUpdateActivityFeed).toHaveBeenCalledWith(
         deploy,
-        { status: DeployStatus.BUILD_FAILED },
+        {
+          status: DeployStatus.BUILD_FAILED,
+          statusMessage: 'After-build pipeline failed.',
+        },
         'run-1'
       );
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        buildLogs: 'https://g.codefresh.io/build/after-build-run',
+      });
       expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
       expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
       expect(mockGetLogger).toHaveBeenCalledWith(
@@ -1060,6 +1087,40 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
           /^Codefresh: after-build pipeline completed result=failure afterBuildPipelineId=sample\/after-build pipelineId=after-build-run imageTag=/
         )
       );
+    });
+
+    test('a current after-build trigger error publishes a terminal after-build failure', async () => {
+      const deploy = createNativeAfterBuildDeploy();
+      const patchTagSpy = prepareNativeAfterBuildTest(() => true);
+      mockBuildWithNative.mockResolvedValue({ success: true });
+      mockCodefreshTriggerPipeline.mockRejectedValue(new Error('Codefresh unavailable'));
+
+      const result = await deployService.buildImageForHelmAndGithub(
+        deploy as any,
+        'run-1',
+        undefined,
+        undefined,
+        undefined,
+        7
+      );
+
+      expect(result).toBe(false);
+      expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
+      expect(patchTagSpy).not.toHaveBeenCalled();
+      expect(deployService.patchAndUpdateActivityFeed).toHaveBeenCalledWith(
+        deploy,
+        { status: DeployStatus.BUILD_FAILED, statusMessage: 'After-build pipeline failed.' },
+        'run-1'
+      );
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        status: DeployStatus.BUILDING,
+        statusMessage: 'Running after-build pipeline...',
+        buildLogs: null,
+      });
+      expect(conditionalDeployPatch).not.toHaveBeenCalledWith(
+        expect.objectContaining({ buildLogs: expect.stringContaining('g.codefresh.io/build/') })
+      );
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Codefresh: after-build pipeline trigger failed');
     });
 
     const flushUntil = async (done: () => boolean) => {
@@ -1089,6 +1150,20 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       await flushUntil(() => mockCodefreshWaitForImage.mock.calls.length > 0);
 
       expect(mockBuildWithNative).not.toHaveBeenCalled();
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        status: DeployStatus.BUILDING,
+        statusMessage: 'Running after-build pipeline...',
+        buildLogs: null,
+      });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        buildLogs: 'https://g.codefresh.io/build/after-build-run',
+      });
+      const afterBuildUrlPatchIndex = conditionalDeployPatch.mock.calls.findIndex(
+        ([params]) => params.buildLogs === 'https://g.codefresh.io/build/after-build-run'
+      );
+      expect(conditionalDeployPatch.mock.invocationCallOrder[afterBuildUrlPatchIndex]).toBeLessThan(
+        mockCodefreshWaitForImage.mock.invocationCallOrder[0]
+      );
       expect(mockCodefreshTriggerPipeline).toHaveBeenCalledTimes(1);
       expect(mockCodefreshTriggerPipeline).toHaveBeenCalledWith(
         'sample/after-build',
@@ -1132,9 +1207,10 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(mockCodefreshTriggerPipeline).not.toHaveBeenCalled();
       expect(mockCodefreshWaitForImage).not.toHaveBeenCalled();
       expect(patchTagSpy).toHaveBeenCalledTimes(1);
+      expect(conditionalDeployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ buildLogs: null }));
     });
 
-    test('rebuilding an image clears a previously recorded completion', async () => {
+    test('rebuilding an image clears the previous completion and build link before building', async () => {
       const deploy = createNativeAfterBuildDeploy() as any;
       deploy.afterBuildCompletionKey = 'sample/after-build@stale-tag';
       const patchTagSpy = prepareNativeAfterBuildTest(() => true);
@@ -1150,7 +1226,13 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       );
 
       expect(result).toBe(true);
-      expect(conditionalDeployPatch).toHaveBeenCalledWith({ afterBuildCompletionKey: null });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({ afterBuildCompletionKey: null, buildLogs: null });
+      const rebuildClearIndex = conditionalDeployPatch.mock.calls.findIndex(
+        ([params]) => params.afterBuildCompletionKey === null && params.buildLogs === null
+      );
+      expect(conditionalDeployPatch.mock.invocationCallOrder[rebuildClearIndex]).toBeLessThan(
+        mockBuildWithNative.mock.invocationCallOrder[0]
+      );
       expect(patchTagSpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1244,9 +1326,15 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(patchTagSpy).not.toHaveBeenCalled();
       expect(deployService.patchAndUpdateActivityFeed).toHaveBeenCalledWith(
         deploy,
-        { status: DeployStatus.BUILD_FAILED },
+        {
+          status: DeployStatus.BUILD_FAILED,
+          statusMessage: 'After-build pipeline failed.',
+        },
         'run-b'
       );
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({
+        buildLogs: 'https://g.codefresh.io/build/after-build-run',
+      });
     });
 
     test('a codefresh-engine cache hit still runs and awaits the after-build pipeline before BUILT', async () => {

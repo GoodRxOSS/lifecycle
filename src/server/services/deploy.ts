@@ -67,6 +67,9 @@ interface SyncedServiceExternalSecrets {
   buildSecretEnvKeys: Set<string>;
 }
 
+const AFTER_BUILD_RUNNING_MESSAGE = 'Running after-build pipeline...';
+const AFTER_BUILD_FAILED_MESSAGE = 'After-build pipeline failed.';
+
 export default class DeployService extends BaseService {
   /**
    * Creates all of the relevant deploys for a build, based on the provided environment, if they do not already exist.
@@ -871,18 +874,36 @@ export default class DeployService extends BaseService {
     branchName: string;
     sourceRevision: string;
   }): Promise<boolean> {
-    // Superset of the native (branch) and Codefresh-embedded (SOURCE_*) invocation contracts.
-    const pipelineId = await codefresh.triggerPipeline(afterBuildPipelineId, 'cli', {
-      ...deploy.env,
-      TAG: ecrRepoTag,
-      branch: branchName,
-      SOURCE_REVISION: sourceRevision,
-      SOURCE_BRANCH: branchName,
+    const current = await this.patchDeployForRun(deploy, runUUID, {
+      status: DeployStatus.BUILDING,
+      statusMessage: AFTER_BUILD_RUNNING_MESSAGE,
+      buildLogs: null,
     });
+    if (!current) return false;
+
+    let pipelineId: string;
+    try {
+      // Superset of the native (branch) and Codefresh-embedded (SOURCE_*) invocation contracts.
+      pipelineId = await codefresh.triggerPipeline(afterBuildPipelineId, 'cli', {
+        ...deploy.env,
+        TAG: ecrRepoTag,
+        branch: branchName,
+        SOURCE_REVISION: sourceRevision,
+        SOURCE_BRANCH: branchName,
+      });
+    } catch (error) {
+      getLogger({ error, afterBuildPipelineId, imageTag: ecrRepoTag }).warn(
+        'Codefresh: after-build pipeline trigger failed'
+      );
+      return false;
+    }
     const details = `afterBuildPipelineId=${afterBuildPipelineId} pipelineId=${pipelineId} imageTag=${ecrRepoTag}`;
     const logger = getLogger({ afterBuildPipelineId, pipelineId, imageTag: ecrRepoTag });
     logger.info(`Codefresh: after-build pipeline triggered ${details}`);
 
+    await this.patchDeployForRun(deploy, runUUID, {
+      buildLogs: `https://g.codefresh.io/build/${pipelineId}`,
+    });
     const completed = await codefresh.waitForImage(pipelineId);
     if (!completed) {
       logger.warn(`Codefresh: after-build pipeline completed result=failure ${details}`);
@@ -1132,13 +1153,13 @@ export default class DeployService extends BaseService {
         }
 
         await deploy.reload();
-        // A prior build's completion must not vouch for the new image; the clear fails closed.
-        if (deployable.afterBuildPipelineId) {
-          const cleared = await this.patchDeployForRun(deploy, runUUID, { afterBuildCompletionKey: null });
-          if (!cleared) {
-            getLogger().info('Image: stopped before build reason=superseded');
-            return true;
-          }
+        const prepared = await this.patchDeployForRun(deploy, runUUID, {
+          buildLogs: null,
+          ...(deployable.afterBuildPipelineId ? { afterBuildCompletionKey: null } : {}),
+        });
+        if (!prepared) {
+          getLogger().info('Image: stopped before build reason=superseded');
+          return true;
         }
         await this.patchAndUpdateActivityFeed(
           deploy,
@@ -1257,7 +1278,11 @@ export default class DeployService extends BaseService {
                 return true;
               }
               if (!completed) {
-                await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+                await this.patchAndUpdateActivityFeed(
+                  deploy,
+                  { status: DeployStatus.BUILD_FAILED, statusMessage: AFTER_BUILD_FAILED_MESSAGE },
+                  runUUID
+                );
                 return false;
               }
             }
@@ -1343,7 +1368,11 @@ export default class DeployService extends BaseService {
               return true;
             }
             if (!completed) {
-              await this.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, runUUID);
+              await this.patchAndUpdateActivityFeed(
+                deploy,
+                { status: DeployStatus.BUILD_FAILED, statusMessage: AFTER_BUILD_FAILED_MESSAGE },
+                runUUID
+              );
               return false;
             }
           }
