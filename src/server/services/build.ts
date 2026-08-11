@@ -2616,26 +2616,6 @@ export default class BuildService extends BaseService {
     return build ?? null;
   }
 
-  /**
-   * Prove that stale work lost authority to a newer live deployment intent,
-   * rather than teardown, deletion, or another non-deployment owner.
-   */
-  async isSupersededByNewerLiveDeploymentGeneration(buildId: number, expectedGeneration?: number): Promise<boolean> {
-    if (expectedGeneration == null || !Number.isSafeInteger(expectedGeneration)) return false;
-
-    const current = await this.loadBuildDeploymentAuthority(buildId);
-    const desiredGeneration = Number(current?.desiredGeneration);
-    return Boolean(
-      current &&
-        Number.isSafeInteger(desiredGeneration) &&
-        desiredGeneration > expectedGeneration &&
-        current.status !== BuildStatus.TEARING_DOWN &&
-        current.status !== BuildStatus.TORN_DOWN &&
-        current.runUUID !== buildTeardownRunUUID(buildId) &&
-        this.deploymentBlockReason(current) == null
-    );
-  }
-
   private async isBuildSetupRunCurrent(buildId: number, runUUID: string): Promise<boolean> {
     const current = await this.loadBuildDeploymentAuthority(buildId);
     return Boolean(current && current.runUUID === runUUID && this.buildSetupBlockReason(current) == null);

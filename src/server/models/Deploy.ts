@@ -62,6 +62,7 @@ export default class Deploy extends Model {
   buildOutput: string;
   deployOutput: string;
   buildJobName: string;
+  afterBuildCompletionKey: string | null;
   manifest: string;
   devMode: boolean;
   devModeSessionId: number | null;

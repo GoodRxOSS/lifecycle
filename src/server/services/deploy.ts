@@ -67,6 +67,9 @@ interface SyncedServiceExternalSecrets {
   buildSecretEnvKeys: Set<string>;
 }
 
+const AFTER_BUILD_RUNNING_MESSAGE = 'Running after-build pipeline...';
+const AFTER_BUILD_FAILED_MESSAGE = 'After-build pipeline failed.';
+
 export default class DeployService extends BaseService {
   /**
    * Creates all of the relevant deploys for a build, based on the provided environment, if they do not already exist.
@@ -851,6 +854,68 @@ export default class DeployService extends BaseService {
     });
   }
 
+  // A Lifecycle tag (sha + env hash) identifies equivalent build outputs, so it keys the completion.
+  private afterBuildCompletionKeyFor(afterBuildPipelineId: string, ecrRepoTag: string): string {
+    return `${afterBuildPipelineId}@${ecrRepoTag}`;
+  }
+
+  private async runAfterBuildPipeline({
+    deploy,
+    runUUID,
+    afterBuildPipelineId,
+    ecrRepoTag,
+    branchName,
+    sourceRevision,
+  }: {
+    deploy: Deploy;
+    runUUID: string;
+    afterBuildPipelineId: string;
+    ecrRepoTag: string;
+    branchName: string;
+    sourceRevision: string;
+  }): Promise<boolean> {
+    const current = await this.patchDeployForRun(deploy, runUUID, {
+      status: DeployStatus.BUILDING,
+      statusMessage: AFTER_BUILD_RUNNING_MESSAGE,
+      buildLogs: null,
+    });
+    if (!current) return false;
+
+    let pipelineId: string;
+    try {
+      // Superset of the native (branch) and Codefresh-embedded (SOURCE_*) invocation contracts.
+      pipelineId = await codefresh.triggerPipeline(afterBuildPipelineId, 'cli', {
+        ...deploy.env,
+        TAG: ecrRepoTag,
+        branch: branchName,
+        SOURCE_REVISION: sourceRevision,
+        SOURCE_BRANCH: branchName,
+      });
+    } catch (error) {
+      getLogger({ error, afterBuildPipelineId, imageTag: ecrRepoTag }).warn(
+        'Codefresh: after-build pipeline trigger failed'
+      );
+      return false;
+    }
+    const details = `afterBuildPipelineId=${afterBuildPipelineId} pipelineId=${pipelineId} imageTag=${ecrRepoTag}`;
+    const logger = getLogger({ afterBuildPipelineId, pipelineId, imageTag: ecrRepoTag });
+    logger.info(`Codefresh: after-build pipeline triggered ${details}`);
+
+    await this.patchDeployForRun(deploy, runUUID, {
+      buildLogs: `https://g.codefresh.io/build/${pipelineId}`,
+    });
+    const completed = await codefresh.waitForImage(pipelineId);
+    if (!completed) {
+      logger.warn(`Codefresh: after-build pipeline completed result=failure ${details}`);
+      return false;
+    }
+    await this.patchDeployForRun(deploy, runUUID, {
+      afterBuildCompletionKey: this.afterBuildCompletionKeyFor(afterBuildPipelineId, ecrRepoTag),
+    });
+    logger.info(`Codefresh: after-build pipeline completed result=success ${details}`);
+    return true;
+  }
+
   private async syncServiceExternalSecrets({
     deploy,
     serviceName,
@@ -1088,6 +1153,14 @@ export default class DeployService extends BaseService {
         }
 
         await deploy.reload();
+        const prepared = await this.patchDeployForRun(deploy, runUUID, {
+          buildLogs: null,
+          ...(deployable.afterBuildPipelineId ? { afterBuildCompletionKey: null } : {}),
+        });
+        if (!prepared) {
+          getLogger().info('Image: stopped before build reason=superseded');
+          return true;
+        }
         await this.patchAndUpdateActivityFeed(
           deploy,
           { status: DeployStatus.BUILDING, sha: fullSha, statusMessage: `Building ${deploy?.uuid}...` },
@@ -1186,72 +1259,35 @@ export default class DeployService extends BaseService {
           }
 
           if (result.success) {
-            if (runIsCurrent) {
-              await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
-              runIsCurrent = await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration);
-            }
+            // The successor re-runs any missing after-build on its image-exists path.
+            if (!runIsCurrent) return true;
 
             if (buildOptions?.afterBuildPipelineId) {
-              // This pipeline belongs to the produced image. A newer live generation may detach it,
-              // while teardown or deletion must suppress new external work.
-              const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
-
-              if (!runIsCurrent) {
-                let hasLiveSuccessor = false;
-                try {
-                  hasLiveSuccessor = await this.db.services.BuildService.isSupersededByNewerLiveDeploymentGeneration(
-                    deploy.buildId,
-                    expectedGeneration
-                  );
-                } catch (error) {
-                  getLogger({ error }).warn('Codefresh: after-build successor check failed');
-                }
-
-                if (!hasLiveSuccessor) {
-                  const skippedLog = {
-                    afterBuildPipelineId: buildOptions.afterBuildPipelineId,
-                    imageTag: ecrRepoTag,
-                  };
-                  getLogger(skippedLog).info(
-                    `Codefresh: after-build pipeline skipped reason=no_live_successor ` +
-                      `afterBuildPipelineId=${skippedLog.afterBuildPipelineId} imageTag=${skippedLog.imageTag}`
-                  );
-                  return true;
-                }
-              }
-
-              const afterbuildPipeline = await codefresh.triggerPipeline(buildOptions.afterBuildPipelineId, 'cli', {
-                ...deploy.env,
-                ...{ TAG: ecrRepoTag },
-                ...{ branch: branchName },
-              });
-              const afterBuildLog = {
+              const completed = await this.runAfterBuildPipeline({
+                deploy,
+                runUUID,
                 afterBuildPipelineId: buildOptions.afterBuildPipelineId,
-                pipelineId: afterbuildPipeline,
-                imageTag: ecrRepoTag,
-              };
-              const afterBuildLogDetails =
-                `afterBuildPipelineId=${afterBuildLog.afterBuildPipelineId} ` +
-                `pipelineId=${afterBuildLog.pipelineId} imageTag=${afterBuildLog.imageTag}`;
-              const afterBuildLogger = getLogger(afterBuildLog);
-              afterBuildLogger.info(`Codefresh: after-build pipeline triggered ${afterBuildLogDetails}`);
-
-              if (!runIsCurrent || !(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
-                afterBuildLogger.info(
-                  `Codefresh: after-build pipeline detached reason=superseded ${afterBuildLogDetails}`
+                ecrRepoTag: constructEcrTag({ repo: ecrRepo, tag, ecrDomain }),
+                branchName,
+                sourceRevision: fullSha,
+              });
+              if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+                getLogger().info(
+                  `Image: after-build publication skipped reason=superseded result=${completed ? 'success' : 'failure'}`
                 );
                 return true;
               }
-
-              const completed = await codefresh.waitForImage(afterbuildPipeline);
               if (!completed) {
-                afterBuildLogger.warn(
-                  `Codefresh: after-build pipeline completed result=failure ${afterBuildLogDetails}`
+                await this.patchAndUpdateActivityFeed(
+                  deploy,
+                  { status: DeployStatus.BUILD_FAILED, statusMessage: AFTER_BUILD_FAILED_MESSAGE },
+                  runUUID
                 );
                 return false;
               }
-              afterBuildLogger.info(`Codefresh: after-build pipeline completed result=success ${afterBuildLogDetails}`);
             }
+
+            await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
             return true;
           } else {
             if (!runIsCurrent) return true;
@@ -1275,6 +1311,15 @@ export default class DeployService extends BaseService {
         await this.patchDeployForRun(deploy, runUUID, { buildOutput });
 
         if (buildSuccess) {
+          if (buildOptions?.afterBuildPipelineId && !deployable.detatchAfterBuildPipeline) {
+            // A non-detached embedded PostBuild must succeed for the parent pipeline to succeed.
+            await this.patchDeployForRun(deploy, runUUID, {
+              afterBuildCompletionKey: this.afterBuildCompletionKeyFor(
+                buildOptions.afterBuildPipelineId,
+                constructEcrTag({ repo: ecrRepo, tag, ecrDomain })
+              ),
+            });
+          }
           await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
           getLogger().info('Image: built');
           return true;
@@ -1300,6 +1345,36 @@ export default class DeployService extends BaseService {
           if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
             getLogger().info('Image: stopped after secret sync reason=superseded');
             return true;
+          }
+        }
+
+        // An existing image is not proof its after-build ran; the recorded completion is.
+        if (deployable.afterBuildPipelineId) {
+          const ecrRepoTag = constructEcrTag({ repo: ecrRepo, tag, ecrDomain });
+          const completionKey = this.afterBuildCompletionKeyFor(deployable.afterBuildPipelineId, ecrRepoTag);
+          if (deploy.afterBuildCompletionKey !== completionKey) {
+            const completed = await this.runAfterBuildPipeline({
+              deploy,
+              runUUID,
+              afterBuildPipelineId: deployable.afterBuildPipelineId,
+              ecrRepoTag,
+              branchName,
+              sourceRevision: fullSha,
+            });
+            if (!(await this.isDeploymentRunCurrent(deploy, runUUID, expectedGeneration))) {
+              getLogger().info(
+                `Image: after-build publication skipped reason=superseded result=${completed ? 'success' : 'failure'}`
+              );
+              return true;
+            }
+            if (!completed) {
+              await this.patchAndUpdateActivityFeed(
+                deploy,
+                { status: DeployStatus.BUILD_FAILED, statusMessage: AFTER_BUILD_FAILED_MESSAGE },
+                runUUID
+              );
+              return false;
+            }
           }
         }
         await this.patchDeployWithTag({ tag, initTag, deploy, ecrDomain, runUUID });
