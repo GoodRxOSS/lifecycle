@@ -196,20 +196,23 @@ export default class GithubService extends Service {
         branch,
       });
 
-      const pullRequestState = await this.patchPullRequest({
-        pullRequest,
-        labels,
-        action,
-        status,
-        autoDeploy,
-      });
-      getLogger({}).info(
-        `PR state: action=${action} repo=${fullName} branch=${branch} labels=[${labels
-          .map((label) => label.name)
-          .join(',')}] deployLabelPresent=${pullRequestState?.deployLabelPresent} deployOnUpdate=${
-          pullRequestState?.deployOnUpdate
-        }`
-      );
+      let pullRequestState: PullRequestPatchState | undefined;
+      if (isOpened || isClosed) {
+        pullRequestState = await this.patchPullRequest({
+          pullRequest,
+          labels,
+          action,
+          status,
+          autoDeploy,
+        });
+        getLogger({}).info(
+          `PR state: action=${action} repo=${fullName} branch=${branch} labels=[${labels
+            .map((label) => label.name)
+            .join(',')}] deployLabelPresent=${pullRequestState?.deployLabelPresent} deployOnUpdate=${
+            pullRequestState?.deployOnUpdate
+          }`
+        );
+      }
 
       const pullRequestId = pullRequest?.id;
       const latestCommit = pullRequest?.latestCommit;
