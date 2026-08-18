@@ -2362,12 +2362,11 @@ describe('BuildService focused changed-line coverage', () => {
     expect(deployUpdate.where).toHaveBeenCalledWith('runUUID', 'build-run');
   });
 
-  test('resolves direct and repository-derived build environments', async () => {
+  test('resolves direct build environments and no longer derives them from the repository', async () => {
     const direct = { id: 5 };
-    const related = [{ id: 6 }];
     const repositoryQuery: any = {
       withGraphJoined: jest.fn(() => repositoryQuery),
-      where: jest.fn().mockResolvedValue(related),
+      where: jest.fn().mockResolvedValue([{ id: 6 }]),
     };
     const service = serviceWith({
       models: {
@@ -2378,8 +2377,13 @@ describe('BuildService focused changed-line coverage', () => {
       },
     });
 
-    await expect((service as any).getEnvironmentsToBuild(5, 9)).resolves.toEqual([direct]);
-    await expect((service as any).getEnvironmentsToBuild(undefined, 9)).resolves.toEqual(related);
+    await expect((service as any).getEnvironmentsToBuild(5)).resolves.toEqual([direct]);
+
+    // The repository-derived lookup joined Environment.services, a relation removed with the
+    // legacy DB-config path. It is only reachable when the repository has no defaultEnvId, in
+    // which case no environment could match anyway, so the lookup is gone rather than repaired.
+    await expect((service as any).getEnvironmentsToBuild(undefined)).resolves.toStrictEqual([]);
+    expect(repositoryQuery.withGraphJoined).not.toHaveBeenCalled();
   });
 
   test('creates missing PR builds with and without a root repository identity', async () => {
