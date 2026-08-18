@@ -182,6 +182,7 @@ describe('Github Service - handlePullRequestHook', () => {
     action = 'opened',
     labels = [] as { name: string }[],
     branchSha = 'abc123',
+    status = 'open',
   } = {}) =>
     ({
       action,
@@ -198,7 +199,7 @@ describe('Github Service - handlePullRequestHook', () => {
         head: { ref: 'feature-branch', sha: branchSha },
         title: 'Test PR',
         user: { login: 'test-user' },
-        state: 'open',
+        state: status,
         labels,
       },
     } as any);
@@ -353,13 +354,92 @@ describe('Github Service - handlePullRequestHook', () => {
     );
   });
 
+  test('keeps the autoDeploy label sync flow when a pull request reopens', async () => {
+    mockGetYamlFileContent.mockResolvedValue({ environment: { autoDeploy: true } });
+    mockHasDeployLabel.mockResolvedValue(false);
+    mockEnableKillSwitch.mockResolvedValue(false);
+
+    const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
+    mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        action: 'reopened',
+        labels: [],
+      })
+    );
+
+    expect(mockPullRequest.__patch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deployOnUpdate: true,
+        labels: JSON.stringify([]),
+      })
+    );
+    expect(mockDb.services.BuildService.createBuildAndDeploys).toHaveBeenCalled();
+    expect(mockDb.services.LabelService.labelQueue.add).toHaveBeenCalledWith(
+      'label',
+      expect.objectContaining({
+        pullRequestId: 1,
+        action: 'enable',
+        waitForComment: true,
+        labels: [],
+      })
+    );
+  });
+
+  test.each(['synchronize', 'edited'])(
+    'updates pull request metadata without patching deployment state for %s events',
+    async (action) => {
+      const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
+      mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
+
+      await githubService.handlePullRequestHook(
+        createMockPullRequestEvent({
+          action,
+          labels: [],
+        })
+      );
+
+      expect(mockDb.services.PullRequest.findOrCreatePullRequest).toHaveBeenCalledWith(
+        expect.anything(),
+        1001,
+        expect.objectContaining({
+          status: 'open',
+          title: 'Test PR',
+        })
+      );
+      expect(mockHasDeployLabel).not.toHaveBeenCalled();
+      expect(mockEnableKillSwitch).not.toHaveBeenCalled();
+      expect(mockPullRequest.__patch).not.toHaveBeenCalledWith(
+        expect.objectContaining({ deployOnUpdate: expect.anything() })
+      );
+      expect(mockPullRequest.__patch).not.toHaveBeenCalledWith(expect.objectContaining({ labels: expect.anything() }));
+    }
+  );
+
   test('queues retryable teardown when a pull request closes', async () => {
-    const mockPullRequest = createMockPullRequest();
+    mockHasDeployLabel.mockResolvedValue(true);
+    mockEnableKillSwitch.mockResolvedValue(true);
+
+    const mockPullRequest = createMockPullRequest({ deployOnUpdate: true });
     const build = { id: 10, uuid: 'build-uuid' };
     mockDb.services.PullRequest.findOrCreatePullRequest.mockResolvedValue(mockPullRequest);
     mockDb.models.Build.findOne.mockResolvedValue(build);
 
-    await githubService.handlePullRequestHook(createMockPullRequestEvent({ action: 'closed' }));
+    await githubService.handlePullRequestHook(
+      createMockPullRequestEvent({
+        action: 'closed',
+        labels: [{ name: 'lifecycle-deploy!' }],
+        status: 'closed',
+      })
+    );
+
+    expect(mockPullRequest.__patch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deployOnUpdate: false,
+        labels: JSON.stringify(['lifecycle-deploy!']),
+      })
+    );
 
     expect(mockDb.services.BuildService.enqueueBuildDeletion).toHaveBeenCalledWith(build, 'pull_request_closed');
     expect(mockDb.services.LabelService.labelQueue.add).toHaveBeenCalledWith(
