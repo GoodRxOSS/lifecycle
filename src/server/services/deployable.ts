@@ -199,7 +199,7 @@ export default class DeployableService extends BaseService {
         const { serviceDefaults, lifecycleDefaults, domainDefaults, buildDefaults } =
           await GlobalConfigService.getInstance().getAllConfigs();
         //TODO check and throw error here?
-        const defaultUUID = lifecycleDefaults.defaultUUID;
+        const defaultUUID = await YamlService.getUUID(service, build);
         const dockerBuildPipelineName =
           YamlService.getDockerBuildPipelineId(service) || lifecycleDefaults.buildPipeline;
 
@@ -262,7 +262,7 @@ export default class DeployableService extends BaseService {
             deployment?.network?.grpc?.defaultHost ?? `${service.name}-${defaultUUID}.${domainDefaults.grpc}`,
 
           ingressAnnotations: deployment?.network?.ingressAnnotations ?? {},
-          defaultUUID: await YamlService.getUUID(service, build),
+          defaultUUID,
           serviceDisksYaml: deployment?.serviceDisks ? JSON.stringify(deployment.serviceDisks) : null,
 
           nodeSelector: deployment?.node_selector ?? null,

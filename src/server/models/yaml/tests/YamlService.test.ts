@@ -19,6 +19,7 @@ mockRedisClient();
 
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator } from 'server/lib/yamlConfigValidator';
+import { Build } from 'server/models';
 import { DeployTypes } from 'shared/constants';
 import * as YamlService from '../index';
 
@@ -584,6 +585,31 @@ services:
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'service-with-app-short');
 
       await expect(YamlService.getEcr(service)).resolves.toEqual('account-id.dkr.ecr.us-west-2.amazonaws.com/svc/lfc');
+    });
+  });
+
+  describe('getPublicUrl', () => {
+    beforeEach(() => {
+      mockGetAllConfigs.mockResolvedValue({
+        lifecycleDefaults: { defaultUUID: 'dev-0' },
+        domainDefaults: { http: 'lifecycle.example.com', grpc: 'lifecycle-grpc.example.com' },
+      });
+    });
+
+    test('falls back to the global default UUID when the service has none configured', async () => {
+      const service: YamlService.Service = { name: 'my-service' } as YamlService.Service;
+      const build = { enabledFeatures: [] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual('my-service-dev-0.lifecycle.example.com');
+    });
+
+    test('uses the service-level defaultUUID override when configured', async () => {
+      const service: YamlService.Service = { name: 'my-service', defaultUUID: 'sandbox' } as YamlService.Service;
+      const build = { enabledFeatures: [] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual(
+        'my-service-sandbox.lifecycle.example.com'
+      );
     });
   });
 
