@@ -20,7 +20,7 @@ mockRedisClient();
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 import { Build } from 'server/models';
-import { DeployTypes } from 'shared/constants';
+import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import * as YamlService from '../index';
 
 const mockGetAllConfigs = jest.fn();
@@ -609,6 +609,15 @@ services:
 
       await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual(
         'my-service-sandbox.lifecycle.example.com'
+      );
+    });
+
+    test('NO_DEFAULT_ENV_RESOLVE takes priority over a service-level defaultUUID override', async () => {
+      const service: YamlService.Service = { name: 'my-service', defaultUUID: 'sandbox' } as YamlService.Service;
+      const build = { enabledFeatures: [FeatureFlags.NO_DEFAULT_ENV_RESOLVE] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual(
+        `my-service-${NO_DEFAULT_ENV_UUID}.lifecycle.example.com`
       );
     });
   });
