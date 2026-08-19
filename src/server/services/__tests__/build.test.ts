@@ -730,6 +730,54 @@ describe('BuildService destroyBuildEnvironment', () => {
   });
 });
 
+describe('BuildService getEnvironmentsToBuild', () => {
+  const createService = (foundEnvironment: any) =>
+    new BuildService(
+      {
+        models: {
+          Environment: {
+            findOne: jest.fn().mockResolvedValue(foundEnvironment),
+            // Phase 1 removed Environment.relationMappings.services. The old else-branch called
+            // Environment.find().withGraphJoined('services'), which throws UnknownRelationError.
+            find: jest.fn(() => {
+              throw new Error('Environment.find() must not be called: the DB-service lookup was removed');
+            }),
+          },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {
+        registerQueue: jest.fn(() => ({ add: jest.fn(), process: jest.fn(), on: jest.fn() })),
+      } as any
+    );
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('returns the environment for a known environmentId', async () => {
+    const environment = { id: 7 };
+    const service = createService(environment);
+
+    await expect((service as any).getEnvironmentsToBuild(7)).resolves.toEqual([environment]);
+  });
+
+  test('returns empty for a null environmentId instead of querying the removed services relation', async () => {
+    const service = createService(undefined);
+
+    await expect((service as any).getEnvironmentsToBuild(null)).resolves.toEqual([]);
+    expect((service as any).db.models.Environment.find).not.toHaveBeenCalled();
+  });
+
+  test('returns empty when the environment is missing rather than a list holding undefined', async () => {
+    const service = createService(undefined);
+
+    // toStrictEqual: toEqual treats [undefined] as [], which would hide the old push-undefined behaviour.
+    await expect((service as any).getEnvironmentsToBuild(99)).resolves.toStrictEqual([]);
+  });
+});
+
 describe('BuildService stale deploy reconciliation', () => {
   let buildService: BuildService;
   let deployableQuery: any;
@@ -2314,12 +2362,11 @@ describe('BuildService focused changed-line coverage', () => {
     expect(deployUpdate.where).toHaveBeenCalledWith('runUUID', 'build-run');
   });
 
-  test('resolves direct and repository-derived build environments', async () => {
+  test('resolves direct build environments and no longer derives them from the repository', async () => {
     const direct = { id: 5 };
-    const related = [{ id: 6 }];
     const repositoryQuery: any = {
       withGraphJoined: jest.fn(() => repositoryQuery),
-      where: jest.fn().mockResolvedValue(related),
+      where: jest.fn().mockResolvedValue([{ id: 6 }]),
     };
     const service = serviceWith({
       models: {
@@ -2330,8 +2377,13 @@ describe('BuildService focused changed-line coverage', () => {
       },
     });
 
-    await expect((service as any).getEnvironmentsToBuild(5, 9)).resolves.toEqual([direct]);
-    await expect((service as any).getEnvironmentsToBuild(undefined, 9)).resolves.toEqual(related);
+    await expect((service as any).getEnvironmentsToBuild(5)).resolves.toEqual([direct]);
+
+    // The repository-derived lookup joined Environment.services, a relation removed with the
+    // legacy DB-config path. It is only reachable when the repository has no defaultEnvId, in
+    // which case no environment could match anyway, so the lookup is gone rather than repaired.
+    await expect((service as any).getEnvironmentsToBuild(undefined)).resolves.toStrictEqual([]);
+    expect(repositoryQuery.withGraphJoined).not.toHaveBeenCalled();
   });
 
   test('creates missing PR builds with and without a root repository identity', async () => {
