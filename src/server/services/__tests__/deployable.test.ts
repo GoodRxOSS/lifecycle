@@ -52,6 +52,8 @@ jest.mock('server/lib/github', () => ({
 }));
 
 import * as YamlService from 'server/models/yaml';
+import { Build } from 'server/models';
+import { FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import DeployableService, { DeployableAttributes } from '../deployable';
 
 const lifecycleDefaults = {
@@ -258,6 +260,78 @@ describe('Deployable Service', () => {
         deploymentDependsOn: [],
         helm: undefined,
       });
+    });
+
+    test('service-level defaultUUID overrides the global default for hostname/URL fallbacks', async () => {
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        defaultUUID: 'sandbox',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+            },
+          },
+        },
+      };
+
+      const build = { enabledFeatures: [] } as unknown as Build;
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        1234567890,
+        'unit-test',
+        githubService,
+        false,
+        '',
+        build
+      );
+
+      expect(result.defaultUUID).toEqual('sandbox');
+      expect(result.defaultInternalHostname).toEqual('github-app-sandbox');
+      expect(result.defaultPublicUrl).toEqual(`github-app-sandbox.${domainDefaults.http}`);
+      expect(result.defaultGrpcHost).toEqual(`github-app-sandbox.${domainDefaults.grpc}`);
+    });
+
+    test('NO_DEFAULT_ENV_RESOLVE takes priority over a service-level defaultUUID override', async () => {
+      const githubService: YamlService.GithubService = {
+        name: 'github-app',
+        defaultUUID: 'sandbox',
+        github: {
+          repository: 'example-org/example-service',
+          branchName: 'unit-test',
+          docker: {
+            defaultTag: 'main',
+            app: {
+              dockerfilePath: 'app1/app.Dockerfile',
+            },
+          },
+        },
+      };
+
+      const build = { enabledFeatures: [FeatureFlags.NO_DEFAULT_ENV_RESOLVE] } as unknown as Build;
+
+      // @ts-ignore
+      const result: DeployableAttributes = await deployableService.generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        1234567890,
+        'unit-test',
+        githubService,
+        false,
+        '',
+        build
+      );
+
+      expect(result.defaultUUID).toEqual(NO_DEFAULT_ENV_UUID);
+      expect(result.defaultInternalHostname).toEqual(`github-app-${NO_DEFAULT_ENV_UUID}`);
+      expect(result.defaultPublicUrl).toEqual(`github-app-${NO_DEFAULT_ENV_UUID}.${domainDefaults.http}`);
+      expect(result.defaultGrpcHost).toEqual(`github-app-${NO_DEFAULT_ENV_UUID}.${domainDefaults.grpc}`);
     });
 
     test('Generate config should have httpGet port and path', async () => {

@@ -885,12 +885,9 @@ export const getDockerBuildPipelineId = (service) =>
   service?.helm?.docker?.pipelineId || service?.github?.docker?.pipelineId;
 
 export async function getPublicUrl(service: Service, build: Build): Promise<string> {
-  const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  let host = lifecycleDefaults.defaultUUID;
-  let { http: httpDomain, grpc: grpcDomain } = domainDefaults;
-  if (build?.enabledFeatures.includes(FeatureFlags.NO_DEFAULT_ENV_RESOLVE)) {
-    host = NO_DEFAULT_ENV_UUID;
-  }
+  const { domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  const host = await getUUID(service, build);
+  const { http: httpDomain, grpc: grpcDomain } = domainDefaults;
 
   if (DeployTypes.HELM === getDeployType(service)) {
     const helmService = (service as unknown as HelmService).helm;

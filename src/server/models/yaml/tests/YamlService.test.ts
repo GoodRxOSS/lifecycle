@@ -19,7 +19,8 @@ mockRedisClient();
 
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { YamlConfigValidator } from 'server/lib/yamlConfigValidator';
-import { DeployTypes } from 'shared/constants';
+import { Build } from 'server/models';
+import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import * as YamlService from '../index';
 
 const mockGetAllConfigs = jest.fn();
@@ -584,6 +585,40 @@ services:
       const service: YamlService.Service = YamlService.getDeployingServicesByName(config, 'service-with-app-short');
 
       await expect(YamlService.getEcr(service)).resolves.toEqual('account-id.dkr.ecr.us-west-2.amazonaws.com/svc/lfc');
+    });
+  });
+
+  describe('getPublicUrl', () => {
+    beforeEach(() => {
+      mockGetAllConfigs.mockResolvedValue({
+        lifecycleDefaults: { defaultUUID: 'dev-0' },
+        domainDefaults: { http: 'lifecycle.example.com', grpc: 'lifecycle-grpc.example.com' },
+      });
+    });
+
+    test('falls back to the global default UUID when the service has none configured', async () => {
+      const service: YamlService.Service = { name: 'my-service' } as YamlService.Service;
+      const build = { enabledFeatures: [] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual('my-service-dev-0.lifecycle.example.com');
+    });
+
+    test('uses the service-level defaultUUID override when configured', async () => {
+      const service: YamlService.Service = { name: 'my-service', defaultUUID: 'sandbox' } as YamlService.Service;
+      const build = { enabledFeatures: [] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual(
+        'my-service-sandbox.lifecycle.example.com'
+      );
+    });
+
+    test('NO_DEFAULT_ENV_RESOLVE takes priority over a service-level defaultUUID override', async () => {
+      const service: YamlService.Service = { name: 'my-service', defaultUUID: 'sandbox' } as YamlService.Service;
+      const build = { enabledFeatures: [FeatureFlags.NO_DEFAULT_ENV_RESOLVE] } as unknown as Build;
+
+      await expect(YamlService.getPublicUrl(service, build)).resolves.toEqual(
+        `my-service-${NO_DEFAULT_ENV_UUID}.lifecycle.example.com`
+      );
     });
   });
 
