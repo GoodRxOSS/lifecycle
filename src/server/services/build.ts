@@ -2362,6 +2362,11 @@ export default class BuildService extends BaseService {
     expectedGeneration?: number
   ) {
     if (!reconciliationResult?.canReconcile) {
+      getLogger({
+        buildUuid: build.uuid,
+        filterGithubRepositoryId,
+        sourceBranch,
+      }).warn('Stale deploy reconciliation: skipped reason=configNotFullyResolved');
       return;
     }
 
@@ -2409,7 +2414,18 @@ export default class BuildService extends BaseService {
         !sourceBranch ||
         (deployable.commentBranchName ?? deployable.branchName) === sourceBranch
     );
-    const staleDeployables = existingDeployables.filter((deployable) => !expectedNames.has(deployable.name));
+    // A service whose config we could not read is an unknown, not a deletion — never reap it.
+    const unresolvedNames = new Set(reconciliationResult.unresolvedServiceNames ?? []);
+    const unresolvedRepositoryIds = new Set(reconciliationResult.unresolvedRepositoryIds ?? []);
+    const staleDeployables = existingDeployables.filter(
+      (deployable) =>
+        !expectedNames.has(deployable.name) &&
+        !unresolvedNames.has(deployable.name) &&
+        !(
+          deployable.resolvedFromRepositoryId != null &&
+          unresolvedRepositoryIds.has(deployable.resolvedFromRepositoryId)
+        )
+    );
 
     if (staleDeployables.length === 0) {
       getLogger({
