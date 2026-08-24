@@ -425,6 +425,55 @@ describe('deployable source seam (PR vs API build)', () => {
     expect(Array.from(unresolvedRepositoryIds)).toEqual([77]);
   });
 
+  it('records the repository when a remote service fails exact-name resolution', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const dependencyRepository = { githubRepositoryId: 99, fullName: 'org/dependency' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'dependency-api', repository: 'org/dependency', branch: 'main' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockResolvedValueOnce({ services: [{ name: 'renamed-api' }] });
+    mockResolveRepository.mockResolvedValue(dependencyRepository);
+    mockResolveExactEnvironmentService.mockReturnValue(null);
+    const build: any = {
+      id: 9,
+      triggerType: 'github_pr',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      null,
+      null,
+      undefined,
+      unresolvedServiceNames,
+      unresolvedRepositoryIds
+    );
+
+    expect(result).toBe(true);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['dependency-api']);
+    // The `requires:` recursion never ran, so the repository must be protected too.
+    expect(Array.from(unresolvedRepositoryIds)).toEqual([99]);
+  });
+
   it('records a legacy serviceId reference instead of vetoing reconciliation', async () => {
     const service = makeService();
     const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };

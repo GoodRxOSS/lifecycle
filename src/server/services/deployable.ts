@@ -616,7 +616,9 @@ export default class DeployableService extends BaseService {
                       build
                     );
                   } else {
-                    markUnresolved(yamlEnvService.name);
+                    // The `requires:` recursion above is gated on a resolved service, so this service's
+                    // inner dependencies were never enumerated either. Protect them by repository.
+                    markUnresolved(yamlEnvService.name, repository?.githubRepositoryId);
                     getLogger({ buildUUID, service: yamlEnvService.name }).warn(
                       'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
                     );
