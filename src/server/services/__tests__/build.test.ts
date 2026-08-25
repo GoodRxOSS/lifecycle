@@ -863,6 +863,73 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables, deploys]');
   });
 
+  test('never reaps a service whose YAML could not be resolved', async () => {
+    createService(
+      [
+        { id: 1, name: 'unreadable-dep', resolvedFromRepositoryId: targetRepoId },
+        { id: 3, name: 'worker-old', resolvedFromRepositoryId: targetRepoId },
+      ],
+      [{ id: 78, uuid: 'worker-old-build-1', deployableId: 3 }]
+    );
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build, {
+      canReconcile: true,
+      deployables: [],
+      unresolvedServiceNames: ['unreadable-dep'],
+      unresolvedRepositoryIds: [],
+      reconcileEligibleDeployables: [
+        { name: 'worker-new', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+      ],
+    });
+
+    // 'unreadable-dep' is absent from the expected set only because its config could not be read.
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [3] });
+  });
+
+  test('never reaps deployables owned by a repository whose YAML could not be read', async () => {
+    createService(
+      [
+        { id: 5, name: 'dep-child', resolvedFromRepositoryId: otherRepoId },
+        { id: 3, name: 'worker-old', resolvedFromRepositoryId: targetRepoId },
+      ],
+      [{ id: 78, uuid: 'worker-old-build-1', deployableId: 3 }]
+    );
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build, {
+      canReconcile: true,
+      deployables: [],
+      unresolvedServiceNames: [],
+      unresolvedRepositoryIds: [otherRepoId],
+      reconcileEligibleDeployables: [
+        { name: 'worker-new', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+      ],
+    });
+
+    // 'requires:' children of an unreadable repository are never enumerated, so they must be protected.
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [3] });
+  });
+
+  test('an unresolved dependency no longer blocks reaping the rest of the environment', async () => {
+    const staleDeploy = { id: 78, uuid: 'worker-old-build-1', deployableId: 3 };
+    createService([{ id: 3, name: 'worker-old', resolvedFromRepositoryId: targetRepoId }], [staleDeploy]);
+    const build = createBuild();
+
+    await (buildService as any).reconcileDeletedDeployables(build, {
+      canReconcile: true,
+      deployables: [],
+      unresolvedServiceNames: ['unrelated-archived-dep'],
+      unresolvedRepositoryIds: [otherRepoId],
+      reconcileEligibleDeployables: [
+        { name: 'worker-new', source: 'yaml', reconcileEligible: true, resolvedFromRepositoryId: targetRepoId },
+      ],
+    });
+
+    expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+    expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [3] });
+  });
+
   test('repo-filtered reconciliation removes only deployables from the triggering repository scope', async () => {
     const staleDeploy = { id: 79, uuid: 'target-old-build-1', deployableId: 4 };
     createService([{ id: 4, name: 'target-old', resolvedFromRepositoryId: targetRepoId }], [staleDeploy]);

@@ -377,6 +377,151 @@ describe('deployable source seam (PR vs API build)', () => {
     );
   });
 
+  it('records an unresolvable dependency repository instead of vetoing reconciliation', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValue({
+      environment: {
+        defaultServices: [{ name: 'archived-dep', repository: 'org/archived', branch: 'main' }],
+        optionalServices: [],
+      },
+      services: [],
+    });
+    mockResolveRepository.mockResolvedValue({
+      githubRepositoryId: 77,
+      fullName: 'org/archived',
+      deletedAt: '2026-01-01T00:00:00Z',
+    });
+    const build: any = {
+      id: 9,
+      triggerType: 'github_pr',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      null,
+      null,
+      undefined,
+      unresolvedServiceNames,
+      unresolvedRepositoryIds
+    );
+
+    expect(result).toBe(true);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['archived-dep']);
+    expect(Array.from(unresolvedRepositoryIds)).toEqual([77]);
+  });
+
+  it('records the repository when a remote service fails exact-name resolution', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const dependencyRepository = { githubRepositoryId: 99, fullName: 'org/dependency' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'dependency-api', repository: 'org/dependency', branch: 'main' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockResolvedValueOnce({ services: [{ name: 'renamed-api' }] });
+    mockResolveRepository.mockResolvedValue(dependencyRepository);
+    mockResolveExactEnvironmentService.mockReturnValue(null);
+    const build: any = {
+      id: 9,
+      triggerType: 'github_pr',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      null,
+      null,
+      undefined,
+      unresolvedServiceNames,
+      unresolvedRepositoryIds
+    );
+
+    expect(result).toBe(true);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['dependency-api']);
+    // The `requires:` recursion never ran, so the repository must be protected too.
+    expect(Array.from(unresolvedRepositoryIds)).toEqual([99]);
+  });
+
+  it('records a legacy serviceId reference instead of vetoing reconciliation', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(rootRepository) })),
+      })),
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValue({
+      environment: {
+        defaultServices: [{ name: 'legacy-db-service', serviceId: 47 }, { name: 'api' }],
+        optionalServices: [],
+      },
+      services: [{ name: 'api' }],
+    });
+    mockResolveExactEnvironmentService.mockReturnValue({ service: { name: 'api' }, requiredServices: [] });
+    jest.spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig').mockResolvedValue(undefined);
+    const build: any = {
+      id: 9,
+      triggerType: 'github_pr',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      42,
+      null,
+      'main',
+      42,
+      unresolvedServiceNames,
+      new Set<number>()
+    );
+
+    expect(result).toBe(true);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['legacy-db-service']);
+  });
+
   it('fails closed before YAML import when the targeted repository has no live row', async () => {
     const service = makeService();
     const filterWhereNull = jest.fn().mockResolvedValue(undefined);

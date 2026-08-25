@@ -40,6 +40,10 @@ export interface DeployableReconciliationResult {
   canReconcile: boolean;
   reconcileEligibleDeployables: DeployableReconciliationEntry[];
   filterGithubRepositoryId?: number | null;
+  /** Services named in YAML that could not be fully resolved; never reaped as stale. */
+  unresolvedServiceNames: string[];
+  /** Repositories whose YAML could not be read; their deployables are never reaped as stale. */
+  unresolvedRepositoryIds: number[];
 }
 
 export interface DeployableAttributes {
@@ -432,10 +436,11 @@ export default class DeployableService extends BaseService {
     filterGithubRepositoryId?: number,
     sourceRef?: string | null,
     sourceBranch?: string | null,
-    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId
+    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId,
+    unresolvedServiceNames: Set<string> = new Set(),
+    unresolvedRepositoryIds: Set<number> = new Set()
   ): Promise<boolean> {
     try {
-      let allReferencedYamlConfigsResolved = true;
       let sourceRepository: Repository | null = null;
       let rootBranch: string | null = null;
       let rootBaseConfigRef: string | null = null;
@@ -461,6 +466,14 @@ export default class DeployableService extends BaseService {
         }
         filterRepositoryFullName = filterRepo?.fullName?.toLowerCase() ?? null;
       }
+
+      // A service we could not fully resolve is an unknown, not a deletion. Recording it (and the
+      // repository whose config we could not read) keeps stale-service reaping scoped to the
+      // services we did resolve, instead of vetoing reconciliation for the whole environment.
+      const markUnresolved = (name: string | undefined, repositoryId?: number | string | null) => {
+        if (name != null) unresolvedServiceNames.add(name);
+        if (repositoryId != null) unresolvedRepositoryIds.add(Number(repositoryId));
+      };
 
       const targetsSource = (repository: Repository | null | undefined, branchName: string | null | undefined) =>
         filterGithubRepositoryId == null ||
@@ -490,7 +503,7 @@ export default class DeployableService extends BaseService {
             services.map(async (yamlEnvService) => {
               try {
                 if (yamlEnvService.serviceId != null) {
-                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
+                  markUnresolved(yamlEnvService.name);
                   getLogger({ buildUUID, service: yamlEnvService.name, serviceId: yamlEnvService.serviceId }).warn(
                     'serviceId references in lifecycle.yaml are no longer supported; skipping service ' +
                       yamlEnvService.name
@@ -535,7 +548,7 @@ export default class DeployableService extends BaseService {
                     if (yamlEnvService.repository.toLowerCase() === filterRepositoryFullName) {
                       targetAttributionFailed = true;
                     }
-                    allReferencedYamlConfigsResolved = false;
+                    markUnresolved(yamlEnvService.name, repository?.githubRepositoryId);
                     getLogger({ buildUUID, service: yamlEnvService.name }).warn(
                       'Deployable: referenced repository is not live; skipping service'
                     );
@@ -603,14 +616,15 @@ export default class DeployableService extends BaseService {
                       build
                     );
                   } else {
-                    if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
+                    // The `requires:` recursion above is gated on a resolved service, so this service's
+                    // inner dependencies were never enumerated either. Protect them by repository.
+                    markUnresolved(yamlEnvService.name, repository?.githubRepositoryId);
                     getLogger({ buildUUID, service: yamlEnvService.name }).warn(
                       'Service cannot be found in yaml configuration. Is it referenced via the Lifecycle database?'
                     );
                   }
                 } else {
-                  allReferencedYamlConfigsResolved = false;
-                  if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionFailed = true;
+                  markUnresolved(yamlEnvService.name, repository?.githubRepositoryId);
                   getLogger({ buildUUID, deployUUID: deploy?.uuid, repository: repository?.fullName }).warn(
                     `Unable to locate YAML config file from ${repository?.fullName}:${branchName}. Is this a database service?`
                   );
@@ -721,7 +735,7 @@ export default class DeployableService extends BaseService {
               );
             }
           }
-          return allReferencedYamlConfigsResolved && targetAttributionResolved && !targetAttributionFailed;
+          return targetAttributionResolved && !targetAttributionFailed;
         }
       } else {
         getLogger({ buildUUID }).warn('Build source repository or ref missing');
@@ -761,6 +775,8 @@ export default class DeployableService extends BaseService {
 
     // Temporary storage for all the deployable configurations in memory
     const deployableServices: Map<string, DeployableAttributes> = new Map<string, DeployableAttributes>();
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
     try {
       if (pullRequest != null || hasBuildSource) {
         if (pullRequest != null && pullRequest.branchName == null) {
@@ -777,7 +793,9 @@ export default class DeployableService extends BaseService {
           filterGithubRepositoryId,
           sourceRef,
           sourceBranch,
-          sourceGithubRepositoryId
+          sourceGithubRepositoryId,
+          unresolvedServiceNames,
+          unresolvedRepositoryIds
         );
 
         // Finally, Upsert the deployables into the database
@@ -802,6 +820,8 @@ export default class DeployableService extends BaseService {
       deployables,
       canReconcile,
       filterGithubRepositoryId: filterGithubRepositoryId ?? null,
+      unresolvedServiceNames: Array.from(unresolvedServiceNames),
+      unresolvedRepositoryIds: Array.from(unresolvedRepositoryIds),
       reconcileEligibleDeployables: Array.from(deployableServices.values())
         .filter((deployable) => deployable.reconcileEligible)
         .map((deployable) => ({
