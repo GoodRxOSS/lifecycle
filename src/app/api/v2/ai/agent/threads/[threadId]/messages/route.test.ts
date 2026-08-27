@@ -112,14 +112,40 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
     ]);
   });
 
-  it('rejects invalid limits', async () => {
-    const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=0'), {
-      params: Promise.resolve({ threadId: 'thread-1' }),
+  it.each([
+    {
+      label: 'an omitted limit',
+      url: 'http://localhost/api/v2/ai/agent/threads/thread-1/messages',
+      expectedLimit: 50,
+    },
+    {
+      label: 'a blank limit',
+      url: 'http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=%20%20',
+      expectedLimit: 50,
+    },
+    {
+      label: 'a limit above the maximum',
+      url: 'http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=500',
+      expectedLimit: 100,
+    },
+  ])('uses the documented page size for $label', async ({ url, expectedLimit }) => {
+    const response = await GET(makeRequest(url), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(200);
+    expect(mockListCanonicalMessages).toHaveBeenCalledWith('thread-1', 'sample-user', {
+      limit: expectedLimit,
+      beforeMessageId: null,
     });
-    const body = await response.json();
+  });
+
+  it.each(['0', '-1', '1.5', 'many'])('rejects invalid limit %s', async (limit) => {
+    const response = await GET(
+      makeRequest(`http://localhost/api/v2/ai/agent/threads/thread-1/messages?limit=${limit}`),
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
+    );
 
     expect(response.status).toBe(400);
-    expect(body.error.message).toBe('Expected a positive integer limit.');
+    expect((await response.json()).error.message).toBe('Expected a positive integer limit.');
     expect(mockListCanonicalMessages).not.toHaveBeenCalled();
   });
 
@@ -131,5 +157,43 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/messages', () => {
 
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Agent thread not found');
+  });
+
+  it('maps a missing backing session to 404', async () => {
+    mockListCanonicalMessages.mockRejectedValue(new Error('Agent session not found'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Agent session not found');
+  });
+
+  it('maps an unknown message cursor to 400', async () => {
+    mockListCanonicalMessages.mockRejectedValue(new Error('Agent message cursor not found'));
+
+    const response = await GET(
+      makeRequest('http://localhost/api/v2/ai/agent/threads/thread-1/messages?beforeMessageId=missing-message'),
+      { params: Promise.resolve({ threadId: 'thread-1' }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Agent message cursor not found');
+  });
+
+  it('maps an unexpected message-store failure to 500', async () => {
+    mockListCanonicalMessages.mockRejectedValue(new Error('message store unavailable'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(500);
+  });
+
+  it('rejects an unauthenticated request before listing messages', async () => {
+    mockGetRequestUserIdentity.mockReturnValue(null);
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(401);
+    expect(mockListCanonicalMessages).not.toHaveBeenCalled();
   });
 });

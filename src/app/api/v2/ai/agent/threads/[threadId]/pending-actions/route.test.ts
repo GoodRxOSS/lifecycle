@@ -183,4 +183,22 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/pending-actions', () => {
     });
     expect(mockListPendingActions).toHaveBeenCalledWith('missing-thread', 'sample-user');
   });
+
+  it('maps an unexpected pending-action lookup failure to 500', async () => {
+    mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
+      userId: 'sample-user',
+      githubUsername: 'sample-user',
+    });
+    mockListPendingActions.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'database unavailable' },
+    });
+    expect(mockListPendingActions).toHaveBeenCalledWith('thread-1', 'sample-user');
+    expect(mockSerializePendingAction).not.toHaveBeenCalled();
+  });
 });

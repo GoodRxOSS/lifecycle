@@ -43,6 +43,7 @@ jest.mock('server/services/agentSession', () => {
     __esModule: true,
     default: {
       archiveSession: jest.fn(),
+      reconcileLostChatWorkspaceRuntime: jest.fn(),
       releaseWorkspace: jest.fn(),
       suspendChatRuntime: jest.fn(),
     },
@@ -94,6 +95,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 
 import AgentSandbox from 'server/models/AgentSandbox';
 import AgentSession from 'server/models/AgentSession';
+import AgentSandboxService from 'server/services/agent/SandboxService';
 import AgentSessionService from 'server/services/agentSession';
 import { getLogger } from 'server/lib/logger';
 import { processAgentSessionCleanup } from '../agentSessionCleanup';
@@ -106,6 +108,7 @@ import { WorkspaceRuntimeGoneError } from 'server/services/workspaceRuntime/type
 const mockRecordWorkspaceFailure = WorkspaceRuntimeStateService.recordWorkspaceFailure as jest.Mock;
 const mockClaimWorkspaceAction = WorkspaceRuntimeStateService.claimWorkspaceAction as jest.Mock;
 const mockRecordWorkspaceState = WorkspaceRuntimeStateService.recordWorkspaceState as jest.Mock;
+const mockReconcileLostChatWorkspaceRuntime = AgentSessionService.reconcileLostChatWorkspaceRuntime as jest.Mock;
 
 // idle-active cohort: 3 chained .where (status, lastActivity, callback) resolving on the 3rd.
 function buildIdleActiveQuery(result: unknown[]) {
@@ -277,6 +280,65 @@ describe('agentSessionCleanup', () => {
     });
     expect(AgentSessionService.archiveSession).not.toHaveBeenCalled();
     expect(AgentSessionService.releaseWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('suspends an idle ready chat runtime backed by a remote sandbox even without a PVC', async () => {
+    const remoteSession = {
+      id: 41,
+      uuid: 'remote-chat-session',
+      userId: 'sample-user',
+      sessionKind: 'chat',
+      workspaceStatus: 'ready',
+      status: 'active',
+      namespace: 'remote-namespace',
+      podName: 'remote-sandbox',
+      pvcName: null,
+      lastActivity: '2026-03-23T11:00:00.000Z',
+      updatedAt: '2026-03-23T11:00:00.000Z',
+    };
+
+    mockCleanupQueries({ idleActive: [remoteSession] });
+    (AgentSandboxService.getLatestSandboxForSession as jest.Mock).mockResolvedValueOnce({
+      provider: 'opensandbox',
+    });
+    (AgentSessionService.suspendChatRuntime as jest.Mock).mockResolvedValueOnce(undefined);
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSandboxService.getLatestSandboxForSession).toHaveBeenCalledWith(remoteSession.id);
+    expect(AgentSessionService.suspendChatRuntime).toHaveBeenCalledWith({
+      sessionId: remoteSession.uuid,
+      userId: remoteSession.userId,
+    });
+    expect(AgentSessionService.releaseWorkspace).not.toHaveBeenCalled();
+    expect(AgentSessionService.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('releases an idle ready chat runtime without a PVC when no remote sandbox exists', async () => {
+    const localSession = {
+      id: 42,
+      uuid: 'local-chat-session',
+      userId: 'sample-user',
+      sessionKind: 'chat',
+      workspaceStatus: 'ready',
+      status: 'active',
+      namespace: 'local-namespace',
+      podName: 'local-pod',
+      pvcName: null,
+      lastActivity: '2026-03-23T11:00:00.000Z',
+      updatedAt: '2026-03-23T11:00:00.000Z',
+    };
+
+    mockCleanupQueries({ idleActive: [localSession] });
+    (AgentSandboxService.getLatestSandboxForSession as jest.Mock).mockResolvedValueOnce(null);
+    (AgentSessionService.releaseWorkspace as jest.Mock).mockResolvedValueOnce(undefined);
+
+    await processAgentSessionCleanup();
+
+    expect(AgentSandboxService.getLatestSandboxForSession).toHaveBeenCalledWith(localSession.id);
+    expect(AgentSessionService.suspendChatRuntime).not.toHaveBeenCalled();
+    expect(AgentSessionService.releaseWorkspace).toHaveBeenCalledWith(localSession.uuid);
+    expect(AgentSessionService.archiveSession).not.toHaveBeenCalled();
   });
 
   it('releases workspaces of idle chat sessions when no ready runtime can be suspended', async () => {
@@ -497,6 +559,42 @@ describe('agentSessionCleanup', () => {
     expect(mockLogger.info).toHaveBeenCalledWith('Session: cleanup skipped sessionId=chat-session reason=active_run');
   });
 
+  it('contains an ordinary cleanup action failure and continues processing later sessions', async () => {
+    const cleanupError = new Error('archive failed');
+    const activeSessions = [
+      {
+        id: 21,
+        uuid: 'first-environment-session',
+        sessionKind: 'environment',
+        workspaceStatus: 'ready',
+        status: 'active',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+      },
+      {
+        id: 22,
+        uuid: 'second-environment-session',
+        sessionKind: 'environment',
+        workspaceStatus: 'ready',
+        status: 'active',
+        lastActivity: '2026-03-23T11:00:00.000Z',
+      },
+    ];
+
+    mockCleanupQueries({ idleActive: activeSessions });
+    (AgentSessionService.archiveSession as jest.Mock)
+      .mockRejectedValueOnce(cleanupError)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(AgentSessionService.archiveSession).toHaveBeenNthCalledWith(1, 'first-environment-session');
+    expect(AgentSessionService.archiveSession).toHaveBeenNthCalledWith(2, 'second-environment-session');
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { error: cleanupError, sessionId: 'first-environment-session' },
+      'Session: cleanup failed sessionId=first-environment-session'
+    );
+  });
+
   it('logs but does not archive the session when the workspace-startup-timeout failure write fails', async () => {
     const timedOutSession = {
       id: 7,
@@ -643,6 +741,137 @@ describe('agentSessionCleanup', () => {
     expect(renewLease).toHaveBeenCalledWith({ sandboxId: 'sb-kept' });
   });
 
+  it('contains a kept-workspace renewal failure to the affected sandbox', async () => {
+    const renewalError = new Error('lease unavailable');
+    mockCleanupQueries({ keptSessions: [{ id: 42 }] });
+    const suspendedSandbox = {
+      id: 14,
+      sessionId: 42,
+      provider: 'opensandbox',
+      status: 'suspended',
+      providerState: { sandboxId: 'sb-kept' },
+    };
+    const keptWhereIn2 = jest.fn().mockResolvedValue([suspendedSandbox]);
+    const keptWhereIn1 = jest.fn(() => ({ whereIn: keptWhereIn2 }));
+    (AgentSandbox.query as jest.Mock)
+      .mockImplementationOnce(() => ({ where: jest.fn(() => ({ whereIn: keptWhereIn1 })) }))
+      .mockImplementationOnce(() => ({
+        where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([]) })),
+      }));
+    const renewLease = jest.fn().mockRejectedValue(renewalError);
+    mockResolveRemoteProvider.mockResolvedValueOnce({ renewLease });
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(renewLease).toHaveBeenCalledWith(suspendedSandbox.providerState);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: renewalError, sandboxId: suspendedSandbox.id },
+      'Session: cleanup kept-workspace lease renewal failed'
+    );
+  });
+
+  it('skips renewal without warning when a kept workspace provider has no lease hook', async () => {
+    mockCleanupQueries({ keptSessions: [{ id: 42 }] });
+    const suspendedSandbox = {
+      id: 16,
+      sessionId: 42,
+      provider: 'modal',
+      status: 'suspended',
+      providerState: { sandboxId: 'sb-kept' },
+    };
+    const keptWhereIn2 = jest.fn().mockResolvedValue([suspendedSandbox]);
+    const keptWhereIn1 = jest.fn(() => ({ whereIn: keptWhereIn2 }));
+    (AgentSandbox.query as jest.Mock)
+      .mockImplementationOnce(() => ({ where: jest.fn(() => ({ whereIn: keptWhereIn1 })) }))
+      .mockImplementationOnce(() => ({
+        where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([]) })),
+      }));
+    mockResolveRemoteProvider.mockResolvedValueOnce({});
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(mockResolveRemoteProvider).toHaveBeenCalledWith(suspendedSandbox);
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it('continues active workspace maintenance when the kept-workspace renewal query fails', async () => {
+    const queryError = new Error('kept session query failed');
+    const { keptSessionsQuery } = mockCleanupQueries({});
+    keptSessionsQuery.select.mockRejectedValueOnce(queryError);
+    const activeWhereIn = jest.fn().mockResolvedValue([]);
+    (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+      where: jest.fn(() => ({ whereIn: activeWhereIn })),
+    }));
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: queryError },
+      'Session: cleanup kept-workspace renewal pass failed'
+    );
+    expect(activeWhereIn).toHaveBeenCalled();
+  });
+
+  it('reconciles a provider-terminated ready workspace and contains reconciliation failure', async () => {
+    const goneError = new WorkspaceRuntimeGoneError('sandbox expired');
+    const reconcileError = new Error('reconcile write failed');
+    const remoteSandbox = {
+      id: 15,
+      sessionId: 43,
+      provider: 'opensandbox',
+      status: 'ready',
+      providerState: { sandboxId: 'sb-expired' },
+    };
+    const orphanedSandbox = {
+      ...remoteSandbox,
+      id: 17,
+      sessionId: 44,
+      providerState: { sandboxId: 'sb-orphaned' },
+    };
+    mockCleanupQueries({});
+    (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+      where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([remoteSandbox, orphanedSandbox]) })),
+    }));
+    (AgentSession.query as jest.Mock)
+      .mockReturnValueOnce({
+        findById: jest.fn().mockResolvedValue({ id: 43, uuid: 'lost-runtime-session' }),
+      })
+      .mockReturnValueOnce({
+        findById: jest.fn().mockResolvedValue(null),
+      });
+    const renewLease = jest.fn().mockRejectedValue(goneError);
+    mockResolveRemoteProvider.mockResolvedValueOnce({ renewLease });
+    mockReconcileLostChatWorkspaceRuntime.mockRejectedValueOnce(reconcileError);
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(mockReconcileLostChatWorkspaceRuntime).toHaveBeenCalledWith('lost-runtime-session');
+    expect(renewLease).toHaveBeenCalledTimes(2);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: reconcileError, sandboxId: remoteSandbox.id },
+      'Session: cleanup workspace-loss reconcile failed'
+    );
+    expect(mockLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sandboxId: remoteSandbox.id }),
+      'Session: cleanup remote maintenance failed'
+    );
+  });
+
+  it('contains an active remote-sandbox scan failure after completing the session cleanup cohorts', async () => {
+    const scanError = new Error('sandbox scan failed');
+    mockCleanupQueries({});
+    (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+      where: jest.fn(() => ({ whereIn: jest.fn().mockRejectedValue(scanError) })),
+    }));
+
+    await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      { error: scanError },
+      'Session: cleanup workspace lease renewal failed'
+    );
+  });
+
   describe('modal 24h-wall checkpointing', () => {
     // mockImplementationOnce queues survive clearMocks; reset so unconsumed impls never leak across tests.
     beforeEach(() => {
@@ -701,6 +930,66 @@ describe('agentSessionCleanup', () => {
       expect(whereIn.mock.calls[0][1]).not.toContain('lifecycle_kubernetes');
     });
 
+    it('does not run Modal wall checkpointing for another remote provider', async () => {
+      mockCleanupQueries({});
+      const row = buildModalRow(24 * 60 * 60 * 1000 - 5 * 60 * 1000, {
+        provider: 'opensandbox',
+      });
+      (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+        where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([row]) })),
+      }));
+      const renewLease = jest.fn().mockResolvedValue(undefined);
+      const checkpoint = jest.fn();
+      mockResolveRemoteProvider.mockResolvedValueOnce({ renewLease, checkpoint });
+
+      await processAgentSessionCleanup();
+
+      expect(renewLease).toHaveBeenCalledWith(row.providerState);
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(AgentSandbox.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('renews a ready remote provider without a checkpoint capability', async () => {
+      mockCleanupQueries({});
+      const row = buildModalRow(24 * 60 * 60 * 1000 - 5 * 60 * 1000, {
+        provider: 'opensandbox',
+      });
+      (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+        where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([row]) })),
+      }));
+      const renewLease = jest.fn().mockResolvedValue(undefined);
+      mockResolveRemoteProvider.mockResolvedValueOnce({ renewLease });
+
+      await processAgentSessionCleanup();
+
+      expect(renewLease).toHaveBeenCalledWith(row.providerState);
+      expect(AgentSandbox.query).toHaveBeenCalledTimes(1);
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+    });
+
+    it('does not checkpoint a legacy Modal row without valid wall-time metadata', async () => {
+      mockCleanupQueries({});
+      const row = buildModalRow(0, {
+        providerState: {
+          appName: 'lifecycle-workspaces',
+          sandboxId: 'sb-legacy',
+          timeoutMs: null,
+        },
+      });
+      (AgentSandbox.query as jest.Mock).mockImplementationOnce(() => ({
+        where: jest.fn(() => ({ whereIn: jest.fn().mockResolvedValue([row]) })),
+      }));
+      const renewLease = jest.fn().mockResolvedValue(undefined);
+      const checkpoint = jest.fn();
+      mockResolveRemoteProvider.mockResolvedValueOnce({ renewLease, checkpoint });
+
+      await processAgentSessionCleanup();
+
+      expect(renewLease).toHaveBeenCalledWith(row.providerState);
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(AgentSandbox.query).toHaveBeenCalledTimes(1);
+    });
+
     it('checkpoints wall-adjacent modal sandboxes and persists a MERGED state via a status-guarded patch', async () => {
       mockCleanupQueries({});
       // 23h50m old with a 24h wall: inside the max(2×cadence, 10min) margin.
@@ -723,6 +1012,24 @@ describe('agentSessionCleanup', () => {
       // Conditional on the row still being 'ready' so a concurrent suspend wins the race.
       expect(persistWhere1).toHaveBeenCalledWith('id', 9);
       expect(persistWhere2).toHaveBeenCalledWith('status', 'ready');
+    });
+
+    it('reports when a concurrent action wins the conditional checkpoint update', async () => {
+      mockCleanupQueries({});
+      const row = buildModalRow(24 * 60 * 60 * 1000 - 5 * 60 * 1000);
+      const { patch } = mockSandboxQueries(row, row, 0);
+      const checkpoint = jest.fn().mockResolvedValue({
+        providerState: { snapshotImageId: 'im-raced' },
+        capabilitySnapshot: {},
+      });
+      mockResolveRemoteProvider.mockResolvedValueOnce({ checkpoint });
+
+      await processAgentSessionCleanup();
+
+      expect(patch).toHaveBeenCalled();
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        `Session: cleanup checkpoint superseded by a concurrent action sandboxId=${row.id}`
+      );
     });
 
     it('skips the checkpoint persist when the row was superseded (no longer ready) between read and re-fetch', async () => {
@@ -777,6 +1084,23 @@ describe('agentSessionCleanup', () => {
         expect.objectContaining({ expectedLifecycle: expect.objectContaining({ action: 'cleanup' }) })
       );
       expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('does not hibernate a wall-killed sandbox after its session is no longer eligible', async () => {
+      mockCleanupQueries({});
+      const row = buildModalRow(24 * 60 * 60 * 1000 - 5 * 60 * 1000);
+      mockSandboxQueries(row);
+      (AgentSession.query as jest.Mock).mockReturnValueOnce({
+        findById: jest.fn().mockResolvedValue(null),
+      });
+      mockResolveRemoteProvider.mockResolvedValueOnce({
+        checkpoint: jest.fn().mockRejectedValue(new WorkspaceRuntimeGoneError('gone')),
+      });
+
+      await expect(processAgentSessionCleanup()).resolves.toBeUndefined();
+
+      expect(mockClaimWorkspaceAction).not.toHaveBeenCalled();
+      expect(mockRecordWorkspaceState).not.toHaveBeenCalled();
     });
 
     it('keeps the pass non-fatal when checkpointing fails', async () => {

@@ -129,7 +129,7 @@ import { resolveRequestGitHubAuth } from 'server/lib/agentSession/githubToken';
 import AgentRunAdmissionService from 'server/services/agent/RunAdmissionService';
 import AgentRunPlanResolver, { AgentRunPlanAgentUnavailableError } from 'server/services/agent/RunPlanResolver';
 import AgentRunQueueService from 'server/services/agent/RunQueueService';
-import AgentRunService from 'server/services/agent/RunService';
+import AgentRunService, { InvalidAgentRunDefaultsError } from 'server/services/agent/RunService';
 import AgentSourceService from 'server/services/agent/SourceService';
 import AgentThreadService from 'server/services/agent/ThreadService';
 import AgentSessionReadService from 'server/services/agent/SessionReadService';
@@ -140,12 +140,14 @@ const mockResolveRequestGitHubAuth = resolveRequestGitHubAuth as jest.Mock;
 const mockCreateQueuedRunWithMessage = AgentRunAdmissionService.createQueuedRunWithMessage as jest.Mock;
 const mockResolveForRunAdmission = AgentRunPlanResolver.resolveForRunAdmission as jest.Mock;
 const mockEnqueueRun = AgentRunQueueService.enqueueRun as jest.Mock;
+const mockIsActiveRunConflictError = AgentRunService.isActiveRunConflictError as jest.Mock;
 const mockMarkQueuedRunDispatchFailed = AgentRunService.markQueuedRunDispatchFailed as jest.Mock;
 const mockHasPriorCompletedDebugIntentRun = AgentRunService.hasPriorCompletedDebugIntentRun as jest.Mock;
 const mockGetSessionSource = AgentSourceService.getSessionSource as jest.Mock;
 const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
 const mockGetOwnedSessionRecord = AgentSessionReadService.getOwnedSessionRecord as jest.Mock;
 const mockCanAcceptMessages = AgentSessionService.canAcceptMessages as jest.Mock;
+const mockGetMessageBlockReason = AgentSessionService.getMessageBlockReason as jest.Mock;
 const mockEnsureSessionActive = AgentSessionService.ensureSessionActive as jest.Mock;
 const mockTouchActivity = AgentSessionService.touchActivity as jest.Mock;
 
@@ -210,12 +212,26 @@ const customAgentRunPlanSnapshot = {
   warnings: [],
 } as const;
 
-function makeRequest(body: Record<string, unknown>): NextRequest {
+function makeRequest(body: unknown, jsonError?: unknown): NextRequest {
   return {
-    json: jest.fn().mockResolvedValue(body),
+    json: jsonError === undefined ? jest.fn().mockResolvedValue(body) : jest.fn().mockRejectedValue(jsonError),
     headers: new Headers([['x-request-id', 'req-test']]),
     nextUrl: new URL('http://localhost/api/v2/ai/agent/threads/thread-1/runs'),
   } as unknown as NextRequest;
+}
+
+function makeValidRunBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    message: {
+      clientMessageId: 'client-message-1',
+      parts: [{ type: 'text', text: 'Hi' }],
+    },
+    ...overrides,
+  };
+}
+
+function makeRouteContext(threadId = 'thread-1') {
+  return { params: Promise.resolve({ threadId }) };
 }
 
 describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
@@ -242,6 +258,8 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     });
     mockEnsureSessionActive.mockImplementation(async (session) => session);
     mockCanAcceptMessages.mockReturnValue(true);
+    mockGetMessageBlockReason.mockReturnValue('Session cannot accept messages');
+    mockIsActiveRunConflictError.mockReturnValue(false);
     mockGetSessionSource.mockResolvedValue({
       uuid: 'source-1',
       adapter: 'blank_workspace',
@@ -974,5 +992,321 @@ describe('POST /api/v2/ai/agent/threads/[threadId]/runs', () => {
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Agent session not found');
     expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('requires an authenticated session before reading the request body', async () => {
+    mockGetRequestUserIdentity.mockReturnValueOnce(null);
+    const request = makeRequest(makeValidRunBody());
+
+    const response = await POST(request, makeRouteContext());
+
+    expect(response.status).toBe(401);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(mockGetOwnedThreadWithSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'null', body: null },
+    { label: 'a primitive', body: 'message' },
+    { label: 'an array', body: [] },
+  ])('rejects a top-level body that is $label', async ({ body }) => {
+    const response = await POST(makeRequest(body), makeRouteContext());
+    const responseBody = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(responseBody.error.message).toBe('Request body must be an object');
+    expect(mockGetOwnedThreadWithSession).not.toHaveBeenCalled();
+  });
+
+  it('treats malformed JSON as an empty request and returns the canonical-message validation error', async () => {
+    const response = await POST(makeRequest(undefined, new SyntaxError('invalid JSON')), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('message must contain supported canonical parts and no role or metadata fields');
+    expect(mockGetOwnedThreadWithSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'omitted message', message: undefined },
+    { label: 'null message', message: null },
+    { label: 'primitive message', message: 'Hi' },
+    { label: 'array message', message: [] },
+    { label: 'unknown message field', message: { parts: [{ type: 'text', text: 'Hi' }], id: 'message-1' } },
+    { label: 'non-string client id', message: { clientMessageId: 7, parts: [{ type: 'text', text: 'Hi' }] } },
+    { label: 'non-array parts', message: { parts: { type: 'text', text: 'Hi' } } },
+    { label: 'empty parts', message: { parts: [] } },
+    { label: 'null part', message: { parts: [null] } },
+    { label: 'primitive part', message: { parts: [7] } },
+    { label: 'array part', message: { parts: [[]] } },
+    { label: 'unknown part type', message: { parts: [{ type: 'tool_call' }] } },
+    { label: 'empty text part', message: { parts: [{ type: 'text', text: '   ' }] } },
+    { label: 'empty file reference', message: { parts: [{ type: 'file_ref' }] } },
+    { label: 'empty source reference', message: { parts: [{ type: 'source_ref' }] } },
+  ])('rejects a canonical message with $label', async ({ message }) => {
+    const response = await POST(makeRequest({ message }), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('message must contain supported canonical parts and no role or metadata fields');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('normalizes all supported canonical input part types and omits a blank client id', async () => {
+    const response = await POST(
+      makeRequest({
+        message: {
+          clientMessageId: '   ',
+          parts: [
+            { type: 'reasoning', text: 'Think carefully' },
+            {
+              type: 'file_ref',
+              path: ' /workspace/sample.ts ',
+              url: ' ',
+              mediaType: ' text/typescript ',
+              title: ' Sample ',
+            },
+            {
+              type: 'source_ref',
+              url: ' https://example.test/source ',
+              title: ' Source ',
+              sourceType: ' docs ',
+            },
+          ],
+        },
+      }),
+      makeRouteContext()
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockCreateQueuedRunWithMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: {
+          parts: [
+            { type: 'reasoning', text: 'Think carefully' },
+            {
+              type: 'file_ref',
+              path: ' /workspace/sample.ts ',
+              url: null,
+              mediaType: ' text/typescript ',
+              title: ' Sample ',
+            },
+            {
+              type: 'source_ref',
+              url: ' https://example.test/source ',
+              title: ' Source ',
+              sourceType: ' docs ',
+              sourceId: null,
+              mediaType: null,
+            },
+          ],
+        },
+      })
+    );
+  });
+
+  it.each([
+    { label: 'null', model: null },
+    { label: 'a primitive', model: 'gpt-5.4' },
+    { label: 'an array', model: [] },
+    { label: 'an unknown field', model: { temperature: 0.2 } },
+    { label: 'a non-string provider', model: { provider: 42 } },
+  ])('rejects a model selection containing $label', async ({ model }) => {
+    const response = await POST(makeRequest(makeValidRunBody({ model })), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('model must contain only provider and id fields');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+  });
+
+  it('trims model selections and treats blank values as unspecified', async () => {
+    const response = await POST(
+      makeRequest(makeValidRunBody({ model: { provider: ' openai ', id: '   ' } })),
+      makeRouteContext()
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockResolveForRunAdmission).toHaveBeenCalledWith(
+      expect.objectContaining({ requestedProvider: 'openai', requestedModel: null })
+    );
+  });
+
+  it.each([
+    { label: 'null', runtimeOptions: null },
+    { label: 'a primitive', runtimeOptions: 'default' },
+    { label: 'an array', runtimeOptions: [] },
+    { label: 'a non-number iteration limit', runtimeOptions: { maxIterations: '12' } },
+    { label: 'a fractional iteration limit', runtimeOptions: { maxIterations: 1.5 } },
+    { label: 'a non-positive iteration limit', runtimeOptions: { maxIterations: 0 } },
+  ])('rejects runtime options containing $label', async ({ runtimeOptions }) => {
+    const response = await POST(makeRequest(makeValidRunBody({ runtimeOptions })), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('runtimeOptions contains unsupported or invalid fields');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-string Debug intent', async () => {
+    const response = await POST(makeRequest(makeValidRunBody({ debugIntent: 7 })), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('debugIntent must be one of diagnose, investigate, or repair');
+    expect(mockGetOwnedThreadWithSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'a generic error', error: new Error('thread lookup failed') },
+    { label: 'a non-Error rejection', error: 'thread lookup failed' },
+  ])('returns 500 when owned-thread lookup rejects with $label', async ({ error }) => {
+    mockGetOwnedThreadWithSession.mockRejectedValueOnce(error);
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+
+    expect(response.status).toBe(500);
+    expect(mockEnsureSessionActive).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns the session block reason when the active session cannot accept messages', async () => {
+    mockCanAcceptMessages.mockReturnValueOnce(false);
+    mockGetMessageBlockReason.mockReturnValueOnce('Session is stopping');
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.message).toBe('Session is stopping');
+    expect(mockGetSessionSource).not.toHaveBeenCalled();
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'missing', source: null },
+    { label: 'not ready', source: { uuid: 'source-1', status: 'pending' } },
+  ])('rejects a session source that is $label', async ({ source }) => {
+    mockGetSessionSource.mockResolvedValueOnce(source);
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.message).toBe('Session source is not ready yet.');
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('maps non-workspace agent unavailability to a 400 response', async () => {
+    mockResolveForRunAdmission.mockRejectedValueOnce(
+      new AgentRunPlanAgentUnavailableError('system.agent', 'source_kind_unsupported')
+    );
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Agent "system.agent" is unavailable: source_kind_unsupported.');
+    expect(mockGetOwnedSessionRecord).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a non-Error run-plan rejection to the public invalid-model error', async () => {
+    mockResolveForRunAdmission.mockRejectedValueOnce({ reason: 'bad model' });
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Invalid agent run model');
+    expect(mockCreateQueuedRunWithMessage).not.toHaveBeenCalled();
+  });
+
+  it('maps an active-run admission conflict to 409 without touching or dispatching the run', async () => {
+    const conflict = new Error('An active run already exists');
+    mockCreateQueuedRunWithMessage.mockRejectedValueOnce(conflict);
+    mockIsActiveRunConflictError.mockImplementationOnce((error) => error === conflict);
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.message).toBe('An active run already exists');
+    expect(mockTouchActivity).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('maps invalid persisted run defaults to 400 without dispatching a run', async () => {
+    mockCreateQueuedRunWithMessage.mockRejectedValueOnce(new InvalidAgentRunDefaultsError('Invalid defaults'));
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe('Invalid defaults');
+    expect(mockTouchActivity).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when run admission fails unexpectedly', async () => {
+    mockCreateQueuedRunWithMessage.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+
+    expect(response.status).toBe(500);
+    expect(mockTouchActivity).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('preserves the activity-touch failure when marking the queued run also fails', async () => {
+    mockTouchActivity.mockRejectedValueOnce(new Error('touch failed'));
+    mockMarkQueuedRunDispatchFailed.mockRejectedValueOnce(new Error('mark failed'));
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+
+    expect(response.status).toBe(500);
+    expect(mockMarkQueuedRunDispatchFailed).toHaveBeenCalledWith('run-1', expect.any(Error));
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('returns an existing non-queued run without dispatching it again', async () => {
+    mockCreateQueuedRunWithMessage.mockResolvedValueOnce({
+      run: { uuid: 'run-1', status: 'running' },
+      message: {
+        uuid: 'message-1',
+        clientMessageId: 'client-message-1',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Hi' }],
+      },
+      created: false,
+    });
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data.run).toEqual(expect.objectContaining({ id: 'run-1', status: 'running' }));
+    expect(mockResolveRequestGitHubAuth).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when dispatch authentication fails', async () => {
+    mockResolveRequestGitHubAuth.mockRejectedValueOnce(new Error('credential broker unavailable'));
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+
+    expect(response.status).toBe(500);
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when the queue rejects the dispatch request', async () => {
+    mockEnqueueRun.mockRejectedValueOnce(new Error('queue unavailable'));
+
+    const response = await POST(makeRequest(makeValidRunBody()), makeRouteContext());
+
+    expect(response.status).toBe(500);
+    expect(mockEnqueueRun).toHaveBeenCalledTimes(1);
   });
 });

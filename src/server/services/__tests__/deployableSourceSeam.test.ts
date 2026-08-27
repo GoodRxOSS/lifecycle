@@ -596,4 +596,593 @@ describe('deployable source seam (PR vs API build)', () => {
     expect(result.deployables).toHaveLength(0);
     expect(result.canReconcile).toBe(false);
   });
+
+  it('fails closed when the targeted repository lookup itself fails', async () => {
+    const service = makeService();
+    const lookupError = new Error('repository database unavailable');
+    const filterWhereNull = jest.fn().mockRejectedValueOnce(lookupError);
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: filterWhereNull })),
+      })),
+    };
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      $fetchGraph: jest.fn(),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      99,
+      'dependency-sha',
+      'main'
+    );
+
+    expect(result).toBe(false);
+    expect(filterWhereNull).toHaveBeenCalledWith('deletedAt');
+    expect(build.$fetchGraph).not.toHaveBeenCalled();
+    expect(mockFetchLifecycleConfigByRepository).not.toHaveBeenCalled();
+  });
+
+  it('skips remote YAML outside the targeted repository without resolving or fetching it', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const filterRepository = { githubRepositoryId: 99, fullName: 'org/target' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(filterRepository) })),
+      })),
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: {
+        defaultServices: [{ name: 'other-api', repository: 'org/other', branch: 'main' }],
+        optionalServices: [],
+      },
+      services: [],
+    });
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      99,
+      'target-sha',
+      'main'
+    );
+
+    expect(result).toBe(false);
+    expect(mockResolveRepository).not.toHaveBeenCalled();
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails targeted attribution when the named target repository is no longer resolvable', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const filterRepository = { githubRepositoryId: 99, fullName: 'org/target' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(filterRepository) })),
+      })),
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: {
+        defaultServices: [{ name: 'target-api', repository: 'org/target', branch: 'main' }],
+        optionalServices: [],
+      },
+      services: [],
+    });
+    mockResolveRepository.mockResolvedValueOnce(null);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      99,
+      'target-sha',
+      'main',
+      99,
+      unresolvedServiceNames,
+      new Set<number>()
+    );
+
+    expect(result).toBe(false);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['target-api']);
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledTimes(1);
+  });
+
+  it('protects a remote service and repository when its lifecycle YAML cannot be read', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const dependencyRepository = { githubRepositoryId: 99, fullName: 'org/dependency' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'dependency-api', repository: 'org/dependency', branch: 'main' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockResolvedValueOnce(null);
+    mockResolveRepository.mockResolvedValueOnce(dependencyRepository);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [{ uuid: 'deploy-1', deployable: { name: 'dependency-api' } }],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      null,
+      null,
+      undefined,
+      unresolvedServiceNames,
+      unresolvedRepositoryIds
+    );
+
+    expect(result).toBe(true);
+    expect(Array.from(unresolvedServiceNames)).toEqual(['dependency-api']);
+    expect(Array.from(unresolvedRepositoryIds)).toEqual([99]);
+    expect(mockResolveExactEnvironmentService).not.toHaveBeenCalled();
+  });
+
+  it('uses main when a remote service omits its branch', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const dependencyRepository = { githubRepositoryId: 99, fullName: 'org/dependency' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'dependency-api', repository: 'org/dependency' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockResolvedValueOnce({ services: [{ name: 'dependency-api' }] });
+    mockResolveRepository.mockResolvedValueOnce(dependencyRepository);
+    mockResolveExactEnvironmentService.mockReturnValueOnce({
+      service: { name: 'dependency-api' },
+      requiredServices: [],
+    });
+    const attributeSpy = jest
+      .spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig')
+      .mockResolvedValueOnce(undefined);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(new Map(), 9, 'uuid-9', null, build);
+
+    expect(result).toBe(true);
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenNthCalledWith(2, dependencyRepository, 'main');
+    expect(attributeSpy).toHaveBeenCalledWith(
+      expect.any(Map),
+      9,
+      'uuid-9',
+      expect.objectContaining({ name: 'dependency-api' }),
+      99,
+      'main',
+      true,
+      null,
+      build
+    );
+  });
+
+  it('preserves an attribution error raised while materializing a resolved service', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: {
+        defaultServices: [{ name: 'api' }],
+        optionalServices: [],
+      },
+      services: [{ name: 'api' }],
+    });
+    mockResolveExactEnvironmentService.mockReturnValueOnce({
+      service: { name: 'api' },
+      requiredServices: [],
+    });
+    const attributionError = new Error('attribute resolution failed');
+    jest.spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig').mockRejectedValueOnce(attributionError);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      (service as any).updateOrCreateDeployableUsingYamlConfig(new Map(), 9, 'uuid-9', null, build)
+    ).rejects.toBe(attributionError);
+
+    expect(service.updateOrCreateDeployableAttributesUsingYAMLConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a persisted comment branch override for a service defined in the root YAML', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: {
+        defaultServices: [{ name: 'api' }],
+        optionalServices: [],
+      },
+      services: [{ name: 'api' }],
+    });
+    mockResolveExactEnvironmentService.mockReturnValueOnce({
+      service: { name: 'api' },
+      requiredServices: [],
+    });
+    const attributeSpy = jest
+      .spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig')
+      .mockResolvedValueOnce(undefined);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [{ deployable: { name: 'api', commentBranchName: 'release-candidate' } }],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(new Map(), 9, 'uuid-9', null, build);
+
+    expect(result).toBe(true);
+    expect(attributeSpy).toHaveBeenCalledWith(
+      expect.any(Map),
+      9,
+      'uuid-9',
+      expect.objectContaining({ name: 'api' }),
+      42,
+      'release-candidate',
+      true,
+      null,
+      build
+    );
+  });
+
+  it('skips a root service when a targeted update is for another effective branch', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(rootRepository) })),
+      })),
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: {
+        defaultServices: [{ name: 'api' }],
+        optionalServices: [],
+      },
+      services: [{ name: 'api' }],
+    });
+    const attributeSpy = jest.spyOn(service, 'updateOrCreateDeployableAttributesUsingYAMLConfig');
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      42,
+      'release-sha',
+      'release'
+    );
+
+    expect(result).toBe(false);
+    expect(attributeSpy).not.toHaveBeenCalled();
+  });
+
+  it('marks a targeted root import reconciliable when it consumes the delivered source ref', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(rootRepository) })),
+      })),
+    };
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: { defaultServices: [], optionalServices: [] },
+      services: [],
+    });
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const pullRequest: any = {
+      branchName: 'main',
+      repository: rootRepository,
+      build,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      pullRequest,
+      build,
+      42,
+      'root-push-sha',
+      'main',
+      42
+    );
+
+    expect(result).toBe(true);
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(rootRepository, 'root-push-sha');
+  });
+
+  it('imports legacy top-level services when the environment lists no default or optional services', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const legacyService = { name: 'legacy-api' };
+    const generatedAttributes = {
+      name: 'legacy-api',
+      type: 'github',
+      source: 'yaml',
+      reconcileEligible: true,
+      branchName: 'main',
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      services: [legacyService],
+    });
+    const generateSpy = jest
+      .spyOn(service as any, 'generateAttributesFromYamlConfig')
+      .mockResolvedValueOnce(generatedAttributes);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const deployableServices = new Map();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      deployableServices,
+      9,
+      'uuid-9',
+      null,
+      build
+    );
+
+    expect(result).toBe(true);
+    expect(generateSpy).toHaveBeenCalledWith(9, 'uuid-9', 42, 'main', legacyService, true, null, build);
+    expect(deployableServices.get('legacy-api')).toEqual(generatedAttributes);
+  });
+
+  it('does not import legacy root services for a different targeted repository', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const filterRepository = { githubRepositoryId: 99, fullName: 'org/dependency' };
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({ whereNull: jest.fn().mockResolvedValue(filterRepository) })),
+      })),
+    };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValueOnce({
+      environment: { defaultServices: [], optionalServices: [] },
+      services: [{ name: 'legacy-api' }],
+    });
+    const generateSpy = jest.spyOn(service as any, 'generateAttributesFromYamlConfig');
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      99,
+      'dependency-sha',
+      'main'
+    );
+
+    expect(result).toBe(false);
+    expect(generateSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns false without a YAML read when the build source repository or ref is incomplete', async () => {
+    const service = makeService();
+    const build: any = {
+      id: 9,
+      githubRepositoryId: null,
+      branchName: null,
+      configSha: null,
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(new Map(), 9, 'uuid-9', null, build);
+
+    expect(result).toBe(false);
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deploys.[deployable], environment]');
+    expect(mockFetchLifecycleConfigByRepository).not.toHaveBeenCalled();
+  });
+
+  it('updates a missing PR branch and returns reconciliation metadata from the resolved YAML set', async () => {
+    const service = makeService();
+    const updateBranchName = (service as any).db.services.PullRequest.updatePullRequestBranchName as jest.Mock;
+    const pullRequest: any = { branchName: null };
+    const persistedDeployable = { id: 1, name: 'api' };
+    const yamlSpy = jest
+      .spyOn(service as any, 'updateOrCreateDeployableUsingYamlConfig')
+      .mockImplementationOnce(async (deployableServices, ...args) => {
+        const unresolvedServiceNames = args[8] as Set<string>;
+        const unresolvedRepositoryIds = args[9] as Set<number>;
+        deployableServices.set('api', {
+          name: 'api',
+          source: undefined,
+          reconcileEligible: true,
+          resolvedFromRepositoryId: 42,
+          branchName: 'main',
+          commentBranchName: 'release',
+        });
+        deployableServices.set('configuration', {
+          name: 'configuration',
+          source: 'yaml',
+          reconcileEligible: false,
+        });
+        unresolvedServiceNames.add('unresolved-api');
+        unresolvedRepositoryIds.add(99);
+        return true;
+      });
+    const databaseUpsert = jest
+      .spyOn(service as any, 'upsertDeployablesWithDatabase')
+      .mockResolvedValueOnce([persistedDeployable]);
+
+    const result = await service.upsertDeployables(9, 'uuid-9', pullRequest, { name: 'env' } as any, undefined, 42);
+
+    expect(updateBranchName).toHaveBeenCalledWith(pullRequest);
+    expect(yamlSpy).toHaveBeenCalled();
+    expect(databaseUpsert).toHaveBeenCalledWith('uuid-9', 9, [
+      expect.objectContaining({ name: 'api' }),
+      expect.objectContaining({ name: 'configuration' }),
+    ]);
+    expect(result).toEqual({
+      deployables: [persistedDeployable],
+      canReconcile: true,
+      filterGithubRepositoryId: 42,
+      unresolvedServiceNames: ['unresolved-api'],
+      unresolvedRepositoryIds: [99],
+      reconcileEligibleDeployables: [
+        {
+          name: 'api',
+          source: 'yaml',
+          reconcileEligible: true,
+          resolvedFromRepositoryId: 42,
+          branchName: 'release',
+        },
+      ],
+    });
+  });
+
+  it('preserves YAML import errors and does not attempt database writes', async () => {
+    const service = makeService();
+    const importError = new Error('root lifecycle YAML unavailable');
+    jest.spyOn(service as any, 'updateOrCreateDeployableUsingYamlConfig').mockRejectedValueOnce(importError);
+    const databaseUpsert = jest.spyOn(service as any, 'upsertDeployablesWithDatabase');
+    const pullRequest: any = { branchName: 'feature' };
+
+    await expect(service.upsertDeployables(9, 'uuid-9', pullRequest, { name: 'env' } as any)).rejects.toBe(importError);
+
+    expect(databaseUpsert).not.toHaveBeenCalled();
+  });
+
+  it('updates existing deployables, creates missing rows, and isolates per-row database failures', async () => {
+    const service = makeService();
+    const patchExisting = jest.fn().mockResolvedValue(1);
+    const patchFailure = jest.fn().mockRejectedValueOnce(new Error('patch failed'));
+    const existing = { id: 1, name: 'existing', $query: () => ({ patch: patchExisting }) };
+    const existingWithPatchFailure = {
+      id: 3,
+      name: 'patch-failure',
+      $query: () => ({ patch: patchFailure }),
+    };
+    const searchResults = [
+      Promise.resolve(existing),
+      Promise.reject(new Error('search failed')),
+      Promise.resolve(existingWithPatchFailure),
+      Promise.resolve(undefined),
+    ];
+    const query = jest.fn(() => {
+      const first = jest.fn().mockReturnValue(searchResults.shift());
+      const builder: any = {
+        where: jest.fn(() => builder),
+        first,
+      };
+      return builder;
+    });
+    const created = { id: 2, name: 'created' };
+    const create = jest.fn().mockResolvedValueOnce(created).mockRejectedValueOnce(new Error('create failed'));
+    (service as any).db.models.Deployable = { query, create };
+    const attributes = [
+      { name: 'existing', buildUUID: 'uuid-9', buildId: 9 },
+      { name: 'search-failure', buildUUID: 'uuid-9', buildId: 9 },
+      { name: 'patch-failure', buildUUID: 'uuid-9', buildId: 9 },
+      { name: 'create-failure', buildUUID: 'uuid-9', buildId: 9 },
+    ];
+
+    const result = await (service as any).upsertDeployablesWithDatabase('uuid-9', 9, attributes);
+
+    expect(patchExisting).toHaveBeenCalledWith(attributes[0]);
+    expect(patchFailure).toHaveBeenCalledWith(attributes[2]);
+    expect(create).toHaveBeenNthCalledWith(1, attributes[1]);
+    expect(create).toHaveBeenNthCalledWith(2, attributes[3]);
+    expect(result).toEqual([existing, created, existingWithPatchFailure]);
+
+    await expect((service as any).upsertDeployablesWithDatabase('uuid-9', 9, [])).resolves.toEqual([]);
+    expect(query).toHaveBeenCalledTimes(4);
+  });
 });

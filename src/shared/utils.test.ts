@@ -25,6 +25,7 @@ import {
   insertBuildLink,
   mergeKeyValueArrays,
   extractEnvVarsWithBuildDependencies,
+  waitForColumnValue,
 } from 'shared/utils';
 
 jest.mock('server/lib/logger', () => ({
@@ -323,5 +324,45 @@ describe('extractEnvVarsWithBuildDependencies', () => {
     };
 
     expect(extractEnvVarsWithBuildDependencies(env)).toEqual(expected);
+  });
+});
+
+describe('waitForColumnValue', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('returns immediately when the model already has the requested value', async () => {
+    const model = { buildPipelineId: 'pipeline-1', reload: jest.fn() };
+
+    await expect(waitForColumnValue(model as any, 'buildPipelineId')).resolves.toBe(model);
+    expect(model.reload).not.toHaveBeenCalled();
+  });
+
+  test('reloads until the requested value appears', async () => {
+    jest.useFakeTimers();
+    const model = {
+      buildPipelineId: '',
+      reload: jest.fn(async () => {
+        model.buildPipelineId = 'pipeline-1';
+      }),
+    };
+
+    const result = waitForColumnValue(model as any, 'buildPipelineId', 3, 100);
+    await jest.advanceTimersByTimeAsync(100);
+
+    await expect(result).resolves.toBe(model);
+    expect(model.reload).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns null after the configured polling attempts are exhausted', async () => {
+    jest.useFakeTimers();
+    const model = { buildPipelineId: '', reload: jest.fn().mockResolvedValue(undefined) };
+
+    const result = waitForColumnValue(model as any, 'buildPipelineId', 2, 50);
+    await jest.advanceTimersByTimeAsync(100);
+
+    await expect(result).resolves.toBeNull();
+    expect(model.reload).toHaveBeenCalledTimes(2);
   });
 });

@@ -61,4 +61,56 @@ describe('renderLifecycleSchemaSlices', () => {
   it('returns null when the error carries no schema paths', () => {
     expect(renderLifecycleSchemaSlices('Config file is empty.')).toBeNull();
   });
+
+  it('describes enum, format, minimum, and array-item constraints at exact paths', () => {
+    const slices = renderLifecycleSchemaSlices(
+      [
+        'instance.services[0].helm.deploymentMethod is invalid',
+        'instance.version is invalid',
+        'instance.services[0].dev.agentSession.skills[0].repo is invalid',
+        'instance.services[0].dev.agentSession.readiness.timeoutMs is invalid',
+      ].join('\n')
+    );
+
+    expect(slices).toContain('- services.helm.deploymentMethod: type=string, enum=[native, ci]');
+    expect(slices).toContain('- version: type=string, format=schema100Version');
+    expect(slices).toContain('- services.dev.agentSession.skills.repo: type=string, minLength=1');
+    expect(slices).toContain('- services.dev.agentSession.readiness.timeoutMs: type=integer, minimum=0');
+  });
+
+  it('labels the nearest schema node when an error path contains an unknown field', () => {
+    const slices = renderLifecycleSchemaSlices('instance.services[0].dockerfle is not allowed');
+
+    expect(slices).toContain('- services (nearest schema match for services.dockerfle):');
+    expect(slices).toContain('allowed fields:');
+  });
+
+  it('reports omitted paths after the bounded four-slice limit', () => {
+    const slices = renderLifecycleSchemaSlices(
+      [
+        'instance.version is invalid',
+        'instance.environment.autoDeploy is invalid',
+        'instance.environment.ignoreFiles is invalid',
+        'instance.environment.enabledFeatures is invalid',
+        'instance.environment.githubDeployments is invalid',
+      ].join('\n')
+    );
+
+    expect(slices).toContain('- (+1 more failing paths)');
+  });
+
+  it('bounds verbose nearest-match descriptions', () => {
+    const longUnknownField = 'x'.repeat(400);
+    const slices = renderLifecycleSchemaSlices(
+      [
+        `instance.services[0].${longUnknownField}One is invalid`,
+        `instance.services[0].${longUnknownField}Two is invalid`,
+        `instance.services[0].${longUnknownField}Three is invalid`,
+        `instance.services[0].${longUnknownField}Four is invalid`,
+      ].join('\n')
+    );
+
+    expect(slices).toHaveLength(1501);
+    expect(slices?.endsWith('…')).toBe(true);
+  });
 });

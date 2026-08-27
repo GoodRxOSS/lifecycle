@@ -158,6 +158,41 @@ describe('get_context', () => {
     const { output } = await call('get_context', {});
     expect(output).toMatchObject({ limits: { defaultWaitSeconds: 10, maxWaitSeconds: 15 } });
   });
+
+  it('uses the strongest available identity display name', async () => {
+    const { call } = harness({ getContext: { loadConfig: async () => config } });
+    const identityCases = [
+      {
+        identity: { displayName: 'Display Name', preferredUsername: 'preferred', githubUsername: 'octocat' },
+        expected: 'Display Name',
+      },
+      {
+        identity: { displayName: null, preferredUsername: 'preferred', githubUsername: 'octocat' },
+        expected: 'preferred',
+      },
+      {
+        identity: { displayName: null, preferredUsername: null, githubUsername: 'octocat' },
+        expected: 'octocat',
+      },
+    ];
+
+    for (const { identity, expected } of identityCases) {
+      const principal = { ...PRINCIPAL, identity } as unknown as Principal;
+      const { output } = await call('get_context', {}, principal);
+      expect(output?.user).toMatchObject({ id: 'user-1', displayName: expected });
+    }
+  });
+
+  it('rejects an OAuth principal without a Lifecycle user id', async () => {
+    const loadConfig = jest.fn().mockResolvedValue(config);
+    const { call } = harness({ getContext: { loadConfig } });
+    const principal = { ...PRINCIPAL, userId: null } as unknown as Principal;
+
+    const { error } = await call('get_context', {}, principal);
+
+    expect(error).toMatchObject({ code: 'internal_error', retryable: false });
+    expect(loadConfig).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('list_repositories', () => {
@@ -380,6 +415,44 @@ describe('list_environments', () => {
       updatedAt: '2026-07-02T00:00:00.000Z',
       deletedAt: '2026-07-03T00:00:00.000Z',
     });
+  });
+
+  it('drops malformed rows and normalizes safe defaults for valid legacy rows', async () => {
+    const listEnvironments = jest.fn().mockResolvedValue({
+      data: [
+        { ...row, repository: '' },
+        { ...row, repository: 'not-a-repository' },
+        { ...row, createdAt: 'not-a-date' },
+        { ...row, environmentId: 0 },
+        {
+          ...row,
+          status: 'legacy_status',
+          phase: 'legacy_phase',
+          trigger: 'legacy_trigger',
+          activeServiceCount: -3,
+          expiresAt: null,
+          author: '',
+          pullRequest: { number: '42', title: 'Legacy pull request', status: '' },
+        },
+      ],
+      paginationMetadata: { current: 1, total: 1, items: 5, limit: 25 },
+    });
+    const { call } = harness({ listEnvironments: { listEnvironments } });
+
+    const { output } = await call('list_environments', {});
+
+    expect(output!.environments).toEqual([
+      expect.objectContaining({
+        uuid: UUID,
+        status: 'pending',
+        phase: 'in_progress',
+        trigger: 'github_pr',
+        activeServiceCount: 0,
+        pullRequest: { number: 42, title: 'Legacy pull request', status: 'unknown' },
+      }),
+    ]);
+    expect((output!.environments as McpJsonObject[])[0]).not.toHaveProperty('expiresAt');
+    expect((output!.environments as McpJsonObject[])[0]).not.toHaveProperty('author');
   });
 
   it('scopes mine to the signed-in user and short-circuits without an identity', async () => {

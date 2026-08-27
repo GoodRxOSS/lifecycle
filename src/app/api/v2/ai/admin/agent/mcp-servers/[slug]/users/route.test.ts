@@ -141,4 +141,26 @@ describe('GET /api/v2/ai/admin/agent/mcp-servers/[slug]/users', () => {
       error: { message: 'MCP server config not found' },
     });
   });
+
+  it('maps an unexpected connector lookup failure to 500', async () => {
+    mockGetRequestUserIdentity.mockReturnValue({
+      roles: ['user'],
+      userId: 'sample-admin',
+      githubUsername: 'sample-admin',
+    });
+    mockListMcpServerUsers.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await GET(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/mcp-servers/sample-connector/users?scope=global'),
+      {
+        params: Promise.resolve({ slug: 'sample-connector' }),
+      }
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'database unavailable' },
+    });
+    expect(mockListMcpServerUsers).toHaveBeenCalledWith('sample-connector', 'global');
+  });
 });

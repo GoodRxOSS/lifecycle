@@ -21,6 +21,10 @@ describe('validateBuildUuidFormat', () => {
     expect(validateBuildUuidFormat(uuid)).toBeNull();
   });
 
+  test('accepts a UUID at the 50-character maximum', () => {
+    expect(validateBuildUuidFormat('a'.repeat(50))).toBeNull();
+  });
+
   test.each([
     ['ab', 'UUID must be between 3 and 50 characters'],
     ['a'.repeat(51), 'UUID must be between 3 and 50 characters'],

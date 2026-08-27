@@ -370,7 +370,11 @@ describe('AgentRunPlanResolver', () => {
             deployStatus: 'build_failed',
             deployStatusMessage: 'Dockerfile not found',
             source: 'yaml',
-            helm: null,
+            helm: {
+              chartName: 'sample-chart',
+              chartRepoUrl: 'oci://charts.example.com',
+              valueFiles: ['values.yaml', '   ', 'values-production.yaml'],
+            },
           },
         },
       },
@@ -392,6 +396,11 @@ describe('AgentRunPlanResolver', () => {
           initDockerfilePath: 'services/sample/init.Dockerfile',
           deployStatus: 'build_failed',
           source: 'yaml',
+          helm: {
+            chartName: 'sample-chart',
+            chartRepoUrl: 'oci://charts.example.com',
+            valueFiles: ['values.yaml', 'values-production.yaml'],
+          },
         }),
       })
     );
@@ -604,6 +613,16 @@ describe('AgentRunPlanResolver', () => {
     expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
   });
 
+  it('propagates unexpected instruction resolution failures without resolving rules', async () => {
+    const dependencyError = new Error('instruction store unavailable');
+    mockResolveInstructionRefs.mockRejectedValueOnce(dependencyError);
+
+    await expect(resolve()).rejects.toBe(dependencyError);
+
+    expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
+    expect(mockResolveRulesForRun).not.toHaveBeenCalled();
+  });
+
   it('resolves explicit Debug investigation intent to diagnose for build-context chat', async () => {
     const result = await resolve({
       source: {
@@ -619,6 +638,26 @@ describe('AgentRunPlanResolver', () => {
       decisionSource: 'client_request',
       reasonCode: 'explicit_investigate',
     });
+  });
+
+  it('resolves explicit Debug diagnosis without consulting repair history', async () => {
+    const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
+
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      requestedDebugIntent: 'diagnose',
+      findPriorCompletedDebugIntentRun,
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: 'diagnose',
+      resolvedIntent: 'diagnose',
+      decisionSource: 'client_request',
+      reasonCode: 'explicit_diagnose',
+    });
+    expect(findPriorCompletedDebugIntentRun).not.toHaveBeenCalled();
   });
 
   it('resolves explicit Debug repair only after a prior completed diagnosis or investigation', async () => {
@@ -877,6 +916,29 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
+  it('defaults a repair request to diagnosis when no repair-history reader is available', async () => {
+    const result = await resolve({
+      source: {
+        input: { buildUuid: 'build-1' },
+      },
+      messageText: 'Please fix the ingress issue',
+    });
+
+    expect(result.runPlanSnapshot.debug).toEqual({
+      requestedIntent: null,
+      resolvedIntent: 'diagnose',
+      decisionSource: 'repair_guard',
+      reasonCode: 'repair_requires_prior_diagnosis',
+    });
+    expect(result.runPlanSnapshot.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'debug_repair_requires_prior_diagnosis',
+        }),
+      ])
+    );
+  });
+
   it('does not treat negative approval language as repair intent', async () => {
     const findPriorCompletedDebugIntentRun = jest.fn().mockResolvedValue(true);
 
@@ -998,6 +1060,58 @@ describe('AgentRunPlanResolver', () => {
         sessionKind: AgentSessionKind.SANDBOX,
       })
     );
+  });
+
+  it('uses build context when an environment session selects Debug with a build', async () => {
+    const result = await resolve({
+      session: {
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+      },
+      source: {
+        adapter: 'lifecycle_environment',
+        input: { buildUuid: 'build-1' },
+      },
+      thread: {
+        metadata: { selectedAgentDefinitionId: 'system.debug' },
+      },
+    });
+
+    expect(result.runPlanSnapshot.agent).toEqual(
+      expect.objectContaining({
+        id: 'system.debug',
+        sourceKind: 'build_context_chat',
+      })
+    );
+    expect(result.runPlanSnapshot.source.buildUuid).toBe('build-1');
+    expect(result.runPlanSnapshot.debug).toEqual(
+      expect.objectContaining({
+        resolvedIntent: 'diagnose',
+        decisionSource: 'default',
+      })
+    );
+  });
+
+  it('uses freeform context when an environment session selects a freeform-only custom agent', async () => {
+    const result = await resolve({
+      session: {
+        sessionKind: AgentSessionKind.ENVIRONMENT,
+      },
+      source: {
+        adapter: 'lifecycle_environment',
+      },
+      thread: {
+        metadata: { selectedAgentDefinitionId: 'custom.sample-agent' },
+      },
+    });
+
+    expect(mockGetUserDefinition).toHaveBeenCalledWith('custom.sample-agent', 'sample-user');
+    expect(result.runPlanSnapshot.agent).toEqual(
+      expect.objectContaining({
+        id: 'custom.sample-agent',
+        sourceKind: 'freeform_chat',
+      })
+    );
+    expect(result.runPlanSnapshot.debug).toBeUndefined();
   });
 
   it('uses a valid selected thread agent preference for future run admission', async () => {
@@ -1281,6 +1395,28 @@ describe('AgentRunPlanResolver', () => {
     );
   });
 
+  it('marks an unprepared workspace source snapshot as session-fresh', async () => {
+    const result = await resolve({
+      session: {
+        workspaceStatus: AgentWorkspaceStatus.READY,
+        podName: 'agent-session-pod',
+        pvcName: 'agent-session-pvc',
+      },
+      source: {
+        input: { buildUuid: 'build-1' },
+        preparedAt: null,
+      },
+      thread: {
+        metadata: { selectedAgentDefinitionId: 'system.develop' },
+      },
+    });
+
+    expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
+    expect(result.runPlanSnapshot.source.freshness).toEqual(
+      expect.objectContaining({ preparedAt: null, freshnessSource: 'session' })
+    );
+  });
+
   it('fails closed for legacy workspace custom agents that need one-agent conversion', async () => {
     mockGetUserDefinition.mockResolvedValueOnce({
       ...customDefinition,
@@ -1404,6 +1540,18 @@ describe('AgentRunPlanResolver', () => {
     });
     expect(result.runPlanSnapshot.prompt.renderedHash).toEqual(expect.any(String));
     expect(JSON.stringify(result.runPlanSnapshot.prompt)).not.toContain('DB prompt as stored');
+  });
+
+  it('rejects a blank session model before provider selection and instruction resolution', async () => {
+    await expect(
+      resolve({
+        session: { defaultModel: '   ' },
+      })
+    ).rejects.toThrow('Agent run model is required');
+
+    expect(mockResolveSelection).not.toHaveBeenCalled();
+    expect(mockResolveRunAdmissionChoices).not.toHaveBeenCalled();
+    expect(mockSeedSystemTemplates).not.toHaveBeenCalled();
   });
 
   it('uses durable session default provider when a run omits provider', async () => {
@@ -1648,5 +1796,146 @@ describe('AgentRunPlanResolver', () => {
     expect(result.runPlanSnapshot.capabilities.selectedRuntimeToolChoiceIds).toEqual([]);
     expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpChoiceIds).toEqual([]);
     expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpConnectionRefs).toEqual([]);
+  });
+
+  it.each([
+    {
+      policy: { sourceKinds: ['freeform_chat'], workspaceRequired: true, sandboxRequired: false },
+      reason: 'workspace_required',
+    },
+    {
+      policy: { sourceKinds: ['freeform_chat'], workspaceRequired: false, sandboxRequired: true },
+      reason: 'sandbox_required',
+    },
+  ])('rejects a freeform system agent whose resource policy requires $reason resources', async ({ policy, reason }) => {
+    mockGetSystemAgentDefinition.mockResolvedValueOnce({
+      ...SYSTEM_AGENT_DEFINITIONS['system.freeform'],
+      resourcePolicy: policy,
+    });
+
+    await expect(
+      resolve({
+        thread: { metadata: { selectedAgentDefinitionId: 'system.freeform' } },
+      })
+    ).rejects.toMatchObject({
+      name: AgentRunPlanAgentUnavailableError.name,
+      agentId: 'system.freeform',
+      reason,
+      details: expect.objectContaining({ sourceKind: 'freeform_chat' }),
+    });
+    expect(mockResolveRunAdmissionChoices).not.toHaveBeenCalled();
+    expect(mockSeedSystemTemplates).not.toHaveBeenCalled();
+  });
+
+  it('uses empty runtime options when admission does not provide overrides', async () => {
+    const result = await AgentRunPlanResolver.resolveForRunAdmission({
+      thread: { id: 7, uuid: 'thread-1', metadata: {} } as any,
+      session: buildSession(),
+      source: buildSource(),
+      userIdentity,
+      requestedProvider: null,
+      requestedModel: null,
+    });
+
+    expect(result.runtimeOptions).toEqual({});
+    expect(result.runPlanSnapshot.runtime.runtimeOptions).toEqual({});
+  });
+
+  it('projects source context fallbacks when a valid session has no mounted repositories or selected services', async () => {
+    mockResolveSessionContext.mockResolvedValueOnce({
+      repoFullName: 'example-org/context-repo',
+      approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+      capabilityPolicy: undefined,
+    });
+
+    const result = await resolve({
+      session: {
+        buildUuid: null,
+        namespace: null,
+        workspaceRepos: [],
+        selectedServices: [],
+      },
+      source: {
+        input: { branchName: '  feature/context  ', namespace: '  source-namespace  ' },
+        preparedAt: null,
+      },
+    });
+
+    expect(result.runPlanSnapshot.source).toEqual(
+      expect.objectContaining({
+        buildUuid: null,
+        repoFullName: 'example-org/context-repo',
+        branch: 'feature/context',
+        namespace: 'source-namespace',
+        workspaceLayout: {
+          repoCount: 0,
+          primaryRepo: 'example-org/context-repo',
+          selectedServiceCount: 0,
+          primaryService: null,
+        },
+        freshness: expect.objectContaining({ preparedAt: null, freshnessSource: 'request' }),
+      })
+    );
+  });
+
+  it('preserves a template error without optional upstream details', async () => {
+    mockResolveInstructionRefs.mockRejectedValueOnce(
+      new InstructionTemplateServiceError('invalid_ref', 'Instruction template ref is invalid.', {
+        statusCode: 400,
+      })
+    );
+
+    await expect(resolve()).rejects.toMatchObject({
+      name: AgentRunPlanInstructionTemplateError.name,
+      code: 'instruction_template_invalid',
+      templateCode: 'invalid_ref',
+      statusCode: 400,
+      details: { templateCode: 'invalid_ref' },
+    });
+    expect(mockResolveRulesForRun).not.toHaveBeenCalled();
+  });
+
+  it('normalizes present runtime metadata with omitted choice arrays to explicit empty selections', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      capabilityRefs: ['read_context', 'external_mcp_read'],
+      requiredCapabilityRefs: ['read_context'],
+      optionalCapabilityRefs: ['external_mcp_read'],
+    });
+    mockResolveRunAdmissionChoices.mockResolvedValueOnce({
+      metadataPresent: true,
+      selectedRuntimeToolChoiceIds: undefined,
+      selectedRuntimeMcpChoiceIds: undefined,
+      selectedRuntimeCapabilityIds: undefined,
+      selectedRuntimeMcpConnectionRefs: undefined,
+    });
+
+    const result = await resolve({
+      thread: { metadata: { selectedAgentDefinitionId: 'custom.sample-agent' } },
+    });
+
+    expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(['read_context']);
+    expect(result.runPlanSnapshot.capabilities.selectedRuntimeCapabilityIds).toEqual(['read_context']);
+    expect(result.runPlanSnapshot.capabilities.selectedRuntimeToolChoiceIds).toEqual([]);
+    expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpChoiceIds).toEqual([]);
+    expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpConnectionRefs).toEqual([]);
+  });
+
+  it('uses capabilityRefs as the required set for definitions without split capability fields', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      capabilityRefs: ['read_context'],
+      requiredCapabilityRefs: undefined,
+      optionalCapabilityRefs: undefined,
+    });
+
+    const result = await resolve({
+      thread: { metadata: { selectedAgentDefinitionId: 'custom.sample-agent' } },
+    });
+
+    expect(result.runPlanSnapshot.capabilities.provisionalCapabilityIds).toEqual(['read_context']);
+    expect(result.runPlanSnapshot.capabilities.resolvedCapabilityAccess).toEqual([
+      expect.objectContaining({ capabilityId: 'read_context', allowed: true }),
+    ]);
   });
 });

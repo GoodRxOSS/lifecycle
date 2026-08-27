@@ -14,6 +14,23 @@
  * limitations under the License.
  */
 
+var mockKubeConfig: jest.Mock;
+var mockLoadFromDefault: jest.Mock;
+var mockMakeApiClient: jest.Mock;
+
+jest.mock('@kubernetes/client-node', () => {
+  mockLoadFromDefault = jest.fn();
+  mockMakeApiClient = jest.fn();
+  mockKubeConfig = jest.fn(() => ({
+    loadFromDefault: mockLoadFromDefault,
+    makeApiClient: mockMakeApiClient,
+  }));
+  return {
+    KubeConfig: mockKubeConfig,
+    CoreV1Api: class CoreV1Api {},
+  };
+});
+
 import {
   buildTriageDossier,
   classifyDeployPhase,
@@ -33,6 +50,10 @@ function fakeCoreApi(overrides: Partial<TriageCoreApi> = {}): TriageCoreApi {
 
 const healthyBuild = { uuid: 'build-1', status: 'deployed', statusMessage: 'ok', namespace: 'env-build-1' };
 const failedBuild = { uuid: 'build-1', status: 'deploy_failed', statusMessage: 'web failed', namespace: 'env-build-1' };
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
 describe('classifyDeployPhase', () => {
   it('classifies statuses into phases', () => {
@@ -350,6 +371,184 @@ describe('buildTriageDossier', () => {
     );
   });
 
+  it.each([
+    ['no pods found for this deploy', []],
+    [
+      'all pods currently Ready (failure may be stale)',
+      [
+        {
+          metadata: { name: 'web-build-1-ready' },
+          status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+        },
+      ],
+    ],
+  ])('records the runtime state note %p', async (expectedNote, items) => {
+    const coreApi = fakeCoreApi({
+      listNamespacedPod: jest.fn().mockResolvedValue({ body: { items } }),
+    });
+
+    const dossier = await buildTriageDossier(
+      failedBuild,
+      [
+        {
+          uuid: 'web-build-1',
+          status: 'deploy_failed',
+          statusMessage: 'Pods failed to become ready',
+          deployable: { name: 'web' },
+        },
+      ],
+      { coreApi }
+    );
+
+    expect(dossier).toContain(`- ${expectedNote}`);
+    expect(coreApi.listNamespacedEvent).not.toHaveBeenCalled();
+    expect(coreApi.readNamespacedPodLog).not.toHaveBeenCalled();
+  });
+
+  it('summarizes restart-only containers, falls back to pod phase, and bounds failing pods', async () => {
+    const items = [
+      {
+        metadata: { name: 'restart-only' },
+        status: {
+          phase: 'Running',
+          conditions: [{ type: 'Ready', status: 'False' }],
+          containerStatuses: [
+            {
+              name: 'app',
+              restartCount: 2,
+              state: { waiting: { reason: 'ContainerCreating' } },
+            },
+          ],
+        },
+      },
+      {
+        metadata: { name: 'phase-only' },
+        status: {
+          phase: 'Pending',
+          conditions: [{ type: 'Ready', status: 'False' }],
+          containerStatuses: [{ name: 'app', restartCount: 0 }],
+        },
+      },
+      ...Array.from({ length: 3 }, (_, index) => ({
+        metadata: { name: `extra-${index}` },
+        status: { phase: 'Failed', conditions: [{ type: 'Ready', status: 'False' }] },
+      })),
+    ];
+    const coreApi = fakeCoreApi({ listNamespacedPod: jest.fn().mockResolvedValue({ body: { items } }) });
+
+    const dossier = await buildTriageDossier(
+      failedBuild,
+      [
+        {
+          uuid: 'web-build-1',
+          status: 'deploy_failed',
+          statusMessage: 'Pods failed to become ready',
+          deployable: { name: 'web' },
+        },
+      ],
+      { coreApi }
+    );
+
+    expect(dossier).toContain('- pod restart-only: app restarts=2');
+    expect(dossier).toContain('- pod phase-only: phase=Pending');
+    expect(dossier).toContain('- (+2 more failing pods)');
+  });
+
+  it('keeps pod summaries when events fail and reports the contained event error', async () => {
+    const eventError = new Error('events forbidden');
+    const coreApi = fakeCoreApi({
+      listNamespacedPod: jest.fn().mockResolvedValue({
+        body: {
+          items: [
+            {
+              metadata: { name: 'web-build-1-pod' },
+              status: { phase: 'Pending', conditions: [{ type: 'Ready', status: 'False' }] },
+            },
+          ],
+        },
+      }),
+      listNamespacedEvent: jest.fn().mockRejectedValue(eventError),
+    });
+
+    const dossier = await buildTriageDossier(
+      failedBuild,
+      [
+        {
+          uuid: 'web-build-1',
+          status: 'deploy_failed',
+          statusMessage: 'Pods failed to become ready',
+          deployable: { name: 'web' },
+        },
+      ],
+      { coreApi }
+    );
+
+    expect(dossier).toContain('- pod web-build-1-pod: phase=Pending');
+    expect(dossier).toContain('- events unavailable: events forbidden');
+  });
+
+  it('reports a failed previous-log read without discarding other runtime evidence', async () => {
+    const coreApi = fakeCoreApi({
+      listNamespacedPod: jest.fn().mockResolvedValue({
+        body: {
+          items: [
+            {
+              metadata: { name: 'web-build-1-crashing' },
+              status: {
+                phase: 'Running',
+                conditions: [{ type: 'Ready', status: 'False' }],
+                containerStatuses: [
+                  {
+                    name: 'web',
+                    restartCount: 1,
+                    state: { waiting: { reason: 'CrashLoopBackOff' } },
+                    lastState: { terminated: { reason: 'Error' } },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+      readNamespacedPodLog: jest.fn().mockRejectedValue(new Error('previous log expired')),
+    });
+
+    const dossier = await buildTriageDossier(
+      failedBuild,
+      [
+        {
+          uuid: 'web-build-1',
+          status: 'deploy_failed',
+          statusMessage: 'Pods failed to become ready',
+          deployable: { name: 'web' },
+        },
+      ],
+      { coreApi }
+    );
+
+    expect(dossier).toContain('- pod web-build-1-crashing: web waiting=CrashLoopBackOff restarts=1');
+    expect(dossier).toContain('- previous logs unavailable for web-build-1-crashing');
+  });
+
+  it('constructs the default Kubernetes client only for detailed runtime evidence', async () => {
+    const coreApi = fakeCoreApi();
+    mockMakeApiClient.mockReturnValue(coreApi);
+
+    const dossier = await buildTriageDossier(failedBuild, [
+      {
+        uuid: 'web-build-1',
+        status: 'deploy_failed',
+        statusMessage: 'Pods failed to become ready',
+        deployable: { name: 'web' },
+      },
+    ]);
+
+    expect(dossier).toContain('- no pods found for this deploy');
+    expect(mockKubeConfig).toHaveBeenCalledTimes(1);
+    expect(mockLoadFromDefault).toHaveBeenCalledTimes(1);
+    expect(mockMakeApiClient).toHaveBeenCalledTimes(1);
+  });
+
   it('degrades to a one-line note when k8s reads fail', async () => {
     const coreApi = fakeCoreApi({
       listNamespacedPod: jest.fn().mockRejectedValue(new Error('connect ETIMEDOUT 10.0.0.1:443')),
@@ -369,6 +568,34 @@ describe('buildTriageDossier', () => {
     );
 
     expect(dossier).toContain('- k8s evidence unavailable: connect ETIMEDOUT 10.0.0.1:443');
+  });
+
+  it('bounds a stalled Kubernetes diagnostic read by the dossier timebox', async () => {
+    jest.useFakeTimers();
+    try {
+      const coreApi = fakeCoreApi({
+        listNamespacedPod: jest.fn(() => new Promise(() => undefined)),
+      });
+      const pending = buildTriageDossier(
+        failedBuild,
+        [
+          {
+            uuid: 'web-build-1',
+            status: 'deploy_failed',
+            statusMessage: 'Pods failed to become ready',
+            deployable: { name: 'web' },
+          },
+        ],
+        { coreApi }
+      );
+
+      await Promise.resolve();
+      jest.advanceTimersByTime(4_000);
+
+      await expect(pending).resolves.toContain('- k8s evidence unavailable: diagnostic read timed out');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('notes a missing namespace instead of calling k8s', async () => {
@@ -408,6 +635,17 @@ describe('buildTriageDossier', () => {
     expect(dossier).toContain('## other — phase=blocked status=queued\n- blocked: waiting on failed deploy web');
   });
 
+  it('uses a generic blocker when the build failed before any deploy failed', async () => {
+    const dossier = await buildTriageDossier(
+      { uuid: 'build-1', status: 'error', statusMessage: 'orchestration stopped' },
+      [{ status: 'queued', deployable: { name: 'worker' } }]
+    );
+
+    expect(dossier).toContain(
+      '## worker — phase=blocked status=queued\n- blocked: waiting on failed deploy an earlier deploy'
+    );
+  });
+
   it('ignores inactive deploys', async () => {
     await expect(
       buildTriageDossier(healthyBuild, [
@@ -437,6 +675,24 @@ describe('buildTriageDossier', () => {
     }
     expect(dossier).toContain('ERROR: the actual cause');
     expect(dossier).toContain('phase=build status=build_failed (evidence omitted: svc4 build failed)');
+  });
+
+  it('enforces the total size cap when rendering pre-collected evidence', () => {
+    const rendered = renderTriageEvidence({
+      buildStatus: 'build_failed',
+      failingServices: Array.from({ length: 5 }, (_, index) => ({
+        name: `service-${index}`,
+        phase: 'build' as const,
+        status: 'build_failed',
+        detailed: true,
+        logTail: `${index}${'x'.repeat(3_400)}`,
+      })),
+      blockedServices: [],
+    });
+
+    expect(rendered.length).toBeLessThanOrEqual(12_200);
+    expect(rendered).toContain('- (further evidence omitted: dossier size cap reached)');
+    expect(rendered).not.toContain('## service-4');
   });
 
   it('falls back to a build-level block when the build failed with no failing deploys', async () => {

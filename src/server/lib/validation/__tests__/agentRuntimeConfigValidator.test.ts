@@ -58,6 +58,13 @@ describe('validateAgentRuntimeConfig', () => {
     expect(() => validateAgentRuntimeConfig(config)).toThrow('apiKeyEnvVar must be an environment variable name');
   });
 
+  it('rejects an unsupported provider', () => {
+    const config = makeConfig();
+    config.providers[0].name = 'sample-provider' as any;
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('Unsupported provider "sample-provider".');
+  });
+
   it('rejects duplicate providers', () => {
     const config = makeConfig();
     config.providers.push({
@@ -74,6 +81,53 @@ describe('validateAgentRuntimeConfig', () => {
     config.providers[0].models[0].default = false;
 
     expect(() => validateAgentRuntimeConfig(config)).toThrow('must have at least one enabled model');
+  });
+
+  it('rejects duplicate model ids', () => {
+    const config = makeConfig();
+    config.providers[0].models.push({
+      ...config.providers[0].models[0],
+      default: false,
+    });
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow(
+      'Provider "anthropic" has duplicate model id "claude-sonnet-4-20250514".'
+    );
+  });
+
+  it('requires a default model to be enabled', () => {
+    const config = makeConfig();
+    config.providers[0].models[0].enabled = false;
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow(
+      'Provider "anthropic" default model "claude-sonnet-4-20250514" must also be enabled.'
+    );
+  });
+
+  it('rejects more than one default model', () => {
+    const config = makeConfig();
+    config.providers[0].models.push({
+      ...config.providers[0].models[0],
+      id: 'claude-haiku',
+    });
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('Provider "anthropic" can have only one default model.');
+  });
+
+  it('rejects exclusion of a core tool', () => {
+    const config = makeConfig();
+    config.excludedTools = ['query_database'];
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow(
+      'Cannot exclude core tool: "query_database". Core tools are required for agent operation.'
+    );
+  });
+
+  it('validates file exclusions through the shared pattern policy', () => {
+    const config = makeConfig();
+    config.excludedFilePatterns = ['../secrets/**'];
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow();
   });
 
   it('accepts valid capability availability policy', () => {
@@ -176,6 +230,33 @@ describe('validateAgentRuntimeConfig', () => {
 
     expect(() => validateAgentRuntimeConfig(config)).toThrow(
       'Creator capability "read_context" has invalid availability "maybe".'
+    );
+  });
+
+  it.each([
+    ['allowedUserIds', 'sample-user'],
+    ['allowedGithubUsernames', ['sample-user', 42]],
+  ] as const)('requires customAgentCreationPolicy.%s to be an array of strings', (field, value) => {
+    const config = makeConfig();
+    config.customAgentCreationPolicy = {
+      mode: 'allowlist',
+      [field]: value,
+    } as any;
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow(
+      `customAgentCreationPolicy.${field} must be an array of strings.`
+    );
+  });
+
+  it.each([null, [], 'available'])('requires capabilityAvailability to be an object', (value) => {
+    const config = makeConfig();
+    config.customAgentCreationPolicy = {
+      mode: 'enabled',
+      capabilityAvailability: value,
+    } as any;
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow(
+      'customAgentCreationPolicy.capabilityAvailability must be an object.'
     );
   });
 });

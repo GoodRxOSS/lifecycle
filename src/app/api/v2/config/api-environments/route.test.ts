@@ -114,6 +114,17 @@ describe('/api/v2/config/api-environments', () => {
     expect(mockSetApiEnvironmentsConfig).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed JSON before writing config', async () => {
+    const request = makeRequest();
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockSetApiEnvironmentsConfig).not.toHaveBeenCalled();
+  });
+
   it('rejects a default TTL above the max TTL', async () => {
     const response = await PUT(makeRequest({ ...VALID_CONFIG, defaultTtlHours: 400, maxTtlHours: 336 }));
     const body = await response.json();

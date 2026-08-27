@@ -164,6 +164,18 @@ describe('githubToken', () => {
     expect(getGitHubUsernameFromKeycloakAccessToken(keycloakAccessToken)).toBe('sample-user');
   });
 
+  it('supports the alternate username claim and rejects malformed or blank claims', () => {
+    expect(getGitHubUsernameFromKeycloakAccessToken(makeJwt({ githubUsername: ' alternate-user ' }))).toBe(
+      'alternate-user'
+    );
+    expect(getGitHubUsernameFromKeycloakAccessToken(makeJwt({ github_username: '   ' }))).toBeNull();
+    expect(getGitHubUsernameFromKeycloakAccessToken('not-a-jwt')).toBeNull();
+    expect(
+      getGitHubUsernameFromKeycloakAccessToken(`header.${Buffer.from('{bad json').toString('base64url')}.sig`)
+    ).toBeNull();
+    expect(getGitHubUsernameFromKeycloakAccessToken(null)).toBeNull();
+  });
+
   it('resolves the GitHub username and broker token for the request', async () => {
     process.env.ENABLE_AUTH = 'true';
     (globalThis.fetch as jest.Mock).mockResolvedValue({
@@ -190,6 +202,26 @@ describe('githubToken', () => {
 
     await expect(resolveRequestGitHubUserToken(req)).resolves.toEqual({
       githubUsername: 'sample-user',
+      githubToken: 'gho_broker_token',
+    });
+  });
+
+  it('falls back to bearer-token claims when request identity has not been hydrated', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue(JSON.stringify({ access_token: 'gho_broker_token' })),
+    });
+    const keycloakAccessToken = makeJwt({ sub: 'user-123', github_username: 'claim-user' });
+
+    await expect(
+      resolveRequestGitHubUserToken(
+        new NextRequest('http://localhost/api', {
+          headers: { authorization: `Bearer ${keycloakAccessToken}` },
+        })
+      )
+    ).resolves.toEqual({
+      githubUsername: 'claim-user',
       githubToken: 'gho_broker_token',
     });
   });
@@ -228,6 +260,52 @@ describe('githubToken', () => {
     await expect(fetchGitHubBrokerToken('keycloak-access-token')).resolves.toBe('gho_query_token');
   });
 
+  it.each([
+    [JSON.stringify({ token: 'gho_json_token' }), 'gho_json_token'],
+    ['token=gho_query_token', 'gho_query_token'],
+    ['', null],
+    [JSON.stringify({ access_token: 42 }), null],
+  ])('normalizes a successful broker response body', async (body, expected) => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue(body),
+    });
+
+    await expect(fetchGitHubBrokerToken('keycloak-access-token')).resolves.toBe(expected);
+  });
+
+  it('skips the broker request when no Keycloak issuer is configured', async () => {
+    delete process.env.KEYCLOAK_ISSUER;
+    delete process.env.KEYCLOAK_ISSUER_INTERNAL;
+
+    await expect(fetchGitHubBrokerToken('keycloak-access-token')).resolves.toBeNull();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns no broker token when Keycloak rejects the request', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(fetchGitHubBrokerToken('keycloak-access-token')).resolves.toBeNull();
+  });
+
+  it('degrades an unexpected broker request failure to unauthenticated GitHub access', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    (globalThis.fetch as jest.Mock).mockRejectedValue(new Error('network unavailable'));
+
+    await expect(
+      resolveRequestGitHubAuth(
+        new NextRequest('http://localhost/api', {
+          headers: { authorization: 'Bearer keycloak-access-token' },
+        })
+      )
+    ).resolves.toEqual({
+      githubToken: null,
+      source: 'none',
+      githubUsername: null,
+      writeAuthorized: false,
+    });
+  });
+
   it('probes the fetched GitHub token with the authenticated user endpoint', async () => {
     (globalThis.fetch as jest.Mock).mockResolvedValue({
       ok: true,
@@ -255,6 +333,43 @@ describe('githubToken', () => {
         'User-Agent': 'lifecycle-github-token-check',
         'X-GitHub-Api-Version': '2022-11-28',
       },
+    });
+  });
+
+  it('reports an unsuccessful authenticated-user probe without assuming response headers exist', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 401,
+    });
+
+    await expect(fetchGitHubAuthenticatedUser('expired-token')).resolves.toEqual({
+      ok: false,
+      id: null,
+      login: null,
+      status: 401,
+      scopes: [],
+      rateLimitRemaining: null,
+    });
+  });
+
+  it.each([
+    ['unparseable JSON', jest.fn().mockRejectedValue(new Error('invalid json'))],
+    ['invalid identity fields', jest.fn().mockResolvedValue({ id: '12345', login: '   ' })],
+  ])('rejects %s from an otherwise successful authenticated-user probe', async (_label, json) => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json,
+    });
+
+    await expect(fetchGitHubAuthenticatedUser('gho_broker_token')).resolves.toEqual({
+      ok: false,
+      id: null,
+      login: null,
+      status: 200,
+      scopes: [],
+      rateLimitRemaining: null,
     });
   });
 
@@ -330,11 +445,70 @@ describe('githubToken', () => {
     );
   });
 
+  it.each([
+    [403, 'denied'],
+    [500, 'unknown'],
+  ] as const)('classifies a failed repository permission probe with status %s as %s', async (status, permission) => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status,
+    });
+
+    await expect(fetchGitHubRepositoryWritePermission('ghu_user_token', ' GoodRxOSS ', ' lifecycle ')).resolves.toEqual(
+      {
+        ok: false,
+        repository: 'GoodRxOSS/lifecycle',
+        status,
+        permission,
+        permissions: null,
+        scopes: [],
+        rateLimitRemaining: null,
+      }
+    );
+  });
+
+  it('reports unknown permission when a successful repository response has no usable permissions object', async () => {
+    (globalThis.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: jest.fn().mockRejectedValue(new Error('invalid json')),
+    });
+
+    await expect(fetchGitHubRepositoryWritePermission('ghu_user_token', 'GoodRxOSS', 'lifecycle')).resolves.toEqual({
+      ok: true,
+      repository: 'GoodRxOSS/lifecycle',
+      status: 200,
+      permission: 'unknown',
+      permissions: null,
+      scopes: [],
+      rateLimitRemaining: null,
+    });
+  });
+
   it('returns null when auth is enabled but no bearer token is present', async () => {
     process.env.ENABLE_AUTH = 'true';
 
     await expect(resolveRequestGitHubToken(new NextRequest('http://localhost/api'))).resolves.toBeNull();
     await expect(resolveRequestGitHubAuth(new NextRequest('http://localhost/api'))).resolves.toEqual({
+      githubToken: null,
+      source: 'none',
+      githubUsername: null,
+      writeAuthorized: false,
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('treats an empty bearer credential as absent', async () => {
+    process.env.ENABLE_AUTH = 'true';
+
+    await expect(
+      resolveRequestGitHubAuth(
+        new NextRequest('http://localhost/api', {
+          headers: { authorization: 'Bearer    ' },
+        })
+      )
+    ).resolves.toEqual({
       githubToken: null,
       source: 'none',
       githubUsername: null,

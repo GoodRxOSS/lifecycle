@@ -327,6 +327,42 @@ describe('acceptDeploymentIntent', () => {
     await expect(acceptDeploymentIntent(404, { type: 'all', requestId: 'request-missing' })).resolves.toBeNull();
     expect(Build.query).toHaveBeenCalledTimes(1);
   });
+
+  it('replaces malformed persisted refs when accepting new work', async () => {
+    const read = readQuery({ desiredGeneration: 0, acceptedRefs: [] });
+    const write = writeQuery();
+    (Build.query as jest.Mock).mockReturnValueOnce(read).mockReturnValueOnce(write);
+
+    await expect(
+      acceptDeploymentIntent(42, { type: 'repository', requestId: 'request-1', githubRepositoryId: 123 })
+    ).resolves.toEqual({ accepted: true, generation: 1, scopeKey: 'repository:123' });
+    expect(write.patch).toHaveBeenCalledWith({
+      desiredGeneration: 1,
+      acceptedRefs: {
+        'repository:123': { type: 'repository', requestId: 'request-1', githubRepositoryId: 123, gen: 1 },
+      },
+    });
+  });
+
+  it('rejects a negative desired generation without writing', async () => {
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery({ desiredGeneration: -1, acceptedRefs: {} }));
+
+    await expect(acceptDeploymentIntent(42, { type: 'all', requestId: 'request-invalid' })).rejects.toThrow(
+      'Build 42 has an invalid desired generation'
+    );
+    expect(Build.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a generation increment beyond the safe integer range without writing', async () => {
+    (Build.query as jest.Mock).mockReturnValueOnce(
+      readQuery({ desiredGeneration: Number.MAX_SAFE_INTEGER, acceptedRefs: {} })
+    );
+
+    await expect(acceptDeploymentIntent(42, { type: 'all', requestId: 'request-overflow' })).rejects.toThrow(
+      'Build 42 exhausted the safe generation range'
+    );
+    expect(Build.query).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('dirtyDeploymentIntents', () => {
@@ -348,6 +384,33 @@ describe('dirtyDeploymentIntents', () => {
     expect(dirtyDeploymentIntents(acceptedRefs, 2)).toEqual([
       { scopeKey: 'repository:456', intent: acceptedRefs['repository:456'] },
       { scopeKey: 'all', intent: acceptedRefs.all },
+    ]);
+  });
+
+  it('treats an absent mailbox as having no dirty intents', () => {
+    expect(dirtyDeploymentIntents(null, 0)).toEqual([]);
+    expect(dirtyDeploymentIntents(undefined, 0)).toEqual([]);
+  });
+
+  it('ignores malformed persisted entries', () => {
+    const validIntent = { type: 'all' as const, requestId: 'request-2', gen: 2 };
+    const acceptedRefs = {
+      malformed: null,
+      all: validIntent,
+    } as unknown as AcceptedDeploymentRefs;
+
+    expect(dirtyDeploymentIntents(acceptedRefs, 0)).toEqual([{ scopeKey: 'all', intent: validIntent }]);
+  });
+
+  it('uses the scope key as a deterministic tie-breaker for equal generations', () => {
+    const acceptedRefs: AcceptedDeploymentRefs = {
+      'repository:456': { type: 'repository', requestId: 'request-repository', githubRepositoryId: 456, gen: 3 },
+      all: { type: 'all', requestId: 'request-all', gen: 3 },
+    };
+
+    expect(dirtyDeploymentIntents(acceptedRefs, 0)).toEqual([
+      { scopeKey: 'all', intent: acceptedRefs.all },
+      { scopeKey: 'repository:456', intent: acceptedRefs['repository:456'] },
     ]);
   });
 });

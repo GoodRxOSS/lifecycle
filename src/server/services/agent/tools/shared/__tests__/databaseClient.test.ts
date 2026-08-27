@@ -76,6 +76,15 @@ describe('DatabaseClient build scoping', () => {
     await expect(client.queryTable({ table: 'builds' })).rejects.toThrow(/not scoped to a build/);
   });
 
+  it('revokes database access when an existing build scope is cleared', async () => {
+    const client = makeClient([]);
+    client.setBuildScope(undefined);
+
+    await expect(client.queryTable({ table: 'builds' })).rejects.toThrow(/not scoped to a build/);
+
+    expect(calls).toEqual([]);
+  });
+
   it('scopes builds queries to this build uuid (ANDed under model filters)', async () => {
     const client = makeClient([{ uuid: 'my-build-uuid', status: 'deployed' }]);
     await client.queryTable({ table: 'builds', filters: { status: 'deployed' } });
@@ -90,6 +99,18 @@ describe('DatabaseClient build scoping', () => {
     const client = makeClient([]);
     await client.queryTable({ table: 'deploys' });
     expect(calls).toContainEqual({ method: 'where', args: ['buildId', 42] });
+  });
+
+  it('scopes deployables and environments to the build resources', async () => {
+    const client = makeClient([]);
+
+    await client.queryTable({ table: 'deployables' });
+    await client.queryTable({ table: 'environments' });
+
+    expect(calls.filter((call) => call.method === 'where' && call.args[0] === 'buildId')).toHaveLength(2);
+    expect(calls).toContainEqual({ method: 'where', args: ['buildId', 42] });
+    expect(calls.filter((call) => call.method === 'where' && call.args[0] === 'id')).toHaveLength(2);
+    expect(calls).toContainEqual({ method: 'where', args: ['id', 3] });
   });
 
   it('scopes repositories to the build repository ids via whereIn', async () => {
@@ -117,6 +138,25 @@ describe('DatabaseClient build scoping', () => {
     const client = new DatabaseClient(buildDb([], calls));
     client.setBuildScope({ ...SCOPE, pullRequestId: null });
     await expect(client.queryTable({ table: 'pull_requests' })).rejects.toThrow(/no associated pull request/);
+  });
+
+  it.each([
+    { repositoryIds: undefined, label: 'unresolved' },
+    { repositoryIds: [], label: 'empty' },
+  ])('rejects repositories when the build repository scope is $label', async ({ repositoryIds }) => {
+    const client = makeClient([], { ...SCOPE, repositoryIds });
+
+    await expect(client.queryTable({ table: 'repositories' })).rejects.toThrow(/no associated repositories/);
+
+    expect(calls).toEqual([]);
+  });
+
+  it('rejects environments when the build has no associated environment', async () => {
+    const client = makeClient([], { ...SCOPE, environmentId: null });
+
+    await expect(client.queryTable({ table: 'environments' })).rejects.toThrow(/no associated environment/);
+
+    expect(calls).toEqual([]);
   });
 
   it('rejects wildcard-only LIKE patterns that would dump all rows', async () => {
@@ -148,9 +188,89 @@ describe('DatabaseClient build scoping', () => {
     expect(calls.some((c) => c.method === 'select')).toBe(true);
   });
 
+  it('normalizes and deduplicates selected aliases while applying bounded pagination and default ordering', async () => {
+    const client = makeClient([{ uuid: 'my-build-uuid' }]);
+
+    const result = await client.queryTable({
+      table: 'builds',
+      select: ['createdAt', 'created_at', 'uuid'],
+      orderBy: 'created_at',
+      limit: 500,
+      offset: 10,
+    });
+
+    expect(result.warnings).toBeUndefined();
+    expect(calls).toContainEqual({ method: 'select', args: [['createdAt', 'uuid']] });
+    expect(calls).toContainEqual({ method: 'orderBy', args: ['createdAt', 'asc'] });
+    expect(calls).toContainEqual({ method: 'limit', args: [100] });
+    expect(calls).toContainEqual({ method: 'offset', args: [10] });
+  });
+
+  it('supports the positional query form without weakening scope or relation validation', async () => {
+    const client = makeClient([]);
+
+    await client.queryTable('builds', { status: 'deployed' }, ['pullRequest'], 5);
+
+    expect(calls).toContainEqual({ method: 'where', args: ['uuid', 'my-build-uuid'] });
+    expect(calls).toContainEqual({ method: 'where', args: [{ status: 'deployed' }] });
+    expect(calls).toContainEqual({ method: 'withGraphFetched', args: ['[pullRequest]'] });
+    expect(calls).toContainEqual({ method: 'limit', args: [5] });
+  });
+
+  it('compacts allowed array and object relations without mutating null relations', async () => {
+    const client = makeClient([
+      {
+        uuid: 'my-build-uuid',
+        status: 'deployed',
+        deploys: [
+          { uuid: 'deploy-1', status: 'ready', secret: 'not returned' },
+          { id: 2, name: 'API', secret: 'not returned' },
+        ],
+        pullRequest: { id: 7, status: 'open', title: 'Sample PR' },
+        environment: null,
+      },
+    ]);
+
+    const result = await client.queryTable({
+      table: 'builds',
+      relations: ['deploys.repository', 'deploys', 'pullRequest', 'environment'],
+    });
+
+    expect(calls).toContainEqual({
+      method: 'withGraphFetched',
+      args: ['[deploys, pullRequest, environment]'],
+    });
+    expect(result.records).toEqual([
+      {
+        uuid: 'my-build-uuid',
+        status: 'deployed',
+        deploys: [
+          { id: 'deploy-1', name: 'ready' },
+          { id: 2, name: 'API' },
+        ],
+        pullRequest: { id: 7, name: 'open' },
+        environment: null,
+      },
+    ]);
+  });
+
+  it('rejects a valid table when its backing model is unavailable before constructing a query', async () => {
+    const client = new DatabaseClient({ models: {} });
+    client.setBuildScope(SCOPE);
+
+    await expect(client.queryTable({ table: 'builds' })).rejects.toThrow("Model 'Build' not found");
+  });
+
   it('rejects tables not allowed', async () => {
     const client = makeClient([]);
     await expect(client.queryTable({ table: 'users' as any })).rejects.toThrow(/not allowed/);
+  });
+
+  it('returns an empty schema for unknown diagnostic table names', () => {
+    const client = makeClient([]);
+
+    expect(client.getTableSchema('unknown_table')).toEqual({ columns: [], relations: {} });
+    expect(calls).toEqual([]);
   });
 
   it('exposes no write methods on the query builder (read-only)', () => {

@@ -15,6 +15,7 @@
  */
 
 const getAllConfigs = jest.fn();
+const warn = jest.fn();
 
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
@@ -23,6 +24,10 @@ jest.mock('server/services/globalConfig', () => ({
       getAllConfigs,
     })),
   },
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({ warn })),
 }));
 
 import {
@@ -49,8 +54,10 @@ import {
   DEFAULT_AGENT_SESSION_WORKSPACE_TOOL_EXECUTION_TIMEOUT_MS,
   mergeAgentSessionReadinessForServices,
   mergeAgentSessionResources,
+  resolveAgentSessionCleanupConfig,
   resolveAgentSessionControlPlaneConfig,
   resolveAgentSessionControlPlaneConfigFromDefaults,
+  resolveAgentSessionDurabilityConfig,
   resolveAgentSessionDurabilityFromDefaults,
   resolveAgentSessionCleanupFromDefaults,
   resolveAgentSessionReadinessFromDefaults,
@@ -522,6 +529,39 @@ describe('runtimeConfig', () => {
     expect(resolveAgentSessionDurabilityFromDefaults()).toEqual(DEFAULT_DURABILITY);
   });
 
+  it('loads cleanup and durability overrides independently from global config', async () => {
+    getAllConfigs.mockResolvedValue({
+      agentSessionDefaults: {
+        cleanup: { activeIdleSuspendMs: 12_345 },
+        durability: { dispatchRecoveryLimit: 7 },
+      },
+    });
+
+    await expect(
+      Promise.all([resolveAgentSessionCleanupConfig(), resolveAgentSessionDurabilityConfig()])
+    ).resolves.toEqual([
+      {
+        ...DEFAULT_CLEANUP,
+        activeIdleSuspendMs: 12_345,
+      },
+      {
+        ...DEFAULT_DURABILITY,
+        dispatchRecoveryLimit: 7,
+      },
+    ]);
+    expect(getAllConfigs).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates global-config failures from cleanup and durability resolution', async () => {
+    const failure = new Error('global config unavailable');
+    getAllConfigs.mockRejectedValue(failure);
+
+    await expect(Promise.all([resolveAgentSessionCleanupConfig(), resolveAgentSessionDurabilityConfig()])).rejects.toBe(
+      failure
+    );
+    expect(getAllConfigs).toHaveBeenCalledTimes(2);
+  });
+
   it('returns the configured control-plane append prompt from the neutral path', async () => {
     getAllConfigs.mockResolvedValue({
       agentSessionDefaults: {
@@ -685,6 +725,15 @@ describe('runtimeConfig', () => {
   });
 
   describe('OPEN_SANDBOX environment configuration', () => {
+    it('warns and falls back when the environment backend provider is unknown', () => {
+      process.env.AGENT_SESSION_WORKSPACE_BACKEND = 'unsupported-provider';
+
+      expect(resolveAgentSessionWorkspaceBackendFromDefaults().provider).toBe('lifecycle_kubernetes');
+      expect(warn).toHaveBeenCalledWith(
+        "Unknown AGENT_SESSION_WORKSPACE_BACKEND 'unsupported-provider'; using the default backend."
+      );
+    });
+
     it('flows env-only OpenSandbox settings through the runtime config', async () => {
       process.env.AGENT_SESSION_WORKSPACE_BACKEND = 'opensandbox';
       process.env.OPEN_SANDBOX_DOMAIN = 'sandbox.example.com:9000';

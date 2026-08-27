@@ -17,6 +17,7 @@
 const mockCreateOrUpdateNamespace = jest.fn();
 const mockEnsureServiceAccountForJob = jest.fn();
 const mockBuildWithEngine = jest.fn();
+const mockIsNativeBuilderEngine = jest.fn();
 
 jest.mock('../../kubernetes', () => ({
   createOrUpdateNamespace: (...args: unknown[]) => mockCreateOrUpdateNamespace(...args),
@@ -31,7 +32,7 @@ jest.mock('../engines', () => ({
 }));
 
 jest.mock('../../buildEngines', () => ({
-  isNativeBuilderEngine: jest.fn(() => true),
+  isNativeBuilderEngine: (...args: unknown[]) => mockIsNativeBuilderEngine(...args),
 }));
 
 jest.mock('../../logger', () => ({
@@ -51,6 +52,7 @@ describe('buildWithNative', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockEnsureServiceAccountForJob.mockResolvedValue('native-build-sa');
+    mockIsNativeBuilderEngine.mockReturnValue(true);
     mockBuildWithEngine.mockResolvedValue({
       success: true,
       logs: 'Build completed',
@@ -144,5 +146,66 @@ describe('buildWithNative', () => {
       expect.objectContaining({ serviceAccount: 'prepared-build-sa' }),
       'buildkit'
     );
+  });
+
+  it('returns a failed build result when legacy namespace setup lacks build metadata', async () => {
+    const deploy = {
+      deployable: { name: 'sample-service', builder: { engine: 'buildkit' } },
+      build: undefined,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const options = {
+      ecrRepo: 'sample-repo',
+      ecrDomain: 'registry.example.com',
+      envVars: {},
+      dockerfilePath: 'Dockerfile',
+      tag: 'sample-tag',
+      revision: 'abcdef1234567890',
+      repo: 'example-org/example-repo',
+      branch: 'main',
+      namespace: 'env-build123',
+      buildId: '1',
+      buildUuid: 'build123',
+      deployUuid: 'deploy123',
+    };
+
+    await expect(buildWithNative(deploy as any, options)).resolves.toEqual({
+      success: false,
+      logs: 'Build error: Build: namespace setup requires build metadata',
+      jobName: '',
+    });
+    expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    expect(mockEnsureServiceAccountForJob).not.toHaveBeenCalled();
+    expect(mockBuildWithEngine).not.toHaveBeenCalled();
+  });
+
+  it('returns a failed build result when the deployable selects an unsupported builder engine', async () => {
+    mockIsNativeBuilderEngine.mockReturnValue(false);
+    const deploy = {
+      deployable: { name: 'sample-service', builder: { engine: 'unsupported' } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const options = {
+      ecrRepo: 'sample-repo',
+      ecrDomain: 'registry.example.com',
+      envVars: {},
+      dockerfilePath: 'Dockerfile',
+      tag: 'sample-tag',
+      revision: 'abcdef1234567890',
+      repo: 'example-org/example-repo',
+      branch: 'main',
+      namespace: 'env-build123',
+      buildId: '1',
+      buildUuid: 'build123',
+      deployUuid: 'deploy123',
+      serviceAccount: 'prepared-build-sa',
+    };
+
+    await expect(buildWithNative(deploy as any, options)).resolves.toEqual({
+      success: false,
+      logs: 'Build error: Unsupported builder engine: unsupported',
+      jobName: '',
+    });
+    expect(mockBuildWithEngine).not.toHaveBeenCalled();
   });
 });

@@ -195,6 +195,20 @@ describe('service key issuance with ENABLE_AUTH=true', () => {
     expect((await res.json()).error.code).toBe('invalid_body');
   });
 
+  it.each([
+    { label: 'a missing name', name: undefined },
+    { label: 'a non-string name', name: 42 },
+    { label: 'a whitespace-only name', name: '   ' },
+    { label: 'a name longer than 255 characters', name: 'n'.repeat(256) },
+  ])('400s $label before resolving repository access', async ({ name }) => {
+    const res = await issueToken(request('POST', validCreate({ name })));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_name');
+    expect(mockResolveAllowlist).not.toHaveBeenCalled();
+    expect(mockIssueToken).not.toHaveBeenCalled();
+  });
+
   it("400s an unknown body field instead of silently minting (a typo'd expiry never becomes non-expiring)", async () => {
     const res = await issueToken(request('POST', validCreate({ expiresInHours: 24 })));
     expect(res.status).toBe(400);
@@ -390,6 +404,17 @@ describe('token listing and revocation with ENABLE_AUTH=true', () => {
       expect(mockListTokens).not.toHaveBeenCalled();
     }
   );
+
+  it('rejects a page number larger than the safe-integer range', async () => {
+    const res = await listTokens(request('GET', undefined, '?page=9007199254740992'));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatchObject({
+      code: 'invalid_query',
+      message: 'page must be a safe positive integer.',
+    });
+    expect(mockListTokensPaginated).not.toHaveBeenCalled();
+  });
 
   it('revokes a token by id recording the revoking admin, and 404s an unknown id', async () => {
     mockRevokeToken.mockResolvedValueOnce({ id: 5, revokedAt: 'now' });

@@ -261,6 +261,86 @@ describe('EnvironmentVariables library', () => {
     expect(customRenderResult).toEqual(result);
   });
 
+  test('builds service, mapped-host, configuration, and caller-provided variables in one dictionary', async () => {
+    const deploys = [
+      { deployable: null },
+      {
+        active: true,
+        publicUrl: 'web-build.lifecycle.test',
+        UUID: 'ignored-deploy-uuid',
+        deployable: {
+          buildUUID: 'build-uuid',
+          hostPortMapping: { api: 8080 },
+          name: 'web-api',
+          type: DeployTypes.GITHUB,
+        },
+      },
+      {
+        active: false,
+        deployable: {
+          defaultInternalHostname: 'worker-default',
+          defaultPublicUrl: 'worker-default.lifecycle.test',
+          defaultUUID: 'default-uuid',
+          hostPortMapping: { admin: 9090 },
+          name: 'worker',
+          type: DeployTypes.GITHUB,
+        },
+      },
+      {
+        deployable: {
+          env: { CONFIG_VALUE: 'configured' },
+          name: 'settings',
+          type: DeployTypes.CONFIGURATION,
+        },
+      },
+    ] as unknown as Deploy[];
+
+    await expect(
+      envVariables.buildEnvironmentVariableDictionary(deploys, {} as models.Build, {
+        CALLER_VALUE: 'caller',
+      })
+    ).resolves.toMatchObject({
+      'api-web______api_publicUrl': 'api-web-build.lifecycle.test',
+      'admin-worker_publicUrl': 'worker-default.lifecycle.test',
+      web______api_UUID: 'build-uuid',
+      worker_UUID: 'default-uuid',
+      worker_internalHostname: 'worker-default',
+      CONFIG_VALUE: 'configured',
+      CALLER_VALUE: 'caller',
+    });
+  });
+
+  test('rejects an absent build before attempting graph loading', async () => {
+    await expect(envVariables.availableEnvironmentVariablesForBuild(null as unknown as models.Build)).rejects.toThrow(
+      'Attempt retrieving environment Variables from empty build'
+    );
+  });
+
+  test('rejects a build whose deploy graph is still absent after loading', async () => {
+    const build = {
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      deploys: undefined,
+      runUUID: 'run-1',
+    } as unknown as models.Build;
+
+    await expect(envVariables.availableEnvironmentVariablesForBuild(build)).rejects.toThrow(
+      'Missing associated deploys with the build'
+    );
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deploys.[deployable], pullRequest]');
+  });
+
+  test('rejects default-environment rendering when the configured build has no namespace', async () => {
+    jest.spyOn(models.Build, 'query').mockReturnValue({
+      findOne: jest.fn().mockReturnValue({
+        select: jest.fn().mockResolvedValue(undefined),
+      }),
+    } as any);
+
+    await expect(envVariables.customRender('{}', {}, true, 'build-ns')).rejects.toThrow(
+      '[BUILD dev-0] Build not found when looking for namespace'
+    );
+  });
+
   describe('configurationServiceEnvironments', () => {
     test('sources configuration data from the deployable env (not the configurations table)', async () => {
       const configurationQuery = jest.spyOn(models.Configuration, 'query');

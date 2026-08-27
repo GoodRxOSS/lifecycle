@@ -18,11 +18,17 @@ import {
   getEffectiveIgnoreFiles,
   getServicePushIgnorePolicy,
   hasLifecycleConfigChange,
+  normalizeGithubPath,
   normalizeIgnoreFiles,
   shouldSkipPushDeploy,
 } from '../pushIgnoreFiles';
 
 describe('pushIgnoreFiles', () => {
+  test('normalizes GitHub paths from repository-relative Windows and absolute forms', () => {
+    expect(normalizeGithubPath('.\\docs\\readme.md')).toBe('docs/readme.md');
+    expect(normalizeGithubPath('/src/index.ts')).toBe('src/index.ts');
+  });
+
   test('merges environment and service ignoreFiles uniquely', () => {
     expect(getEffectiveIgnoreFiles(['docs/**', '**/*.spec.ts'], ['docs/**', '**/*.stories.tsx'])).toEqual([
       'docs/**',
@@ -32,6 +38,7 @@ describe('pushIgnoreFiles', () => {
   });
 
   test('rejects invalid ignore patterns', () => {
+    expect(() => normalizeIgnoreFiles({ pattern: 'docs/**' })).toThrow('must be an array of strings');
     expect(() => normalizeIgnoreFiles([''])).toThrow('cannot be empty');
     expect(() => normalizeIgnoreFiles(['/tmp/**'])).toThrow('repo-relative');
     expect(() => normalizeIgnoreFiles(['../secrets/**'])).toThrow('traverse');
@@ -141,5 +148,17 @@ describe('pushIgnoreFiles', () => {
   test('detects lifecycle config changes by new path', () => {
     expect(hasLifecycleConfigChange(['docs/readme.md', 'lifecycle.yaml'])).toBe(true);
     expect(hasLifecycleConfigChange(['docs/lifecycle.yml'])).toBe(false);
+  });
+
+  test('never skips a push that changes Lifecycle configuration', () => {
+    expect(
+      shouldSkipPushDeploy({
+        changedFiles: ['./lifecycle.yml'],
+        servicePolicies: [{ serviceName: 'api', ignoreFiles: ['**/*'] }],
+      })
+    ).toEqual({
+      shouldSkip: false,
+      reason: 'lifecycle_config_changed',
+    });
   });
 });

@@ -241,6 +241,31 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
     expect(body.error.message).toBe('Instruction template not found: system:missing');
   });
 
+  it('maps template service validation failures to 400', async () => {
+    mockGetTemplate.mockRejectedValue(
+      new InstructionTemplateServiceError('invalid_ref', 'Instruction template ref is invalid.')
+    );
+
+    const response = await GET_TEMPLATE(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/invalid'),
+      { params: Promise.resolve({ ref: 'invalid' }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Instruction template ref is invalid.');
+  });
+
+  it('maps an unexpected template lookup failure to 500', async () => {
+    mockGetTemplate.mockRejectedValue(new Error('instruction template store unavailable'));
+
+    const response = await GET_TEMPLATE(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug'),
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
+    );
+
+    expect(response.status).toBe(500);
+  });
+
   it.each([
     ['missing content', {}],
     ['non-string content', { content: 123 }],
@@ -311,6 +336,35 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
     expect(body.error.message).toBe('Instruction template content must be non-empty.');
   });
 
+  it('maps a missing override template to 404', async () => {
+    mockUpdateOverride.mockRejectedValue(
+      new InstructionTemplateServiceError('unknown_ref', 'Instruction template not found: system:missing')
+    );
+
+    const response = await PUT_OVERRIDE(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Amissing/override', {
+        content: 'Use an override.',
+      }),
+      { params: Promise.resolve({ ref: 'system%3Amissing' }) }
+    );
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Instruction template not found: system:missing');
+  });
+
+  it('maps an unexpected override failure to 500', async () => {
+    mockUpdateOverride.mockRejectedValue(new Error('instruction template store unavailable'));
+
+    const response = await PUT_OVERRIDE(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/override', {
+        content: 'Use an override.',
+      }),
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
+    );
+
+    expect(response.status).toBe(500);
+  });
+
   it('resets overrides back to default effective metadata', async () => {
     const response = await POST_RESET(
       makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/reset'),
@@ -343,5 +397,30 @@ describe('/api/v2/ai/admin/agent/instruction-templates', () => {
     expect(response.status).toBe(404);
     expect(mockSeedSystemTemplates).toHaveBeenCalledTimes(1);
     expect(body.error.message).toBe('Instruction template not found: system:missing');
+  });
+
+  it('maps reset validation failures to 400', async () => {
+    mockResetOverride.mockRejectedValue(
+      new InstructionTemplateServiceError('invalid_ref', 'Instruction template ref is invalid.')
+    );
+
+    const response = await POST_RESET(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/invalid/reset'),
+      { params: Promise.resolve({ ref: 'invalid' }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Instruction template ref is invalid.');
+  });
+
+  it('maps an unexpected reset failure to 500', async () => {
+    mockResetOverride.mockRejectedValue(new Error('instruction template store unavailable'));
+
+    const response = await POST_RESET(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/instruction-templates/system%3Adebug/reset'),
+      { params: Promise.resolve({ ref: 'system%3Adebug' }) }
+    );
+
+    expect(response.status).toBe(500);
   });
 });

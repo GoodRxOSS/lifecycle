@@ -122,6 +122,17 @@ describe('/api/v2/config/sites', () => {
     expect(mockSetSitesConfig).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed JSON before writing config', async () => {
+    const request = makeRequest();
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockSetSitesConfig).not.toHaveBeenCalled();
+  });
+
   it('rejects partial replacement updates', async () => {
     const response = await PUT(makeRequest({ enabled: true }));
     const body = await response.json();

@@ -21,6 +21,8 @@ jest.mock('server/services/userMcpConnection', () => ({
 
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 import {
+  getMcpOAuthRegistrationRedirectUrl,
+  getMcpOAuthTokenEndpointAuthMethod,
   isMcpOAuthClientAuthenticationCompatible,
   OAUTH_RECONNECT_REQUIRED_MESSAGE,
   OAuthAuthorizationRequiredError,
@@ -48,7 +50,45 @@ function makeProvider(options: { interactive: boolean; validationError?: string 
 
 describe('PersistentOAuthClientProvider', () => {
   beforeEach(() => {
-    mockUpsertConnection.mockClear();
+    jest.restoreAllMocks();
+    mockUpsertConnection.mockReset();
+  });
+
+  it('uses public-client authentication only for HTTP loopback callbacks', () => {
+    const loopbackRedirect = 'http://127.0.0.1:49152/oauth/callback';
+    const hostedRedirect = 'https://app.example.com/oauth/callback';
+
+    expect(getMcpOAuthTokenEndpointAuthMethod(loopbackRedirect)).toBe('none');
+    expect(getMcpOAuthTokenEndpointAuthMethod(hostedRedirect)).toBe('client_secret_basic');
+    expect(
+      isMcpOAuthClientAuthenticationCompatible(
+        {
+          client_id: 'public-client',
+        },
+        loopbackRedirect
+      )
+    ).toBe(true);
+    expect(
+      isMcpOAuthClientAuthenticationCompatible(
+        {
+          client_id: 'stale-confidential-client',
+          client_secret: 'must-not-be-sent',
+        },
+        loopbackRedirect
+      )
+    ).toBe(false);
+  });
+
+  it('normalizes only IP-loopback registration redirects while preserving the runtime callback', () => {
+    expect(getMcpOAuthRegistrationRedirectUrl('http://127.0.0.1:49152/oauth/callback')).toBe(
+      'http://127.0.0.1/oauth/callback'
+    );
+    expect(getMcpOAuthRegistrationRedirectUrl('http://localhost:49152/oauth/callback')).toBe(
+      'http://localhost:49152/oauth/callback'
+    );
+    expect(getMcpOAuthRegistrationRedirectUrl('https://app.example.com:8443/oauth/callback')).toBe(
+      'https://app.example.com:8443/oauth/callback'
+    );
   });
 
   it('registers a hosted HTTPS callback as a confidential client', () => {
@@ -131,6 +171,114 @@ describe('PersistentOAuthClientProvider', () => {
     );
   });
 
+  it('exposes and persists the complete OAuth credential state without losing validation metadata', async () => {
+    const initialTokens = { access_token: 'initial-access-token', token_type: 'bearer' } as const;
+    const initialClientInformation = {
+      client_id: 'initial-client',
+      client_secret: 'initial-client-secret',
+    };
+    const discoveredTools = [
+      {
+        name: 'readSample',
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+    ];
+    const provider = new PersistentOAuthClientProvider({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-github-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      definitionFingerprint: 'sample-definition-fingerprint',
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+      },
+      redirectUrl: 'https://app.example.com/oauth/callback',
+      initialState: {
+        type: 'oauth',
+        tokens: initialTokens,
+        clientInformation: initialClientInformation,
+        codeVerifier: 'initial-verifier',
+        oauthState: 'initial-state',
+      },
+      discoveredTools,
+      validatedAt: '2026-05-01T00:00:00.000Z',
+      validationError: 'previous validation failure',
+      interactive: true,
+    });
+
+    await expect(provider.tokens()).resolves.toEqual(initialTokens);
+    await expect(provider.clientInformation()).resolves.toEqual(initialClientInformation);
+    await expect(provider.codeVerifier()).resolves.toBe('initial-verifier');
+    await expect(provider.storedState()).resolves.toBe('initial-state');
+    expect(provider.currentState).toEqual(
+      expect.objectContaining({
+        type: 'oauth',
+        tokens: initialTokens,
+        clientInformation: initialClientInformation,
+      })
+    );
+
+    const rotatedClientInformation = {
+      client_id: 'rotated-client',
+      client_secret: 'rotated-client-secret',
+    };
+    await provider.saveClientInformation(rotatedClientInformation);
+
+    expect(mockUpsertConnection).toHaveBeenLastCalledWith({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-github-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      state: expect.objectContaining({
+        type: 'oauth',
+        tokens: initialTokens,
+        clientInformation: rotatedClientInformation,
+        codeVerifier: 'initial-verifier',
+        oauthState: 'initial-state',
+      }),
+      definitionFingerprint: 'sample-definition-fingerprint',
+      discoveredTools,
+      validationError: 'previous validation failure',
+      validatedAt: '2026-05-01T00:00:00.000Z',
+      preservePendingFlowState: false,
+    });
+    await expect(provider.clientInformation()).resolves.toEqual(rotatedClientInformation);
+
+    const rotatedTokens = { access_token: 'rotated-access-token', token_type: 'bearer' } as const;
+    await provider.saveTokens(rotatedTokens);
+
+    await expect(provider.tokens()).resolves.toEqual(rotatedTokens);
+    expect(mockUpsertConnection).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({ tokens: rotatedTokens }),
+        validationError: null,
+      })
+    );
+  });
+
+  it('generates deterministic-width OAuth state with an optional flow prefix without persisting it', async () => {
+    const unprefixed = makeProvider({ interactive: false });
+    const prefixed = new PersistentOAuthClientProvider({
+      userId: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      definitionFingerprint: 'sample-definition-fingerprint',
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+      },
+      redirectUrl: 'https://app.example.com/oauth/callback',
+      statePrefix: 'flow-123',
+      interactive: true,
+    });
+
+    await expect(unprefixed.state()).resolves.toMatch(/^[0-9a-f]{32}$/);
+    await expect(prefixed.state()).resolves.toMatch(/^flow-123\.[0-9a-f]{32}$/);
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
   it('rejects stale public credentials for a hosted callback and accepts confidential credentials', () => {
     const redirectUrl = 'https://app.example.com/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback';
 
@@ -157,13 +305,24 @@ describe('PersistentOAuthClientProvider', () => {
     const runtime = makeProvider({ interactive: false });
     await runtime.saveCodeVerifier('runtime-verifier');
     await runtime.saveState('runtime-state');
+    await expect(runtime.codeVerifier()).resolves.toBe('runtime-verifier');
+    await expect(runtime.storedState()).resolves.toBe('runtime-state');
     expect(mockUpsertConnection).not.toHaveBeenCalled();
 
     const interactive = makeProvider({ interactive: true });
     await interactive.saveCodeVerifier('interactive-verifier');
     await interactive.saveState('interactive-state');
     expect(mockUpsertConnection).toHaveBeenCalledTimes(2);
-    expect(mockUpsertConnection).toHaveBeenLastCalledWith(expect.objectContaining({ preservePendingFlowState: false }));
+    expect(mockUpsertConnection).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({
+          codeVerifier: 'interactive-verifier',
+          oauthState: 'interactive-state',
+        }),
+        preservePendingFlowState: false,
+      })
+    );
+    await expect(interactive.storedState()).resolves.toBe('interactive-state');
   });
 
   it('marks every non-interactive persist as read-only for pending-flow state', async () => {
@@ -191,19 +350,95 @@ describe('PersistentOAuthClientProvider', () => {
     expect(mockUpsertConnection).toHaveBeenLastCalledWith(expect.objectContaining({ validationError: null }));
   });
 
-  it('records a reconnect message when credentials are invalidated', async () => {
-    const provider = makeProvider({ interactive: false });
+  it('propagates persistence failures from credential updates', async () => {
+    const persistenceError = new Error('connection persistence failed');
+    mockUpsertConnection.mockRejectedValueOnce(persistenceError);
+    const provider = makeProvider({ interactive: true, validationError: 'previous failure' });
 
-    await provider.invalidateCredentials('tokens');
-    expect(mockUpsertConnection).toHaveBeenLastCalledWith(
-      expect.objectContaining({ validationError: OAUTH_RECONNECT_REQUIRED_MESSAGE })
+    await expect(provider.saveTokens({ access_token: 'sample-access-token', token_type: 'bearer' })).rejects.toBe(
+      persistenceError
     );
 
-    mockUpsertConnection.mockClear();
-    const verifierOnly = makeProvider({ interactive: false });
-    await verifierOnly.invalidateCredentials('verifier');
-    expect(mockUpsertConnection).toHaveBeenLastCalledWith(expect.objectContaining({ validationError: null }));
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: expect.objectContaining({
+          tokens: { access_token: 'sample-access-token', token_type: 'bearer' },
+        }),
+        validationError: null,
+        preservePendingFlowState: false,
+      })
+    );
   });
+
+  it.each(['all', 'client', 'tokens', 'verifier'] as const)(
+    'applies the %s credential invalidation contract and persists its validation state',
+    async (scope) => {
+      const clientInformation = { client_id: 'sample-client', client_secret: 'sample-secret' };
+      const tokens = { access_token: 'sample-access-token', token_type: 'bearer' } as const;
+      const discoveredTools = [{ name: 'readSample', inputSchema: {} }];
+      const provider = new PersistentOAuthClientProvider({
+        userId: 'sample-user',
+        ownerGithubUsername: 'sample-user',
+        scope: 'global',
+        slug: 'sample-oauth',
+        definitionFingerprint: 'sample-definition-fingerprint',
+        authConfig: {
+          mode: 'oauth',
+          provider: 'generic-oauth2.1',
+        },
+        redirectUrl: 'https://app.example.com/oauth/callback',
+        initialState: {
+          type: 'oauth',
+          clientInformation,
+          tokens,
+          codeVerifier: 'sample-verifier',
+          oauthState: 'sample-state',
+        },
+        discoveredTools,
+        validatedAt: '2026-05-01T00:00:00.000Z',
+        validationError: 'previous validation failure',
+        interactive: false,
+      });
+
+      await provider.invalidateCredentials(scope);
+
+      const expectedState = {
+        all: { type: 'oauth' },
+        client: {
+          type: 'oauth',
+          clientInformation: undefined,
+          tokens: undefined,
+          codeVerifier: undefined,
+          oauthState: undefined,
+        },
+        tokens: {
+          type: 'oauth',
+          clientInformation,
+          tokens: undefined,
+          codeVerifier: undefined,
+          oauthState: undefined,
+        },
+        verifier: {
+          type: 'oauth',
+          clientInformation,
+          tokens,
+          codeVerifier: undefined,
+          oauthState: undefined,
+        },
+      }[scope];
+      const preservesValidation = scope === 'verifier';
+
+      expect(provider.currentState).toEqual(expectedState);
+      expect(mockUpsertConnection).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          state: expectedState,
+          discoveredTools: preservesValidation ? discoveredTools : [],
+          validatedAt: preservesValidation ? '2026-05-01T00:00:00.000Z' : null,
+          validationError: preservesValidation ? 'previous validation failure' : OAUTH_RECONNECT_REQUIRED_MESSAGE,
+        })
+      );
+    }
+  );
 
   it('refuses to hand out a missing PKCE code verifier instead of returning an empty string', async () => {
     const provider = new PersistentOAuthClientProvider({
@@ -241,6 +476,16 @@ describe('PersistentOAuthClientProvider', () => {
     await expect(withVerifier.codeVerifier()).resolves.toBe('sample-code-verifier');
   });
 
+  it('captures an interactive authorization URL without persisting credential state', async () => {
+    const provider = makeProvider({ interactive: true });
+    const authorizationUrl = new URL('https://auth.example.com/authorize?client_id=sample-client');
+
+    await expect(provider.redirectToAuthorization(authorizationUrl)).resolves.toBeUndefined();
+
+    expect(provider.authorizationUrl).toBe(authorizationUrl);
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
   it('tells non-interactive callers to reconnect when OAuth authorization is required', async () => {
     const provider = new PersistentOAuthClientProvider({
       userId: 'sample-user',
@@ -256,12 +501,13 @@ describe('PersistentOAuthClientProvider', () => {
       interactive: false,
     });
 
-    await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(
-      OAuthAuthorizationRequiredError
-    );
-    await expect(provider.redirectToAuthorization(new URL('https://auth.example.com/authorize'))).rejects.toThrow(
+    const authorizationUrl = new URL('https://auth.example.com/authorize');
+    await expect(provider.redirectToAuthorization(authorizationUrl)).rejects.toThrow(OAuthAuthorizationRequiredError);
+    await expect(provider.redirectToAuthorization(authorizationUrl)).rejects.toThrow(
       'MCP OAuth connection expired or needs authorization. Reconnect this MCP connection to continue.'
     );
+    expect(provider.authorizationUrl).toBe(authorizationUrl);
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
   });
 
   it('requires protected-resource metadata to identify the exact configured MCP URL', async () => {
@@ -298,5 +544,19 @@ describe('PersistentOAuthClientProvider', () => {
     await expect(
       provider.validateResourceURL('https://mcp.example.com/mcp', 'https://mcp.example.com/mcp#fragment')
     ).rejects.toThrow('must not include credentials, a query, or a fragment');
+  });
+
+  it.each([
+    'https://user:password@mcp.example.com/mcp',
+    'https://mcp.example.com/mcp?tenant=sample',
+    'https://mcp.example.com/mcp#fragment',
+  ])('rejects unsafe configured MCP resource identifiers before authorization: %s', async (serverUrl) => {
+    const provider = makeProvider({ interactive: true });
+
+    await expect(provider.validateResourceURL(serverUrl, 'https://mcp.example.com/mcp')).rejects.toThrow(
+      'configured MCP URL must not include credentials, a query, or a fragment.'
+    );
+
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
   });
 });

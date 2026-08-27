@@ -220,6 +220,20 @@ describe('WorkspaceRuntimeStateService', () => {
     expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
   });
 
+  it('rejects workspace claims when the target session no longer exists', async () => {
+    mockSessionLock(null as any);
+
+    await expect(
+      WorkspaceRuntimeStateService.claimWorkspaceAction(17, {
+        action: 'provision',
+        sessionPatch: { workspaceStatus: AgentWorkspaceStatus.PROVISIONING },
+      })
+    ).rejects.toThrow('Agent session not found');
+
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
+  });
+
   it('blocks workspace claims while another lifecycle action is in progress', async () => {
     const activeClaimedAt = new Date(Date.now() - 60_000).toISOString();
     mockSessionLock();
@@ -322,6 +336,25 @@ describe('WorkspaceRuntimeStateService', () => {
     );
   });
 
+  it.each([
+    ['missing action', { runtimeLifecycle: { claimedAt: new Date().toISOString() } }],
+    ['invalid claim timestamp', { runtimeLifecycle: { currentAction: 'resume', claimedAt: 'not-a-date' } }],
+  ])('replaces a lifecycle marker with %s', async (_description, metadata) => {
+    const patchedSession = buildSession({ workspaceStatus: AgentWorkspaceStatus.PROVISIONING });
+    mockSessionLock();
+    mockActiveRun();
+    mockGetLatestSandboxForSession.mockResolvedValue({ id: 9, metadata });
+    mockSessionPatch(patchedSession);
+
+    await expect(
+      WorkspaceRuntimeStateService.claimWorkspaceAction(17, {
+        action: 'retry',
+        claimedAt: '2026-05-09T00:10:00.000Z',
+        sessionPatch: { workspaceStatus: AgentWorkspaceStatus.PROVISIONING },
+      })
+    ).resolves.toMatchObject({ session: patchedSession });
+  });
+
   it('claims allowed workspace actions by patching session and sandbox state in one transaction', async () => {
     const patchedSession = buildSession({
       workspaceStatus: AgentWorkspaceStatus.PROVISIONING,
@@ -356,6 +389,44 @@ describe('WorkspaceRuntimeStateService', () => {
       session: patchedSession,
       sandbox: { id: 9, status: 'provisioning' },
     });
+  });
+
+  it('generates a claim timestamp when the caller does not provide one', async () => {
+    const patchedSession = buildSession({ workspaceStatus: AgentWorkspaceStatus.PROVISIONING });
+    mockSessionLock();
+    mockActiveRun();
+    mockSessionPatch(patchedSession);
+
+    await WorkspaceRuntimeStateService.claimWorkspaceAction(17, {
+      action: 'provision',
+      sessionPatch: { workspaceStatus: AgentWorkspaceStatus.PROVISIONING },
+    });
+
+    expect(mockRecordSessionSandboxState).toHaveBeenCalledWith(
+      patchedSession,
+      expect.objectContaining({
+        runtimeLifecycle: {
+          currentAction: 'provision',
+          claimedAt: expect.any(String),
+        },
+      })
+    );
+  });
+
+  it('rejects active-action checks when the target session no longer exists', async () => {
+    mockSessionLock(null as any);
+
+    await expect(WorkspaceRuntimeStateService.assertNoActiveWorkspaceAction(17)).rejects.toThrow(
+      'Agent session not found'
+    );
+    expect(mockGetLatestSandboxForSession).not.toHaveBeenCalled();
+  });
+
+  it('allows active-action checks when no current lifecycle claim exists', async () => {
+    mockSessionLock();
+    mockGetLatestSandboxForSession.mockResolvedValue({ id: 9, metadata: {} });
+
+    await expect(WorkspaceRuntimeStateService.assertNoActiveWorkspaceAction(17)).resolves.toBeUndefined();
   });
 
   it('records workspace state with paired session and sandbox writes and can clear the action marker', async () => {
@@ -491,6 +562,37 @@ describe('WorkspaceRuntimeStateService', () => {
     expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['missing', null],
+    ['archived', buildSession({ status: 'archived' })],
+  ])('rejects expected-lifecycle writes when the session is %s', async (_description, session) => {
+    mockSessionLock(session as any);
+
+    await expect(
+      WorkspaceRuntimeStateService.recordWorkspaceState(
+        17,
+        { sessionPatch: { workspaceStatus: AgentWorkspaceStatus.READY } },
+        { expectedLifecycle: { action: 'resume' } }
+      )
+    ).rejects.toMatchObject(
+      session
+        ? { name: 'WorkspaceActionBlockedError', reason: 'action_in_progress' }
+        : { message: 'Agent session not found' }
+    );
+    expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
+  });
+
+  it('rejects state recording when the session disappears during the patch', async () => {
+    mockSessionPatch(null as any);
+
+    await expect(
+      WorkspaceRuntimeStateService.recordWorkspaceState(17, {
+        sessionPatch: { workspaceStatus: AgentWorkspaceStatus.READY },
+      })
+    ).rejects.toThrow('Agent session not found');
+    expect(mockRecordSessionSandboxState).not.toHaveBeenCalled();
+  });
+
   it('records workspace failures using a caller-provided transaction', async () => {
     const callerTrx = { caller: true };
     const failure = {
@@ -533,5 +635,37 @@ describe('WorkspaceRuntimeStateService', () => {
       sandboxStatus: 'failed',
       runtimeLifecycle: null,
     });
+  });
+
+  it('records workspace failure only while the expected lifecycle claim remains current', async () => {
+    const failure = {
+      stage: 'startup',
+      title: 'Workspace startup failed',
+      message: 'Lifecycle could not start the workspace.',
+      recordedAt: '2026-05-09T00:12:00.000Z',
+      retryable: true,
+      origin: 'runtime',
+    } as const;
+    const patchedSession = buildSession({ workspaceStatus: AgentWorkspaceStatus.FAILED });
+    mockSessionLock();
+    mockGetLatestSandboxForSession.mockResolvedValue({
+      id: 9,
+      metadata: { runtimeLifecycle: { currentAction: 'provision', claimedAt: '2026-05-09T00:10:00.000Z' } },
+    });
+    mockSessionPatch(patchedSession);
+
+    await WorkspaceRuntimeStateService.recordWorkspaceFailure(
+      17,
+      {
+        sessionPatch: { workspaceStatus: AgentWorkspaceStatus.FAILED },
+        failure,
+      },
+      { expectedLifecycle: { action: 'provision', claimedAt: '2026-05-09T00:10:00.000Z' } }
+    );
+
+    expect(mockRecordSessionSandboxState).toHaveBeenCalledWith(
+      patchedSession,
+      expect.objectContaining({ failure, sandboxStatus: 'failed', runtimeLifecycle: null })
+    );
   });
 });

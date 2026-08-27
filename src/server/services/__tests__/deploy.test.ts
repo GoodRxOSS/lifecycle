@@ -17,15 +17,17 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 import hash from 'object-hash';
 import DeployService from '../deploy';
-import { DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, DeployStatus, DeployTypes } from 'shared/constants';
 import { ChartType } from 'server/lib/nativeHelm';
 import * as github from 'server/lib/github';
 import { SecretProcessor } from 'server/services/secretProcessor';
+import { AuthorityLockLostError } from 'server/lib/authorityLock';
 
 mockRedisClient();
 
 const mockCliDeploy = jest.fn();
 const mockCodefreshDeploy = jest.fn();
+const mockWaitForCodefresh = jest.fn();
 const mockCodefreshBuildImage = jest.fn();
 const mockCodefreshGetLogs = jest.fn();
 const mockCodefreshGetRepositoryTag = jest.fn();
@@ -36,13 +38,20 @@ const mockBuildWithNative = jest.fn();
 const mockGlobalConfigGetAllConfigs = jest.fn();
 const mockGlobalConfigGetOrgChartName = jest.fn();
 const mockCreateOrUpdateNamespace = jest.fn();
+const mockExtractEnvVarsWithBuildDependencies = jest.fn().mockReturnValue({});
+const mockWaitForColumnValue = jest.fn();
+const mockTaggingGetResources = jest.fn();
+const mockRdsDescribeDBInstances = jest.fn();
+const mockRdsDescribeDBClusters = jest.fn();
 const mockLoggerInfo = jest.fn();
 const mockLoggerWarn = jest.fn();
+const mockLoggerError = jest.fn();
+const mockLoggerDebug = jest.fn();
 const mockGetLogger = jest.fn(() => ({
-  error: jest.fn(),
+  error: mockLoggerError,
   info: mockLoggerInfo,
   warn: mockLoggerWarn,
-  debug: jest.fn(),
+  debug: mockLoggerDebug,
   child: jest.fn().mockReturnThis(),
 }));
 
@@ -80,6 +89,31 @@ jest.mock('server/lib/kubernetes', () => ({
   createOrUpdateNamespace: (...args: any[]) => mockCreateOrUpdateNamespace(...args),
 }));
 
+jest.mock('shared/utils', () => ({
+  ...jest.requireActual('shared/utils'),
+  extractEnvVarsWithBuildDependencies: (...args: any[]) => mockExtractEnvVarsWithBuildDependencies(...args),
+  waitForColumnValue: (...args: any[]) => mockWaitForColumnValue(...args),
+}));
+
+jest.mock('aws-sdk/clients/rds', () =>
+  jest.fn().mockImplementation(() => ({
+    describeDBInstances: (...args: any[]) => ({
+      promise: () => mockRdsDescribeDBInstances(...args),
+    }),
+    describeDBClusters: (...args: any[]) => ({
+      promise: () => mockRdsDescribeDBClusters(...args),
+    }),
+  }))
+);
+
+jest.mock('aws-sdk/clients/resourcegroupstaggingapi', () =>
+  jest.fn().mockImplementation(() => ({
+    getResources: (...args: any[]) => ({
+      promise: () => mockTaggingGetResources(...args),
+    }),
+  }))
+);
+
 const mockDetermineChartType = jest.fn();
 jest.mock('server/lib/nativeHelm', () => ({
   ...jest.requireActual('server/lib/nativeHelm'),
@@ -94,7 +128,7 @@ jest.mock('server/lib/github', () => ({
 jest.mock('server/lib/cli', () => ({
   cliDeploy: (...args: any[]) => mockCliDeploy(...args),
   codefreshDeploy: (...args: any[]) => mockCodefreshDeploy(...args),
-  waitForCodefresh: jest.fn(),
+  waitForCodefresh: (...args: any[]) => mockWaitForCodefresh(...args),
 }));
 
 describe('DeployService - shouldTriggerGithubDeployment', () => {
@@ -1728,5 +1762,1570 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         'expected-run'
       );
     });
+  });
+});
+
+describe('DeployService uncovered public behavior', () => {
+  const queueManager = () => ({
+    registerQueue: jest.fn(() => ({
+      add: jest.fn().mockResolvedValue(undefined),
+      process: jest.fn(),
+      on: jest.fn(),
+    })),
+  });
+
+  const serviceHarness = () => {
+    const deployPatch = jest.fn().mockResolvedValue(1);
+    const deployQuery: any = {
+      where: jest.fn(() => deployQuery),
+      patch: deployPatch,
+      findOne: jest.fn(() => deployQuery),
+      select: jest.fn().mockResolvedValue({ id: 1 }),
+    };
+    const buildQuery: any = {
+      findOne: jest.fn(() => buildQuery),
+      whereNull: jest.fn(() => buildQuery),
+      where: jest.fn(() => buildQuery),
+      then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve({ id: 91 }).then(resolve, reject),
+    };
+    const githubDeploymentAdd = jest.fn().mockResolvedValue(undefined);
+    const updatePullRequestActivityStream = jest.fn().mockResolvedValue(undefined);
+    const db: any = {
+      models: {
+        Deploy: { query: jest.fn(() => deployQuery) },
+        Build: { query: jest.fn(() => buildQuery) },
+      },
+      services: {
+        ActivityStream: { updatePullRequestActivityStream },
+        GithubService: { githubDeploymentQueue: { add: githubDeploymentAdd } },
+      },
+    };
+    const service = new DeployService(db, {}, {}, queueManager() as any);
+    return {
+      service,
+      db,
+      deployQuery,
+      deployPatch,
+      buildQuery,
+      githubDeploymentAdd,
+      updatePullRequestActivityStream,
+    };
+  };
+
+  const codefreshDeploy = (overrides: Record<string, unknown> = {}) => ({
+    id: 5,
+    buildId: 91,
+    uuid: 'pipeline-env',
+    githubRepositoryId: 42,
+    branchName: 'main',
+    sha: null,
+    env: {},
+    build: {
+      id: 91,
+      uuid: 'env',
+      triggerType: 'github_pr',
+      commentRuntimeEnv: {},
+    },
+    deployable: {
+      name: 'pipeline',
+      type: DeployTypes.CODEFRESH,
+      repository: { fullName: 'org/repo' },
+    },
+    reload: jest.fn().mockResolvedValue(undefined),
+    $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    ...overrides,
+  });
+
+  const sourceBuildDeploy = (): any => ({
+    id: 17,
+    buildId: 91,
+    uuid: 'app-env',
+    githubRepositoryId: 42,
+    branchName: 'main',
+    env: { KEEP: 'visible' },
+    initEnv: {},
+    dockerImage: 'old-image',
+    build: {
+      id: 91,
+      uuid: 'env',
+      namespace: 'env-env',
+      isStatic: false,
+      triggerType: 'github_pr',
+      commentRuntimeEnv: {},
+      commentInitEnv: {},
+      enabledFeatures: [],
+      pullRequest: { githubLogin: 'alice' },
+      deploys: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    },
+    deployable: {
+      name: 'app',
+      type: DeployTypes.GITHUB,
+      dockerfilePath: './Dockerfile',
+      initDockerfilePath: null,
+      env: {},
+      ecr: 'org/app',
+      builder: { engine: 'buildkit' },
+      repository: { fullName: 'org/repo' },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    },
+    reload: jest.fn().mockResolvedValue(undefined),
+    $fetchGraph: jest.fn().mockResolvedValue(undefined),
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCliDeploy.mockReset().mockResolvedValue(undefined);
+    mockCodefreshDeploy.mockReset().mockResolvedValue('pipeline-1');
+    mockWaitForCodefresh.mockReset().mockResolvedValue(undefined);
+    mockCodefreshBuildImage.mockReset();
+    mockCodefreshGetLogs.mockReset().mockResolvedValue('pipeline output');
+    mockCodefreshGetRepositoryTag.mockReset().mockImplementation(({ ecrRepo, tag }) => `${ecrRepo}:${tag}`);
+    mockCodefreshTagExists.mockReset();
+    mockCodefreshTriggerPipeline.mockReset();
+    mockCodefreshWaitForImage.mockReset();
+    mockBuildWithNative.mockReset();
+    mockCreateOrUpdateNamespace.mockReset().mockResolvedValue(undefined);
+    mockExtractEnvVarsWithBuildDependencies.mockReset().mockReturnValue({});
+    mockWaitForColumnValue.mockReset();
+    mockTaggingGetResources.mockReset().mockResolvedValue({ ResourceTagMappingList: [] });
+    mockRdsDescribeDBInstances.mockReset();
+    mockRdsDescribeDBClusters.mockReset();
+    mockGlobalConfigGetOrgChartName.mockReset().mockResolvedValue('org-chart');
+    mockGlobalConfigGetAllConfigs.mockReset().mockResolvedValue({
+      lifecycleDefaults: {
+        buildPipeline: 'sample/build-image',
+        deployCluster: 'test-cluster',
+        ecrDomain: 'registry.example.test',
+        ecrRegistry: 'sample-registry',
+      },
+      app_setup: { org: 'example-org' },
+      buildDefaults: {},
+    });
+    mockDetermineChartType.mockReset().mockResolvedValue(ChartType.PUBLIC);
+    (github.getSHAForBranch as jest.Mock).mockReset().mockResolvedValue('abcdef1234567890');
+    (github.getShaForDeploy as jest.Mock).mockReset().mockResolvedValue('deploy-sha');
+  });
+
+  test('findOrCreateDeploys recovers an existing row from the fallback lookup without inserting a duplicate', async () => {
+    const { service, db } = serviceHarness();
+    const patch = jest.fn().mockResolvedValue(1);
+    const existingDeploy = {
+      id: 4,
+      deployableId: 11,
+      githubRepositoryId: 42,
+      $query: jest.fn(() => ({ patch })),
+    };
+    const listQuery: any = {
+      where: jest.fn(() => listQuery),
+      withGraphFetched: jest.fn().mockResolvedValue([]),
+    };
+    db.models.Deploy = {
+      query: jest.fn(() => listQuery),
+      findOne: jest.fn().mockResolvedValue(existingDeploy),
+      create: jest.fn(),
+    };
+    db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'app.example.test') };
+    const build: any = {
+      id: 7,
+      uuid: 'env',
+      deployables: [
+        { id: 11, name: 'app', repositoryId: 42, branchName: 'main', type: DeployTypes.DOCKER, defaultTag: 'latest' },
+      ],
+      deploys: [existingDeploy],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.findOrCreateDeploys({} as any, build)).resolves.toEqual([existingDeploy]);
+
+    expect(db.models.Deploy.findOne).toHaveBeenCalledWith({ deployableId: 11, buildId: 7 });
+    expect(db.models.Deploy.create).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledWith(
+      expect.objectContaining({ deployableId: 11, uuid: 'app-env', publicUrl: 'app.example.test' })
+    );
+  });
+
+  test('findOrCreateDeploys treats a failed fallback read as missing and creates the deploy', async () => {
+    const { service, db } = serviceHarness();
+    const patch = jest.fn().mockResolvedValue(1);
+    const created = {
+      id: 4,
+      $query: jest.fn(() => ({ patch })),
+      $setRelated: jest.fn(),
+    };
+    const listQuery: any = {
+      where: jest.fn(() => listQuery),
+      withGraphFetched: jest.fn().mockResolvedValue([]),
+    };
+    db.models.Deploy = {
+      query: jest.fn(() => listQuery),
+      findOne: jest.fn().mockRejectedValue(new Error('replica unavailable')),
+      create: jest.fn().mockResolvedValue(created),
+    };
+    db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'app.example.test') };
+    const build: any = {
+      id: 7,
+      uuid: 'env',
+      deployables: [
+        {
+          id: 11,
+          name: 'app',
+          repositoryId: 42,
+          branchName: 'main',
+          active: true,
+          type: DeployTypes.DOCKER,
+        },
+      ],
+      deploys: [created],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.findOrCreateDeploys({} as any, build)).resolves.toEqual([created]);
+
+    expect(db.models.Deploy.create).toHaveBeenCalledWith(
+      expect.objectContaining({ buildId: 7, deployableId: 11, githubRepositoryId: 42, active: true })
+    );
+    expect(created.$setRelated).toHaveBeenCalledWith('deployable', build.deployables[0]);
+    expect(created.$setRelated).toHaveBeenCalledWith('build', build);
+  });
+
+  test('findOrCreateDeploys contains one deploy patch failure and still returns the refreshed relation', async () => {
+    const { service, db } = serviceHarness();
+    const patchError = new Error('deploy patch unavailable');
+    const existing = {
+      id: 4,
+      deployableId: 11,
+      $query: jest.fn(() => ({ patch: jest.fn().mockRejectedValue(patchError) })),
+    };
+    const listQuery: any = {
+      where: jest.fn(() => listQuery),
+      withGraphFetched: jest.fn().mockResolvedValue([existing]),
+      then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+        Promise.resolve([]).then(resolve, reject),
+    };
+    db.models.Deploy = { query: jest.fn(() => listQuery), findOne: jest.fn() };
+    db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'app.example.test') };
+    const build: any = {
+      id: 7,
+      uuid: 'env',
+      deployables: [{ id: 11, name: 'app', repositoryId: 42, branchName: 'main', type: DeployTypes.DOCKER }],
+      deploys: [existing],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.findOrCreateDeploys({} as any, build)).resolves.toEqual([existing]);
+
+    expect(mockLoggerError).toHaveBeenCalledWith({ error: patchError }, 'Deploy: create from deployables failed');
+  });
+
+  test('findOrCreateDeploys preserves the rest of an update when source SHA lookup fails', async () => {
+    const { service, db } = serviceHarness();
+    const patch = jest.fn().mockResolvedValue(1);
+    const existing = { id: 4, deployableId: 11, $query: jest.fn(() => ({ patch })) };
+    const listQuery: any = {
+      where: jest.fn(() => listQuery),
+      withGraphFetched: jest.fn().mockResolvedValue([existing]),
+    };
+    db.models.Deploy = { query: jest.fn(() => listQuery), findOne: jest.fn() };
+    db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'app.example.test') };
+    (github.getShaForDeploy as jest.Mock).mockRejectedValue(new Error('github unavailable'));
+    const build: any = {
+      id: 7,
+      uuid: 'env',
+      triggerType: 'github_pr',
+      deployables: [{ id: 11, name: 'app', repositoryId: 42, branchName: 'main', type: DeployTypes.GITHUB }],
+      deploys: [existing],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await service.findOrCreateDeploys({} as any, build);
+
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ uuid: 'app-env', branchName: 'main' }));
+    expect(patch.mock.calls[0][0]).not.toHaveProperty('sha');
+  });
+
+  test('deployAurora returns an already-built endpoint without consulting AWS or running restore', async () => {
+    const { service } = serviceHarness();
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.BUILT,
+      cname: 'database.example.test',
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockTaggingGetResources).not.toHaveBeenCalled();
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+  });
+
+  test('deployAurora adopts an existing cluster endpoint without running restore', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockTaggingGetResources.mockResolvedValue({
+      ResourceTagMappingList: [{ ResourceARN: 'arn:aws:rds:us-west-2:123:db:instance-1' }],
+    });
+    mockRdsDescribeDBInstances.mockResolvedValue({
+      DBInstances: [{ Endpoint: { Address: 'instance.example.test' }, DBClusterIdentifier: 'cluster-1' }],
+    });
+    mockRdsDescribeDBClusters.mockResolvedValue({ DBClusters: [{ Endpoint: 'cluster.example.test' }] });
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.PENDING,
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockRdsDescribeDBInstances).toHaveBeenCalledWith({ DBInstanceIdentifier: 'instance-1' });
+    expect(mockRdsDescribeDBClusters).toHaveBeenCalledWith({ DBClusterIdentifier: 'cluster-1' });
+    expect(deployPatch).toHaveBeenCalledWith({ cname: 'cluster.example.test', status: DeployStatus.BUILT });
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+  });
+
+  test('deployAurora restores a missing database and publishes its instance endpoint', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockTaggingGetResources.mockResolvedValueOnce({ ResourceTagMappingList: [] }).mockResolvedValueOnce({
+      ResourceTagMappingList: [{ ResourceARN: 'arn:aws:rds:us-west-2:123:db:instance-2' }],
+    });
+    mockRdsDescribeDBInstances.mockResolvedValue({ DBInstances: [{ Endpoint: { Address: 'instance.example.test' } }] });
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.PENDING,
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockCliDeploy).toHaveBeenCalledWith(deploy);
+    expect(deployPatch).toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILDING }));
+    expect(deployPatch).toHaveBeenCalledWith({ cname: 'instance.example.test' });
+    expect(deployPatch).toHaveBeenLastCalledWith({ status: DeployStatus.BUILT });
+  });
+
+  test('deployAurora restores when AWS finds an instance before its endpoint is usable', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockTaggingGetResources
+      .mockResolvedValueOnce({
+        ResourceTagMappingList: [{ ResourceARN: 'arn:aws:rds:us-west-2:123:db:instance-starting' }],
+      })
+      .mockResolvedValueOnce({ ResourceTagMappingList: [] });
+    mockRdsDescribeDBInstances.mockResolvedValueOnce({ DBInstances: [{}] });
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.PENDING,
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockRdsDescribeDBInstances).toHaveBeenCalledWith({ DBInstanceIdentifier: 'instance-starting' });
+    expect(mockCliDeploy).toHaveBeenCalledWith(deploy);
+    expect(deployPatch).toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILDING }));
+    expect(deployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ cname: expect.anything() }));
+    expect(deployPatch).toHaveBeenLastCalledWith({ status: DeployStatus.BUILT });
+  });
+
+  test('deployAurora stops before restore when the fenced BUILDING write loses ownership', async () => {
+    const { service, deployPatch } = serviceHarness();
+    deployPatch.mockResolvedValueOnce(0);
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.PENDING,
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+  });
+
+  test('deployCLI dispatches supported service types and leaves unsupported types untouched', async () => {
+    const { service } = serviceHarness();
+    const aurora = jest.spyOn(service, 'deployAurora').mockResolvedValue(true);
+    const codefresh = jest.spyOn(service, 'deployCodefresh').mockResolvedValue(true);
+    const auroraDeploy = { deployable: { type: DeployTypes.AURORA_RESTORE } } as any;
+    const codefreshDeployable = { deployable: { type: DeployTypes.CODEFRESH } } as any;
+
+    await expect(service.deployCLI(auroraDeploy, 'run-1')).resolves.toBe(true);
+    await expect(service.deployCLI(codefreshDeployable, 'run-2', 'sha', 42, 'main')).resolves.toBe(true);
+    await expect(
+      service.deployCLI({ deployable: { type: DeployTypes.DOCKER } } as any, 'run-3')
+    ).resolves.toBeUndefined();
+    await expect(service.deployCLI({ deployable: null } as any, 'run-4')).resolves.toBeUndefined();
+
+    expect(aurora).toHaveBeenCalledWith(auroraDeploy, 'run-1');
+    expect(codefresh).toHaveBeenCalledWith(codefreshDeployable, 'run-2', 'sha', 42, 'main');
+  });
+
+  test('hostForDeployableDeploy and acmARNForDeploy expose the stable routing fallbacks', () => {
+    const { service } = serviceHarness();
+
+    expect(
+      service.hostForDeployableDeploy(
+        { uuid: 'external-env', publicUrl: 'current.example.test' } as any,
+        { type: DeployTypes.EXTERNAL_HTTP, defaultPublicUrl: 'default.example.test' } as any
+      )
+    ).toBe('current.example.test');
+    expect(
+      service.hostForDeployableDeploy(
+        { uuid: 'external-env', publicUrl: null } as any,
+        { type: DeployTypes.EXTERNAL_HTTP, defaultPublicUrl: 'default.example.test' } as any
+      )
+    ).toBe('default.example.test');
+    expect(
+      service.hostForDeployableDeploy(
+        { uuid: 'app-env' } as any,
+        {
+          type: DeployTypes.DOCKER,
+          host: 'example.test',
+        } as any
+      )
+    ).toBe('app-env.example.test');
+    expect(service.hostForDeployableDeploy({ uuid: 'app-env' } as any, { type: DeployTypes.DOCKER } as any)).toBe(
+      undefined
+    );
+    expect(service.acmARNForDeploy({ deployable: { acmARN: 'arn:certificate' } } as any)).toBe('arn:certificate');
+    expect(service.acmARNForDeploy({ deployable: null } as any)).toBeNull();
+  });
+
+  test('deployCodefresh treats an unchanged source and environment as built even when activity publication fails', async () => {
+    const { service } = serviceHarness();
+    const fullSha = 'abcdef1234567890';
+    const deploy = codefreshDeploy({ sha: `${fullSha.substring(0, 7)}-${hash({})}` });
+    const activityError = new Error('activity stream unavailable');
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockRejectedValue(activityError);
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
+
+    expect(mockCodefreshDeploy).not.toHaveBeenCalled();
+    expect(mockWaitForCodefresh).not.toHaveBeenCalled();
+    expect(mockLoggerWarn).toHaveBeenCalledWith({ error: activityError }, 'ActivityFeed: update failed');
+  });
+
+  test('deployCodefresh reports false without waiting when the pipeline cannot be triggered', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const triggerError = new Error('codefresh unavailable');
+    mockCodefreshDeploy.mockRejectedValue(triggerError);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(false);
+
+    expect(deployPatch).toHaveBeenCalledWith({
+      buildLogs: null,
+      buildPipelineId: null,
+      buildOutput: null,
+      deployPipelineId: null,
+      deployOutput: null,
+    });
+    expect(mockWaitForCodefresh).not.toHaveBeenCalled();
+    expect(mockLoggerError).toHaveBeenCalledWith({ error: triggerError }, 'Codefresh: build id missing');
+  });
+
+  test('deployCodefresh completes successfully even when both activity updates fail', async () => {
+    const { service } = serviceHarness();
+    const activityError = new Error('activity stream unavailable');
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockRejectedValue(activityError);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
+
+    expect(mockCodefreshDeploy).toHaveBeenCalledWith(deploy, deploy.build, deploy.deployable, null);
+    expect(mockWaitForCodefresh).toHaveBeenCalledWith('pipeline-1');
+    expect(mockCodefreshGetLogs).toHaveBeenCalledWith('pipeline-1');
+    expect(patchActivity).toHaveBeenCalledTimes(2);
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(2);
+  });
+
+  test('deployCodefresh resolves the configured branch when an API source ref targets another branch', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const deploy = codefreshDeploy({
+      env: null,
+      build: {
+        id: 91,
+        uuid: 'env',
+        triggerType: 'api',
+        githubRepositoryId: 42,
+        branchName: 'main',
+        configSha: null,
+        commentRuntimeEnv: { FROM_COMMENT: 'present' },
+      },
+    });
+
+    await expect(
+      service.deployCodefresh(deploy as any, 'run-1', 'root-push-sha', 42, 'feature/root-change')
+    ).resolves.toBe(true);
+
+    expect(github.getSHAForBranch).toHaveBeenCalledWith('main', 'org', 'repo');
+    expect(mockCodefreshDeploy).toHaveBeenCalledWith(deploy, deploy.build, deploy.deployable, null);
+    expect(mockWaitForCodefresh).toHaveBeenCalledWith('pipeline-1');
+    expect(deployPatch).toHaveBeenLastCalledWith({
+      status: DeployStatus.BUILT,
+      sha: `abcdef1-${hash({ FROM_COMMENT: 'present' })}`,
+      buildOutput: 'pipeline output',
+      statusMessage: 'CI build completed',
+    });
+  });
+
+  test('deployCodefresh publishes a stable terminal error when a triggered pipeline fails', async () => {
+    const { service } = serviceHarness();
+    const pipelineError = new Error('pipeline failed');
+    mockWaitForCodefresh.mockRejectedValue(pipelineError);
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(false);
+
+    expect(patchActivity).toHaveBeenLastCalledWith(
+      deploy,
+      expect.objectContaining({ status: DeployStatus.ERROR, statusMessage: 'CI build failed' }),
+      'run-1'
+    );
+  });
+
+  test('patchAndUpdateActivityFeed queues public GitHub deployment state and still updates PR activity after queue failure', async () => {
+    const { service, deployPatch, githubDeploymentAdd, updatePullRequestActivityStream } = serviceHarness();
+    const queueError = new Error('github deployment queue unavailable');
+    githubDeploymentAdd.mockRejectedValue(queueError);
+    const pullRequest = { id: 55 };
+    const build = {
+      id: 91,
+      kind: 'environment',
+      githubDeployments: true,
+      pullRequest,
+    };
+    const deploy: any = {
+      id: 1,
+      active: true,
+      build,
+      deployable: { name: 'app', type: DeployTypes.DOCKER, public: true },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      service.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.READY }, 'run-1', 42)
+    ).resolves.toBeUndefined();
+
+    expect(deployPatch).toHaveBeenCalledWith({ status: DeployStatus.READY });
+    expect(githubDeploymentAdd).toHaveBeenCalledWith('deployment', {
+      deployId: 1,
+      action: 'create',
+    });
+    expect(updatePullRequestActivityStream).toHaveBeenCalledWith(
+      build,
+      [],
+      pullRequest,
+      null,
+      true,
+      true,
+      null,
+      true,
+      42
+    );
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'GitHub deployment queue failed: deployId=1 error=github deployment queue unavailable'
+    );
+  });
+
+  test('patchAndUpdateActivityFeed supplies the stable fallback message for an unexplained terminal failure', async () => {
+    const { service, deployPatch, githubDeploymentAdd, updatePullRequestActivityStream } = serviceHarness();
+    const deploy: any = {
+      id: 1,
+      build: { id: 91, kind: BuildKind.SANDBOX, githubDeployments: true, pullRequest: { id: 55 } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await service.patchAndUpdateActivityFeed(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+
+    expect(deployPatch).toHaveBeenCalledWith({
+      status: DeployStatus.BUILD_FAILED,
+      statusMessage: 'Build failed. Check build logs for details.',
+    });
+    expect(githubDeploymentAdd).not.toHaveBeenCalled();
+    expect(updatePullRequestActivityStream).not.toHaveBeenCalled();
+  });
+
+  test('buildImage delegates a private Helm chart to the source builder', async () => {
+    const { service } = serviceHarness();
+    mockDetermineChartType.mockResolvedValue(ChartType.LOCAL);
+    const buildFromSource = jest.spyOn(service, 'buildImageForHelmAndGithub').mockResolvedValue(true);
+    const deploy: any = {
+      id: 1,
+      uuid: 'chart-env',
+      deployable: { type: DeployTypes.HELM },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(true);
+
+    expect(buildFromSource).toHaveBeenCalledWith(
+      deploy,
+      'run-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+  });
+
+  test('buildImage records the resolved source SHA for a public Helm chart without building it', async () => {
+    const { service } = serviceHarness();
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deploy: any = {
+      id: 1,
+      uuid: 'chart-env',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      build: { triggerType: 'github_pr' },
+      deployable: {
+        type: DeployTypes.HELM,
+        repository: { fullName: 'org/charts' },
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(true);
+
+    expect(github.getSHAForBranch).toHaveBeenCalledWith('main', 'org', 'charts');
+    expect(patchActivity).toHaveBeenCalledWith(
+      deploy,
+      {
+        status: DeployStatus.BUILT,
+        statusMessage: 'Helm chart does not need to be built',
+        sha: 'abcdef1234567890',
+      },
+      'run-1'
+    );
+    expect(mockCodefreshBuildImage).not.toHaveBeenCalled();
+  });
+
+  test('buildImage keeps a public Helm chart usable when source SHA lookup fails', async () => {
+    const { service } = serviceHarness();
+    const sourceError = new Error('github unavailable');
+    (github.getSHAForBranch as jest.Mock).mockRejectedValue(sourceError);
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deploy: any = {
+      id: 1,
+      uuid: 'chart-env',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      build: { triggerType: 'github_pr' },
+      deployable: { type: DeployTypes.HELM, repository: { fullName: 'org/charts' } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(true);
+
+    expect(patchActivity).toHaveBeenCalledWith(
+      deploy,
+      { status: DeployStatus.BUILT, statusMessage: 'Helm chart does not need to be built' },
+      'run-1'
+    );
+    expect(mockLoggerDebug).toHaveBeenCalledWith(
+      { error: expect.any(Error) },
+      'Could not get SHA for PUBLIC helm chart, continuing without it'
+    );
+  });
+
+  test('buildImage returns false for an unrecognized deployable type without publishing status', async () => {
+    const { service } = serviceHarness();
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deploy: any = {
+      id: 1,
+      uuid: 'unknown-env',
+      deployable: { type: 'future-type' },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(false);
+
+    expect(patchActivity).not.toHaveBeenCalled();
+  });
+
+  test('buildImage rethrows authority-lock loss from Helm processing', async () => {
+    const { service } = serviceHarness();
+    const lockError = new AuthorityLockLostError('deploy-external-secrets.1');
+    mockDetermineChartType.mockRejectedValue(lockError);
+    const deploy: any = {
+      id: 1,
+      uuid: 'chart-env',
+      deployable: { type: DeployTypes.HELM },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).rejects.toBe(lockError);
+  });
+
+  test('buildImage fails closed when an execution error cannot be fenced by an authority read', async () => {
+    const { service, deployQuery } = serviceHarness();
+    const executionError = new Error('deploy graph unavailable');
+    const authorityError = new Error('deploy authority unavailable');
+    deployQuery.select.mockResolvedValueOnce({ id: 1 }).mockRejectedValueOnce(authorityError);
+    const recordFailure = jest.spyOn(service, 'recordDeployFailure').mockResolvedValue(false);
+    const deploy: any = {
+      id: 1,
+      buildId: 91,
+      uuid: 'app-env',
+      $fetchGraph: jest.fn().mockRejectedValue(executionError),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1', undefined, undefined, undefined, 7)).resolves.toBe(true);
+
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(executionError).not.toBe(authorityError);
+  });
+
+  test('buildImageForHelmAndGithub publishes READY for an external host without resolving source', async () => {
+    const { service } = serviceHarness();
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deploy: any = {
+      id: 1,
+      uuid: 'external-env',
+      branchName: null,
+      build: { uuid: 'env' },
+      deployable: { name: 'external' },
+    };
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBeUndefined();
+
+    expect(patchActivity).toHaveBeenCalledWith(deploy, { status: DeployStatus.READY }, 'run-1');
+    expect(github.getSHAForBranch).not.toHaveBeenCalled();
+  });
+
+  test('buildImageForHelmAndGithub stops before registry calls when ECR configuration is incomplete', async () => {
+    const { service } = serviceHarness();
+    mockGlobalConfigGetAllConfigs.mockResolvedValue({
+      lifecycleDefaults: { ecrDomain: null, ecrRegistry: null },
+      app_setup: {},
+      buildDefaults: {},
+    });
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const deployable = {
+      name: 'app',
+      type: DeployTypes.GITHUB,
+      repository: { fullName: 'org/repo' },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const deploy: any = {
+      id: 1,
+      uuid: 'app-env',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      env: {},
+      build: {
+        uuid: 'env',
+        triggerType: 'github_pr',
+        commentRuntimeEnv: {},
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      },
+      deployable,
+    };
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(false);
+
+    expect(patchActivity).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.ERROR }, 'run-1');
+    expect(mockCodefreshTagExists).not.toHaveBeenCalled();
+    expect(mockCodefreshBuildImage).not.toHaveBeenCalled();
+  });
+
+  test('deployAurora continues with a fenced restore when AWS discovery is temporarily unavailable', async () => {
+    const { service } = serviceHarness();
+    const awsError = new Error('AWS discovery unavailable');
+    mockTaggingGetResources.mockRejectedValue(awsError);
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.PENDING,
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockCliDeploy).toHaveBeenCalledWith(deploy);
+    expect(mockLoggerDebug).toHaveBeenCalledWith({ error: awsError }, 'Aurora: check failed');
+  });
+
+  test('deployCodefresh stops before pipeline invocation when its ownership-clearing patch is stale', async () => {
+    const { service, deployPatch } = serviceHarness();
+    deployPatch.mockResolvedValueOnce(0);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
+
+    expect(mockCodefreshDeploy).not.toHaveBeenCalled();
+    expect(mockWaitForCodefresh).not.toHaveBeenCalled();
+  });
+
+  test('deployCodefresh records a source-resolution failure before invoking the pipeline', async () => {
+    const { service } = serviceHarness();
+    const deploy = codefreshDeploy({ branchName: null });
+    const recordFailure = jest.spyOn(service, 'recordDeployFailure').mockResolvedValue(false);
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(false);
+
+    expect(recordFailure).toHaveBeenCalledWith(
+      deploy,
+      'run-1',
+      expect.objectContaining({
+        status: DeployStatus.BUILD_FAILED,
+        fallbackMessage: 'CI build failed.',
+        error: expect.objectContaining({
+          message:
+            'Unable to resolve branch "the selected branch" in repository "org/repo". Verify the branch exists and the repository matches the selected service.',
+        }),
+      })
+    );
+    expect(mockCodefreshDeploy).not.toHaveBeenCalled();
+  });
+
+  test('buildImage contains an ordinary Helm classifier failure as a false image result', async () => {
+    const { service } = serviceHarness();
+    const classifierError = new Error('chart metadata unavailable');
+    mockDetermineChartType.mockRejectedValue(classifierError);
+    const deploy: any = {
+      id: 1,
+      uuid: 'chart-env',
+      deployable: { type: DeployTypes.HELM },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(false);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith({ error: classifierError }, 'Helm: deployment processing failed');
+  });
+
+  test('syncServiceExternalSecrets returns an empty result without configured providers or secret references', async () => {
+    const { service } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets');
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: undefined,
+          runUUID: 'run-1',
+        })
+      ).resolves.toEqual({ secretNames: [], buildSecretEnvKeys: new Set() });
+
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true } },
+          runUUID: 'run-1',
+        })
+      ).resolves.toEqual({ secretNames: [], buildSecretEnvKeys: new Set() });
+
+      expect(processSecrets).not.toHaveBeenCalled();
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    } finally {
+      processSecrets.mockRestore();
+    }
+  });
+
+  test('syncServiceExternalSecrets rejects conflicting build and init references for the same env key', async () => {
+    const { service } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    deploy.env = { TOKEN: '{{aws:repo/build:TOKEN}}' };
+    deploy.initEnv = { TOKEN: '{{aws:repo/init:TOKEN}}' };
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets');
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true } },
+          runUUID: 'run-1',
+        })
+      ).resolves.toBe(false);
+
+      expect(patchActivity).toHaveBeenCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+      expect(processSecrets).not.toHaveBeenCalled();
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    } finally {
+      processSecrets.mockRestore();
+    }
+  });
+
+  test('syncServiceExternalSecrets uses the BuildService mutation gate and stops when admission is lost', async () => {
+    const { service, db } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    deploy.env = { TOKEN: '{{aws:repo/build:TOKEN}}' };
+    const gate = jest.fn().mockResolvedValue({ admitted: false });
+    db.services.BuildService = { withCurrentDeploySecretMutationLock: gate };
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets');
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true } },
+          runUUID: 'run-1',
+          expectedGeneration: 7,
+        })
+      ).resolves.toBe(false);
+
+      expect(gate).toHaveBeenCalledWith(17, expect.any(Function), expect.any(Function));
+      expect(processSecrets).not.toHaveBeenCalled();
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+    } finally {
+      processSecrets.mockRestore();
+    }
+  });
+
+  test('syncServiceExternalSecrets returns processed build keys without waiting when no Kubernetes secret is expected', async () => {
+    const { service } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    deploy.env = { TOKEN: '{{aws:repo/build:TOKEN}}' };
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets').mockResolvedValue({
+      secretRefs: [{ envKey: 'TOKEN', provider: 'aws', path: 'repo/build', key: 'TOKEN' }],
+      expectedKeysPerSecret: {},
+      syncTokensPerSecret: {},
+      warnings: ['provider used a deprecated field'],
+    });
+    const waitForSecretSync = jest.spyOn(SecretProcessor.prototype, 'waitForSecretSync');
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true } },
+          runUUID: 'run-1',
+          expectedGeneration: 7,
+        })
+      ).resolves.toEqual({ secretNames: [], buildSecretEnvKeys: new Set(['TOKEN']) });
+
+      expect(waitForSecretSync).not.toHaveBeenCalled();
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        'Build: secret processing warnings service=app warnings=provider used a deprecated field'
+      );
+    } finally {
+      processSecrets.mockRestore();
+      waitForSecretSync.mockRestore();
+    }
+  });
+
+  test('syncServiceExternalSecrets publishes BUILD_FAILED when provider convergence fails for the current run', async () => {
+    const { service } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    deploy.env = { TOKEN: '{{aws:repo/build:TOKEN}}' };
+    const syncError = new Error('external secret did not converge');
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets').mockResolvedValue({
+      secretRefs: [{ envKey: 'TOKEN', provider: 'aws', path: 'repo/build', key: 'TOKEN' }],
+      expectedKeysPerSecret: { 'app-aws-secrets': ['TOKEN'] },
+      syncTokensPerSecret: { 'app-aws-secrets': 'sync-1' },
+      warnings: [],
+    });
+    const waitForSecretSync = jest.spyOn(SecretProcessor.prototype, 'waitForSecretSync').mockRejectedValue(syncError);
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true, secretSyncTimeout: 12 } },
+          runUUID: 'run-1',
+          expectedGeneration: 7,
+        })
+      ).resolves.toBe(false);
+
+      expect(waitForSecretSync).toHaveBeenCalledWith({ 'app-aws-secrets': ['TOKEN'] }, 'env-env', 12000, {
+        'app-aws-secrets': 'sync-1',
+      });
+      expect(patchActivity).toHaveBeenCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+    } finally {
+      processSecrets.mockRestore();
+      waitForSecretSync.mockRestore();
+    }
+  });
+
+  test('waitAndResolveForBuildDependentEnvVars waits, extracts matches, preserves ordering-only dependencies, and patches once', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const dependentDeploy = { uuid: 'database-env' };
+    const deploy = sourceBuildDeploy();
+    deploy.build.deploys = [dependentDeploy as any];
+    deploy.deployable.env = { DATABASE_URL: 'build:database' };
+    mockExtractEnvVarsWithBuildDependencies.mockReturnValue({
+      database: [
+        { envKey: 'DATABASE_URL', pattern: 'postgres://[^\\s]+' },
+        { envKey: 'ORDER_ONLY', pattern: '' },
+        { envKey: 'NOT_FOUND', pattern: 'redis://[^\\s]+' },
+      ],
+    });
+    mockWaitForColumnValue
+      .mockResolvedValueOnce({ buildPipelineId: 'pipeline-db' })
+      .mockResolvedValueOnce({ buildOutput: 'DATABASE_URL=postgres://db.example.test/app' });
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await service.waitAndResolveForBuildDependentEnvVars(deploy as any, { KEEP: 'visible' }, 'run-1');
+
+    expect(patchActivity).toHaveBeenCalledWith(
+      deploy,
+      { status: DeployStatus.WAITING, statusMessage: 'Waiting for database-env to finish building.' },
+      'run-1'
+    );
+    expect(mockWaitForColumnValue).toHaveBeenNthCalledWith(1, dependentDeploy, 'buildPipelineId');
+    expect(mockWaitForColumnValue).toHaveBeenNthCalledWith(2, dependentDeploy, 'buildOutput', 240, 5000);
+    expect(deployPatch).toHaveBeenLastCalledWith({
+      env: {
+        KEEP: 'visible',
+        DATABASE_URL: 'postgres://db.example.test/app',
+        ORDER_ONLY: '',
+      },
+    });
+  });
+
+  test.each([
+    ['times out', undefined, 'Timed out waiting for build output from database-env'],
+    ['has no logs', { buildOutput: null }, 'No output logs found for app-env'],
+  ])('waitAndResolveForBuildDependentEnvVars rejects when dependency output %s', async (_case, output, message) => {
+    const { service, deployPatch } = serviceHarness();
+    const dependentDeploy = { uuid: 'database-env' };
+    const deploy = sourceBuildDeploy();
+    deploy.build.deploys = [dependentDeploy as any];
+    mockExtractEnvVarsWithBuildDependencies.mockReturnValue({
+      database: [{ envKey: 'DATABASE_URL', pattern: 'postgres://[^\\s]+' }],
+    });
+    mockWaitForColumnValue.mockResolvedValueOnce({ buildPipelineId: 'pipeline-db' }).mockResolvedValueOnce(output);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(
+      service.waitAndResolveForBuildDependentEnvVars(deploy as any, { KEEP: 'visible' }, 'run-1')
+    ).rejects.toThrow(message);
+
+    expect(deployPatch).not.toHaveBeenCalled();
+  });
+
+  test('buildImageForHelmAndGithub contains a tag-patch database failure and completes the cached-image path', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const tagPatchError = new Error('deploy tag patch unavailable');
+    deployPatch.mockRejectedValue(tagPatchError);
+    mockCodefreshTagExists.mockResolvedValue(true);
+    const deploy = sourceBuildDeploy();
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith({ error: tagPatchError }, 'Deploy: tag patch failed');
+    expect(patchActivity).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILT }, 'run-1');
+  });
+
+  test('a cached native image tolerates nullable service and comment environments without scanning secrets', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(true);
+    mockGlobalConfigGetAllConfigs.mockResolvedValue({
+      lifecycleDefaults: {
+        buildPipeline: 'sample/build-image',
+        deployCluster: 'test-cluster',
+        ecrDomain: 'registry.example.test',
+        ecrRegistry: 'sample-registry',
+      },
+      app_setup: { org: 'example-org' },
+      buildDefaults: {},
+      secretProviders: { aws: { enabled: true } },
+    });
+    const deploy = sourceBuildDeploy();
+    deploy.env = null;
+    deploy.initEnv = null;
+    deploy.build.commentRuntimeEnv = null;
+    deploy.build.commentInitEnv = null;
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets');
+
+    try {
+      await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(true);
+
+      expect(mockCodefreshTagExists).toHaveBeenCalledWith(expect.objectContaining({ tag: `lfc-abcdef1-${hash({})}` }));
+      expect(processSecrets).not.toHaveBeenCalled();
+      expect(mockCreateOrUpdateNamespace).not.toHaveBeenCalled();
+      expect(mockBuildWithNative).not.toHaveBeenCalled();
+      expect(deployPatch).toHaveBeenCalledWith(
+        expect.objectContaining({ status: DeployStatus.BUILT, statusMessage: 'Successfully built image' })
+      );
+      expect(deployPatch).toHaveBeenLastCalledWith({ status: DeployStatus.BUILT });
+    } finally {
+      processSecrets.mockRestore();
+    }
+  });
+
+  test('native image builds exclude externally injected secret env keys while preserving ordinary build env', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: true });
+    const deploy = sourceBuildDeploy();
+    deploy.env = {
+      TOKEN: '{{aws:repo/build:TOKEN}}',
+      KEEP: 'visible',
+    };
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'syncServiceExternalSecrets').mockResolvedValue({
+      secretNames: ['app-aws-secrets'],
+      buildSecretEnvKeys: new Set(['TOKEN']),
+    });
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+
+    await expect(
+      service.buildImageForHelmAndGithub(deploy, 'run-1', undefined, undefined, undefined, undefined, 'builder-sa')
+    ).resolves.toBe(true);
+
+    expect(mockBuildWithNative).toHaveBeenCalledWith(
+      deploy,
+      expect.objectContaining({
+        envVars: { KEEP: 'visible' },
+        secretRefs: ['app-aws-secrets'],
+        secretEnvKeys: ['TOKEN'],
+        serviceAccount: 'builder-sa',
+      })
+    );
+  });
+
+  test('a comment-only secret is scanned but excluded from native build env when the stored service env is null', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: true });
+    mockGlobalConfigGetAllConfigs.mockResolvedValue({
+      lifecycleDefaults: {
+        buildPipeline: 'sample/build-image',
+        deployCluster: 'test-cluster',
+        ecrDomain: 'registry.example.test',
+        ecrRegistry: 'sample-registry',
+      },
+      app_setup: { org: 'example-org' },
+      buildDefaults: {},
+      secretProviders: { aws: { enabled: true } },
+    });
+    const deploy = sourceBuildDeploy();
+    deploy.env = null;
+    deploy.initEnv = null;
+    deploy.build.commentRuntimeEnv = { TOKEN: '{{aws:repo/comment:TOKEN}}' };
+    deploy.build.commentInitEnv = null;
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets').mockResolvedValue({
+      secretRefs: [{ envKey: 'TOKEN', provider: 'aws', path: 'repo/comment', key: 'TOKEN' }],
+      expectedKeysPerSecret: { 'app-aws-secrets': ['TOKEN'] },
+      syncTokensPerSecret: { 'app-aws-secrets': 'sync-1' },
+      warnings: [],
+    });
+    const waitForSecretSync = jest.spyOn(SecretProcessor.prototype, 'waitForSecretSync').mockResolvedValue(undefined);
+
+    try {
+      await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(true);
+
+      expect(processSecrets).toHaveBeenCalledWith({
+        env: { TOKEN: '{{aws:repo/comment:TOKEN}}' },
+        serviceName: 'app',
+        namespace: 'env-env',
+        buildUuid: 'app-env',
+      });
+      expect(waitForSecretSync).toHaveBeenCalledWith({ 'app-aws-secrets': ['TOKEN'] }, 'env-env', 60000, {
+        'app-aws-secrets': 'sync-1',
+      });
+      expect(mockBuildWithNative).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({
+          envVars: {},
+          secretRefs: ['app-aws-secrets'],
+          secretEnvKeys: ['TOKEN'],
+        })
+      );
+      expect(deployPatch).toHaveBeenCalledWith(
+        expect.objectContaining({ status: DeployStatus.BUILT, statusMessage: 'Successfully built image' })
+      );
+    } finally {
+      processSecrets.mockRestore();
+      waitForSecretSync.mockRestore();
+    }
+  });
+
+  test('a failed cold-image after-build does not publish a terminal result after deployment authority moves', async () => {
+    const { service, deployQuery, deployPatch } = serviceHarness();
+    let current = true;
+    deployQuery.select.mockImplementation(async () => (current ? { id: 17 } : null));
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: true });
+    mockCodefreshTriggerPipeline.mockResolvedValue('after-build-run');
+    mockCodefreshWaitForImage.mockImplementation(async () => {
+      current = false;
+      return false;
+    });
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.afterBuildPipelineId = 'org/after-build';
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-cold')).resolves.toBe(true);
+
+    expect(mockCodefreshTriggerPipeline).toHaveBeenCalledWith(
+      'org/after-build',
+      'cli',
+      expect.objectContaining({ SOURCE_REVISION: 'abcdef1234567890', SOURCE_BRANCH: 'main' })
+    );
+    expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
+    expect(deployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILT }));
+    expect(deployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILD_FAILED }));
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      'Image: after-build publication skipped reason=superseded result=failure'
+    );
+  });
+
+  test('a failed cached-image after-build does not publish a terminal result after deployment authority moves', async () => {
+    const { service, deployQuery, deployPatch } = serviceHarness();
+    let current = true;
+    deployQuery.select.mockImplementation(async () => (current ? { id: 17 } : null));
+    mockCodefreshTagExists.mockResolvedValue(true);
+    mockCodefreshTriggerPipeline.mockResolvedValue('after-build-run');
+    mockCodefreshWaitForImage.mockImplementation(async () => {
+      current = false;
+      return false;
+    });
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.afterBuildPipelineId = 'org/after-build';
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-cached')).resolves.toBe(true);
+
+    expect(mockBuildWithNative).not.toHaveBeenCalled();
+    expect(mockCodefreshTriggerPipeline).toHaveBeenCalledWith(
+      'org/after-build',
+      'cli',
+      expect.objectContaining({ SOURCE_REVISION: 'abcdef1234567890', SOURCE_BRANCH: 'main' })
+    );
+    expect(mockCodefreshWaitForImage).toHaveBeenCalledWith('after-build-run');
+    expect(deployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILT }));
+    expect(deployPatch).not.toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILD_FAILED }));
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      'Image: after-build publication skipped reason=superseded result=failure'
+    );
+  });
+
+  test('native image build stops before the builder when external-secret mutation fails', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    const deploy = sourceBuildDeploy();
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'syncServiceExternalSecrets').mockResolvedValue(false);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(false);
+
+    expect(mockBuildWithNative).not.toHaveBeenCalled();
+  });
+
+  test('native image build stops after secret sync when deployment authority has moved', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    const deploy = sourceBuildDeploy();
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'syncServiceExternalSecrets').mockResolvedValue({
+      secretNames: [],
+      buildSecretEnvKeys: new Set(),
+    });
+    jest
+      .spyOn(service as any, 'isDeploymentRunCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1', undefined, undefined, undefined, 7)).resolves.toBe(
+      true
+    );
+
+    expect(mockBuildWithNative).not.toHaveBeenCalled();
+  });
+
+  test('source image build stops after dependency resolution when deployment authority has moved', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    const deploy = sourceBuildDeploy();
+    const waitForDependencies = jest
+      .spyOn(service, 'waitAndResolveForBuildDependentEnvVars')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(false);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1', undefined, undefined, undefined, 7)).resolves.toBe(
+      true
+    );
+
+    expect(waitForDependencies).toHaveBeenCalled();
+    expect(deploy.reload).not.toHaveBeenCalled();
+    expect(mockBuildWithNative).not.toHaveBeenCalled();
+  });
+
+  test('a current failed native build persists bounded logs and publishes BUILD_FAILED', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const logs = `discarded-${'x'.repeat(70_000)}`;
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: false, logs });
+    const deploy = sourceBuildDeploy();
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'syncServiceExternalSecrets').mockResolvedValue({
+      secretNames: [],
+      buildSecretEnvKeys: new Set(),
+    });
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(false);
+
+    expect(deployPatch).toHaveBeenCalledWith({ buildOutput: logs.slice(-65536) });
+    expect(patchActivity).toHaveBeenLastCalledWith(deploy, { status: DeployStatus.BUILD_FAILED }, 'run-1');
+  });
+
+  test('a native result is ignored when authority moves between its two publication checks', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: true });
+    const deploy = sourceBuildDeploy();
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'syncServiceExternalSecrets').mockResolvedValue({
+      secretNames: [],
+      buildSecretEnvKeys: new Set(),
+    });
+    jest
+      .spyOn(service as any, 'isDeploymentRunCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const patchTag = jest.spyOn(service as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1', undefined, undefined, undefined, 7)).resolves.toBe(
+      true
+    );
+
+    expect(patchTag).not.toHaveBeenCalled();
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      'Image: native result publication skipped reason=superseded result=success'
+    );
+  });
+
+  test('a Codefresh image result is ignored when deployment authority moves during the pipeline wait', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockCodefreshBuildImage.mockResolvedValue('build-1');
+    mockCodefreshWaitForImage.mockResolvedValue(true);
+    mockCodefreshGetLogs.mockResolvedValue('build logs');
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.builder.engine = 'ci';
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'isDeploymentRunCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1', undefined, undefined, undefined, 7)).resolves.toBe(
+      true
+    );
+
+    expect(deployPatch).not.toHaveBeenCalledWith({ buildOutput: 'build logs' });
+  });
+
+  test('cached native image publication stops when external-secret sync fails or authority moves', async () => {
+    const first = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(true);
+    const failedSyncDeploy = sourceBuildDeploy();
+    jest.spyOn(first.service as any, 'syncServiceExternalSecrets').mockResolvedValue(false);
+    jest.spyOn(first.service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const firstPatchTag = jest.spyOn(first.service as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+
+    await expect(first.service.buildImageForHelmAndGithub(failedSyncDeploy, 'run-1')).resolves.toBe(false);
+    expect(firstPatchTag).not.toHaveBeenCalled();
+
+    const second = serviceHarness();
+    const staleDeploy = sourceBuildDeploy();
+    jest.spyOn(second.service as any, 'syncServiceExternalSecrets').mockResolvedValue({
+      secretNames: [],
+      buildSecretEnvKeys: new Set(),
+    });
+    jest.spyOn(second.service as any, 'isDeploymentRunCurrent').mockResolvedValue(false);
+    jest.spyOn(second.service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    const secondPatchTag = jest.spyOn(second.service as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+
+    await expect(
+      second.service.buildImageForHelmAndGithub(staleDeploy, 'run-2', undefined, undefined, undefined, 7)
+    ).resolves.toBe(true);
+    expect(secondPatchTag).not.toHaveBeenCalled();
+  });
+
+  test('buildImageForHelmAndGithub rejects a source-backed service whose repository relation disappeared', async () => {
+    const { service } = serviceHarness();
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.repository = null;
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).rejects.toThrow(
+      'Unable to resolve branch "main" in repository "the selected repository". Verify the branch exists and the repository matches the selected service.'
+    );
+
+    expect(patchActivity).toHaveBeenCalledWith(deploy, { status: DeployStatus.CLONING }, 'run-1');
+    expect(mockCodefreshTagExists).not.toHaveBeenCalled();
+  });
+
+  test('syncServiceExternalSecrets fallback gate does not call the provider after ownership is stale', async () => {
+    const { service, deployQuery } = serviceHarness();
+    deployQuery.select.mockResolvedValue(null);
+    const deploy = sourceBuildDeploy();
+    deploy.env = { TOKEN: '{{aws:repo/build:TOKEN}}' };
+    const processSecrets = jest.spyOn(SecretProcessor.prototype, 'processEnvSecrets');
+
+    try {
+      await expect(
+        (service as any).syncServiceExternalSecrets({
+          deploy,
+          serviceName: 'app',
+          secretProviders: { aws: { enabled: true } },
+          runUUID: 'run-1',
+          expectedGeneration: 7,
+        })
+      ).resolves.toBe(false);
+
+      expect(processSecrets).not.toHaveBeenCalled();
+    } finally {
+      processSecrets.mockRestore();
+    }
+  });
+
+  test('an after-build pipeline is not triggered when its initial fenced status patch is stale', async () => {
+    const { service, deployPatch } = serviceHarness();
+    deployPatch.mockResolvedValueOnce(0);
+    mockCodefreshTagExists.mockResolvedValue(true);
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.builder.engine = 'ci';
+    deploy.deployable.afterBuildPipelineId = 'org/after-build';
+    const patchActivity = jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(false);
+
+    expect(mockCodefreshTriggerPipeline).not.toHaveBeenCalled();
+    expect(patchActivity).toHaveBeenLastCalledWith(
+      deploy,
+      { status: DeployStatus.BUILD_FAILED, statusMessage: 'After-build pipeline failed.' },
+      'run-1'
+    );
+  });
+
+  test('dependency resolution leaves env unchanged when no build pipeline id materializes', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const dependentDeploy = { uuid: 'database-env' };
+    const deploy = sourceBuildDeploy();
+    deploy.build.deploys = [dependentDeploy];
+    mockExtractEnvVarsWithBuildDependencies.mockReturnValue({
+      database: [{ envKey: 'DATABASE_URL', pattern: 'postgres://[^\\s]+' }],
+    });
+    mockWaitForColumnValue.mockResolvedValue({ buildPipelineId: null });
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+    await service.waitAndResolveForBuildDependentEnvVars(deploy, { KEEP: 'visible' }, 'run-1');
+
+    expect(mockWaitForColumnValue).toHaveBeenCalledTimes(1);
+    expect(deployPatch).toHaveBeenLastCalledWith({ env: { KEEP: 'visible' } });
+  });
+
+  test('findOrCreateDeploys stops before persistence when the build has not been assigned an id', async () => {
+    const { service, db } = serviceHarness();
+    const build: any = {
+      uuid: 'transient-environment',
+      deployables: [],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.findOrCreateDeploys({} as any, build)).resolves.toEqual([]);
+
+    expect(build.$fetchGraph).toHaveBeenCalledWith('[deployables.[repository]]');
+    expect(db.models.Deploy.query).not.toHaveBeenCalled();
+    expect(mockLoggerError).toHaveBeenCalledWith('Deploy: build id missing for=findOrCreateDeploys');
+  });
+
+  test('deployAurora records a terminal error without calling AWS or CLI when its deployable relation is missing', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const deploy: any = {
+      id: 17,
+      buildId: 91,
+      uuid: 'database-environment',
+      status: DeployStatus.PENDING,
+      cname: null,
+      build: {
+        id: 91,
+        uuid: 'environment',
+        kind: BuildKind.SANDBOX,
+        githubDeployments: false,
+        pullRequest: null,
+      },
+      deployable: null,
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(false);
+
+    expect(deployPatch).toHaveBeenCalledWith({
+      status: DeployStatus.ERROR,
+      statusMessage: 'Aurora restore deployable is missing.',
+    });
+    expect(mockTaggingGetResources).not.toHaveBeenCalled();
+    expect(mockRdsDescribeDBInstances).not.toHaveBeenCalled();
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+  });
+
+  test('buildImage publishes a source-free public Helm chart without consulting GitHub', async () => {
+    const { service, deployPatch } = serviceHarness();
+    const deploy: any = {
+      id: 18,
+      buildId: 91,
+      uuid: 'public-chart-environment',
+      branchName: null,
+      tag: 'latest',
+      build: {
+        id: 91,
+        kind: BuildKind.SANDBOX,
+        githubDeployments: false,
+        pullRequest: null,
+      },
+      deployable: {
+        name: 'public-chart',
+        type: DeployTypes.HELM,
+        repository: null,
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    mockDetermineChartType.mockResolvedValue(ChartType.PUBLIC);
+
+    await expect(service.buildImage(deploy, 0, 'run-1')).resolves.toBe(true);
+
+    expect(deployPatch).toHaveBeenLastCalledWith({
+      status: DeployStatus.BUILT,
+      statusMessage: 'Helm chart does not need to be built',
+    });
+    expect(github.getSHAForBranch).not.toHaveBeenCalled();
+    expect(github.getShaForDeploy).not.toHaveBeenCalled();
   });
 });

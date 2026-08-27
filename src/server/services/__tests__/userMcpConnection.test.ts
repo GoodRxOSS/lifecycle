@@ -429,4 +429,348 @@ describe('UserMcpConnectionService', () => {
     expect(result?.validatedAt).toBe('2026-04-06T18:00:00.000Z');
     expect(result?.updatedAt).toBe('2026-04-06T18:01:00.000Z');
   });
+
+  it('returns the requested empty-state auth mode when no connection exists', async () => {
+    await expect(
+      UserMcpConnectionService.getMaskedState('sample-user', 'global', 'missing', 'sample-user', undefined, 'oauth')
+    ).resolves.toEqual({
+      slug: 'missing',
+      scope: 'global',
+      authMode: 'oauth',
+      configured: false,
+      stale: false,
+      configuredFieldKeys: [],
+      validatedAt: null,
+      validationError: null,
+      discoveredTools: [],
+      updatedAt: null,
+    });
+    await expect(
+      UserMcpConnectionService.getDecryptedConnection('sample-user', 'global', 'missing', 'sample-user')
+    ).resolves.toBeNull();
+  });
+
+  it('reconciles an owner-key match to the current user identity', async () => {
+    const record = {
+      id: 9,
+      userId: 'old-user-id',
+      ownerGithubUsername: 'ExampleUser',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState: 'enc:{"type":"oauth","tokens":{"refresh_token":"refresh"}}',
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    };
+    mockQuery.first.mockResolvedValue(record);
+
+    const result = await UserMcpConnectionService.getMaskedState(
+      'current-user-id',
+      'global',
+      'sample-oauth',
+      ' ExampleUser '
+    );
+
+    expect(mockQuery.patch).toHaveBeenCalledWith({
+      userId: 'current-user-id',
+      ownerGithubUsername: 'ExampleUser',
+    });
+    expect(record.userId).toBe('current-user-id');
+    expect(result).toMatchObject({ authMode: 'oauth', configured: true, stale: false });
+  });
+
+  it('falls back to the user key and migrates ownership when the canonical owner has no row', async () => {
+    const fallback = {
+      id: 10,
+      userId: 'user-id',
+      ownerGithubUsername: 'user-id',
+      scope: 'global',
+      slug: 'sample-fields',
+      encryptedState: 'enc:{"type":"fields","values":{"token":"value"}}',
+      definitionFingerprint: 'fingerprint-fields',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    };
+    mockQuery.first.mockResolvedValueOnce(null).mockResolvedValueOnce(fallback);
+
+    const result = await UserMcpConnectionService.getDecryptedConnection(
+      'user-id',
+      'global',
+      'sample-fields',
+      'github-user'
+    );
+
+    expect(result?.state).toEqual({ type: 'fields', values: { token: 'value' } });
+    expect(mockQuery.patch).toHaveBeenCalledWith({ userId: 'user-id', ownerGithubUsername: 'github-user' });
+  });
+
+  it('returns no connection when neither canonical owner nor user fallback has a row', async () => {
+    mockQuery.first.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+
+    await expect(
+      UserMcpConnectionService.getDecryptedConnection('user-id', 'global', 'missing', 'github-user')
+    ).resolves.toBeNull();
+  });
+
+  it('preserves an incoming fields state when pending-flow protection is irrelevant', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 7,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      encryptedState: 'enc:{"type":"oauth","oauthState":"pending"}',
+    });
+
+    await UserMcpConnectionService.upsertConnection({
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-fields',
+      state: { type: 'fields', values: { apiToken: 'fresh-token' } },
+      definitionFingerprint: 'fingerprint-fields',
+      discoveredTools: [],
+      validatedAt: null,
+      preservePendingFlowState: true,
+    });
+
+    expect(JSON.parse((encrypt as jest.Mock).mock.calls[0][0])).toEqual({
+      type: 'fields',
+      values: { apiToken: 'fresh-token' },
+    });
+  });
+
+  it('treats unknown stored state types as unreadable and non-stale without a current fingerprint', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 1,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'unknown-state',
+      encryptedState: 'enc:{"type":"unknown"}',
+      definitionFingerprint: 'fingerprint-1',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: 123,
+      updatedAt: null,
+    });
+
+    const result = await UserMcpConnectionService.getMaskedState(
+      'sample-user',
+      'global',
+      'unknown-state',
+      'sample-user'
+    );
+
+    expect(result).toMatchObject({ authMode: 'none', configured: false, stale: false, validatedAt: null });
+    expect(result.validationError).toContain('Stored connection could not be read');
+  });
+
+  it('treats structurally invalid decrypted JSON as unreadable state', async () => {
+    mockQuery.first.mockResolvedValue({
+      id: 1,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'invalid-state',
+      encryptedState: 'enc:null',
+      definitionFingerprint: 'fingerprint-1',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+
+    const result = await UserMcpConnectionService.getDecryptedConnection(
+      'sample-user',
+      'global',
+      'invalid-state',
+      'sample-user'
+    );
+
+    expect(result?.state).toBeNull();
+    expect(result?.validationError).toContain('Stored connection could not be read');
+  });
+
+  it('lists masked states once per unique non-empty scope', async () => {
+    const records = [
+      {
+        id: 1,
+        userId: 'sample-user',
+        ownerGithubUsername: 'sample-user',
+        scope: 'global',
+        slug: 'sample-fields',
+        encryptedState: 'enc:{"type":"fields","values":{"token":"value"}}',
+        definitionFingerprint: 'fingerprint-fields',
+        discoveredTools: [{ name: 'inspect', inputSchema: {} }],
+        validationError: null,
+        validatedAt: null,
+        updatedAt: null,
+      },
+    ];
+    mockQuery.whereIn.mockResolvedValue(records);
+
+    const result = await UserMcpConnectionService.listMaskedStatesByScopes(
+      'sample-user',
+      ['global', '', 'global'],
+      'sample-user'
+    );
+
+    expect(mockQuery.whereIn).toHaveBeenCalledWith('scope', ['global']);
+    expect(result.get('global:sample-fields')).toMatchObject({
+      configured: true,
+      discoveredTools: records[0].discoveredTools,
+    });
+  });
+
+  it('falls back to user-owned rows when bulk masked lookup has no canonical-owner matches', async () => {
+    const fallback = {
+      id: 2,
+      userId: 'user-id',
+      ownerGithubUsername: 'user-id',
+      scope: 'global',
+      slug: 'sample-fields',
+      encryptedState: 'enc:{"type":"fields","values":{"token":"value"}}',
+      definitionFingerprint: 'fingerprint-fields',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    };
+    mockQuery.whereIn.mockResolvedValueOnce([]).mockResolvedValueOnce([fallback]);
+
+    const result = await UserMcpConnectionService.listMaskedStatesByScopes('user-id', ['global'], 'github-user');
+
+    expect(mockQuery.patch).toHaveBeenCalledWith({ userId: 'user-id', ownerGithubUsername: 'github-user' });
+    expect(result.has('global:sample-fields')).toBe(true);
+  });
+
+  it('lists decrypted connections and applies definition fingerprint staleness', async () => {
+    const record = {
+      id: 3,
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState: 'enc:{"type":"oauth","tokens":{"access_token":"access"}}',
+      definitionFingerprint: 'old-fingerprint',
+      discoveredTools: [{ name: 'inspect', inputSchema: {} }],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    };
+    mockQuery.whereIn.mockResolvedValue([record]);
+
+    const result = await UserMcpConnectionService.listDecryptedConnectionsByScopes(
+      'sample-user',
+      ['global'],
+      'sample-user',
+      new Map([['global:sample-oauth', 'new-fingerprint']])
+    );
+
+    expect(result.get('global:sample-oauth')).toMatchObject({ state: null, stale: true, discoveredTools: [] });
+  });
+
+  it('falls back to user-owned rows during bulk decrypted lookup and reconciles ownership', async () => {
+    const fallback = {
+      id: 5,
+      userId: 'user-id',
+      ownerGithubUsername: 'user-id',
+      scope: 'global',
+      slug: 'sample-oauth',
+      encryptedState: 'enc:{"type":"oauth","tokens":{"access_token":"access"}}',
+      definitionFingerprint: 'fingerprint-oauth',
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    };
+    mockQuery.whereIn.mockResolvedValueOnce([]).mockResolvedValueOnce([fallback]);
+
+    const result = await UserMcpConnectionService.listDecryptedConnectionsByScopes(
+      'user-id',
+      ['global'],
+      'github-user'
+    );
+
+    expect(mockQuery.patch).toHaveBeenCalledWith({ userId: 'user-id', ownerGithubUsername: 'github-user' });
+    expect(result.get('global:sample-oauth')?.state).toMatchObject({ type: 'oauth' });
+  });
+
+  it.each([
+    ['returns false when no connection exists', null, 1, false],
+    ['returns false when deletion affects no row', { id: 4 }, 0, false],
+    ['returns true when deletion removes the row', { id: 4 }, 1, true],
+  ])('%s', async (_label, record, deletedCount, expected) => {
+    mockQuery.first.mockResolvedValue(record);
+    mockQuery.delete.mockResolvedValue(deletedCount);
+
+    await expect(
+      UserMcpConnectionService.deleteConnection('sample-user', 'global', 'sample', 'sample-user')
+    ).resolves.toBe(expected);
+  });
+
+  it('lists masked users without exposing state values and marks stale definitions', async () => {
+    mockQuery.orderBy.mockResolvedValue([
+      {
+        userId: 'user-1',
+        ownerGithubUsername: '',
+        scope: 'global',
+        slug: 'sample-server',
+        encryptedState: 'enc:{"type":"fields","values":{"secret":"value"}}',
+        definitionFingerprint: 'current-fingerprint',
+        discoveredTools: [{ name: 'inspect', inputSchema: {} }],
+        validationError: null,
+        validatedAt: '2026-04-06T18:00:00.000Z',
+        updatedAt: '2026-04-06T18:01:00.000Z',
+      },
+      {
+        userId: 'user-2',
+        ownerGithubUsername: 'github-user-2',
+        scope: 'global',
+        slug: 'sample-server',
+        encryptedState: 'enc:{"type":"oauth","tokens":{"refresh_token":"refresh"}}',
+        definitionFingerprint: 'old-fingerprint',
+        discoveredTools: [{ name: 'write', inputSchema: {} }],
+        validationError: 'Reconnect required',
+        validatedAt: null,
+        updatedAt: null,
+      },
+    ]);
+
+    const result = await UserMcpConnectionService.listMaskedUsersForServer(
+      'global',
+      'sample-server',
+      'current-fingerprint'
+    );
+
+    expect(result).toEqual([
+      {
+        userId: 'user-1',
+        ownerGithubUsername: null,
+        authMode: 'fields',
+        stale: false,
+        configuredFieldKeys: ['secret'],
+        discoveredToolCount: 1,
+        validationError: null,
+        validatedAt: '2026-04-06T18:00:00.000Z',
+        updatedAt: '2026-04-06T18:01:00.000Z',
+      },
+      {
+        userId: 'user-2',
+        ownerGithubUsername: 'github-user-2',
+        authMode: 'oauth',
+        stale: true,
+        configuredFieldKeys: [],
+        discoveredToolCount: 0,
+        validationError: 'Reconnect required',
+        validatedAt: null,
+        updatedAt: null,
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toContain('value');
+    expect(JSON.stringify(result)).not.toContain('refresh');
+  });
 });

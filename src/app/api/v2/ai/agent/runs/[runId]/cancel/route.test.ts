@@ -96,6 +96,21 @@ describe('POST /api/v2/ai/agent/runs/[runId]/cancel', () => {
     expect(body.error.message).toBe('Agent run not found');
   });
 
+  it('maps an unexpected cancellation failure to 500', async () => {
+    const error = new Error('database unavailable');
+    mockCancelRun.mockRejectedValueOnce(error);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ runId: 'run-1' }),
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'database unavailable' },
+    });
+    expect(mockIsRunNotFoundError).toHaveBeenCalledWith(error);
+  });
+
   it('rejects unauthenticated requests', async () => {
     mockGetRequestUserIdentity.mockReturnValueOnce(null);
 

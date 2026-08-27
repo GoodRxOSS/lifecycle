@@ -139,6 +139,18 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events/stream', () => {
     expect(body.error.message).toBe('Agent run not found');
   });
 
+  it('maps an unexpected run lookup failure to 500', async () => {
+    mockGetOwnedRun.mockRejectedValue(new Error('run store unavailable'));
+    mockIsRunNotFoundError.mockReturnValue(false);
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events/stream'), {
+      params: Promise.resolve({ runId: 'run-1' }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(mockCreateCanonicalRunEventStream).not.toHaveBeenCalled();
+  });
+
   it('returns 401 when the request has no user identity', async () => {
     mockGetRequestUserIdentity.mockReturnValue(null);
 

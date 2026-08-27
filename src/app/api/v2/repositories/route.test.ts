@@ -37,11 +37,11 @@ jest.mock('server/services/repository', () => ({
 
 import { GET, POST } from './route';
 
-function makeRequest(url: string, body?: unknown) {
+function makeRequest(url: string, body: unknown = {}, jsonError?: unknown) {
   return {
     headers: new Headers([['x-request-id', 'req-test']]),
     nextUrl: new URL(url),
-    json: jest.fn().mockResolvedValue(body || {}),
+    json: jsonError === undefined ? jest.fn().mockResolvedValue(body) : jest.fn().mockRejectedValue(jsonError),
   } as unknown as NextRequest;
 }
 
@@ -106,6 +106,62 @@ describe('/api/v2/repositories', () => {
       expect(response.status).toBe(400);
       expect(body.error.message).toContain('view must be onboarded or all');
     });
+
+    test('forwards a numeric installation id and default filters to installed listing', async () => {
+      const response = await GET(makeRequest('http://localhost/api/v2/repositories?view=all&installationId=42'));
+
+      expect(response.status).toBe(200);
+      expect(mockParseOnboardedParam).toHaveBeenCalledWith(null);
+      expect(mockListInstalledRepositories).toHaveBeenCalledWith({
+        query: '',
+        page: 1,
+        limit: 25,
+        installationId: 42,
+        onboarded: undefined,
+        refresh: false,
+        allowedGithubRepositoryIds: null,
+        allowedRepositoryFullNames: null,
+      });
+    });
+
+    test('rejects a non-numeric installation id before listing', async () => {
+      const response = await GET(makeRequest('http://localhost/api/v2/repositories?installationId=not-a-number'));
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body.error.message).toBe('installationId must be a number');
+      expect(mockListOnboardedRepositories).not.toHaveBeenCalled();
+      expect(mockListInstalledRepositories).not.toHaveBeenCalled();
+    });
+
+    test('maps an invalid onboarded filter to 400 without listing', async () => {
+      const error = new Error('onboarded must be true or false');
+      mockParseOnboardedParam.mockImplementationOnce(() => {
+        throw error;
+      });
+
+      const response = await GET(makeRequest('http://localhost/api/v2/repositories?view=all&onboarded=maybe'));
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body.error.message).toBe(error.message);
+      expect(mockListInstalledRepositories).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      { label: 'onboarded', url: 'http://localhost/api/v2/repositories', service: mockListOnboardedRepositories },
+      {
+        label: 'installed',
+        url: 'http://localhost/api/v2/repositories?view=all',
+        service: mockListInstalledRepositories,
+      },
+    ])('returns 500 when the $label repository listing fails', async ({ url, service }) => {
+      service.mockRejectedValueOnce(new Error('GitHub unavailable'));
+
+      const response = await GET(makeRequest(url));
+
+      expect(response.status).toBe(500);
+    });
   });
 
   describe('POST', () => {
@@ -131,6 +187,87 @@ describe('/api/v2/repositories', () => {
 
       expect(response.status).toBe(400);
       expect(body.error.message).toContain('Missing required field: fullName');
+    });
+
+    test('accepts the legacy repository field and GitHub installation id alias', async () => {
+      const response = await POST(
+        makeRequest('http://localhost/api/v2/repositories', {
+          fullName: null,
+          repository: 'example-org/legacy',
+          installationId: null,
+          githubInstallationId: '42',
+        })
+      );
+
+      expect(response.status).toBe(201);
+      expect(mockOnboardRepository).toHaveBeenCalledWith('example-org/legacy', 42, null, null);
+    });
+
+    test.each([
+      { label: 'a number', fullName: 42 },
+      { label: 'a blank string', fullName: '   ' },
+    ])('rejects fullName as $label', async ({ fullName }) => {
+      const response = await POST(makeRequest('http://localhost/api/v2/repositories', { fullName }));
+
+      expect(response.status).toBe(400);
+      expect(mockOnboardRepository).not.toHaveBeenCalled();
+    });
+
+    test('rejects a non-numeric onboarding installation id', async () => {
+      const response = await POST(
+        makeRequest('http://localhost/api/v2/repositories', {
+          fullName: 'example-org/api',
+          installationId: 'not-a-number',
+        })
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body.error.message).toBe('installationId must be a number');
+      expect(mockOnboardRepository).not.toHaveBeenCalled();
+    });
+
+    test('returns 200 when onboarding refreshes an existing repository', async () => {
+      mockOnboardRepository.mockResolvedValueOnce({
+        repository: { id: 1, fullName: 'example-org/api', onboarded: true },
+        created: false,
+      });
+
+      const response = await POST(makeRequest('http://localhost/api/v2/repositories', { fullName: 'example-org/api' }));
+
+      expect(response.status).toBe(200);
+    });
+
+    test('rejects malformed JSON before onboarding', async () => {
+      const response = await POST(
+        makeRequest('http://localhost/api/v2/repositories', undefined, new SyntaxError('invalid JSON'))
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body.error.message).toBe('Invalid JSON in request body');
+      expect(mockOnboardRepository).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      { label: 'invalid full name', error: new Error('Invalid repository fullName'), status: 400 },
+      { label: 'missing installation', error: new Error('installation ID is required'), status: 400 },
+      { label: 'missing repository', error: new Error('Repository not found'), status: 404 },
+      { label: 'non-Error invalid full name', error: 'Invalid repository fullName', status: 400 },
+    ])('maps $label onboarding failures to $status', async ({ error, status }) => {
+      mockOnboardRepository.mockRejectedValueOnce(error);
+
+      const response = await POST(makeRequest('http://localhost/api/v2/repositories', { fullName: 'example-org/api' }));
+
+      expect(response.status).toBe(status);
+    });
+
+    test('returns 500 for an unexpected onboarding failure', async () => {
+      mockOnboardRepository.mockRejectedValueOnce(new Error('GitHub unavailable'));
+
+      const response = await POST(makeRequest('http://localhost/api/v2/repositories', { fullName: 'example-org/api' }));
+
+      expect(response.status).toBe(500);
     });
   });
 });

@@ -80,15 +80,38 @@ import { POST } from './route';
 
 function makeRequest(
   url = 'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/start?scope=global',
-  origin = 'https://app.example.com'
+  origin: string | null = 'https://app.example.com',
+  referer?: string
 ) {
+  const headers = new Headers([['x-request-id', 'req-test']]);
+  if (origin !== null) {
+    headers.set('origin', origin);
+  }
+  if (referer !== undefined) {
+    headers.set('referer', referer);
+  }
   return {
-    headers: new Headers([
-      ['x-request-id', 'req-test'],
-      ['origin', origin],
-    ]),
+    headers,
     nextUrl: new URL(url),
   } as unknown as NextRequest;
+}
+
+function makeOAuthConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+    slug: 'sample-oauth',
+    scope: 'global',
+    enabled: true,
+    timeout: 30000,
+    preset: 'oauth-http',
+    transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+    sharedConfig: {},
+    authConfig: {
+      mode: 'oauth',
+      provider: 'generic-oauth2.1',
+    },
+    ...overrides,
+  };
 }
 
 describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
@@ -462,5 +485,257 @@ describe('POST /api/v2/ai/agent/mcp-connections/[slug]/oauth/start', () => {
       clientInformation,
     });
     expect(provider.clientMetadata.redirect_uris).toEqual([registeredRedirectUri]);
+  });
+
+  it('requires authentication before looking up the MCP definition', async () => {
+    mockGetRequestUserIdentity.mockReturnValueOnce(null);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(mockGetBySlugAndScope).not.toHaveBeenCalled();
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'missing', config: null },
+    { label: 'disabled', config: makeOAuthConfig({ enabled: false }) },
+  ])('returns 404 when the MCP definition is $label', async ({ config }) => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(config);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(404);
+    expect(body.error.message).toBe("Enabled MCP connection 'sample-oauth' not found in scope 'global'");
+    expect(mockGetDecryptedConnection).not.toHaveBeenCalled();
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+  });
+
+  it('rejects an MCP definition that does not use OAuth', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(
+      makeOAuthConfig({ authConfig: { mode: 'api_key', header: 'authorization' } })
+    );
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe("MCP connection 'sample-oauth' does not use OAuth");
+    expect(mockGetDecryptedConnection).not.toHaveBeenCalled();
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stdio OAuth definition before metadata discovery', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(
+      makeOAuthConfig({ transport: { type: 'stdio', command: 'sample-mcp', args: [] } })
+    );
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.message).toBe("OAuth MCP connection 'sample-oauth' must use an HTTP or SSE transport");
+    expect(mockDiscoverOAuthProtectedResourceMetadata).not.toHaveBeenCalled();
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+  });
+
+  it('drops incompatible saved client metadata when no access token can be preserved', async () => {
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        clientInformation: {
+          client_id: 'sample-client',
+          redirect_uris: ['https://old.example.test/oauth/callback'],
+        },
+        codeVerifier: 'stale-verifier',
+        oauthState: 'old-flow.sample-state',
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const provider = mockAuth.mock.calls[0]?.[0] as { currentState: Record<string, unknown> };
+
+    expect(response.status).toBe(200);
+    expect(provider.currentState).toEqual({ type: 'oauth' });
+  });
+
+  it.each([
+    {
+      label: 'an invalid origin',
+      request: () => makeRequest(undefined, 'not a URL'),
+      expectedOrigin: null,
+    },
+    {
+      label: 'no origin or referer',
+      request: () => makeRequest(undefined, null),
+      expectedOrigin: null,
+    },
+    {
+      label: 'a valid referer when origin is absent',
+      request: () => makeRequest(undefined, null, 'https://referer.example.com/path?q=1'),
+      expectedOrigin: 'https://referer.example.com',
+    },
+    {
+      label: 'an invalid referer when origin is absent',
+      request: () => makeRequest(undefined, null, 'not a URL'),
+      expectedOrigin: null,
+    },
+  ])('records $label as the callback app origin', async ({ request, expectedOrigin }) => {
+    const response = await POST(request(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockCreateFlow).toHaveBeenCalledWith(expect.objectContaining({ appOrigin: expectedOrigin }));
+  });
+
+  it('defaults an omitted scope query parameter to global', async () => {
+    const response = await POST(
+      makeRequest('http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/start'),
+      { params: Promise.resolve({ slug: 'sample-oauth' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockGetBySlugAndScope).toHaveBeenCalledWith('sample-oauth', 'global');
+    expect(mockCreateFlow).toHaveBeenCalledWith(expect.objectContaining({ scope: 'global' }));
+  });
+
+  it.each([
+    {
+      label: 'an empty authorization-server list',
+      metadata: {
+        resource: 'https://mcp.example.com/v1/mcp',
+        authorization_servers: [],
+        scopes_supported: ['sample.read'],
+      },
+    },
+    {
+      label: 'no authorization-server field',
+      metadata: {
+        resource: 'https://mcp.example.com/v1/mcp',
+        scopes_supported: ['sample.read'],
+      },
+    },
+  ])('rejects protected-resource metadata with $label', async ({ metadata }) => {
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce(metadata);
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error.message).toContain('does not advertise an authorization server');
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it('allows protected-resource metadata to omit advertised scopes', async () => {
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce({
+      resource: 'https://mcp.example.com/v1/mcp',
+      authorization_servers: ['https://auth.example.com'],
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockAuth).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ serverUrl: 'https://mcp.example.com/v1/mcp', scope: undefined })
+    );
+  });
+
+  it('normalizes a non-Error metadata-discovery failure', async () => {
+    mockDiscoverOAuthProtectedResourceMetadata.mockRejectedValueOnce({ reason: 'network unavailable' });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error.message).toContain('invalid protected-resource metadata');
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it('supports OAuth metadata discovery for SSE MCP definitions', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(
+      makeOAuthConfig({
+        preset: 'oauth-sse',
+        transport: { type: 'sse', url: 'https://mcp.example.com/v1/events', headers: {} },
+        sharedConfig: undefined,
+      })
+    );
+    mockDiscoverOAuthProtectedResourceMetadata.mockResolvedValueOnce({
+      resource: 'https://mcp.example.com/v1/events',
+      authorization_servers: ['https://auth.example.com'],
+      scopes_supported: ['sample.read'],
+    });
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockDiscoverOAuthProtectedResourceMetadata).toHaveBeenCalledWith('https://mcp.example.com/v1/events');
+    expect(mockAuth).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ serverUrl: 'https://mcp.example.com/v1/events' })
+    );
+  });
+
+  it('stores a sanitized validation error when silent reconnect tool discovery rejects', async () => {
+    mockAuth.mockResolvedValueOnce('AUTHORIZED');
+    mockGetDecryptedConnection.mockResolvedValueOnce({
+      state: {
+        type: 'oauth',
+        tokens: { access_token: 'sample-access-token', token_type: 'bearer' },
+        codeVerifier: 'sample-verifier',
+        oauthState: 'flow-123.sample-state',
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+    mockDiscoverTools.mockRejectedValueOnce(
+      new Error('Discovery failed token sample-access-token verifier sample-verifier state flow-123.sample-state')
+    );
+
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error.message).toBe('Discovery failed token ****** verifier ****** state ******');
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        discoveredTools: [],
+        validationError: 'Discovery failed token ****** verifier ****** state ******',
+      })
+    );
   });
 });

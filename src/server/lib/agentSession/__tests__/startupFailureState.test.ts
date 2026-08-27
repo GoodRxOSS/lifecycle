@@ -19,7 +19,10 @@ import {
   WORKSPACE_RUNTIME_FAILURE_STAGES,
   buildAgentSessionStartupFailure,
   buildWorkspaceRuntimeFailure,
+  clearAgentSessionStartupFailure,
+  getAgentSessionStartupFailure,
   normalizeWorkspaceRuntimeFailure,
+  setAgentSessionStartupFailure,
   toPublicAgentSessionStartupFailure,
   type WorkspaceRuntimeFailureStage,
 } from '../startupFailureState';
@@ -235,6 +238,29 @@ describe('startupFailureState', () => {
     expect(failure.retryable).toBe(true);
   });
 
+  it('lets an explicit next action override error-derived guidance', () => {
+    const failure = buildWorkspaceRuntimeFailure({
+      error: new Error('workspace is paused'),
+      nextAction: { kind: 'retry', label: 'Try again' },
+    });
+
+    expect(failure.nextAction).toEqual({ kind: 'retry', label: 'Try again' });
+  });
+
+  it('bounds long public messages after sanitization', () => {
+    const failure = buildWorkspaceRuntimeFailure({ error: new Error(`workspace failed: ${'x'.repeat(5_000)}`) });
+
+    expect(failure.message).toHaveLength(4_000);
+    expect(failure.message.endsWith('...')).toBe(true);
+  });
+
+  it('classifies an initialization failure without a pod-start prefix', () => {
+    const failure = buildWorkspaceRuntimeFailure({ error: new Error('init-workspace exited with code 1') });
+
+    expect(failure.title).toBe('Workspace initialization failed');
+    expect(failure.message).toBe('init-workspace exited with code 1');
+  });
+
   it('round-trips the code and nextAction through normalizeWorkspaceRuntimeFailure', () => {
     const built = buildWorkspaceRuntimeFailure({
       error: new AppError({
@@ -249,5 +275,56 @@ describe('startupFailureState', () => {
     const normalized = normalizeWorkspaceRuntimeFailure(built);
     expect(normalized.code).toBe('session_workspace_gateway_unavailable');
     expect(normalized.nextAction).toEqual({ kind: 'reconnect', label: 'Reconnect workspace' });
+  });
+
+  it('persists and clears startup failures under the session-scoped Redis key', async () => {
+    const failure = buildAgentSessionStartupFailure({ sessionId: 'session-1', error: new Error('startup failed') });
+    const redis = {
+      del: jest.fn().mockResolvedValue(1),
+      setex: jest.fn().mockResolvedValue('OK'),
+    } as any;
+
+    await setAgentSessionStartupFailure(redis, failure);
+    await clearAgentSessionStartupFailure(redis, 'session-1');
+
+    expect(redis.setex).toHaveBeenCalledWith(
+      'lifecycle:agent:session:startup-failure:session-1',
+      3600,
+      JSON.stringify(failure)
+    );
+    expect(redis.del).toHaveBeenCalledWith('lifecycle:agent:session:startup-failure:session-1');
+  });
+
+  it.each([
+    [null, null],
+    ['not-json', null],
+    ['[]', null],
+  ])('ignores an absent or malformed persisted startup failure', async (raw, expected) => {
+    const redis = { get: jest.fn().mockResolvedValue(raw) } as any;
+
+    await expect(getAgentSessionStartupFailure(redis, 'session-1')).resolves.toBe(expected);
+    expect(redis.get).toHaveBeenCalledWith('lifecycle:agent:session:startup-failure:session-1');
+  });
+
+  it('normalizes a persisted legacy record and restores the requested session id', async () => {
+    const redis = {
+      get: jest.fn().mockResolvedValue(
+        JSON.stringify({
+          stage: 'invalid-stage',
+          title: 'Legacy failure',
+          message: 'legacy workspace failure',
+          origin: 'invalid-origin',
+          recordedAt: 42,
+        })
+      ),
+    } as any;
+
+    await expect(getAgentSessionStartupFailure(redis, 'session-1')).resolves.toEqual(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        stage: 'connect_runtime',
+        origin: 'agent_session',
+      })
+    );
   });
 });

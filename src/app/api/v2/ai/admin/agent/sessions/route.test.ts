@@ -154,4 +154,23 @@ describe('GET /api/v2/ai/admin/agent/sessions', () => {
       limit: 10,
     });
   });
+
+  it('uses default pagination and omits optional filters when they are not requested', async () => {
+    mockListSessions.mockResolvedValue({
+      data: [],
+      metadata: { pagination: { current: 1, total: 0, items: 0, limit: 25 } },
+    });
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions'));
+
+    expect(response.status).toBe(200);
+    expect(mockListSessions).toHaveBeenCalledWith({
+      page: 1,
+      limit: 25,
+      status: 'all',
+      repo: undefined,
+      user: undefined,
+      buildUuid: undefined,
+    });
+  });
 });

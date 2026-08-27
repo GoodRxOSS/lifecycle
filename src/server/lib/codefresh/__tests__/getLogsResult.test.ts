@@ -36,7 +36,7 @@ jest.mock('server/lib/shell', () => ({
 }));
 jest.mock('server/lib/codefresh/utils');
 
-import { getLogsResult } from 'server/lib/codefresh';
+import { getLogs, getLogsResult } from 'server/lib/codefresh';
 
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
@@ -83,14 +83,22 @@ describe('getLogsResult', () => {
     }
   });
 
-  it('reports a non-zero exit with the stderr tail', async () => {
+  it('reports a non-zero exit with only the bounded stderr tail', async () => {
     const child = spawnFake();
     const promise = getLogsResult('672ea2c44b9c09ed7c91a8ef');
-    child.stderr.emit('data', Buffer.from('unauthorized: bad api key'));
+    child.stderr.emit('data', Buffer.from(`discard-this-prefix:${'x'.repeat(2100)}`));
     child.emit('close', 1);
 
     const result = await promise;
-    expect(result).toEqual({ ok: false, reason: expect.stringContaining('unauthorized: bad api key') });
+    expect(result).toEqual({ ok: false, reason: `codefresh logs exited with code 1: ${'x'.repeat(2000)}` });
+  });
+
+  it('reports a non-zero exit without adding an empty stderr suffix', async () => {
+    const child = spawnFake();
+    const promise = getLogsResult('672ea2c44b9c09ed7c91a8ef');
+    child.emit('close', 2);
+
+    await expect(promise).resolves.toEqual({ ok: false, reason: 'codefresh logs exited with code 2' });
   });
 
   it('reports spawn errors (binary missing)', async () => {
@@ -101,6 +109,36 @@ describe('getLogsResult', () => {
     await expect(promise).resolves.toEqual({ ok: false, reason: 'spawn codefresh ENOENT' });
   });
 
+  it('reports a synchronous spawn failure', async () => {
+    mockSpawn.mockImplementationOnce(() => {
+      throw new Error('spawn setup failed');
+    });
+
+    await expect(getLogsResult('672ea2c44b9c09ed7c91a8ef')).resolves.toEqual({
+      ok: false,
+      reason: 'spawn setup failed',
+    });
+  });
+
+  it('kills a timed-out log process and reports the timeout after it closes', async () => {
+    jest.useFakeTimers();
+    try {
+      const child = spawnFake();
+      const promise = getLogsResult('672ea2c44b9c09ed7c91a8ef');
+
+      jest.advanceTimersByTime(180_000);
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      child.emit('close', null);
+
+      await expect(promise).resolves.toEqual({
+        ok: false,
+        reason: 'codefresh logs timed out after 180s',
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('settles once even if close follows error', async () => {
     const child = spawnFake();
     const promise = getLogsResult('672ea2c44b9c09ed7c91a8ef');
@@ -108,5 +146,18 @@ describe('getLogsResult', () => {
     child.emit('close', 1);
 
     await expect(promise).resolves.toEqual({ ok: false, reason: 'boom' });
+  });
+
+  it('keeps the legacy string contract for successful and failed fetches', async () => {
+    const successfulChild = spawnFake();
+    const successful = getLogs('successful-build');
+    successfulChild.stdout.emit('data', Buffer.from('complete log'));
+    successfulChild.emit('close', 0);
+    await expect(successful).resolves.toBe('complete log');
+
+    const failedChild = spawnFake();
+    const failed = getLogs('failed-build');
+    failedChild.emit('close', 1);
+    await expect(failed).resolves.toBe('');
   });
 });

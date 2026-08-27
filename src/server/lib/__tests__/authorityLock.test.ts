@@ -157,4 +157,119 @@ describe('withAuthorityLock', () => {
     expect(action).toHaveBeenCalledTimes(1);
     expect(acquired.unlock).toHaveBeenCalledTimes(1);
   });
+
+  test('does not execute an unlocked fallback action after authority changes', async () => {
+    const action = jest.fn();
+    const isCurrent = jest.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await expect(
+      withAuthorityLock({
+        redlock: null,
+        resource: 'build-promotion.1',
+        ttlMs: 60_000,
+        isCurrent,
+        action,
+      })
+    ).resolves.toEqual({ admitted: false });
+
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  test('admits an unlocked fallback result only while authority remains current', async () => {
+    const action = jest.fn().mockResolvedValue('done');
+
+    await expect(
+      withAuthorityLock({
+        redlock: undefined,
+        resource: 'build-promotion.1',
+        ttlMs: 60_000,
+        isCurrent: jest.fn().mockResolvedValue(true),
+        action,
+      })
+    ).resolves.toEqual({ admitted: true, value: 'done' });
+
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not publish an unlocked fallback result after authority changes during the action', async () => {
+    const action = jest.fn().mockResolvedValue('stale-value');
+    const isCurrent = jest.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await expect(
+      withAuthorityLock({
+        redlock: null,
+        resource: 'build-promotion.1',
+        ttlMs: 60_000,
+        isCurrent,
+        action,
+      })
+    ).resolves.toEqual({ admitted: false });
+
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  test('reports prolonged contention once the wait-log interval elapses', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(0);
+    const waitError = new Error('still busy');
+    let current = true;
+    const onWait = jest.fn(() => {
+      current = false;
+    });
+    const result = withAuthorityLock({
+      redlock: {
+        lock: jest.fn(),
+        lockWithOptions: jest.fn().mockRejectedValue(waitError),
+      } as any,
+      resource: 'build-promotion.1',
+      ttlMs: 60_000,
+      isCurrent: jest.fn(async () => current),
+      action: jest.fn(),
+      onWait,
+    });
+
+    await jest.advanceTimersByTimeAsync(60_250);
+
+    await expect(result).resolves.toEqual({ admitted: false });
+    expect(onWait).toHaveBeenCalledTimes(1);
+    expect(onWait).toHaveBeenCalledWith(waitError);
+  });
+
+  test('releases the acquired lock without executing after authority changes', async () => {
+    const acquired = { extend: jest.fn(), unlock: jest.fn().mockResolvedValue(undefined) };
+    const action = jest.fn();
+    const isCurrent = jest.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await expect(
+      withAuthorityLock({
+        redlock: { lock: jest.fn(), lockWithOptions: jest.fn().mockResolvedValue(acquired) } as any,
+        resource: 'build-promotion.1',
+        ttlMs: 60_000,
+        isCurrent,
+        action,
+      })
+    ).resolves.toEqual({ admitted: false });
+
+    expect(action).not.toHaveBeenCalled();
+    expect(acquired.unlock).toHaveBeenCalledTimes(1);
+  });
+
+  test('preserves a successful legacy-lock result when best-effort unlock fails', async () => {
+    const unlockError = new Error('unlock unavailable');
+    const acquired = { extend: jest.fn(), unlock: jest.fn().mockRejectedValue(unlockError) };
+    const legacyLock = jest.fn().mockResolvedValue(acquired);
+
+    await expect(
+      withAuthorityLock({
+        redlock: { lock: legacyLock } as any,
+        resource: 'build-promotion.1',
+        ttlMs: 60_000,
+        isCurrent: jest.fn().mockResolvedValue(true),
+        action: jest.fn().mockResolvedValue('done'),
+      })
+    ).resolves.toEqual({ admitted: true, value: 'done' });
+
+    expect(legacyLock).toHaveBeenCalledWith('build-promotion.1', 60_000);
+    expect(acquired.unlock).toHaveBeenCalledTimes(1);
+  });
 });

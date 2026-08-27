@@ -59,6 +59,26 @@ describe('OutputLimiter', () => {
       expect(parsed.small).toBe('c'.repeat(100));
       expect(parsed.big.length).toBeLessThan(20000);
     });
+
+    it('compacts large array fields to their first three and last two values', () => {
+      const result = OutputLimiter.truncate(
+        JSON.stringify({ items: Array.from({ length: 100 }, (_, index) => index), status: 'complete' }),
+        200
+      );
+
+      expect(JSON.parse(result)).toEqual({ items: [0, 1, 2, 98, 99], status: 'complete' });
+    });
+
+    it('falls back to bounded text when an object has no individually shrinkable fields', () => {
+      const content = JSON.stringify(
+        Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`field${index}`, `value${index}`]))
+      );
+
+      const result = OutputLimiter.truncate(content, 250);
+
+      expect(result.length).toBeLessThanOrEqual(250);
+      expect(result).toContain('[Truncated:');
+    });
   });
 
   describe('truncateLogOutput', () => {
@@ -128,6 +148,30 @@ describe('OutputLimiter', () => {
       expect(result).toContain('panic: boom');
     });
 
+    it('uses a final bounded tail when the retained error window alone exceeds the cap', () => {
+      const lines = Array.from({ length: 100 }, (_, index) =>
+        index === 50 ? `panic: ${'x'.repeat(900)}` : `${'y'.repeat(100)}-line${index}`
+      );
+
+      const result = OutputLimiter.truncateLogOutput(lines.join('\n'), 200, 5, 20);
+
+      expect(result.length).toBeLessThanOrEqual(200);
+      expect(result).toMatch(/^\[Truncated: showing last/);
+    });
+
+    it('does not add a second omission marker when the error window meets the retained tail', () => {
+      const lines = Array.from({ length: 100 }, (_, index) =>
+        index === 89 ? 'fatal: boundary failure' : `line${index}`
+      );
+
+      const result = OutputLimiter.truncateLogOutput(lines.join('\n'), 100000, 10, 10);
+
+      expect(result).toContain('fatal: boundary failure');
+      expect(result).toContain('retained error region');
+      expect(result.match(/lines omitted/g)).toHaveLength(1);
+      expect(result).toContain('line99');
+    });
+
     it('respects retainErrorRegion=false (legacy behavior)', () => {
       const lines = Array.from({ length: 500 }, (_, i) => (i === 250 ? 'Error: hidden in the middle' : `line${i}`));
       const content = lines.join('\n');
@@ -166,6 +210,14 @@ describe('OutputLimiter', () => {
       expect(result).toContain('TAIL');
       expect(result).not.toContain('HEAD');
       expect(result).toMatch(/^\[Truncated: showing last/);
+    });
+
+    it('uses the 30000 character default cap', () => {
+      const result = OutputLimiter.truncateTail(`HEAD${'x'.repeat(40000)}TAIL`);
+
+      expect(result.length).toBeLessThanOrEqual(30000);
+      expect(result).toContain('TAIL');
+      expect(result).not.toContain('HEAD');
     });
   });
 
@@ -215,8 +267,38 @@ describe('OutputLimiter', () => {
     });
 
     it('falls back to truncate() on invalid JSON input', () => {
-      const result = OutputLimiter.truncateJsonSafely('not json at all', 100);
+      const result = OutputLimiter.truncateJsonSafely(`{not-json:${'x'.repeat(500)}`, 100);
       expect(result.length).toBeLessThanOrEqual(100);
+      expect(result).toContain('[Truncated:');
+    });
+
+    it('falls back to plain truncation for a large JSON primitive', () => {
+      const result = OutputLimiter.truncateJsonSafely(JSON.stringify('x'.repeat(500)), 100);
+
+      expect(result.length).toBeLessThanOrEqual(100);
+      expect(result).toContain('[Truncated:');
+    });
+
+    it('falls back after walking an object that remains over budget', () => {
+      const json = JSON.stringify(
+        Object.fromEntries(Array.from({ length: 50 }, (_, index) => [`field${index}`, `value${index}`]))
+      );
+
+      const result = OutputLimiter.truncateJsonSafely(json, 250);
+
+      expect(result.length).toBeLessThanOrEqual(250);
+      expect(result).toContain('[Truncated:');
+    });
+
+    it('walks short arrays recursively without adding an omission record', () => {
+      const json = JSON.stringify({ items: ['x'.repeat(2000), 'keep'] });
+
+      const result = OutputLimiter.truncateJsonSafely(json, 1500);
+      const parsed = JSON.parse(result);
+
+      expect(parsed.items).toHaveLength(2);
+      expect(parsed.items[0]).toContain('[Truncated:');
+      expect(parsed.items[1]).toBe('keep');
     });
 
     it('produces valid JSON for all outputs', () => {

@@ -132,6 +132,89 @@ describe('OpenSandboxPoolAdminService', () => {
     ]);
   });
 
+  it('sorts multiple pools by normalized resource name', async () => {
+    const firstPool = buildPool();
+    const { service } = buildService({
+      listNamespacedCustomObject: jest.fn().mockResolvedValue({
+        body: {
+          items: [
+            buildPool({ metadata: { ...firstPool.metadata, name: 'zeta-pool' } }),
+            buildPool({ metadata: { ...firstPool.metadata, name: 'alpha-pool' } }),
+          ],
+        },
+      }),
+    });
+
+    const pools = await service.listPools('opensandbox');
+
+    expect(pools.map((pool) => pool.name)).toEqual(['alpha-pool', 'zeta-pool']);
+  });
+
+  it('normalizes malformed numeric fields returned by the pool provider', async () => {
+    const pool = buildPool();
+    const { service } = buildService({
+      getNamespacedCustomObject: jest.fn().mockResolvedValue({
+        body: buildPool({
+          spec: {
+            ...pool.spec,
+            capacitySpec: {
+              poolMin: -1,
+              poolMax: 3.8,
+              bufferMin: Number.NaN,
+              bufferMax: 'invalid',
+            },
+          },
+          status: {
+            total: -2,
+            allocated: 2.9,
+            available: Number.POSITIVE_INFINITY,
+            observedGeneration: 4.7,
+            revision: 42,
+          },
+        }),
+      }),
+    });
+
+    await expect(service.getPool('opensandbox', 'lifecycle-workspace-pool')).resolves.toEqual(
+      expect.objectContaining({
+        capacitySpec: {
+          poolMin: 0,
+          poolMax: 3,
+          bufferMin: 0,
+          bufferMax: 0,
+        },
+        status: {
+          total: 0,
+          allocated: 2,
+          available: 0,
+          observedGeneration: 4,
+        },
+      })
+    );
+  });
+
+  it('loads the default Kubernetes client when no client is injected', async () => {
+    const customObjectsApi = {
+      listNamespacedCustomObject: jest.fn().mockResolvedValue({ body: { items: [] } }),
+    };
+    const loadFromDefault = jest.spyOn(k8s.KubeConfig.prototype, 'loadFromDefault').mockImplementation(() => undefined);
+    const makeApiClient = jest
+      .spyOn(k8s.KubeConfig.prototype, 'makeApiClient')
+      .mockReturnValue(customObjectsApi as any);
+
+    try {
+      const service = new OpenSandboxPoolAdminService();
+
+      await expect(service.listPools('opensandbox')).resolves.toEqual([]);
+      expect(loadFromDefault).toHaveBeenCalledTimes(1);
+      expect(makeApiClient).toHaveBeenCalledWith(k8s.CustomObjectsApi);
+      expect(customObjectsApi.listNamespacedCustomObject).toHaveBeenCalledTimes(1);
+    } finally {
+      loadFromDefault.mockRestore();
+      makeApiClient.mockRestore();
+    }
+  });
+
   it('patches capacity with a merge patch after validating merged values', async () => {
     const { service, customObjectsApi } = buildService();
 
@@ -175,6 +258,16 @@ describe('OpenSandboxPoolAdminService', () => {
         bufferMax: 2,
       })
     ).rejects.toThrow('bufferMax must be less than or equal to poolMax.');
+  });
+
+  it.each([
+    [{ poolMin: 4 }, 'poolMin must be less than or equal to poolMax.'],
+    [{ bufferMin: 2 }, 'bufferMin must be less than or equal to bufferMax.'],
+  ])('rejects an invalid merged capacity without patching: %p', async (patch, message) => {
+    const { service, customObjectsApi } = buildService();
+
+    await expect(service.updateCapacity('opensandbox', 'lifecycle-workspace-pool', patch)).rejects.toThrow(message);
+    expect(customObjectsApi.patchNamespacedCustomObject).not.toHaveBeenCalled();
   });
 
   it('parses capacitySpec request bodies', () => {
@@ -242,6 +335,17 @@ describe('OpenSandboxPoolAdminService', () => {
     expect(patchNamespacedCustomObject.mock.calls[0][5]).toMatchObject({
       metadata: { resourceVersion: 'rv-1' },
     });
+  });
+
+  it('passes through non-conflict errors from the capacity patch provider', async () => {
+    const failure = httpError(503, 'unavailable');
+    const patchNamespacedCustomObject = jest.fn().mockRejectedValue(failure);
+    const { service } = buildService({ patchNamespacedCustomObject });
+
+    await expect(service.updateCapacity('opensandbox', 'lifecycle-workspace-pool', { poolMax: 5 })).rejects.toBe(
+      failure
+    );
+    expect(patchNamespacedCustomObject).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a patch whose merge with current capacity is invalid without calling k8s patch', async () => {

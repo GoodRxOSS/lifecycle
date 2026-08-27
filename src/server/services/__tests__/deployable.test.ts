@@ -15,6 +15,7 @@
  */
 
 const mockGetAllConfigs = jest.fn();
+const mockResolveRepositoryForAttributes = jest.fn();
 const mockInstance = {
   getAllConfigs: (...args: any[]) => mockGetAllConfigs(...args),
   isFeatureEnabled: jest.fn().mockResolvedValue(false),
@@ -50,6 +51,15 @@ jest.mock('server/lib/logger', () => ({
 jest.mock('server/lib/github', () => ({
   getYamlFileContentFromBranch: jest.fn(),
 }));
+
+jest.mock('server/models/yaml', () => {
+  const actual = jest.requireActual('server/models/yaml');
+  return {
+    __esModule: true,
+    ...actual,
+    resolveRepository: (...args: unknown[]) => mockResolveRepositoryForAttributes(...args),
+  };
+});
 
 import * as YamlService from 'server/models/yaml';
 import { Build } from 'server/models';
@@ -677,6 +687,366 @@ describe('Deployable Service', () => {
       );
 
       expect(result.builder).toEqual({ engine: 'kaniko' });
+    });
+  });
+
+  describe('YAML attribute resolution boundaries', () => {
+    const deployableService: DeployableService = new DeployableService(null, null, null);
+    const githubService: YamlService.GithubService = {
+      name: 'github-app',
+      github: {
+        repository: 'example-org/example-service',
+        branchName: 'configured-branch',
+        docker: {
+          defaultTag: 'main',
+          app: {
+            dockerfilePath: 'app/app.Dockerfile',
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      mockGetAllConfigs.mockResolvedValue(globalConfigs);
+      mockResolveRepositoryForAttributes.mockReset();
+    });
+
+    test('maps an external Docker service and preserves explicit deployment overrides', async () => {
+      const dockerService: YamlService.DockerService = {
+        name: 'postgres',
+        docker: {
+          dockerImage: 'postgres',
+          defaultTag: '16',
+          command: 'postgres',
+          arguments: '-c max_connections=250',
+          env: { POSTGRES_DB: 'app' },
+          ports: [5432],
+          deployment: {
+            public: true,
+            capacityType: 'ON_DEMAND',
+            resource: {
+              cpu: { request: '250m', limit: '1' },
+              memory: { request: '256Mi', limit: '1Gi' },
+            },
+            readiness: {
+              initialDelaySeconds: 4,
+              periodSeconds: 5,
+              timeoutSeconds: 6,
+              successThreshold: 2,
+              failureThreshold: 7,
+              tcpSocketPort: 5432,
+            },
+            hostnames: {
+              host: 'postgres.example.test',
+              acmARN: 'arn:explicit',
+              defaultInternalHostname: 'postgres.internal',
+              defaultPublicUrl: 'postgres.public.example.test',
+            },
+            network: {
+              ipWhitelist: ['10.0.0.0/8', '192.168.0.0/16'],
+              pathPortMapping: { metrics: '9187' },
+              hostPortMapping: { postgres: '5432' },
+              grpc: {
+                enable: true,
+                host: 'grpc.postgres.example.test',
+                defaultHost: 'postgres.grpc.internal',
+              },
+              ingressAnnotations: { 'example.test/owner': 'platform' },
+            },
+            serviceDisks: [
+              {
+                name: 'data',
+                mountPath: '/var/lib/postgresql/data',
+                storageSize: '10Gi',
+              },
+            ],
+            node_selector: { workload: 'stateful' },
+            node_affinity: { required: { zone: 'west' } },
+          },
+        },
+      };
+
+      const result: DeployableAttributes = await (deployableService as any).generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        null,
+        undefined,
+        dockerService,
+        true,
+        null
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          name: 'postgres',
+          type: 'docker',
+          dockerImage: 'postgres',
+          defaultTag: '16',
+          dockerfilePath: serviceDefaults.dockerfilePath,
+          repositoryId: null,
+          resolvedFromRepositoryId: null,
+          branchName: 'main',
+          command: 'postgres',
+          arguments: '-c max_connections=250',
+          env: { POSTGRES_DB: 'app' },
+          port: '5432',
+          public: true,
+          capacityType: 'ON_DEMAND',
+          cpuRequest: '250m',
+          cpuLimit: '1',
+          memoryRequest: '256Mi',
+          memoryLimit: '1Gi',
+          readinessInitialDelaySeconds: 4,
+          readinessPeriodSeconds: 5,
+          readinessTimeoutSeconds: 6,
+          readinessSuccessThreshold: 2,
+          readinessFailureThreshold: 7,
+          readinessTcpSocketPort: 5432,
+          host: 'postgres.example.test',
+          acmARN: 'arn:explicit',
+          defaultInternalHostname: 'postgres.internal',
+          defaultPublicUrl: 'postgres.public.example.test',
+          ipWhitelist: '{10.0.0.0/8,192.168.0.0/16}',
+          pathPortMapping: { metrics: '9187' },
+          hostPortMapping: { postgres: '5432' },
+          grpc: true,
+          grpcHost: 'grpc.postgres.example.test',
+          defaultGrpcHost: 'postgres.grpc.internal',
+          ingressAnnotations: { 'example.test/owner': 'platform' },
+          serviceDisksYaml: JSON.stringify([
+            {
+              name: 'data',
+              mountPath: '/var/lib/postgresql/data',
+              storageSize: '10Gi',
+            },
+          ]),
+          nodeSelector: { workload: 'stateful' },
+          nodeAffinity: { required: { zone: 'west' } },
+          active: true,
+          source: 'yaml',
+          reconcileEligible: true,
+        })
+      );
+    });
+
+    test('maps Codefresh deploy and destroy pipeline contracts', async () => {
+      const codefreshService: YamlService.CodefreshService = {
+        name: 'legacy-pipeline-service',
+        codefresh: {
+          repository: 'example-org/legacy-pipeline-service',
+          branchName: 'main',
+          env: { SOURCE: 'codefresh' },
+          deploy: { pipelineId: 'deploy-pipeline', trigger: 'deploy-trigger' },
+          destroy: { pipelineId: 'destroy-pipeline', trigger: 'destroy-trigger' },
+          deployment: { public: false },
+        },
+      };
+
+      const result: DeployableAttributes = await (deployableService as any).generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        42,
+        'main',
+        codefreshService,
+        true,
+        null
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          name: 'legacy-pipeline-service',
+          type: 'codefresh',
+          dockerfilePath: serviceDefaults.dockerfilePath,
+          deployPipelineId: 'deploy-pipeline',
+          deployTrigger: 'deploy-trigger',
+          destroyPipelineId: 'destroy-pipeline',
+          destroyTrigger: 'destroy-trigger',
+          active: true,
+          source: 'yaml',
+          reconcileEligible: true,
+        })
+      );
+    });
+
+    test('applies the pull-request branch hack only to explicitly enabled services', async () => {
+      const matchingBuild = {
+        enabledFeatures: ['hack-force-pull-request-branch', 'hack-force-pull-request-service-github-app'],
+        pullRequest: { branchName: 'pull-request-branch' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Build;
+
+      const matchingResult: DeployableAttributes = await (deployableService as any).generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        42,
+        'delivery-branch',
+        githubService,
+        true,
+        null,
+        matchingBuild
+      );
+
+      expect(matchingBuild.$fetchGraph).toHaveBeenCalledWith('pullRequest');
+      expect(matchingResult.branchName).toBe('pull-request-branch');
+
+      const nonMatchingBuild = {
+        enabledFeatures: ['hack-force-pull-request-branch'],
+        pullRequest: { branchName: 'other-pull-request-branch' },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Build;
+      const nonMatchingResult: DeployableAttributes = await (deployableService as any).generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        42,
+        'delivery-branch',
+        githubService,
+        true,
+        null,
+        nonMatchingBuild
+      );
+
+      expect(nonMatchingResult.branchName).toBe('delivery-branch');
+
+      const buildWithoutPullRequest = {
+        enabledFeatures: ['hack-force-pull-request-branch', 'hack-force-pull-request-service-github-app'],
+        pullRequest: null,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Build;
+      const resultWithoutPullRequest: DeployableAttributes = await (
+        deployableService as any
+      ).generateAttributesFromYamlConfig(
+        100,
+        'unit-test-12345',
+        42,
+        'delivery-branch',
+        githubService,
+        true,
+        null,
+        buildWithoutPullRequest
+      );
+
+      expect(resultWithoutPullRequest.branchName).toBe('delivery-branch');
+    });
+
+    test('uses the delivered branch for the source repository and the configured branch for another repository', async () => {
+      const repository = { githubRepositoryId: 42, fullName: 'example-org/example-service' };
+      mockResolveRepositoryForAttributes.mockResolvedValue(repository);
+      const deployableServices = new Map<string, DeployableAttributes>();
+
+      await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        deployableServices,
+        100,
+        'unit-test-12345',
+        githubService,
+        42,
+        'delivery-branch',
+        true,
+        null
+      );
+      expect(deployableServices.get('github-app')).toEqual(
+        expect.objectContaining({ repositoryId: 42, branchName: 'delivery-branch', active: true })
+      );
+
+      await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        deployableServices,
+        100,
+        'unit-test-12345',
+        githubService,
+        99,
+        'unrelated-delivery-branch',
+        false,
+        'parent-service'
+      );
+      expect(deployableServices.get('github-app')).toEqual(
+        expect.objectContaining({
+          repositoryId: 42,
+          branchName: 'configured-branch',
+          active: false,
+          dependsOnDeployableName: 'parent-service',
+        })
+      );
+      expect(deployableServices.size).toBe(1);
+    });
+
+    test('falls back to the build pull-request repository and the default branch when repository resolution misses', async () => {
+      const repository = { githubRepositoryId: 77, fullName: 'example-org/fallback' };
+      const pullRequest = {
+        repository,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const build = {
+        enabledFeatures: [],
+        pullRequest,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Build;
+      mockResolveRepositoryForAttributes.mockResolvedValue(null);
+      const deployableServices = new Map<string, DeployableAttributes>();
+
+      await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        deployableServices,
+        100,
+        'unit-test-12345',
+        githubService,
+        42,
+        'delivery-branch',
+        true,
+        null,
+        build
+      );
+
+      expect(build.$fetchGraph).toHaveBeenCalledWith('[pullRequest, environment]');
+      expect(pullRequest.$fetchGraph).toHaveBeenCalledWith('[repository]');
+      expect(deployableServices.get('github-app')).toEqual(
+        expect.objectContaining({ repositoryId: 77, branchName: 'main' })
+      );
+    });
+
+    test('keeps a resolvable YAML service when neither repository lookup can identify its repository', async () => {
+      const build = {
+        enabledFeatures: [],
+        pullRequest: null,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Build;
+      mockResolveRepositoryForAttributes.mockResolvedValue(null);
+      const deployableServices = new Map<string, DeployableAttributes>();
+
+      await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+        deployableServices,
+        100,
+        'unit-test-12345',
+        githubService,
+        42,
+        'delivery-branch',
+        true,
+        null,
+        build
+      );
+
+      expect(deployableServices.get('github-app')).toEqual(
+        expect.objectContaining({ repositoryId: null, resolvedFromRepositoryId: null, branchName: 'main' })
+      );
+    });
+
+    test('preserves YAML resolution errors without mutating the in-memory deployable set', async () => {
+      const resolutionError = new Error('global defaults unavailable');
+      mockResolveRepositoryForAttributes.mockResolvedValue({ githubRepositoryId: 42 });
+      mockGetAllConfigs.mockRejectedValueOnce(resolutionError);
+      const deployableServices = new Map<string, DeployableAttributes>();
+
+      await expect(
+        deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+          deployableServices,
+          100,
+          'unit-test-12345',
+          githubService,
+          42,
+          'delivery-branch',
+          true,
+          null
+        )
+      ).rejects.toBe(resolutionError);
+
+      expect(deployableServices.size).toBe(0);
     });
   });
 });

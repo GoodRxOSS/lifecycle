@@ -160,6 +160,25 @@ describe('DeployCleanupService', () => {
     expect(mockDeleteDeploy).not.toHaveBeenCalled();
   });
 
+  test('ignores malformed service disk metadata while cleaning the remaining deploy resources', async () => {
+    const deploy = createDeploy({
+      deployable: {
+        name: 'old-api',
+        type: DeployTypes.HELM,
+        serviceDisksYaml: '{not-json',
+      },
+    });
+    const service = createService();
+
+    await expect(service.cleanupDeploy(deploy, { mode: 'service' })).resolves.toBe(true);
+
+    const commands = mockShellPromise.mock.calls.map(([command]) => command as string);
+    expect(commands).toContain(
+      "kubectl delete deployment 'old-api-build-1' --namespace 'env-build-1' --ignore-not-found"
+    );
+    expect(commands.some((command) => command.includes('kubectl delete pvc'))).toBe(false);
+  });
+
   test('registers infra cleanup queue without automatic retries', () => {
     const queueManager = createQueueManager();
 
@@ -344,6 +363,60 @@ describe('DeployCleanupService', () => {
     await expect(service.cleanupDeploy(deploy, { mode: 'infra' })).resolves.toBe(false);
 
     expect(deploy.patch).not.toHaveBeenCalled();
+  });
+
+  test('returns false when a queued deploy no longer exists', async () => {
+    const query = {
+      findById: jest.fn(() => query),
+      withGraphFetched: jest.fn().mockResolvedValue(null),
+    };
+    const service = createService({
+      models: {
+        Deploy: {
+          query: jest.fn(() => query),
+        },
+      },
+    });
+
+    await expect(service.cleanupDeploy(77, { mode: 'infra' })).resolves.toBe(false);
+
+    expect(query.findById).toHaveBeenCalledWith(77);
+    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockMetricsIncrement).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['namespace', { build: { uuid: 'build-1', namespace: '' } }],
+    ['deploy uuid', { uuid: '' }],
+    [
+      'service name',
+      {
+        deployable: {
+          name: '',
+          type: DeployTypes.HELM,
+          serviceDisksYaml: null,
+        },
+      },
+    ],
+    [
+      'deploy type',
+      {
+        deployable: {
+          name: 'old-api',
+          type: undefined,
+          serviceDisksYaml: null,
+        },
+      },
+    ],
+  ])('returns false before teardown when deploy metadata is missing its %s', async (_field, overrides) => {
+    const deploy = createDeploy(overrides);
+    const service = createService();
+
+    await expect(service.cleanupDeploy(deploy, { mode: 'infra' })).resolves.toBe(false);
+
+    expect(deploy.$fetchGraph).toHaveBeenCalledWith('[build, deployable]');
+    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockMetricsIncrement).not.toHaveBeenCalled();
   });
 
   test('missing Kubernetes resource types are skipped without failing infra cleanup', async () => {

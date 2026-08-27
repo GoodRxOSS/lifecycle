@@ -68,10 +68,12 @@ jest.mock('server/lib/agentSession/chatPreviewFactory', () => ({
   }),
 }));
 
+const mockWarn = jest.fn();
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
     debug: jest.fn(),
-    warn: jest.fn(),
+    warn: mockWarn,
   })),
 }));
 
@@ -167,6 +169,17 @@ function editorExposureReviveQuery(existing: Record<string, unknown>) {
   return patchAndFetchById;
 }
 
+function previewExposureInsertQuery(result: Record<string, unknown> = { id: 45 }) {
+  const existingQuery: Record<string, jest.Mock> = {};
+  existingQuery.where = jest.fn(() => existingQuery);
+  existingQuery.orderBy = jest.fn(() => existingQuery);
+  existingQuery.first = jest.fn().mockResolvedValue(null);
+
+  const insertAndFetch = jest.fn().mockResolvedValue(result);
+  mockExposureQuery.mockReturnValueOnce(existingQuery).mockReturnValueOnce({ insertAndFetch });
+  return insertAndFetch;
+}
+
 function previewExposureListQuery(exposures: Array<Record<string, unknown>>) {
   const query: Record<string, jest.Mock> = {};
   query.where = jest.fn(() => query);
@@ -193,6 +206,134 @@ describe('AgentSandboxService', () => {
     mockProvisionChatRuntime.mockReset();
     mockResolveBackendConfig.mockReset();
     mockResolveBackendConfig.mockResolvedValue({ provider: 'lifecycle_kubernetes', opensandbox: {} });
+  });
+
+  it('maps a provisioning session to provisioning sandbox and editor exposure states', async () => {
+    latestSandboxQuery(null);
+    const insertAndFetch = insertSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'provisioning',
+      providerState: {},
+      suspendedAt: null,
+      endedAt: null,
+    });
+    const insertExposure = editorExposureInsertQuery();
+
+    await AgentSandboxService.recordSessionSandboxState(
+      buildSession({ status: 'active', workspaceStatus: 'provisioning' })
+    );
+
+    expect(insertAndFetch).toHaveBeenCalledWith(expect.objectContaining({ status: 'provisioning' }));
+    expect(insertExposure).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'provisioning', lastVerifiedAt: null, endedAt: null })
+    );
+  });
+
+  it('uses Date timestamps and ends editor exposure when a sandbox suspends', async () => {
+    const suspendedAt = new Date('2026-05-10T00:00:00.000Z');
+    latestSandboxQuery(null);
+    const insertAndFetch = insertSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'suspended',
+      providerState: {},
+      suspendedAt,
+      endedAt: null,
+    });
+    const closeExposure = closeExposureQuery();
+    const insertExposure = editorExposureInsertQuery();
+
+    await AgentSandboxService.recordSessionSandboxState(
+      buildSession({ status: 'active', workspaceStatus: 'hibernated', updatedAt: suspendedAt })
+    );
+
+    expect(insertAndFetch).toHaveBeenCalledWith(expect.objectContaining({ suspendedAt: suspendedAt.toISOString() }));
+    expect(closeExposure).toHaveBeenCalledWith(expect.objectContaining({ endedAt: suspendedAt.toISOString() }));
+    expect(insertExposure).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'ended', endedAt: suspendedAt.toISOString() })
+    );
+  });
+
+  it.each([
+    ['a non-record lifecycle value', 'invalid'],
+    ['a lifecycle value without a current action', { currentAction: '   ', claimedAt: '2026-05-09T00:00:00.000Z' }],
+  ])('drops %s while preserving other safe metadata', async (_label, runtimeLifecycle) => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      providerState: {},
+      capabilitySnapshot: {},
+      metadata: {
+        runtimePlan: { version: 1, pvc: { name: 'workspace-pvc' } },
+        runtimeLifecycle,
+      },
+      error: null,
+    });
+    const patchAndFetchById = patchSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: {},
+    });
+
+    await AgentSandboxService.recordSessionSandboxState(
+      buildSession({ namespace: null, podName: null, pvcName: null, status: 'active', workspaceStatus: 'ready' }),
+      { sandboxStatus: 'ready' }
+    );
+
+    expect(patchAndFetchById).toHaveBeenCalledWith(
+      9,
+      expect.objectContaining({
+        metadata: expect.objectContaining({ runtimePlan: expect.any(Object) }),
+      })
+    );
+    expect((patchAndFetchById.mock.calls[0][1] as any).metadata).not.toHaveProperty('runtimeLifecycle');
+  });
+
+  it('omits selected-service provider state when persisted session input is not an array', async () => {
+    latestSandboxQuery(null);
+    const insertAndFetch = insertSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: {},
+    });
+    editorExposureInsertQuery();
+
+    await AgentSandboxService.recordSessionSandboxState(
+      buildSession({ status: 'active', workspaceStatus: 'ready', selectedServices: null })
+    );
+
+    expect(insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({ providerState: expect.not.objectContaining({ selectedServices: expect.anything() }) })
+    );
+  });
+
+  it('builds the declared remote capability snapshot and records editor availability', async () => {
+    latestSandboxQuery(null);
+    const insertAndFetch = insertSandboxQuery({
+      id: 9,
+      provider: 'opensandbox',
+      status: 'ready',
+      providerState: { sandboxId: 'sb-1', editorUrl: 'https://editor.example' },
+    });
+    editorExposureInsertQuery();
+
+    await AgentSandboxService.recordSessionSandboxState(
+      buildSession({ namespace: null, podName: null, pvcName: null, status: 'active', workspaceStatus: 'ready' }),
+      {
+        runtimeProvider: 'opensandbox',
+        providerState: { sandboxId: 'sb-1', editorUrl: 'https://editor.example' },
+      }
+    );
+
+    expect(insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'opensandbox',
+        capabilitySnapshot: expect.objectContaining({ backend: 'opensandbox', editorAccess: true }),
+      })
+    );
   });
 
   it('persists an explicit canonical failure when inserting a failed sandbox row', async () => {
@@ -366,6 +507,20 @@ describe('AgentSandboxService', () => {
         error: null,
       })
     );
+  });
+
+  it('rejects chat sandbox access when the user-owned session does not exist', async () => {
+    mockFindSession.mockResolvedValueOnce(null);
+
+    await expect(
+      AgentSandboxService.ensureChatSandbox({
+        sessionId: 'missing-session',
+        userId: 'user-1',
+        userIdentity: { id: 'user-1' } as never,
+      })
+    ).rejects.toThrow('Agent session not found');
+    expect(mockOpenChatRuntime).not.toHaveBeenCalled();
+    expect(mockSandboxQuery).not.toHaveBeenCalled();
   });
 
   it('opens missing chat sandbox runtime through the canonical openChatRuntime policy', async () => {
@@ -770,6 +925,33 @@ describe('AgentSandboxService', () => {
     await expect(AgentSandboxService.getLatestRuntimePlanPvcMetadata(17)).resolves.toBeNull();
   });
 
+  it('rejects absent metadata and a malformed compatible prewarm UUID', async () => {
+    latestSandboxQuery({ id: 9, metadata: null });
+    latestSandboxQuery({
+      id: 10,
+      metadata: {
+        runtimePlan: {
+          pvc: {
+            name: 'prewarm-pvc',
+            ownsPvc: false,
+            skipWorkspaceBootstrap: true,
+            compatiblePrewarmUuid: '   ',
+          },
+        },
+      },
+    });
+
+    await expect(AgentSandboxService.getLatestRuntimePlanPvcMetadata(17)).resolves.toBeNull();
+    await expect(AgentSandboxService.getLatestRuntimePlanPvcMetadata(17)).resolves.toBeNull();
+  });
+
+  it('returns null when looking up a sandbox for an unknown session UUID', async () => {
+    mockFindSession.mockResolvedValueOnce(null);
+
+    await expect(AgentSandboxService.getLatestSandboxBySessionUuid('missing-session')).resolves.toBeNull();
+    expect(mockSandboxQuery).not.toHaveBeenCalled();
+  });
+
   describe('resolveWorkspaceGatewayEndpoint', () => {
     it('returns null when the session is missing', async () => {
       mockFindSession.mockResolvedValueOnce(null);
@@ -923,6 +1105,22 @@ describe('AgentSandboxService', () => {
     });
   });
 
+  it('projects a resolved workspace gateway endpoint to its base URL', async () => {
+    const endpoint = jest
+      .spyOn(AgentSandboxService, 'resolveWorkspaceGatewayEndpoint')
+      .mockResolvedValueOnce({ url: 'https://gateway.example', headers: { Authorization: 'Bearer token' } })
+      .mockResolvedValueOnce(null);
+
+    await expect(AgentSandboxService.resolveWorkspaceGatewayBaseUrl('session-1')).resolves.toBe(
+      'https://gateway.example'
+    );
+    await expect(AgentSandboxService.resolveWorkspaceGatewayBaseUrl('session-2')).resolves.toBeNull();
+
+    expect(endpoint).toHaveBeenNthCalledWith(1, 'session-1');
+    expect(endpoint).toHaveBeenNthCalledWith(2, 'session-2');
+    endpoint.mockRestore();
+  });
+
   describe('resolveGatewayEndpointForSandbox', () => {
     it('mints auth from the given sandbox row, not the latest generation', async () => {
       mockResolveBackendConfig.mockResolvedValue({
@@ -1021,6 +1219,18 @@ describe('AgentSandboxService', () => {
       await expect(AgentSandboxService.deriveWorkspaceBackendForAction(buildSession())).rejects.toThrow(
         'no-such-backend'
       );
+    });
+
+    it('propagates non-classification failures from remote provider resolution', async () => {
+      const configError = new Error('workspace configuration unavailable');
+      mockResolveBackendConfig.mockRejectedValueOnce(configError);
+      latestSandboxQuery({
+        id: 9,
+        provider: 'opensandbox',
+        providerState: { sandboxId: 'sb-live', lifecycleBaseUrl: 'https://osb.example/v1' },
+      });
+
+      await expect(AgentSandboxService.deriveWorkspaceBackendForAction(buildSession())).rejects.toBe(configError);
     });
   });
 
@@ -1208,6 +1418,127 @@ describe('AgentSandboxService', () => {
         endedAt: null,
       })
     );
+  });
+
+  it('returns null instead of recording a preview without a sandbox', async () => {
+    latestSandboxQuery(null);
+
+    await expect(
+      AgentSandboxService.recordPreviewExposure(buildSession(), {
+        port: 3000,
+        url: 'http://3000--preview.localhost:5001/',
+        attachmentKind: 'workspace_gateway_preview',
+      })
+    ).resolves.toBeNull();
+    expect(mockExposureQuery).not.toHaveBeenCalled();
+  });
+
+  it('inserts the first preview exposure for a sandbox', async () => {
+    latestSandboxQuery({ id: 9, provider: 'lifecycle_kubernetes', status: 'ready', providerState: {} });
+    const insertAndFetch = previewExposureInsertQuery({ id: 45, kind: 'preview', targetPort: 3000 });
+
+    await AgentSandboxService.recordPreviewExposure(buildSession(), {
+      port: 3000,
+      url: 'http://3000--preview.localhost:5001/',
+      attachmentKind: 'workspace_gateway_preview',
+    });
+
+    expect(insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandboxId: 9,
+        kind: 'preview',
+        targetPort: 3000,
+        status: 'ready',
+        url: 'http://3000--preview.localhost:5001/',
+        metadata: { attachmentKind: 'workspace_gateway_preview' },
+        providerState: { url: 'http://3000--preview.localhost:5001/' },
+      })
+    );
+  });
+
+  it('does not restore previews for a non-ready sandbox or when no valid ports remain', async () => {
+    latestSandboxQuery({ id: 9, provider: 'lifecycle_kubernetes', status: 'suspended', providerState: {} });
+    await expect(AgentSandboxService.restorePreviewExposures(buildSession())).resolves.toBe(0);
+    expect(mockExposureQuery).not.toHaveBeenCalled();
+
+    latestSandboxQuery({ id: 10, provider: 'lifecycle_kubernetes', status: 'ready', providerState: {} });
+    previewExposureListQuery([
+      { targetPort: null, metadata: null },
+      { targetPort: 3000.5, metadata: { previewSlug: 'invalid' } },
+    ]);
+    await expect(AgentSandboxService.restorePreviewExposures(buildSession())).resolves.toBe(0);
+  });
+
+  it('degrades preview restore when gateway authentication cannot be resolved', async () => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: { podName: 'state-pod', namespace: 'state-ns', gatewayToken: 'garbled' },
+    });
+    previewExposureListQuery([{ targetPort: 3000, metadata: null }]);
+
+    await expect(AgentSandboxService.restorePreviewExposures(buildSession())).resolves.toBe(0);
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', provider: 'lifecycle_kubernetes' }),
+      'Session: gateway auth resolution failed during preview restore'
+    );
+  });
+
+  it('contains one failed preview restoration and continues with remaining ports', async () => {
+    latestSandboxQuery({
+      id: 9,
+      provider: 'lifecycle_kubernetes',
+      status: 'ready',
+      providerState: { podName: 'state-pod', namespace: 'state-ns' },
+    });
+    previewExposureListQuery([
+      { targetPort: 3000, metadata: null },
+      { targetPort: 4000, metadata: { previewSlug: 'stable-4000' } },
+    ]);
+
+    const firstExisting: Record<string, jest.Mock> = {};
+    firstExisting.where = jest.fn(() => firstExisting);
+    firstExisting.orderBy = jest.fn(() => firstExisting);
+    firstExisting.first = jest.fn().mockRejectedValue(new Error('preview database unavailable'));
+    mockExposureQuery.mockReturnValueOnce(firstExisting);
+    previewExposureInsertQuery({ id: 46, kind: 'preview', targetPort: 4000 });
+
+    await expect(AgentSandboxService.restorePreviewExposures(buildSession())).resolves.toBe(1);
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', provider: 'lifecycle_kubernetes', port: 3000 }),
+      'Session: failed to restore preview exposure after resume'
+    );
+  });
+
+  it('serializes the public exposure shape with timestamp fallbacks', () => {
+    expect(
+      AgentSandboxService.serializeSandboxExposure({
+        uuid: 'exposure-1',
+        kind: 'preview',
+        status: 'ready',
+        targetPort: 3000,
+        url: 'https://preview.example',
+        metadata: null,
+        lastVerifiedAt: '2026-05-09T00:00:00.000Z',
+        endedAt: null,
+        createdAt: null,
+        updatedAt: undefined,
+      } as never)
+    ).toEqual({
+      id: 'exposure-1',
+      kind: 'preview',
+      status: 'ready',
+      targetPort: 3000,
+      url: 'https://preview.example',
+      metadata: {},
+      lastVerifiedAt: '2026-05-09T00:00:00.000Z',
+      endedAt: null,
+      createdAt: null,
+      updatedAt: null,
+    });
   });
 
   it('restores previously published preview ports through the current workspace gateway after resume', async () => {

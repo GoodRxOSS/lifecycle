@@ -45,10 +45,11 @@ jest.mock('server/services/globalConfig', () => ({
 jest.mock('server/services/logArchival', () => ({
   getLogArchivalService: jest.fn(),
 }));
+const mockPatchAndUpdateActivityFeed = jest.fn().mockResolvedValue(undefined);
 const mockRecordDeployFailure = jest.fn().mockResolvedValue(false);
 jest.mock('server/services/deploy', () => {
   return jest.fn().mockImplementation(() => ({
-    patchAndUpdateActivityFeed: jest.fn().mockResolvedValue(void 0),
+    patchAndUpdateActivityFeed: (...args: any[]) => mockPatchAndUpdateActivityFeed(...args),
     recordDeployFailure: (...args: any[]) => mockRecordDeployFailure(...args),
   }));
 });
@@ -73,6 +74,8 @@ describe('DeploymentManager', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockPatchAndUpdateActivityFeed.mockReset().mockResolvedValue(undefined);
+    mockRecordDeployFailure.mockReset().mockResolvedValue(false);
     (deployHelm as jest.Mock).mockReset().mockResolvedValue(undefined);
     (shouldUseNativeHelm as jest.Mock).mockReset().mockResolvedValue(false);
     (createKubernetesApplyJob as jest.Mock).mockReset().mockResolvedValue(undefined);
@@ -83,7 +86,8 @@ describe('DeploymentManager', () => {
     (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
       getAllConfigs: mockGetAllConfigs,
     });
-    mockGetAllConfigs.mockResolvedValue({ logArchival: { enabled: true } });
+    mockGetAllConfigs.mockReset().mockResolvedValue({ logArchival: { enabled: true } });
+    mockArchiveLogs.mockReset().mockResolvedValue(undefined);
     (getLogArchivalService as jest.Mock).mockReturnValue({
       archiveLogs: mockArchiveLogs,
     });
@@ -576,6 +580,223 @@ describe('DeploymentManager', () => {
           deploymentType: 'github',
         }),
         'kubectl apply logs'
+      );
+    });
+  });
+
+  describe('public deployment failure and boundary behavior', () => {
+    function managedDeploy({
+      name,
+      type = 'github',
+      deploymentDependsOn = [],
+      manifest = 'apiVersion: v1\nkind: ConfigMap',
+      runUUID,
+      sha = 'abcdef1234567890',
+    }: {
+      name: string;
+      type?: string;
+      deploymentDependsOn?: string[];
+      manifest?: string;
+      runUUID?: string | null;
+      sha?: string;
+    }) {
+      const where = jest.fn().mockResolvedValue(1);
+      const patch = jest.fn().mockReturnValue({ where });
+      const resolvedRunUUID = runUUID === undefined ? `run-${name}` : runUUID;
+      const deploy = {
+        id: name.split('').reduce((total, character) => total + character.charCodeAt(0), 0),
+        uuid: `${name}-preview-build-123456`,
+        sha,
+        manifest,
+        runUUID: resolvedRunUUID,
+        build: { namespace: 'testns' },
+        deployable: { name, type, deploymentDependsOn: [...deploymentDependsOn] },
+        service: { type },
+        $query: () => ({ patch }),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Deploy;
+
+      return { deploy, patch, where };
+    }
+
+    it('removes a self-dependency and surfaces a Codefresh provider failure', async () => {
+      const { deploy, patch } = managedDeploy({
+        name: 'self-dependent-chart',
+        type: 'helm',
+        deploymentDependsOn: ['self-dependent-chart'],
+      });
+      const providerError = new Error('Codefresh deploy failed');
+      (deployHelm as jest.Mock).mockRejectedValueOnce(providerError);
+
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toBe(providerError);
+      expect(deployHelm).toHaveBeenCalledWith([deploy]);
+      expect(patch).toHaveBeenCalledWith({ status: DeployStatus.QUEUED });
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+    });
+
+    it('surfaces an aggregated readiness failure from deploy()', async () => {
+      const { deploy } = managedDeploy({ name: 'unready-service' });
+      (waitForDeployPodReady as jest.Mock).mockResolvedValueOnce({
+        ready: false,
+        causeSummary: 'container waiting=ImagePullBackOff',
+      });
+
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toThrow(
+        'Pods failed to become ready within timeout: container waiting=ImagePullBackOff'
+      );
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        deploy.runUUID,
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
+      expect(deployHelm).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        caseName: 'archival is disabled',
+        config: { logArchival: { enabled: false } },
+        logs: 'apply output',
+      },
+      {
+        caseName: 'the provider returns no logs',
+        config: { logArchival: { enabled: true } },
+        logs: undefined,
+      },
+      {
+        caseName: 'log archival configuration is absent',
+        config: {},
+        logs: 'apply output',
+      },
+    ])('skips log archival when $caseName', async ({ config, logs }) => {
+      const { deploy } = managedDeploy({ name: 'archive-boundary' });
+      mockGetAllConfigs.mockResolvedValueOnce(config);
+      (monitorKubernetesJob as jest.Mock).mockResolvedValueOnce({ success: true, message: 'ok', logs });
+
+      const manager = new DeploymentManager([deploy]);
+      await manager.deploy();
+
+      expect(mockArchiveLogs).not.toHaveBeenCalled();
+      expect(mockPatchAndUpdateActivityFeed).toHaveBeenLastCalledWith(
+        deploy,
+        { status: DeployStatus.READY, statusMessage: 'Kubernetes pods are ready' },
+        deploy.runUUID
+      );
+    });
+
+    it('reports the base readiness timeout when the provider has no cause summary', async () => {
+      const { deploy } = managedDeploy({ name: 'unready-without-cause' });
+      (waitForDeployPodReady as jest.Mock).mockResolvedValueOnce({ ready: false });
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toThrow('Pods failed to become ready within timeout');
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        deploy.runUUID,
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
+    });
+
+    it('completes an Aurora CLI deploy without polling pods and uses the missing-SHA fallback', async () => {
+      const { deploy } = managedDeploy({ name: 'database-restore', type: 'aurora-restore', sha: '' });
+      const manager = new DeploymentManager([deploy]);
+
+      await manager.deploy();
+
+      expect(waitForDeployPodReady).not.toHaveBeenCalled();
+      expect(monitorKubernetesJob).toHaveBeenCalledWith(expect.stringContaining('unknown'), 'testns');
+      expect(mockPatchAndUpdateActivityFeed).toHaveBeenLastCalledWith(
+        deploy,
+        { status: DeployStatus.READY, statusMessage: 'CLI Deploy completed' },
+        deploy.runUUID
+      );
+    });
+
+    it('records a deployment failure and avoids Kubernetes calls when the manifest is missing', async () => {
+      const { deploy } = managedDeploy({ name: 'missing-manifest', manifest: '' });
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toThrow(
+        `Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`
+      );
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        deploy.runUUID,
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+      expect(monitorKubernetesJob).not.toHaveBeenCalled();
+      expect(waitForDeployPodReady).not.toHaveBeenCalled();
+    });
+
+    it('archives an unsuccessful apply result before recording the provider failure', async () => {
+      const { deploy } = managedDeploy({ name: 'failed-apply' });
+      (monitorKubernetesJob as jest.Mock).mockResolvedValueOnce({
+        success: false,
+        message: 'Kubernetes apply job failed',
+        logs: 'kubectl error output',
+      });
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toThrow('Kubernetes apply job failed');
+      expect(mockArchiveLogs).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'Failed', deployUuid: deploy.uuid }),
+        'kubectl error output'
+      );
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        deploy.runUUID,
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
+      expect(waitForDeployPodReady).not.toHaveBeenCalled();
+    });
+
+    it('propagates supersession during manifest application without recording a provider failure', async () => {
+      const { deploy } = managedDeploy({ name: 'superseded-apply' });
+      const superseded = new DeploymentSupersededError();
+      mockPatchAndUpdateActivityFeed.mockRejectedValueOnce(superseded);
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toBe(superseded);
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+    });
+
+    it('propagates supersession during readiness without recording a provider failure', async () => {
+      const { deploy } = managedDeploy({ name: 'superseded-readiness' });
+      const superseded = new DeploymentSupersededError();
+      (waitForDeployPodReady as jest.Mock).mockRejectedValueOnce(superseded);
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).rejects.toBe(superseded);
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+      expect(mockPatchAndUpdateActivityFeed).not.toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.READY }),
+        deploy.runUUID
+      );
+    });
+
+    it('claims a persisted deploy whose nullable run identity has not been assigned yet', async () => {
+      // The deploys.runUUID database column is nullable even though the model field is typed as string.
+      const { deploy, patch, where } = managedDeploy({ name: 'unclaimed-run', runUUID: null });
+      const manager = new DeploymentManager([deploy]);
+
+      await manager.deploy();
+
+      expect(deploy.runUUID).toEqual(expect.any(String));
+      expect(deploy.runUUID).not.toBe('');
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(patch).toHaveBeenCalledWith({ runUUID: deploy.runUUID });
+      expect(where).not.toHaveBeenCalled();
+      expect(mockPatchAndUpdateActivityFeed).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.DEPLOYING }),
+        deploy.runUUID
       );
     });
   });

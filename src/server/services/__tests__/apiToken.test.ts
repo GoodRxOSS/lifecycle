@@ -17,7 +17,7 @@
 jest.mock('server/models/ApiToken');
 jest.mock('server/lib/dependencies', () => ({}));
 jest.mock('server/lib/logger', () => ({
-  getLogger: () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() }),
+  getLogger: jest.fn(),
 }));
 jest.mock('server/services/globalConfig', () => ({
   __esModule: true,
@@ -35,9 +35,16 @@ import ApiTokenService, { API_TOKEN_PATTERN, isRepositoryAllowed, scopeSatisfies
 import ApiToken from 'server/models/ApiToken';
 import { recordAuthAuditEventInTransaction } from 'server/services/authAudit';
 import { BadRequestError } from 'server/lib/appError';
+import { getLogger } from 'server/lib/logger';
 
 const mockRecordInTx = recordAuthAuditEventInTransaction as jest.Mock;
 const TRX = { __trx: true, raw: jest.fn() } as any;
+const mockLogger = {
+  warn: jest.fn(),
+  info: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+};
 
 const mockQuery = () => {
   const query: any = {
@@ -63,8 +70,35 @@ beforeEach(() => {
   query = mockQuery();
   (ApiToken.query as jest.Mock) = jest.fn().mockReturnValue(query);
   (ApiToken.transaction as jest.Mock) = jest.fn(async (cb: any) => cb(TRX));
+  (getLogger as jest.Mock).mockReturnValue(mockLogger);
   mockRecordInTx.mockReset();
   mockRecordInTx.mockResolvedValue(undefined);
+});
+
+describe('assertManagementAllowed', () => {
+  const originalEnableAuth = process.env.ENABLE_AUTH;
+
+  afterEach(() => {
+    if (originalEnableAuth === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = originalEnableAuth;
+  });
+
+  it('requires authentication to be explicitly enabled', () => {
+    delete process.env.ENABLE_AUTH;
+    expect(() => ApiTokenService.assertManagementAllowed()).toThrow(
+      expect.objectContaining({ httpStatus: 403, code: 'auth_required' })
+    );
+
+    process.env.ENABLE_AUTH = 'false';
+    expect(() => ApiTokenService.assertManagementAllowed()).toThrow(
+      expect.objectContaining({ httpStatus: 403, code: 'auth_required' })
+    );
+  });
+
+  it('allows management when authenticated mode is explicitly enabled', () => {
+    process.env.ENABLE_AUTH = 'true';
+    expect(() => ApiTokenService.assertManagementAllowed()).not.toThrow();
+  });
 });
 
 describe('scopeSatisfies', () => {
@@ -144,6 +178,27 @@ describe('issueToken', () => {
       })
     );
     expect(record.tokenHash).not.toEqual(token);
+  });
+
+  it('preserves explicit repository and expiry restrictions on the issued record', async () => {
+    query.insertAndFetch.mockImplementation(async (attrs: any) => ({ id: 8, ...attrs }));
+
+    await ApiTokenService.issueToken({
+      name: 'repository deployer',
+      scopes: ['repos:write'],
+      repositoryAllowlist: ['org/repo'],
+      repositoryAllowlistRepoIds: [42],
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      createdBy: 'user-1',
+    });
+
+    expect(query.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryAllowlist: ['org/repo'],
+        repositoryAllowlistRepoIds: [42],
+        expiresAt: '2030-01-01T00:00:00.000Z',
+      })
+    );
   });
 
   it('deduplicates scopes and rejects unknown ones', async () => {
@@ -291,6 +346,18 @@ describe('touchLastUsed', () => {
     ApiTokenService.touchLastUsed({ id: 3, lastUsedAt: new Date(Date.now() - 120_000).toISOString() } as any);
     expect(query.findById).toHaveBeenCalledWith(3);
     expect(query.patch).toHaveBeenCalledWith({ lastUsedAt: expect.any(String) });
+  });
+
+  it('reports a background write failure without rejecting the caller', async () => {
+    const error = new Error('database unavailable');
+    query.findById.mockReturnValue(query);
+    query.execute.mockRejectedValueOnce(error);
+
+    expect(() => ApiTokenService.touchLastUsed({ id: 3, lastUsedAt: null } as any)).not.toThrow();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(query.patch).toHaveBeenCalledWith({ lastUsedAt: expect.any(String) });
+    expect(mockLogger.warn).toHaveBeenCalledWith({ error }, 'ApiToken: lastUsedAt update failed');
   });
 });
 
@@ -446,6 +513,29 @@ describe('durable audit on mint and revoke (D10, same transaction)', () => {
         tokenId: 9,
         outcome: 'revoked',
         meta: { scopes: ['env:read'], kind: 'service', reason: 'manual' },
+      })
+    );
+  });
+
+  it('attributes a Personal-key revocation to its bound owner principal', async () => {
+    query.findById.mockResolvedValueOnce({
+      id: 10,
+      kind: 'personal',
+      scopes: ['env:read'],
+      ownerUserId: 'sub-10',
+      revokedAt: null,
+    });
+    query.patchAndFetchById.mockResolvedValueOnce({ id: 10, revokedAt: 'now' });
+
+    await ApiTokenService.revokeToken(10, 'admin');
+
+    expect(mockRecordInTx).toHaveBeenCalledWith(
+      TRX,
+      expect.objectContaining({
+        principalKind: 'personal_key',
+        principalId: 'sub-10',
+        actorId: 'admin',
+        tokenId: 10,
       })
     );
   });

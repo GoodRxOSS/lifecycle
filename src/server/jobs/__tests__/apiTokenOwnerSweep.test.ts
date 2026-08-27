@@ -17,11 +17,26 @@
 const mockWarn = jest.fn();
 const mockInfo = jest.fn();
 const mockError = jest.fn();
+const mockExpiryWhereNull = jest.fn();
+const mockExpiryOrWhere = jest.fn();
 let mockOwnerRows: { ownerUserId: string | null }[] = [];
 const mockQuery = jest.fn(() => {
+  const expiryBuilder: any = {
+    whereNull: (...args: unknown[]) => {
+      mockExpiryWhereNull(...args);
+      return expiryBuilder;
+    },
+    orWhere: (...args: unknown[]) => {
+      mockExpiryOrWhere(...args);
+      return expiryBuilder;
+    },
+  };
   const builder: any = {
     distinct: jest.fn(() => builder),
-    where: jest.fn(() => builder),
+    where: jest.fn((criteria) => {
+      if (typeof criteria === 'function') criteria(expiryBuilder);
+      return builder;
+    }),
     whereNotNull: jest.fn(() => builder),
     whereNull: jest.fn(() => builder),
     then: (onFulfilled: any, onRejected: any) => Promise.resolve(mockOwnerRows).then(onFulfilled, onRejected),
@@ -74,6 +89,8 @@ describe('processApiTokenOwnerSweep', () => {
       outcome: 'revoked',
       meta: { count: 2 },
     });
+    expect(mockExpiryWhereNull).toHaveBeenCalledWith('expiresAt');
+    expect(mockExpiryOrWhere).toHaveBeenCalledWith('expiresAt', '>', expect.any(String));
   });
 
   it('revokes keys of a deleted owner the same way', async () => {

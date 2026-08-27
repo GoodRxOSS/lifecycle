@@ -14,9 +14,108 @@
  * limitations under the License.
  */
 
-import { toPublicSandboxLaunchState } from '../sandboxLaunchState';
+import type { Redis } from 'ioredis';
+import {
+  buildSandboxFocusUrl,
+  getSandboxLaunchState,
+  patchSandboxLaunchState,
+  setSandboxLaunchState,
+  toPublicSandboxLaunchState,
+} from '../sandboxLaunchState';
 
 describe('sandboxLaunchState', () => {
+  const get = jest.fn();
+  const setex = jest.fn();
+  const redis = { get, setex } as unknown as Redis;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('builds the sandbox focus URL with an encoded base-build identity', () => {
+    expect(
+      buildSandboxFocusUrl({
+        buildUuid: 'sandbox-build-1',
+        sessionId: 'session-1',
+        baseBuildUuid: 'base/build 1',
+      })
+    ).toBe('/environments/sandbox-build-1/agent-session/session-1?baseBuildUuid=base%2Fbuild+1');
+  });
+
+  it('persists launch state under the launch key with the one-hour TTL', async () => {
+    const state = {
+      launchId: 'launch-1',
+      userId: 'user-1',
+      status: 'queued' as const,
+      stage: 'queued' as const,
+      message: 'Queued sandbox launch',
+      createdAt: '2026-04-06T00:00:00.000Z',
+      updatedAt: '2026-04-06T00:00:00.000Z',
+    };
+
+    await setSandboxLaunchState(redis, state);
+
+    expect(setex).toHaveBeenCalledWith('lifecycle:agent:sandbox-launch:launch-1', 3600, JSON.stringify(state));
+  });
+
+  it.each([
+    ['an absent value', null],
+    ['malformed JSON', '{not-json'],
+  ])('returns null for %s in Redis', async (_label, raw) => {
+    get.mockResolvedValue(raw);
+
+    await expect(getSandboxLaunchState(redis, 'launch-1')).resolves.toBeNull();
+  });
+
+  it('returns null without writing when a launch disappears before patching', async () => {
+    get.mockResolvedValue(null);
+
+    await expect(patchSandboxLaunchState(redis, 'launch-1', { stage: 'ready' })).resolves.toBeNull();
+    expect(setex).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a stored launch and persists an updated patch', async () => {
+    get.mockResolvedValue(
+      JSON.stringify({
+        launchId: 'launch-1',
+        userId: 'user-1',
+        status: 'running',
+        stage: 'opening_session',
+        message: 'Opening session',
+        createdAt: '2026-04-06T00:00:00.000Z',
+        updatedAt: '2026-04-06T00:00:30.000Z',
+      })
+    );
+    jest.useFakeTimers().setSystemTime(new Date('2026-04-06T00:01:00.000Z'));
+
+    try {
+      const updated = await patchSandboxLaunchState(redis, 'launch-1', {
+        status: 'created',
+        stage: 'ready',
+        message: 'Sandbox session is ready',
+        sessionId: 'session-1',
+      });
+
+      expect(updated).toEqual(
+        expect.objectContaining({
+          launchId: 'launch-1',
+          status: 'created',
+          stage: 'ready',
+          sessionId: 'session-1',
+          buildUuid: null,
+          namespace: null,
+          focusUrl: null,
+          error: null,
+          workspaceFailure: null,
+          updatedAt: '2026-04-06T00:01:00.000Z',
+        })
+      );
+      expect(setex).toHaveBeenCalledWith('lifecycle:agent:sandbox-launch:launch-1', 3600, JSON.stringify(updated));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('fills nullable launch fields with null for queued launches', () => {
     expect(
       toPublicSandboxLaunchState({

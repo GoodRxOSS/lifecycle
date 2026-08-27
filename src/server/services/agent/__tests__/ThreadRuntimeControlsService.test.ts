@@ -320,6 +320,71 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(JSON.stringify(mockPatchRuntimeControlChoices.mock.calls[0][1])).not.toContain('sample-mcp');
   });
 
+  it('trims and deduplicates externally supplied choice ids before persistence', async () => {
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+    const optionalChoiceId = getOptionalChoiceId(state);
+    const mcpChoiceId = state.mcp.connections[0].id;
+    mockPatchRuntimeControlChoices.mockResolvedValue({
+      ...thread,
+      metadata: {},
+    });
+
+    await AgentThreadRuntimeControlsService.patchChoices({
+      threadId: 'thread-1',
+      userIdentity,
+      toolChoiceIds: [`  ${optionalChoiceId}  `, optionalChoiceId],
+      mcpChoiceIds: [` ${mcpChoiceId}`, mcpChoiceId],
+    });
+
+    expect(mockPatchRuntimeControlChoices).toHaveBeenCalledWith(23, {
+      version: 1,
+      toolChoiceIds: [optionalChoiceId],
+      mcpChoiceIds: [mcpChoiceId],
+    });
+    expect(mockCreateRuntimeControlsUpdateEvent).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing and malformed choice arrays without persisting', async () => {
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+      })
+    ).rejects.toMatchObject({
+      code: 'invalid_input',
+      httpStatus: 400,
+      message: 'runtimeControlChoices are required.',
+    });
+
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+        toolChoiceIds: 'not-an-array' as never,
+      })
+    ).rejects.toMatchObject({
+      code: 'invalid_input',
+      message: 'toolChoiceIds must be an array of choice ids.',
+    });
+
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+        mcpChoiceIds: ['   '],
+      })
+    ).rejects.toMatchObject({
+      code: 'invalid_input',
+      message: 'mcpChoiceIds must contain only choice ids.',
+    });
+
+    expect(mockPatchRuntimeControlChoices).not.toHaveBeenCalled();
+    expect(mockCreateRuntimeControlsUpdateEvent).not.toHaveBeenCalled();
+  });
+
   it('preserves current MCP choices when patching only tool choices', async () => {
     const state = await AgentThreadRuntimeControlsService.getState({
       threadId: 'thread-1',
@@ -421,6 +486,57 @@ describe('AgentThreadRuntimeControlsService', () => {
         expect.objectContaining({ label: 'Sample MCP' }),
       ]),
     });
+  });
+
+  it('records newly enabled choices in the runtime-controls update event', async () => {
+    const defaultState = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+    const optionalChoiceId = getOptionalChoiceId(defaultState);
+    const mcpChoiceId = defaultState.mcp.connections[0].id;
+    mockGetRuntimeControlChoices.mockReturnValue({
+      version: 1,
+      toolChoiceIds: [],
+      mcpChoiceIds: [],
+    });
+    mockPatchRuntimeControlChoices.mockResolvedValue({
+      ...thread,
+      metadata: {},
+    });
+
+    await AgentThreadRuntimeControlsService.patchChoices({
+      threadId: 'thread-1',
+      userIdentity,
+      toolChoiceIds: [optionalChoiceId],
+      mcpChoiceIds: [mcpChoiceId],
+    });
+
+    expect(mockCreateRuntimeControlsUpdateEvent).toHaveBeenCalledWith({
+      thread: { id: 23 },
+      actor: { userId: 'sample-user', label: 'Sample User' },
+      enabled: expect.arrayContaining([
+        expect.objectContaining({ label: 'Workspace files' }),
+        expect.objectContaining({ label: 'Sample MCP' }),
+      ]),
+      disabled: [],
+    });
+  });
+
+  it('propagates persistence failures and does not append an audit event', async () => {
+    const persistenceError = new Error('update failed');
+    mockPatchRuntimeControlChoices.mockRejectedValueOnce(persistenceError);
+
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+        toolChoiceIds: [],
+        mcpChoiceIds: [],
+      })
+    ).rejects.toBe(persistenceError);
+
+    expect(mockCreateRuntimeControlsUpdateEvent).not.toHaveBeenCalled();
   });
 
   it('records no event when the patch does not change the selection', async () => {
@@ -534,6 +650,77 @@ describe('AgentThreadRuntimeControlsService', () => {
     });
   });
 
+  it('reflects connection setup, staleness, tool discovery, and nullable descriptions in MCP availability', async () => {
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'needs-setup',
+        name: 'Needs setup',
+        description: 'Not configured.',
+        scope: 'global',
+        connectionRequired: true,
+        configured: false,
+        stale: false,
+        validationError: null,
+        discoveredTools: [{ name: 'readSetup', annotations: { readOnlyHint: true } }],
+        sharedDiscoveredTools: [],
+      },
+      {
+        slug: 'stale-connection',
+        name: 'Stale connection',
+        description: 'Needs refresh.',
+        scope: 'global',
+        connectionRequired: true,
+        configured: true,
+        stale: true,
+        validationError: null,
+        discoveredTools: [{ name: 'readStale', annotations: { readOnlyHint: true } }],
+        sharedDiscoveredTools: [],
+      },
+      {
+        slug: 'no-tools',
+        name: 'No tools',
+        description: 'Connected but empty.',
+        scope: 'global',
+        connectionRequired: false,
+        configured: true,
+        stale: false,
+        validationError: null,
+        discoveredTools: [],
+        sharedDiscoveredTools: [],
+      },
+      {
+        slug: 'available-without-description',
+        name: 'Available without description',
+        description: null,
+        scope: 'global',
+        connectionRequired: false,
+        configured: true,
+        stale: false,
+        validationError: null,
+        discoveredTools: [{ name: 'readAvailable', annotations: { readOnlyHint: true } }],
+        sharedDiscoveredTools: [],
+      },
+    ]);
+
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+
+    expect(state.mcp.connections).toEqual([
+      expect.objectContaining({ label: 'Needs setup', available: false, selected: false }),
+      expect.objectContaining({ label: 'Stale connection', available: false, selected: false }),
+      expect.objectContaining({ label: 'No tools', available: false, selected: false }),
+      expect.objectContaining({
+        label: 'Available without description',
+        description: null,
+        available: true,
+        selected: true,
+      }),
+    ]);
+    expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[3].id]);
+  });
+
   it('keeps metadata absent until runtime choices are saved', async () => {
     await AgentThreadRuntimeControlsService.getState({
       threadId: 'thread-1',
@@ -541,6 +728,22 @@ describe('AgentThreadRuntimeControlsService', () => {
     });
 
     expect(mockPatchRuntimeControlChoices).not.toHaveBeenCalled();
+  });
+
+  it('returns an absent admission snapshot without loading MCP connections when no choices were saved', async () => {
+    const choices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
+      thread,
+      userIdentity,
+      definition: SYSTEM_AGENT_DEFINITIONS['system.freeform'],
+      sourceKind: 'freeform_chat',
+      capabilityPolicy: undefined,
+      customAgentCreationPolicy: undefined,
+      approvalPolicy: { defaultMode: 'allow', rules: {} },
+      repoFullName: 'example-org/example-repo',
+    });
+
+    expect(choices).toEqual({ metadataPresent: false });
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
   });
 
   it('admits allowed MCP capabilities when a connection is selected', async () => {
@@ -626,6 +829,23 @@ describe('AgentThreadRuntimeControlsService', () => {
     });
   });
 
+  it('rejects an unknown MCP choice before persistence', async () => {
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+        toolChoiceIds: [],
+        mcpChoiceIds: ['rtc_v1_f48b74d9_mcp_unknown'],
+      })
+    ).rejects.toMatchObject({
+      code: 'unknown_choice',
+      httpStatus: 400,
+    });
+
+    expect(mockPatchRuntimeControlChoices).not.toHaveBeenCalled();
+    expect(mockCreateRuntimeControlsUpdateEvent).not.toHaveBeenCalled();
+  });
+
   it('blocks existing-thread edits while an active run exists', async () => {
     mockHasActiveRun.mockResolvedValue(true);
 
@@ -664,6 +884,212 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(state.mcp.connections.map((choice) => choice.label)).toEqual(['Sample MCP']);
     expect(JSON.stringify(state)).not.toContain('custom.sample-agent');
     expect(JSON.stringify(state)).not.toContain('sample-mcp');
+  });
+
+  it.each([
+    {
+      name: 'build-backed blank chat',
+      sourceInput: { adapter: 'blank_workspace', input: { buildUuid: ' build-1 ' } },
+      expectedRequiredLabel: 'Diagnostic logs',
+    },
+    {
+      name: 'workspace chat',
+      sourceInput: { adapter: 'lifecycle_fork', input: {} },
+      expectedRequiredLabel: 'Workspace files',
+    },
+    {
+      name: 'free-form blank chat',
+      sourceInput: { adapter: 'blank_workspace', input: {} },
+      expectedRequiredLabel: 'Read/context',
+    },
+  ])('maps the default Lifecycle agent to the $name tool surface', async ({ sourceInput, expectedRequiredLabel }) => {
+    mockGetSystemAgentDefinition.mockResolvedValueOnce(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+
+    const state = await AgentThreadRuntimeControlsService.getEntryPreview({
+      userIdentity,
+      source: sourceInput,
+      defaults: {},
+    });
+
+    expect(state.tools.required).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: expectedRequiredLabel, selected: true })])
+    );
+  });
+
+  it('uses workspace defaults when a new-entry preview omits source details', async () => {
+    mockGetSystemAgentDefinition.mockResolvedValueOnce(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+
+    const state = await AgentThreadRuntimeControlsService.getEntryPreview({
+      userIdentity,
+      defaults: {},
+    });
+
+    expect(state.tools.required.map((choice) => choice.label)).toEqual(
+      expect.arrayContaining(['Read/context', 'Workspace files', 'Command tools', 'Source control'])
+    );
+    expect(mockGetEffectiveConfig).toHaveBeenCalledWith(undefined);
+    expect(mockListEnabledConnectionsForUser).toHaveBeenCalledWith(undefined, userIdentity);
+  });
+
+  it('uses an explicitly selected legacy system agent source kind instead of the entry adapter default', async () => {
+    mockGetSystemAgentDefinition.mockResolvedValueOnce(SYSTEM_AGENT_DEFINITIONS['system.freeform']);
+
+    const state = await AgentThreadRuntimeControlsService.getEntryPreview({
+      userIdentity,
+      agentId: 'system.freeform',
+      source: { adapter: 'lifecycle_fork', input: {} },
+      defaults: {},
+    });
+
+    expect(mockGetSystemAgentDefinition).toHaveBeenCalledWith('system.freeform');
+    expect(state.tools.required).toEqual([expect.objectContaining({ label: 'Read/context', available: true })]);
+  });
+
+  it.each([
+    {
+      name: 'direct repository',
+      sourceInput: {
+        adapter: 'lifecycle_fork',
+        input: { repo: ' example-org/direct-repo ', repoUrl: 'https://github.com/ignored/repo.git' },
+      },
+      expectedRepo: 'example-org/direct-repo',
+    },
+    {
+      name: 'GitHub URL',
+      sourceInput: {
+        adapter: 'lifecycle_fork',
+        input: { repoUrl: ' https://github.com/example-org/url-repo.git ' },
+      },
+      expectedRepo: 'example-org/url-repo',
+    },
+    {
+      name: 'incomplete GitHub URL',
+      sourceInput: {
+        adapter: 'lifecycle_fork',
+        input: { repoUrl: 'https://github.com/' },
+      },
+      expectedRepo: undefined,
+    },
+  ])('normalizes the $name before resolving entry policy and MCP context', async ({ sourceInput, expectedRepo }) => {
+    await AgentThreadRuntimeControlsService.getEntryPreview({
+      userIdentity,
+      agentId: 'custom.sample-agent',
+      source: sourceInput,
+      defaults: {},
+    });
+
+    expect(mockGetEffectiveConfig).toHaveBeenCalledWith(expectedRepo);
+    expect(mockListEnabledConnectionsForUser).toHaveBeenCalledWith(expectedRepo, userIdentity);
+  });
+
+  it('uses capabilityRefs as optional choices for a definition without explicit required/optional partitions', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      requiredCapabilityRefs: undefined,
+      optionalCapabilityRefs: undefined,
+    });
+
+    const state = await AgentThreadRuntimeControlsService.getEntryPreview({
+      userIdentity,
+      agentId: 'custom.sample-agent',
+      source: { adapter: 'lifecycle_fork', input: {} },
+      defaults: {},
+    });
+
+    expect(state.tools.required).toEqual([]);
+    expect(state.tools.optional.map((choice) => choice.label)).toEqual(['Read/context', 'Workspace files']);
+    expect(state.mcp.connections).toEqual([expect.objectContaining({ label: 'Sample MCP', available: true })]);
+  });
+
+  it('rejects disabled custom definitions before resolving policy or MCP context', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      status: 'disabled',
+    });
+
+    await expect(
+      AgentThreadRuntimeControlsService.getEntryPreview({
+        userIdentity,
+        agentId: 'custom.sample-agent',
+        source: { adapter: 'lifecycle_fork', input: {} },
+        defaults: {},
+      })
+    ).rejects.toMatchObject({
+      code: 'policy_denied',
+      httpStatus: 403,
+      message: 'Sample agent is unavailable.',
+    });
+
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects custom definitions that require one-agent conversion before resolving runtime context', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      resourcePolicy: {
+        ...customDefinition.resourcePolicy,
+        workspaceRequired: true,
+      },
+    });
+
+    await expect(
+      AgentThreadRuntimeControlsService.getEntryPreview({
+        userIdentity,
+        agentId: 'custom.sample-agent',
+        source: { adapter: 'lifecycle_fork', input: {} },
+        defaults: {},
+      })
+    ).rejects.toMatchObject({
+      code: 'policy_denied',
+      message: 'This custom agent needs conversion before it can run in the one-agent harness.',
+    });
+
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a definition that does not support the selected conversation source', async () => {
+    mockGetUserDefinition.mockResolvedValueOnce({
+      ...customDefinition,
+      resourcePolicy: {
+        ...customDefinition.resourcePolicy,
+        sourceKinds: ['freeform_chat'],
+      },
+    });
+
+    await expect(
+      AgentThreadRuntimeControlsService.getEntryPreview({
+        userIdentity,
+        agentId: 'custom.sample-agent',
+        source: { adapter: 'lifecycle_fork', input: {} },
+        defaults: {},
+      })
+    ).rejects.toMatchObject({
+      code: 'policy_denied',
+      message: 'Sample agent is unavailable for this conversation.',
+    });
+
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown agent family without querying user definitions or runtime context', async () => {
+    await expect(
+      AgentThreadRuntimeControlsService.getEntryPreview({
+        userIdentity,
+        agentId: 'vendor.unknown',
+        source: { adapter: 'lifecycle_fork', input: {} },
+        defaults: {},
+      })
+    ).rejects.toMatchObject({
+      code: 'policy_denied',
+      message: 'Selected agent is unavailable.',
+    });
+
+    expect(mockGetUserDefinition).not.toHaveBeenCalled();
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
   });
 
   it('previews Develop tools for blank chat entry without a prepared workspace yet', async () => {
@@ -718,7 +1144,6 @@ describe('AgentThreadRuntimeControlsService', () => {
   it('stores selected agent metadata without runtime-choice metadata for agent-only create-session input', async () => {
     const metadata = await AgentThreadRuntimeControlsService.validateEntryChoices({
       userIdentity,
-      agentId: 'custom.sample-agent',
       source: { adapter: 'lifecycle_fork', input: {} },
       defaults: {},
       runtimeControlChoices: {
@@ -732,6 +1157,23 @@ describe('AgentThreadRuntimeControlsService', () => {
       },
       runtimeControlChoices: null,
     });
+  });
+
+  it('uses the default agent without writing selected-agent metadata when entry choices omit an agent', async () => {
+    mockGetSystemAgentDefinition.mockResolvedValueOnce(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+
+    const metadata = await AgentThreadRuntimeControlsService.validateEntryChoices({
+      userIdentity,
+      source: { adapter: 'blank_workspace', input: {} },
+      defaults: {},
+      runtimeControlChoices: {},
+    });
+
+    expect(metadata).toEqual({
+      selectedAgentMetadataPatch: null,
+      runtimeControlChoices: null,
+    });
+    expect(mockBuildSelectedAgentDefinitionMetadataPatch).not.toHaveBeenCalled();
   });
 
   it('stores Develop metadata for blank chat create-session input', async () => {
@@ -778,14 +1220,73 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(updatedPreview.mcp.selectedChoiceIds).toEqual([]);
   });
 
-  it('throws a typed not_found error for missing threads', async () => {
-    mockGetOwnedThreadWithSession.mockRejectedValueOnce(new Error('Agent thread not found'));
+  it('falls back to the inferred system agent when the thread has no saved agent selection', async () => {
+    mockGetSelectedAgentDefinitionId.mockReturnValueOnce(null);
+    mockGetSystemAgentDefinition.mockResolvedValueOnce(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+
+    expect(mockGetSystemAgentDefinition).toHaveBeenCalledWith('system.agent');
+    expect(mockGetUserDefinition).not.toHaveBeenCalled();
+    expect(state.tools.required.map((choice) => choice.label)).toEqual(
+      expect.arrayContaining(['Read/context', 'Workspace files', 'Command tools', 'Source control'])
+    );
+  });
+
+  it.each(['Agent thread not found', 'Agent session not found'])(
+    'maps "%s" dependency errors to a typed not_found response',
+    async (message) => {
+      mockGetOwnedThreadWithSession.mockRejectedValueOnce(new Error(message));
+      const statePromise = AgentThreadRuntimeControlsService.getState({
+        threadId: 'missing-thread',
+        userIdentity,
+      });
+
+      await expect(statePromise).rejects.toBeInstanceOf(AgentThreadRuntimeControlsError);
+      await expect(statePromise).rejects.toMatchObject({
+        name: 'AgentThreadRuntimeControlsError',
+        code: 'not_found',
+        httpStatus: 404,
+        message,
+      });
+    }
+  );
+
+  it('preserves unexpected thread lookup failures', async () => {
+    const lookupError = new Error('database unavailable');
+    mockGetOwnedThreadWithSession.mockRejectedValueOnce(lookupError);
 
     await expect(
       AgentThreadRuntimeControlsService.getState({
-        threadId: 'missing-thread',
+        threadId: 'thread-1',
         userIdentity,
       })
-    ).rejects.toBeInstanceOf(AgentThreadRuntimeControlsError);
+    ).rejects.toBe(lookupError);
+  });
+
+  it.each([
+    { name: 'missing', sourceRecord: null },
+    { name: 'not ready', sourceRecord: { ...source, status: 'preparing' } },
+  ])('rejects a $name session source before resolving agent or capability context', async ({ sourceRecord }) => {
+    mockGetSessionSource.mockResolvedValueOnce(sourceRecord);
+
+    await expect(
+      AgentThreadRuntimeControlsService.getState({
+        threadId: 'thread-1',
+        userIdentity,
+      })
+    ).rejects.toMatchObject({
+      code: 'policy_denied',
+      httpStatus: 403,
+      message: 'Session source is not ready yet.',
+    });
+
+    expect(mockGetUserDefinition).not.toHaveBeenCalled();
+    expect(mockResolveSessionContext).not.toHaveBeenCalled();
+    expect(mockHasActiveRun).not.toHaveBeenCalled();
+    expect(mockListEnabledConnectionsForUser).not.toHaveBeenCalled();
   });
 });

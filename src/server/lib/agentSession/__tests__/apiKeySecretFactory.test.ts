@@ -16,6 +16,7 @@
 
 const mockCreateSecret = jest.fn();
 const mockDeleteSecret = jest.fn();
+const mockLoggerInfo = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
@@ -33,20 +34,22 @@ jest.mock('@kubernetes/client-node', () => {
 
 jest.mock('server/lib/logger', () => ({
   getLogger: () => ({
-    info: jest.fn(),
+    info: (...args: unknown[]) => mockLoggerInfo(...args),
   }),
 }));
 
-import { createAgentApiKeySecret } from '../apiKeySecretFactory';
+import * as k8s from '@kubernetes/client-node';
+import { createAgentApiKeySecret, deleteAgentApiKeySecret } from '../apiKeySecretFactory';
 
 describe('apiKeySecretFactory', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCreateSecret.mockResolvedValue({ body: { metadata: { name: 'agent-secret-abc123' } } });
+    mockDeleteSecret.mockResolvedValue(undefined);
   });
 
   it('stores the GitHub token once in the session secret when provided', async () => {
-    await createAgentApiKeySecret(
+    const result = await createAgentApiKeySecret(
       'test-ns',
       'agent-secret-abc123',
       {
@@ -56,6 +59,7 @@ describe('apiKeySecretFactory', () => {
       'sample-github-token'
     );
 
+    expect(result).toEqual({ metadata: { name: 'agent-secret-abc123' } });
     expect(mockCreateSecret).toHaveBeenCalledWith(
       'test-ns',
       expect.objectContaining({
@@ -69,6 +73,9 @@ describe('apiKeySecretFactory', () => {
           GITHUB_TOKEN: 'sample-github-token',
         },
       })
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      'AgentRuntime: credentials prepared kind=api_key_secret secretName=agent-secret-abc123 namespace=test-ns'
     );
   });
 
@@ -121,5 +128,58 @@ describe('apiKeySecretFactory', () => {
         stringData: {},
       })
     );
+  });
+
+  it('propagates Kubernetes creation failures without logging successful preparation', async () => {
+    const error = new Error('Kubernetes API unavailable');
+    mockCreateSecret.mockRejectedValue(error);
+
+    await expect(createAgentApiKeySecret('test-ns', 'agent-secret-abc123')).rejects.toBe(error);
+
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
+    expect(mockDeleteSecret).not.toHaveBeenCalled();
+  });
+
+  describe('deleteAgentApiKeySecret', () => {
+    it('deletes the named secret and logs successful cleanup', async () => {
+      await expect(deleteAgentApiKeySecret('test-ns', 'agent-secret-abc123')).resolves.toBeUndefined();
+
+      expect(mockDeleteSecret).toHaveBeenCalledWith('agent-secret-abc123', 'test-ns');
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        'AgentRuntime: credentials cleaned kind=api_key_secret secretName=agent-secret-abc123 namespace=test-ns'
+      );
+    });
+
+    it('treats a Kubernetes 404 as idempotent cleanup', async () => {
+      const notFound = new k8s.HttpError({ statusCode: 404 } as any, 'not found', 404);
+      mockDeleteSecret.mockRejectedValue(notFound);
+
+      await expect(deleteAgentApiKeySecret('test-ns', 'missing-secret')).resolves.toBeUndefined();
+
+      expect(mockDeleteSecret).toHaveBeenCalledWith('missing-secret', 'test-ns');
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        'AgentRuntime: credentials cleanup skipped reason=not_found kind=api_key_secret secretName=missing-secret namespace=test-ns'
+      );
+    });
+
+    it('propagates non-404 Kubernetes failures without logging cleanup', async () => {
+      const forbidden = new k8s.HttpError({ statusCode: 403 } as any, 'forbidden', 403);
+      mockDeleteSecret.mockRejectedValue(forbidden);
+
+      await expect(deleteAgentApiKeySecret('test-ns', 'agent-secret-abc123')).rejects.toBe(forbidden);
+
+      expect(mockDeleteSecret).toHaveBeenCalledWith('agent-secret-abc123', 'test-ns');
+      expect(mockLoggerInfo).not.toHaveBeenCalled();
+    });
+
+    it('propagates non-HTTP client failures without logging cleanup', async () => {
+      const error = new Error('connection reset');
+      mockDeleteSecret.mockRejectedValue(error);
+
+      await expect(deleteAgentApiKeySecret('test-ns', 'agent-secret-abc123')).rejects.toBe(error);
+
+      expect(mockDeleteSecret).toHaveBeenCalledWith('agent-secret-abc123', 'test-ns');
+      expect(mockLoggerInfo).not.toHaveBeenCalled();
+    });
   });
 });

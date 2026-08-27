@@ -42,6 +42,7 @@ jest.mock('@kubernetes/client-node', () => {
 
 jest.mock('server/lib/logger', () => ({
   getLogger: () => ({
+    debug: jest.fn(),
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
@@ -850,6 +851,78 @@ describe('podFactory', () => {
       expect(pod.spec!.initContainers?.map((container) => container.name)).toEqual(['seed-runtime-config']);
     });
 
+    it('builds an empty editor workspace and omits identity env when no repository or user is supplied', () => {
+      const pod = buildSessionWorkspacePodSpec({
+        ...baseOpts,
+        repoUrl: undefined,
+        branch: undefined,
+        workspaceRepos: undefined,
+        userIdentity: undefined,
+      });
+      const runtimeSeed = getInitContainer(pod, 'seed-runtime-config');
+      const gateway = getContainer(pod, 'workspace-gateway');
+
+      expect(runtimeSeed.command?.[2]).toContain('"folders": []');
+      expect(runtimeSeed.env?.find((env) => env.name === 'LIFECYCLE_USER_ID')).toBeUndefined();
+      expect(gateway.env).toEqual(
+        expect.arrayContaining([{ name: 'LIFECYCLE_SESSION_PRIMARY_REPO_PATH', value: '/workspace' }])
+      );
+      expect(gateway.env?.find((env) => env.name === 'LIFECYCLE_USER_ID')).toBeUndefined();
+    });
+
+    it('rejects a pod spec when either required workspace image is missing', () => {
+      expect(() =>
+        buildSessionWorkspacePodSpec({
+          ...baseOpts,
+          workspaceEditorImage: undefined,
+        })
+      ).toThrow('Session workspace pod requires workspaceImage and workspaceEditorImage');
+    });
+
+    it('adds a skill bootstrap init container when the resolved skill plan is non-empty', () => {
+      const skillPlan = {
+        version: 1 as const,
+        skills: [
+          {
+            repo: 'example-org/agent-skills',
+            repoUrl: 'https://github.com/example-org/agent-skills.git',
+            branch: 'main',
+            path: 'skills/code-review',
+            source: 'environment' as const,
+          },
+        ],
+      };
+      const pod = buildSessionWorkspacePodSpec({
+        ...baseOpts,
+        workspaceGatewayImage: 'lifecycle-workspace-gateway:latest',
+        skillPlan,
+      });
+      const initSkills = getInitContainer(pod, 'init-skills');
+
+      expect(initSkills).toEqual(
+        expect.objectContaining({
+          image: 'lifecycle-workspace-gateway:latest',
+          imagePullPolicy: 'IfNotPresent',
+          securityContext: expect.objectContaining({
+            runAsNonRoot: true,
+            readOnlyRootFilesystem: false,
+          }),
+          volumeMounts: expect.arrayContaining([
+            { name: 'workspace', mountPath: '/workspace', subPath: 'repo' },
+            { name: SESSION_WORKSPACE_HOME_VOLUME_NAME, mountPath: SESSION_WORKSPACE_SHARED_HOME_DIR },
+          ]),
+        })
+      );
+      expect(initSkills.command?.[2]).toContain('/opt/lifecycle-workspace-gateway/skills-bootstrap.mjs');
+      expect(initSkills.command?.[2]).toContain(Buffer.from(JSON.stringify(skillPlan)).toString('base64'));
+      expect(initSkills.env).toEqual(
+        expect.arrayContaining([
+          { name: 'LIFECYCLE_SESSION_HOME', value: SESSION_WORKSPACE_SHARED_HOME_DIR },
+          expect.objectContaining({ name: 'GITHUB_TOKEN' }),
+        ])
+      );
+    });
+
     it('does not set runtimeClassName when gVisor not requested', () => {
       const pod = buildSessionWorkspacePodSpec(baseOpts);
       expect(pod.spec!.runtimeClassName).toBeUndefined();
@@ -907,6 +980,43 @@ describe('podFactory', () => {
       );
     });
 
+    it('surfaces a plain-text Kubernetes rejection from pod creation', async () => {
+      mockCreatePod.mockRejectedValue(
+        new k8s.HttpError({ statusCode: 403 } as any, ' admission policy denied this pod ', 403)
+      );
+
+      await expect(createSessionWorkspacePodWithoutWaiting(baseOpts)).rejects.toThrow(
+        'Session workspace pod creation rejected by Kubernetes: admission policy denied this pod'
+      );
+      expect(mockReadPod).not.toHaveBeenCalled();
+    });
+
+    it('preserves message-only and field-only Kubernetes validation causes', async () => {
+      mockCreatePod.mockRejectedValue(
+        new k8s.HttpError(
+          { statusCode: 422 } as any,
+          {
+            details: {
+              causes: [{ message: 'value is not permitted' }, { field: 'spec.securityContext.runAsUser' }],
+            },
+          },
+          422
+        )
+      );
+
+      await expect(createSessionWorkspacePodWithoutWaiting(baseOpts)).rejects.toThrow(
+        'Session workspace pod creation rejected by Kubernetes: value is not permitted; spec.securityContext.runAsUser'
+      );
+    });
+
+    it('rethrows a non-Kubernetes pod creation failure unchanged', async () => {
+      const createError = new Error('connection reset');
+      mockCreatePod.mockRejectedValue(createError);
+
+      await expect(createSessionWorkspacePodWithoutWaiting(baseOpts)).rejects.toBe(createError);
+      expect(mockReadPod).not.toHaveBeenCalled();
+    });
+
     it('fails fast when pod enters image pull backoff', async () => {
       mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
       mockReadPodLog.mockResolvedValue({ body: 'pull failed for test image' });
@@ -944,6 +1054,63 @@ describe('podFactory', () => {
         undefined,
         200
       );
+    });
+
+    it('reports a terminated startup container even when its logs cannot be fetched', async () => {
+      mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
+      mockReadPod.mockResolvedValue({
+        body: {
+          status: {
+            phase: 'Running',
+            containerStatuses: [
+              {
+                name: 'workspace-gateway',
+                state: {
+                  terminated: {
+                    reason: 'Error',
+                    exitCode: 1,
+                    message: 'gateway exited during startup',
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+      mockReadPodLog.mockRejectedValue(new Error('logs unavailable'));
+
+      await expect(createSessionWorkspacePod(baseOpts)).rejects.toThrow(
+        'Session workspace pod failed to start: workspace-gateway: Error - gateway exited during startup'
+      );
+      expect(mockReadPodLog).toHaveBeenCalledWith(
+        'agent-abc123',
+        'test-ns',
+        'workspace-gateway',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        200
+      );
+    });
+
+    it('reports a failed pod phase even when Kubernetes exposes no failing container', async () => {
+      mockCreatePod.mockResolvedValue({ body: { metadata: { name: 'agent-abc123' } } });
+      mockReadPod.mockResolvedValue({
+        body: {
+          status: {
+            phase: 'Failed',
+            message: 'pod was evicted',
+          },
+        },
+      });
+
+      await expect(createSessionWorkspacePod(baseOpts)).rejects.toThrow(
+        'Session workspace pod failed to start: pod was evicted'
+      );
+      expect(mockReadPodLog).not.toHaveBeenCalled();
     });
 
     it('prefers explicit readiness overrides over process env defaults', async () => {
@@ -1098,6 +1265,31 @@ describe('podFactory', () => {
       await deleteSessionWorkspacePod('test-ns', 'agent-abc123', { pollMs: 0 });
 
       expect(mockReadPod).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows a non-404 failure while polling for pod deletion', async () => {
+      const readError = new Error('pod lookup failed');
+      mockDeletePod.mockResolvedValue({});
+      mockReadPod.mockRejectedValue(readError);
+
+      await expect(deleteSessionWorkspacePod('test-ns', 'agent-abc123')).rejects.toBe(readError);
+      expect(mockDeletePod).toHaveBeenCalledWith('agent-abc123', 'test-ns');
+      expect(mockReadPod).toHaveBeenCalledWith('agent-abc123', 'test-ns');
+    });
+
+    it('times out when Kubernetes never removes the deleted pod', async () => {
+      mockDeletePod.mockResolvedValue({});
+      mockReadPod.mockResolvedValue({
+        body: {
+          metadata: { name: 'agent-abc123' },
+          status: { phase: 'Terminating' },
+        },
+      });
+
+      await expect(deleteSessionWorkspacePod('test-ns', 'agent-abc123', { timeoutMs: 1, pollMs: 0 })).rejects.toThrow(
+        'Session workspace pod was not deleted within 1ms: phase=Terminating init=[] containers=[]'
+      );
+      expect(mockReadPod).toHaveBeenCalled();
     });
 
     it('ignores 404 errors', async () => {

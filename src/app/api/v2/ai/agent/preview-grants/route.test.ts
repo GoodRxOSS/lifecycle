@@ -161,4 +161,15 @@ describe('/api/v2/ai/agent/preview-grants', () => {
     expect(mockFindOne).not.toHaveBeenCalled();
     expect(mockCreateChatPreviewGrant).not.toHaveBeenCalled();
   });
+
+  it('rejects malformed JSON before looking up a session', async () => {
+    const request = makeRequest(undefined);
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect(mockFindOne).not.toHaveBeenCalled();
+    expect(mockCreateChatPreviewGrant).not.toHaveBeenCalled();
+  });
 });

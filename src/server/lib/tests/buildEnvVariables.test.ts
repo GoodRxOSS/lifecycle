@@ -17,6 +17,17 @@
 import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
+const mockLoggerError = jest.fn();
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: () => ({
+    debug: jest.fn(),
+    error: (...args: unknown[]) => mockLoggerError(...args),
+    info: jest.fn(),
+    warn: jest.fn(),
+  }),
+}));
+
 import Database from 'server/database';
 import * as models from 'server/models';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
@@ -58,6 +69,10 @@ describe('EnvironmentVariables', () => {
   db.services = { GlobalConfig: globalConfigService, BuildService: buildService } as unknown as IServices;
   db.models = models;
   describe('targeted source resolution', () => {
+    beforeEach(() => {
+      mockLoggerError.mockClear();
+    });
+
     test('patches only deploys on the exact repository and branch', async () => {
       const mainPatch = jest.fn().mockResolvedValue(undefined);
       const stablePatch = jest.fn().mockResolvedValue(undefined);
@@ -88,6 +103,110 @@ describe('EnvironmentVariables', () => {
 
       expect(mainPatch).toHaveBeenCalledTimes(1);
       expect(stablePatch).not.toHaveBeenCalled();
+    });
+
+    test('does not persist configuration deploy data onto its unused deploy record', async () => {
+      const patch = jest.fn();
+      const query = jest.fn(() => ({ patch }));
+      const build: any = {
+        namespace: 'env-test',
+        enabledFeatures: [],
+        deploys: [
+          {
+            githubRepositoryId: 42,
+            branchName: 'main',
+            deployable: {
+              type: DeployTypes.CONFIGURATION,
+              env: { DATABASE_PASSWORD: { secretRef: 'database/password' } },
+            },
+            $query: query,
+          },
+        ],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const envVariables = new BuildEnvironmentVariables(db);
+      jest.spyOn(envVariables, 'availableEnvironmentVariablesForBuild').mockResolvedValue({});
+      const compileEnv = jest.spyOn(envVariables, 'compileEnv');
+
+      await expect(envVariables.resolve(build)).resolves.toBe(build);
+
+      expect(query).not.toHaveBeenCalled();
+      expect(patch).not.toHaveBeenCalled();
+      expect(compileEnv).not.toHaveBeenCalled();
+      expect(build.$fetchGraph).toHaveBeenCalledTimes(2);
+    });
+
+    test('prepares runtime and init environments when an init Dockerfile is configured', async () => {
+      const patch = jest.fn().mockResolvedValue(undefined);
+      const deployable = {
+        type: DeployTypes.GITHUB,
+        env: { APP_MODE: '{{mode}}' },
+        initDockerfilePath: 'docker/init.Dockerfile',
+        initEnv: { MIGRATION_MODE: '{{mode}}' },
+      };
+      const deploy = {
+        githubRepositoryId: 42,
+        branchName: 'main',
+        deployable,
+        $query: jest.fn(() => ({ patch })),
+      };
+      const build: any = {
+        namespace: 'env-test',
+        enabledFeatures: [FeatureFlags.NO_DEFAULT_ENV_RESOLVE],
+        deploys: [deploy],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const envVariables = new BuildEnvironmentVariables(db);
+      jest.spyOn(envVariables, 'availableEnvironmentVariablesForBuild').mockResolvedValue({ mode: 'safe' });
+      const compileEnv = jest
+        .spyOn(envVariables, 'compileEnv')
+        .mockResolvedValueOnce('{"APP_MODE":"safe"}')
+        .mockResolvedValueOnce('{"MIGRATION_MODE":"safe"}');
+
+      await envVariables.resolve(build);
+
+      expect(compileEnv).toHaveBeenNthCalledWith(1, deployable.env, { mode: 'safe' }, false, 'env-test');
+      expect(compileEnv).toHaveBeenNthCalledWith(2, deployable.initEnv, { mode: 'safe' }, false, 'env-test');
+      expect(patch).toHaveBeenNthCalledWith(1, { env: { APP_MODE: 'safe' } });
+      expect(patch).toHaveBeenNthCalledWith(2, { initEnv: { MIGRATION_MODE: 'safe' } });
+      expect(build.$fetchGraph).toHaveBeenCalledTimes(2);
+    });
+
+    test('logs both patch failures and still completes environment preparation', async () => {
+      const runtimeError = new Error('runtime env patch failed');
+      const initError = new Error('init env patch failed');
+      const patch = jest.fn().mockRejectedValueOnce(runtimeError).mockRejectedValueOnce(initError);
+      const deployable = {
+        type: DeployTypes.GITHUB,
+        env: { APP_MODE: 'safe' },
+        initDockerfilePath: 'docker/init.Dockerfile',
+        initEnv: { MIGRATION_MODE: 'safe' },
+      };
+      const build: any = {
+        namespace: 'env-test',
+        enabledFeatures: [],
+        deploys: [
+          {
+            githubRepositoryId: 42,
+            branchName: 'main',
+            deployable,
+            $query: jest.fn(() => ({ patch })),
+          },
+        ],
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const envVariables = new BuildEnvironmentVariables(db);
+      jest.spyOn(envVariables, 'availableEnvironmentVariablesForBuild').mockResolvedValue({});
+      jest
+        .spyOn(envVariables, 'compileEnv')
+        .mockResolvedValueOnce('{"APP_MODE":"safe"}')
+        .mockResolvedValueOnce('{"MIGRATION_MODE":"safe"}');
+
+      await expect(envVariables.resolve(build)).resolves.toBe(build);
+
+      expect(mockLoggerError).toHaveBeenNthCalledWith(1, { error: runtimeError }, 'EnvVars: preparation failed');
+      expect(mockLoggerError).toHaveBeenNthCalledWith(2, { error: initError }, 'EnvVars: init preparation failed');
+      expect(build.$fetchGraph).toHaveBeenCalledTimes(2);
     });
   });
 

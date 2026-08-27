@@ -52,8 +52,13 @@ jest.mock('../RunEventService', () => ({
     appendStatusEvent: jest.fn(),
     appendStatusEventForRunInTransaction: jest.fn(),
     appendChunkEventsForRunInTransaction: jest.fn(),
+    appendEventsForChunks: jest.fn(),
     notifyRunEventsInserted: jest.fn(),
   },
+}));
+
+jest.mock('../runInterruptedMessagePersistence', () => ({
+  persistInterruptedRunAssistantMessage: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('server/lib/agentSession/runtimeConfig', () => {
@@ -70,7 +75,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
   };
 });
 
-import AgentRunService from '../RunService';
+import AgentRunService, { ActiveAgentRunError, InvalidAgentRunDefaultsError } from '../RunService';
 import AgentRun from 'server/models/AgentRun';
 import AgentSession from 'server/models/AgentSession';
 import AgentThread from 'server/models/AgentThread';
@@ -78,6 +83,7 @@ import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRunEventService from '../RunEventService';
 import { AgentRunOwnershipLostError } from '../AgentRunOwnershipLostError';
 import { resolveAgentSessionDurabilityConfig } from 'server/lib/agentSession/runtimeConfig';
+import { persistInterruptedRunAssistantMessage } from '../runInterruptedMessagePersistence';
 
 const mockRunQuery = AgentRun.query as jest.Mock;
 const mockPendingActionQuery = AgentPendingAction.query as jest.Mock;
@@ -88,8 +94,10 @@ const mockThreadQuery = AgentThread.query as jest.Mock;
 const mockAppendStatusEvent = AgentRunEventService.appendStatusEvent as jest.Mock;
 const mockAppendStatusEventForRunInTransaction = AgentRunEventService.appendStatusEventForRunInTransaction as jest.Mock;
 const mockAppendChunkEventsForRunInTransaction = AgentRunEventService.appendChunkEventsForRunInTransaction as jest.Mock;
+const mockAppendEventsForChunks = AgentRunEventService.appendEventsForChunks as jest.Mock;
 const mockNotifyRunEventsInserted = AgentRunEventService.notifyRunEventsInserted as jest.Mock;
 const mockResolveDurabilityConfig = resolveAgentSessionDurabilityConfig as jest.Mock;
+const mockPersistInterruptedRunAssistantMessage = persistInterruptedRunAssistantMessage as jest.Mock;
 const VALID_RUN_UUID = '123e4567-e89b-12d3-a456-426614174000';
 const runPlanSnapshot = {
   version: 1,
@@ -906,6 +914,16 @@ describe('AgentRunService', () => {
       expect(acquireConnection).toHaveBeenCalledTimes(1);
       expect(connection.query).toHaveBeenCalledWith('LISTEN agent_run_cancel');
 
+      listeners['notification']({ channel: 'agent_run_cancel', payload: undefined });
+      listeners['notification']({ channel: 'agent_run_cancel', payload: '{not-json' });
+      listeners['notification']({ channel: 'agent_run_cancel', payload: JSON.stringify({ runId: 17 }) });
+      listeners['notification']({ channel: 'agent_run_cancel', payload: JSON.stringify({ runId: 'not-a-uuid' }) });
+      listeners['notification']({
+        channel: 'agent_run_cancel',
+        payload: JSON.stringify({ runId: '223e4567-e89b-12d3-a456-426614174000' }),
+      });
+      expect(abortSpy).not.toHaveBeenCalled();
+
       // A cancel notification for the registered run aborts its controller.
       listeners['notification']({
         channel: 'agent_run_cancel',
@@ -914,6 +932,21 @@ describe('AgentRunService', () => {
       expect(abortSpy).toHaveBeenCalled();
 
       AgentRunService.clearAbortController(VALID_RUN_UUID);
+    });
+
+    it('keeps local controller registration usable when the shared listener cannot start', async () => {
+      const ensureListener = jest
+        .spyOn(AgentRunService as any, 'ensureCancelNotificationListener')
+        .mockRejectedValue(new Error('listen unavailable'));
+      const controller = new AbortController();
+
+      AgentRunService.registerAbortController(VALID_RUN_UUID, controller);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ensureListener).toHaveBeenCalledTimes(1);
+
+      AgentRunService.clearAbortController(VALID_RUN_UUID);
+      expect(controller.signal.aborted).toBe(true);
     });
   });
 
@@ -1590,6 +1623,855 @@ describe('AgentRunService', () => {
           heartbeatAt: expect.any(String),
         })
       );
+    });
+  });
+
+  describe('queued run creation behavior', () => {
+    const queuedInput = (overrides: Record<string, unknown> = {}) =>
+      ({
+        thread: { id: 7, uuid: 'thread-1', metadata: undefined },
+        session: { id: 17, uuid: 'session-1' },
+        policy: { defaultMode: 'require_approval', rules: {} },
+        requestedHarness: undefined,
+        requestedProvider: undefined,
+        requestedModel: undefined,
+        resolvedHarness: 'lifecycle_ai_sdk',
+        resolvedProvider: 'openai',
+        resolvedModel: 'gpt-5.4',
+        runPlanSnapshot,
+        ...overrides,
+      } as any);
+
+    it.each([
+      ['harness', { resolvedHarness: ' ' }, 'Agent run harness is required.'],
+      ['provider', { resolvedProvider: '' }, 'Agent run provider is required.'],
+      ['model', { resolvedModel: ' ' }, 'Agent run model is required.'],
+      ['plan snapshot', { runPlanSnapshot: {} }, 'Agent run plan snapshot is required.'],
+    ])('rejects a queued run with an invalid %s', async (_label, overrides, message) => {
+      await expect(AgentRunService.createQueuedRun(queuedInput(overrides))).rejects.toMatchObject({
+        name: 'InvalidAgentRunDefaultsError',
+        message,
+        code: 'run_defaults_invalid',
+      });
+
+      expect(mockRunTransaction).not.toHaveBeenCalled();
+    });
+
+    it('creates a queued run atomically, updates thread metadata, and emits its queued event', async () => {
+      const queuedRun = { id: 19, uuid: VALID_RUN_UUID, status: 'queued' };
+      const sessionForUpdate = jest.fn().mockResolvedValue({ id: 17 });
+      mockSessionQuery.mockReturnValue({
+        findById: jest.fn().mockReturnValue({ forUpdate: sessionForUpdate }),
+      });
+      const activeQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue(null),
+      };
+      const insertAndFetch = jest.fn().mockResolvedValue(queuedRun);
+      mockRunQuery.mockReturnValueOnce(activeQuery).mockReturnValueOnce({ insertAndFetch });
+      const patchAndFetchById = jest.fn().mockResolvedValue(undefined);
+      mockThreadQuery.mockReturnValue({ patchAndFetchById });
+
+      await expect(AgentRunService.createQueuedRun(queuedInput())).resolves.toBe(queuedRun);
+
+      expect(sessionForUpdate).toHaveBeenCalledTimes(1);
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 7,
+          sessionId: 17,
+          status: 'queued',
+          requestedHarness: null,
+          requestedProvider: null,
+          requestedModel: null,
+          sandboxRequirement: {},
+        })
+      );
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ metadata: { latestRunId: VALID_RUN_UUID } })
+      );
+      expect(mockAppendStatusEvent).toHaveBeenCalledWith(VALID_RUN_UUID, 'run.queued', {
+        threadId: 'thread-1',
+        sessionId: 'session-1',
+      });
+    });
+
+    it('rejects creation when another session run is active', async () => {
+      mockSessionQuery.mockReturnValue({
+        findById: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue({ id: 17 }) }),
+      });
+      const activeQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 18, status: 'running' }),
+      };
+      mockRunQuery.mockReturnValue(activeQuery);
+
+      await expect(AgentRunService.createQueuedRun(queuedInput())).rejects.toBeInstanceOf(ActiveAgentRunError);
+      expect(mockThreadQuery).not.toHaveBeenCalled();
+      expect(mockAppendStatusEvent).not.toHaveBeenCalled();
+    });
+
+    it('rejects a continuation when a different run is active', async () => {
+      mockSessionQuery.mockReturnValue({
+        findById: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue({ id: 17 }) }),
+      });
+      const activeQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNot: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 18, status: 'running' }),
+      };
+      mockRunQuery.mockReturnValue(activeQuery);
+
+      await expect(
+        AgentRunService.createQueuedContinuationRunInTransaction({
+          ...queuedInput(),
+          sourceRun: { id: 11 },
+          trx: { trx: true },
+        })
+      ).rejects.toBeInstanceOf(ActiveAgentRunError);
+      expect(mockThreadQuery).not.toHaveBeenCalled();
+    });
+
+    it('exposes the two stable public error predicates', () => {
+      expect(new InvalidAgentRunDefaultsError('bad defaults')).toMatchObject({
+        name: 'InvalidAgentRunDefaultsError',
+        code: 'run_defaults_invalid',
+      });
+      const active = new ActiveAgentRunError();
+      expect(AgentRunService.isActiveRunConflictError(active)).toBe(true);
+      expect(AgentRunService.isActiveRunConflictError(new Error('other'))).toBe(false);
+      expect(AgentRunService.isRunNotFoundError(new Error('Agent run not found'))).toBe(true);
+      expect(AgentRunService.isRunNotFoundError('Agent run not found')).toBe(false);
+    });
+  });
+
+  describe('run lookup and liveness helpers', () => {
+    const ownedLookup = (result: unknown) => ({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(result),
+    });
+
+    it('reports active-run presence through the transaction-scoped query', async () => {
+      const present = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: 1 }),
+      };
+      const absent = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue(undefined),
+      };
+      mockRunQuery.mockReturnValueOnce(present).mockReturnValueOnce(absent);
+
+      await expect(AgentRunService.hasActiveRun(7, { trx: true } as any)).resolves.toBe(true);
+      await expect(AgentRunService.hasActiveRun(8)).resolves.toBe(false);
+      expect(mockRunQuery).toHaveBeenNthCalledWith(1, { trx: true });
+      expect(present.whereNotIn).toHaveBeenCalledWith('status', ['transitioned', 'completed', 'failed', 'cancelled']);
+    });
+
+    it('returns the latest owned thread run and rejects malformed thread ids before querying', async () => {
+      const run = { id: 1, uuid: VALID_RUN_UUID };
+      const query = ownedLookup(run);
+      mockRunQuery.mockReturnValue(query);
+
+      await expect(AgentRunService.getLatestOwnedThreadRun('bad-thread-id', 'user-1')).resolves.toBeUndefined();
+      await expect(AgentRunService.getLatestOwnedThreadRun(VALID_RUN_UUID, 'user-1')).resolves.toBe(run);
+
+      expect(query.where).toHaveBeenCalledWith('thread.uuid', VALID_RUN_UUID);
+      expect(query.where).toHaveBeenCalledWith('thread:session.userId', 'user-1');
+      expect(query.orderBy).toHaveBeenNthCalledWith(1, 'run.createdAt', 'desc');
+      expect(query.orderBy).toHaveBeenNthCalledWith(2, 'run.id', 'desc');
+    });
+
+    it('returns undefined when the owned session has no runs and rejects malformed session ids', async () => {
+      const query = ownedLookup(null);
+      mockRunQuery.mockReturnValue(query);
+
+      await expect(AgentRunService.getLatestOwnedSessionRun('bad-session-id', 'user-1')).resolves.toBeUndefined();
+      await expect(AgentRunService.getLatestOwnedSessionRun(VALID_RUN_UUID, 'user-1')).resolves.toBeUndefined();
+
+      expect(query.joinRelated).toHaveBeenCalledWith('session');
+      expect(query.where).toHaveBeenCalledWith('session.uuid', VALID_RUN_UUID);
+      expect(query.where).toHaveBeenCalledWith('session.userId', 'user-1');
+    });
+
+    it('throws not-found when a syntactically valid owned run id has no matching row', async () => {
+      const query = ownedLookup(undefined);
+      mockRunQuery.mockReturnValue(query);
+
+      await expect(AgentRunService.getOwnedRun(VALID_RUN_UUID, 'user-1')).rejects.toThrow('Agent run not found');
+    });
+
+    it('recognizes each terminal status and rejects active statuses', () => {
+      for (const status of ['transitioned', 'completed', 'failed', 'cancelled'] as const) {
+        expect(AgentRunService.isTerminalStatus(status)).toBe(true);
+      }
+      expect(AgentRunService.isTerminalStatus('running')).toBe(false);
+    });
+  });
+
+  describe('claim and heartbeat boundary behavior', () => {
+    it('rejects malformed and missing queued-run ids', async () => {
+      await expect(AgentRunService.claimQueuedRunForExecution('bad-id', 'worker-1')).rejects.toThrow(
+        'Agent run not found'
+      );
+      expect(mockRunQuery).not.toHaveBeenCalled();
+
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(AgentRunService.claimQueuedRunForExecution(VALID_RUN_UUID, 'worker-1', 60_000)).rejects.toThrow(
+        'Agent run not found'
+      );
+    });
+
+    it('does not reclaim an owner with neither lease nor heartbeat timestamps', async () => {
+      const run = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        startedAt: null,
+      };
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(run) }),
+      });
+
+      await expect(AgentRunService.claimQueuedRunForExecution(VALID_RUN_UUID, 'worker-1', 60_000)).resolves.toBeNull();
+      expect(mockSessionQuery).not.toHaveBeenCalled();
+    });
+
+    it('updates a live heartbeat and reports a missing run after a zero-row update', async () => {
+      const successfulPatch = jest.fn().mockResolvedValue(1);
+      const successfulQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        patch: successfulPatch,
+      };
+      mockRunQuery.mockReturnValueOnce(successfulQuery);
+      await expect(AgentRunService.heartbeatRunExecution(VALID_RUN_UUID, 'worker-1')).resolves.toBeUndefined();
+      expect(successfulPatch).toHaveBeenCalledWith(
+        expect.objectContaining({ heartbeatAt: expect.any(String), leaseExpiresAt: expect.any(String) })
+      );
+
+      const failedPatch = jest.fn().mockResolvedValue(0);
+      const failedQuery = {
+        where: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn().mockReturnThis(),
+        patch: failedPatch,
+      };
+      mockRunQuery.mockReturnValueOnce(failedQuery).mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(null) });
+      await expect(AgentRunService.heartbeatRunExecution(VALID_RUN_UUID, 'worker-1')).rejects.toThrow(
+        'Agent run not found'
+      );
+    });
+
+    it('fails cancellation safely when the locked row disappeared', async () => {
+      jest.spyOn(AgentRunService, 'getOwnedRun').mockResolvedValue({ id: 17, uuid: VALID_RUN_UUID } as any);
+      mockRunQuery.mockReturnValue({
+        findById: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+
+      await expect(AgentRunService.cancelRun(VALID_RUN_UUID, 'user-1')).rejects.toThrow('Agent run not found');
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('execution-owner public helpers', () => {
+    const ownedRun = {
+      id: 17,
+      uuid: VALID_RUN_UUID,
+      status: 'running',
+      executionOwner: 'worker-1',
+    };
+
+    it('asserts ownership and rejects malformed, missing, or terminal runs', async () => {
+      await expect(AgentRunService.assertRunExecutionOwner('bad-id', 'worker-1')).rejects.toThrow(
+        'Agent run not found'
+      );
+      expect(mockRunQuery).not.toHaveBeenCalled();
+
+      mockRunQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) });
+      await expect(AgentRunService.assertRunExecutionOwner(VALID_RUN_UUID, 'worker-1')).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(ownedRun) });
+      await expect(AgentRunService.assertRunExecutionOwner(VALID_RUN_UUID, 'worker-1')).resolves.toBe(ownedRun);
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockResolvedValue({ ...ownedRun, status: 'completed' }),
+      });
+      await expect(AgentRunService.assertRunExecutionOwner(VALID_RUN_UUID, 'worker-1')).rejects.toBeInstanceOf(
+        AgentRunOwnershipLostError
+      );
+    });
+
+    it('patches an owned run transactionally and reports invalid or disappeared runs', async () => {
+      await expect(AgentRunService.patchRunForExecutionOwner('bad-id', 'worker-1', {})).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(
+        AgentRunService.patchRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', { model: 'gpt-next' })
+      ).rejects.toThrow('Agent run not found');
+
+      const patchAndFetchById = jest.fn().mockResolvedValue({ ...ownedRun, model: 'gpt-next' });
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      await expect(
+        AgentRunService.patchRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', { model: 'gpt-next' })
+      ).resolves.toEqual(expect.objectContaining({ model: 'gpt-next' }));
+      expect(patchAndFetchById).toHaveBeenCalledWith(17, { model: 'gpt-next' });
+    });
+
+    it('reports a run that disappears before an owner-status transition', async () => {
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+
+      await expect(AgentRunService.patchStatusForExecutionOwner(VALID_RUN_UUID, 'worker-1', 'running')).rejects.toThrow(
+        'Agent run not found'
+      );
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('starts a run with resolved runtime fields and marks approval waits with optional usage', async () => {
+      const ensureListener = jest
+        .spyOn(AgentRunService as any, 'ensureCancelNotificationListener')
+        .mockRejectedValue(new Error('listener unavailable'));
+      const patchStatus = jest
+        .spyOn(AgentRunService, 'patchStatusForExecutionOwner')
+        .mockResolvedValue(ownedRun as any);
+
+      await expect(
+        AgentRunService.startRunForExecutionOwner(
+          VALID_RUN_UUID,
+          'worker-1',
+          { resolvedHarness: 'sdk', provider: 'openai', model: 'gpt-next' },
+          { dispatchAttemptId: 'dispatch-1' }
+        )
+      ).resolves.toBe(ownedRun);
+      await Promise.resolve();
+      expect(ensureListener).toHaveBeenCalledTimes(1);
+      expect(patchStatus).toHaveBeenNthCalledWith(
+        1,
+        VALID_RUN_UUID,
+        'worker-1',
+        'running',
+        expect.objectContaining({
+          startedAt: expect.any(String),
+          resolvedHarness: 'sdk',
+          resolvedProvider: 'openai',
+          resolvedModel: 'gpt-next',
+          sandboxGeneration: null,
+        }),
+        { dispatchAttemptId: 'dispatch-1' }
+      );
+
+      await AgentRunService.markWaitingForApprovalForExecutionOwner(
+        VALID_RUN_UUID,
+        'worker-1',
+        { totalTokens: 9 },
+        { dispatchAttemptId: 'dispatch-2' }
+      );
+      await AgentRunService.markWaitingForApprovalForExecutionOwner(VALID_RUN_UUID, 'worker-1');
+      expect(patchStatus).toHaveBeenNthCalledWith(
+        2,
+        VALID_RUN_UUID,
+        'worker-1',
+        'waiting_for_approval',
+        { usageSummary: { totalTokens: 9 } },
+        { dispatchAttemptId: 'dispatch-2' }
+      );
+      expect(patchStatus).toHaveBeenNthCalledWith(3, VALID_RUN_UUID, 'worker-1', 'waiting_for_approval', undefined, {});
+    });
+
+    it('refreshes progress through the owner-fenced patch helper', async () => {
+      const patch = jest.spyOn(AgentRunService, 'patchRunForExecutionOwner').mockResolvedValue(ownedRun as any);
+
+      await expect(
+        AgentRunService.patchProgressForExecutionOwner(VALID_RUN_UUID, 'worker-1', { usageSummary: { totalTokens: 3 } })
+      ).resolves.toBe(ownedRun);
+      expect(patch).toHaveBeenCalledWith(
+        VALID_RUN_UUID,
+        'worker-1',
+        expect.objectContaining({
+          usageSummary: { totalTokens: 3 },
+          heartbeatAt: expect.any(String),
+          leaseExpiresAt: expect.any(String),
+        })
+      );
+    });
+
+    it('appends chunks atomically after the caller hook and notifies the stream', async () => {
+      const trx = { trx: true };
+      const beforeAppendChunks = jest.fn().mockResolvedValue(undefined);
+      mockRunTransaction.mockImplementation(async (callback) => callback(trx));
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+      });
+      mockAppendChunkEventsForRunInTransaction.mockResolvedValue(22);
+
+      await expect(
+        AgentRunService.appendStreamChunksForExecutionOwner(
+          VALID_RUN_UUID,
+          'worker-1',
+          [{ type: 'text-delta', id: 'text-1', delta: 'hello' } as any],
+          { beforeAppendChunks }
+        )
+      ).resolves.toBe(ownedRun);
+
+      expect(beforeAppendChunks).toHaveBeenCalledWith({ run: ownedRun, trx });
+      expect(mockAppendChunkEventsForRunInTransaction).toHaveBeenCalledWith(
+        ownedRun,
+        [{ type: 'text-delta', id: 'text-1', delta: 'hello' }],
+        trx
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 22);
+    });
+
+    it('handles empty, malformed, and disappeared owner-fenced chunk requests', async () => {
+      await expect(AgentRunService.appendStreamChunksForExecutionOwner('bad-id', 'worker-1', [])).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+      });
+      await expect(AgentRunService.appendStreamChunksForExecutionOwner(VALID_RUN_UUID, 'worker-1', [])).resolves.toBe(
+        ownedRun
+      );
+      expect(mockAppendChunkEventsForRunInTransaction).not.toHaveBeenCalled();
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(AgentRunService.appendStreamChunksForExecutionOwner(VALID_RUN_UUID, 'worker-1', [])).rejects.toThrow(
+        'Agent run not found'
+      );
+    });
+
+    it('rejects malformed or disappeared finalization targets before invoking the callback', async () => {
+      const finalize = jest.fn();
+      await expect(AgentRunService.finalizeRunForExecutionOwner('bad-id', 'worker-1', finalize)).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(AgentRunService.finalizeRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', finalize)).rejects.toThrow(
+        'Agent run not found'
+      );
+      expect(finalize).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['waiting_for_approval', 'run.waiting_for_approval', true],
+      ['cancelled', 'run.cancelled', true],
+      ['running', 'run.started', false],
+      ['starting', 'run.started', false],
+    ] as const)('maps %s owner transitions to %s and release=%s', async (status, eventType, releasesOwner) => {
+      const nextRun = {
+        ...ownedRun,
+        status,
+        ...(releasesOwner ? { executionOwner: null, leaseExpiresAt: null, heartbeatAt: null } : {}),
+      };
+      const patchAndFetchById = jest.fn().mockResolvedValue(nextRun);
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(null);
+
+      await expect(AgentRunService.patchStatusForExecutionOwner(VALID_RUN_UUID, 'worker-1', status)).resolves.toBe(
+        nextRun
+      );
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        releasesOwner
+          ? expect.objectContaining({
+              status,
+              executionOwner: null,
+              leaseExpiresAt: null,
+              heartbeatAt: null,
+            })
+          : { status }
+      );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        nextRun,
+        eventType,
+        expect.objectContaining({ status, executionOwner: 'worker-1' }),
+        { trx: true }
+      );
+    });
+
+    it('uses start defaults, preserves a supplied sandbox generation, and defaults completion usage', async () => {
+      jest.spyOn(AgentRunService as any, 'ensureCancelNotificationListener').mockResolvedValue(undefined);
+      const patchStatus = jest
+        .spyOn(AgentRunService, 'patchStatusForExecutionOwner')
+        .mockResolvedValue(ownedRun as any);
+
+      await AgentRunService.startRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', {
+        resolvedHarness: 'sdk',
+        provider: 'openai',
+        model: 'gpt-next',
+        sandboxGeneration: 4,
+      });
+      expect(patchStatus).toHaveBeenCalledWith(
+        VALID_RUN_UUID,
+        'worker-1',
+        'running',
+        expect.objectContaining({ sandboxGeneration: 4 }),
+        {}
+      );
+
+      await AgentRunService.markCompletedForExecutionOwner(VALID_RUN_UUID, 'worker-1');
+      expect(patchStatus).toHaveBeenLastCalledWith(
+        VALID_RUN_UUID,
+        'worker-1',
+        'completed',
+        expect.objectContaining({ usageSummary: {} }),
+        {}
+      );
+    });
+
+    it('appends nonempty owner-fenced chunks without a caller hook or notification sequence', async () => {
+      mockRunQuery.mockReturnValue({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+      });
+      mockAppendChunkEventsForRunInTransaction.mockResolvedValue(null);
+
+      await expect(
+        AgentRunService.appendStreamChunksForExecutionOwner(VALID_RUN_UUID, 'worker-1', [
+          { type: 'text-delta', id: 'text-1', delta: 'hello' } as any,
+        ])
+      ).resolves.toBe(ownedRun);
+      expect(mockAppendChunkEventsForRunInTransaction).toHaveBeenCalledTimes(1);
+      expect(mockNotifyRunEventsInserted).not.toHaveBeenCalled();
+    });
+
+    it('serializes a callback failure during atomic finalization', async () => {
+      const failedRun = {
+        ...ownedRun,
+        status: 'failed',
+        executionOwner: null,
+        error: { message: 'finalization failed' },
+      };
+      const patchAndFetchById = jest.fn().mockResolvedValue(failedRun);
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(ownedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(null);
+
+      await expect(
+        AgentRunService.finalizeRunForExecutionOwner(VALID_RUN_UUID, 'worker-1', async () => ({
+          status: 'failed',
+          error: new Error('finalization failed'),
+        }))
+      ).resolves.toBe(failedRun);
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'failed',
+          error: expect.objectContaining({ message: 'finalization failed' }),
+          executionOwner: null,
+        })
+      );
+    });
+  });
+
+  describe('dispatch failure behavior', () => {
+    const queuedRun = {
+      id: 17,
+      uuid: VALID_RUN_UUID,
+      threadId: 7,
+      status: 'queued',
+      executionOwner: null,
+    };
+
+    const captureSerializedFailure = async (error: unknown) => {
+      const patchAndFetchById = jest.fn().mockResolvedValue({ ...queuedRun, status: 'failed' });
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(queuedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValueOnce(null);
+
+      await AgentRunService.markQueuedRunDispatchFailed(VALID_RUN_UUID, error);
+      return (patchAndFetchById.mock.calls[0][1] as { error: Record<string, unknown> }).error;
+    };
+
+    it('reports a queued run that disappears and leaves an already-claimed run unchanged', async () => {
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(AgentRunService.markQueuedRunDispatchFailed(VALID_RUN_UUID, new Error('dispatch'))).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      const claimed = { ...queuedRun, status: 'starting', executionOwner: 'worker-1' };
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(claimed) }),
+      });
+      await expect(AgentRunService.markQueuedRunDispatchFailed(VALID_RUN_UUID, new Error('late'))).resolves.toBe(
+        claimed
+      );
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('serializes validation, classified provider, typed, object, and primitive failures', async () => {
+      const validationError = new Error('invalid saved message');
+      validationError.name = 'AI_TypeValidationError';
+      await expect(captureSerializedFailure(validationError)).resolves.toEqual({
+        name: 'AI_TypeValidationError',
+        code: 'run_resume_state_invalid',
+        message:
+          'Lifecycle could not resume this response because the saved run state is invalid. Send a new message to continue from the last saved chat state.',
+        details: { reason: 'ui_message_validation' },
+      });
+
+      const unnamedValidationError = new Error('Type validation failed for saved message');
+      unnamedValidationError.name = '';
+      await expect(captureSerializedFailure(unnamedValidationError)).resolves.toMatchObject({
+        name: 'Error',
+        code: 'run_resume_state_invalid',
+      });
+
+      const providerError = Object.assign(new Error('rate limited'), {
+        name: 'AI_APICallError',
+        statusCode: 429,
+        url: 'https://provider.example/v1',
+      });
+      await expect(captureSerializedFailure(providerError)).resolves.toMatchObject({
+        code: 'provider_rate_limited',
+        retryable: true,
+        nextAction: { kind: 'retry' },
+        details: { status: 429, provider: 'https://provider.example/v1' },
+      });
+
+      const ownershipError = new AgentRunOwnershipLostError({
+        runUuid: VALID_RUN_UUID,
+        expectedExecutionOwner: 'worker-1',
+      });
+      await expect(captureSerializedFailure(ownershipError)).resolves.toEqual({
+        name: 'AgentRunTerminalFailure',
+        code: 'run_ownership_lost',
+        message: 'This response was taken over by another worker or was cancelled.',
+        retryable: false,
+      });
+
+      const typedError = Object.assign(new Error('generic failure'), {
+        name: 'CustomRunError',
+        code: 'custom_code',
+        details: { attempt: 2 },
+      });
+      await expect(captureSerializedFailure(typedError)).resolves.toMatchObject({
+        message: 'generic failure',
+        name: 'CustomRunError',
+        code: 'custom_code',
+        details: { attempt: 2 },
+      });
+
+      const stacklessError = new Error('without stack');
+      stacklessError.stack = undefined;
+      await expect(captureSerializedFailure(stacklessError)).resolves.toMatchObject({
+        message: 'without stack',
+        stack: null,
+      });
+
+      await expect(captureSerializedFailure({ message: '   ', source: 'dispatcher' })).resolves.toEqual({
+        message: 'Agent run failed.',
+        source: 'dispatcher',
+      });
+      await expect(captureSerializedFailure({ message: 42, source: 'dispatcher' })).resolves.toEqual({
+        message: 'Agent run failed.',
+        source: 'dispatcher',
+      });
+      await expect(captureSerializedFailure('plain failure')).resolves.toEqual({ message: 'plain failure' });
+    });
+
+    it('marks an unclaimed queued run failed, emits the terminal event, and notifies listeners', async () => {
+      const failedRun = {
+        ...queuedRun,
+        status: 'failed',
+        error: { message: 'dispatch failed' },
+      };
+      const patchAndFetchById = jest.fn().mockResolvedValue(failedRun);
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(queuedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(29);
+
+      await expect(
+        AgentRunService.markQueuedRunDispatchFailed(VALID_RUN_UUID, new Error('dispatch failed'))
+      ).resolves.toBe(failedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          status: 'failed',
+          executionOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          error: expect.objectContaining({ message: 'dispatch failed' }),
+        })
+      );
+      expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+        failedRun,
+        'run.failed',
+        expect.objectContaining({ status: 'failed', error: failedRun.error }),
+        { trx: true }
+      );
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 29);
+    });
+  });
+
+  describe('recovery and legacy chunk boundaries', () => {
+    const eligibility = {
+      decision: 'manual_recovery_required',
+      reason: 'runtime_unavailable',
+      evaluatedAt: '2026-04-24T12:00:00.000Z',
+      detail: {},
+    } as any;
+
+    it('rejects malformed and missing recovery targets and ignores inactive runs', async () => {
+      await expect(AgentRunService.markWaitingForInputForRecovery('bad-id', eligibility)).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(undefined) }),
+      });
+      await expect(AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility)).rejects.toThrow(
+        'Agent run not found'
+      );
+
+      mockRunQuery.mockReturnValueOnce({
+        findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue({ id: 17, status: 'queued' }) }),
+      });
+      await expect(AgentRunService.markWaitingForInputForRecovery(VALID_RUN_UUID, eligibility)).resolves.toBeNull();
+      expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('returns the run for empty legacy chunks, appends nonempty chunks, and rejects a missing run', async () => {
+      const run = { id: 17, uuid: VALID_RUN_UUID };
+      mockRunQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(run) });
+      await expect(AgentRunService.appendStreamChunks(VALID_RUN_UUID, [])).resolves.toBe(run);
+      expect(mockAppendEventsForChunks).not.toHaveBeenCalled();
+
+      mockRunQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(run) });
+      const chunks = [{ type: 'text-delta', id: 'text-1', delta: 'hello' }] as any;
+      await expect(AgentRunService.appendStreamChunks(VALID_RUN_UUID, chunks)).resolves.toBe(run);
+      expect(mockAppendEventsForChunks).toHaveBeenCalledWith(VALID_RUN_UUID, chunks);
+
+      mockRunQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) });
+      await expect(AgentRunService.appendStreamChunks(VALID_RUN_UUID, [])).rejects.toThrow('Agent run not found');
+    });
+
+    it('records recovery defaults for an orphaned run with no owner, lease, or prior eligibility detail', async () => {
+      const orphanedRun = {
+        id: 17,
+        uuid: VALID_RUN_UUID,
+        status: 'running',
+        executionOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        startedAt: null,
+      };
+      const pausedRun = { ...orphanedRun, status: 'waiting_for_input' };
+      const patchAndFetchById = jest.fn().mockResolvedValue(pausedRun);
+      mockRunQuery
+        .mockReturnValueOnce({
+          findOne: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(orphanedRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(null);
+
+      await expect(
+        AgentRunService.markWaitingForInputForRecovery(
+          VALID_RUN_UUID,
+          { decision: 'manual_recovery_required', reason: 'runtime_unavailable' } as any,
+          { allowActiveLease: true, detail: { source: 'recovery-scan' } }
+        )
+      ).resolves.toBe(pausedRun);
+
+      expect(patchAndFetchById).toHaveBeenCalledWith(
+        17,
+        expect.objectContaining({
+          error: expect.objectContaining({
+            details: {
+              recovery: expect.objectContaining({
+                previousOwner: null,
+                leaseExpiresAt: null,
+                evaluatedAt: expect.any(String),
+                detail: { source: 'recovery-scan' },
+              }),
+            },
+          }),
+        })
+      );
+    });
+
+    it('omits malformed recovery metadata from the public run shape', () => {
+      const serialized = AgentRunService.serializeRun({
+        uuid: VALID_RUN_UUID,
+        threadId: 7,
+        sessionId: 17,
+        status: 'waiting_for_input',
+        provider: 'openai',
+        model: 'gpt-next',
+        error: { details: { recovery: { decision: 'manual_recovery_required', reason: ' ' } } },
+      } as any);
+
+      expect(serialized.recovery).toBeNull();
+    });
+  });
+
+  describe('best-effort cancellation side effects', () => {
+    it('still completes cancellation when the cross-process notification fails', async () => {
+      const runningRun = { id: 17, uuid: VALID_RUN_UUID, threadId: 7, status: 'running' };
+      const cancelledRun = { ...runningRun, status: 'cancelled' };
+      jest
+        .spyOn(AgentRunService, 'getOwnedRun')
+        .mockResolvedValueOnce(runningRun as any)
+        .mockResolvedValueOnce(cancelledRun as any);
+      mockRunQuery
+        .mockReturnValueOnce({
+          findById: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockResolvedValue(runningRun) }),
+        })
+        .mockReturnValueOnce({ patchAndFetchById: jest.fn().mockResolvedValue(cancelledRun) });
+      mockAppendStatusEventForRunInTransaction.mockResolvedValue(41);
+      mockRunKnex.mockReturnValue({ raw: jest.fn().mockRejectedValue(new Error('notify unavailable')) });
+
+      await expect(AgentRunService.cancelRun(VALID_RUN_UUID, 'user-1')).resolves.toBe(cancelledRun);
+      expect(mockNotifyRunEventsInserted).toHaveBeenCalledWith(VALID_RUN_UUID, 41);
+      expect(mockPersistInterruptedRunAssistantMessage).toHaveBeenCalledWith(runningRun);
     });
   });
 });

@@ -14,6 +14,30 @@
  * limitations under the License.
  */
 
+const mockResolveDurabilityConfig = jest.fn();
+const mockPendingActionQuery = jest.fn();
+const mockWhere = jest.fn();
+const mockWhereIn = jest.fn();
+const mockSelect = jest.fn();
+const pendingActionQuery = {
+  where: mockWhere,
+  whereIn: mockWhereIn,
+  select: mockSelect,
+};
+
+jest.mock('server/models/AgentPendingAction', () => ({
+  __esModule: true,
+  default: { query: () => mockPendingActionQuery() },
+}));
+
+jest.mock('server/lib/agentSession/runtimeConfig', () => {
+  const actual = jest.requireActual('server/lib/agentSession/runtimeConfig');
+  return {
+    ...actual,
+    resolveAgentSessionDurabilityConfig: (...args: unknown[]) => mockResolveDurabilityConfig(...args),
+  };
+});
+
 import AgentRunResumeEligibilityService from '../RunResumeEligibilityService';
 
 const now = new Date('2026-05-08T12:00:00.000Z');
@@ -98,7 +122,75 @@ function evaluate(overrides: Record<string, unknown> = {}, options: Record<strin
   });
 }
 
+function persistedRun(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+    status: 'queued',
+    executionOwner: null,
+    leaseExpiresAt: null,
+    heartbeatAt: null,
+    startedAt: null,
+    runPlanSnapshot: readOnlyRunPlan,
+    ...overrides,
+  } as any;
+}
+
 describe('AgentRunResumeEligibilityService', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveDurabilityConfig.mockResolvedValue({ runExecutionLeaseMs: 180_000 });
+    mockPendingActionQuery.mockReturnValue(pendingActionQuery);
+    mockWhere.mockReturnValue(pendingActionQuery);
+    mockWhereIn.mockReturnValue(pendingActionQuery);
+    mockSelect.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('classifies terminal runs at the current clock without consulting approvals or run plans', () => {
+    jest.useFakeTimers().setSystemTime(now);
+
+    expect(
+      AgentRunResumeEligibilityService.evaluate({
+        run: {
+          status: 'completed',
+          executionOwner: '',
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          startedAt: null,
+          runPlanSnapshot: null,
+        } as any,
+      })
+    ).toEqual({
+      decision: 'replay_only',
+      reason: 'terminal_run',
+      previousStatus: 'completed',
+      previousOwner: null,
+      leaseExpiresAt: null,
+      evaluatedAt: now.toISOString(),
+    });
+  });
+
+  it('keeps input-waiting runs replay-only', () => {
+    expect(evaluate({ status: 'waiting_for_input' })).toEqual(
+      expect.objectContaining({
+        decision: 'replay_only',
+        reason: 'waiting_for_input',
+      })
+    );
+  });
+
+  it('requires manual recovery when approval state is unavailable', () => {
+    expect(evaluate({}, { pendingActions: null })).toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'approval_state_unknown',
+      })
+    );
+  });
+
   it('allows stale queued dispatch retries without requiring a read-only run plan', () => {
     const result = evaluate({
       status: 'queued',
@@ -292,8 +384,117 @@ describe('AgentRunResumeEligibilityService', () => {
     );
   });
 
+  it('requires manual recovery when an allowed capability has no runtime classification', () => {
+    expect(
+      evaluate({
+        runPlanSnapshot: {
+          ...readOnlyRunPlan,
+          capabilities: {
+            ...readOnlyRunPlan.capabilities,
+            resolvedCapabilityAccess: [
+              {
+                capabilityId: 'unclassified_capability',
+                availability: 'all_users',
+                allowed: true,
+                approvalMode: 'allow',
+              },
+            ],
+          },
+        },
+      })
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'unknown_capability',
+        detail: {
+          capabilityId: 'unclassified_capability',
+          capabilityKey: null,
+        },
+      })
+    );
+  });
+
+  it('allows expired runs whose only allowed capability is external MCP read', () => {
+    expect(
+      evaluate({
+        runPlanSnapshot: {
+          ...readOnlyRunPlan,
+          capabilities: {
+            ...readOnlyRunPlan.capabilities,
+            resolvedCapabilityAccess: [
+              {
+                capabilityId: 'external_mcp',
+                availability: 'all_users',
+                allowed: true,
+                runtimeCapabilityKey: 'external_mcp_read',
+                approvalMode: 'allow',
+              },
+            ],
+          },
+        },
+      })
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
+  it('does not apply the Debug repair guard outside build-context chat', () => {
+    expect(
+      evaluate({
+        runPlanSnapshot: {
+          ...readOnlyRunPlan,
+          agent: { ...readOnlyRunPlan.agent, sourceKind: 'workspace_session' },
+          debug: { ...readOnlyRunPlan.debug, resolvedIntent: 'repair' },
+        },
+      })
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
+  it('allows a safe non-Debug run plan with no debug metadata', () => {
+    expect(
+      evaluate({
+        runPlanSnapshot: {
+          ...readOnlyRunPlan,
+          debug: undefined,
+        },
+      })
+    ).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
   it('requires manual recovery for invalid run plans', () => {
     expect(evaluate({ runPlanSnapshot: null })).toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'invalid_run_plan',
+      })
+    );
+  });
+
+  it('requires manual recovery for a versioned run plan with invalid capability access', () => {
+    expect(
+      evaluate({
+        runPlanSnapshot: {
+          ...readOnlyRunPlan,
+          capabilities: {
+            ...readOnlyRunPlan.capabilities,
+            resolvedCapabilityAccess: null,
+          },
+        },
+      })
+    ).toEqual(
       expect.objectContaining({
         decision: 'manual_recovery_required',
         reason: 'invalid_run_plan',
@@ -323,5 +524,130 @@ describe('AgentRunResumeEligibilityService', () => {
         reason: 'ambiguous_ownership',
       })
     );
+  });
+
+  it('requires manual recovery when an owner has no lease expiry', () => {
+    expect(evaluate({ leaseExpiresAt: null })).toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'ambiguous_ownership',
+      })
+    );
+  });
+
+  it('treats a lease expiring exactly at evaluation time as expired', () => {
+    expect(evaluate({ leaseExpiresAt: now.toISOString() })).toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
+  it('evaluates an id-less run without querying approvals or resolving durability config when staleness is supplied', async () => {
+    const run = persistedRun({
+      id: undefined,
+      status: 'running',
+      executionOwner: 'worker-1',
+      leaseExpiresAt: expiredLease,
+    });
+
+    await expect(AgentRunResumeEligibilityService.evaluateRun(run, { now, heartbeatStaleMs: 30_000 })).resolves.toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'approval_state_unknown',
+      })
+    );
+    expect(mockResolveDurabilityConfig).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('derives heartbeat staleness, queries only unresolved approvals, and retries a queued run with no rows', async () => {
+    jest.useFakeTimers().setSystemTime(now);
+    mockResolveDurabilityConfig.mockResolvedValue({ runExecutionLeaseMs: 90_000 });
+
+    await expect(AgentRunResumeEligibilityService.evaluateRun(persistedRun())).resolves.toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'queued_dispatch_retry',
+        evaluatedAt: now.toISOString(),
+      })
+    );
+
+    expect(mockResolveDurabilityConfig).toHaveBeenCalledTimes(1);
+    expect(mockWhere).toHaveBeenCalledWith({ runId: 7 });
+    expect(mockWhereIn).toHaveBeenCalledWith('status', ['pending', 'denied']);
+    expect(mockSelect).toHaveBeenCalledWith('status');
+  });
+
+  it('counts pending approvals and gives them precedence over denied rows', async () => {
+    mockSelect.mockResolvedValue([{ status: 'pending' }, { status: 'denied' }, { status: 'pending' }]);
+
+    await expect(
+      AgentRunResumeEligibilityService.evaluateRun(
+        persistedRun({ status: 'running', executionOwner: 'worker-1', leaseExpiresAt: expiredLease }),
+        { now }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'pending_approval',
+        detail: { pendingActions: 2 },
+      })
+    );
+  });
+
+  it('counts denied approvals when no pending approval remains', async () => {
+    mockSelect.mockResolvedValue([{ status: 'denied' }, { status: 'denied' }]);
+
+    await expect(
+      AgentRunResumeEligibilityService.evaluateRun(
+        persistedRun({ status: 'running', executionOwner: 'worker-1', leaseExpiresAt: expiredLease }),
+        { now }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'denied_approval',
+        detail: { deniedActions: 2 },
+      })
+    );
+  });
+
+  it('uses the durability-derived heartbeat boundary to recover an orphaned run with an active lease', async () => {
+    mockResolveDurabilityConfig.mockResolvedValue({ runExecutionLeaseMs: 30_000 });
+
+    await expect(
+      AgentRunResumeEligibilityService.evaluateRun(
+        persistedRun({
+          status: 'running',
+          executionOwner: 'worker-1',
+          leaseExpiresAt: activeLease,
+          heartbeatAt: '2026-05-08T11:59:29.000Z',
+        }),
+        { now }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        decision: 'auto_resume_allowed',
+        reason: 'read_only_expired_lease',
+      })
+    );
+  });
+
+  it('propagates durability configuration failures before querying approvals', async () => {
+    const configError = new Error('durability config unavailable');
+    mockResolveDurabilityConfig.mockRejectedValue(configError);
+
+    await expect(AgentRunResumeEligibilityService.evaluateRun(persistedRun(), { now })).rejects.toBe(configError);
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('propagates approval query failures after durability resolution', async () => {
+    const queryError = new Error('approval query failed');
+    mockSelect.mockRejectedValue(queryError);
+
+    await expect(AgentRunResumeEligibilityService.evaluateRun(persistedRun(), { now })).rejects.toBe(queryError);
+    expect(mockResolveDurabilityConfig).toHaveBeenCalledTimes(1);
   });
 });

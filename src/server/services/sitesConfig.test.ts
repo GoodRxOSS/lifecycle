@@ -47,6 +47,55 @@ describe('SitesConfigService normalization', () => {
     expect(result).toEqual(DEFAULT_SITES_CONFIG);
   });
 
+  it('preserves explicit non-default values while trimming stored strings', async () => {
+    const result = await normalizeViaGetConfig({
+      enabled: true,
+      domain: ' sites.example.test ',
+      port: 65535,
+      hostPrefix: 'Preview',
+      ttl: { enabled: false, defaultDays: 30, extensionDays: 14 },
+      upload: {
+        maxUploadBytes: 20,
+        maxExtractedBytes: 40,
+        maxFiles: 2,
+        allowedExtensions: ['HTML'],
+      },
+      storage: {
+        backend: 's3',
+        bucket: ' sites-bucket ',
+        prefix: '/published/assets/',
+        region: ' us-east-1 ',
+        endpoint: ' https://objects.example.test ',
+        forcePathStyle: false,
+      },
+      cleanup: { enabled: false, intervalMinutes: 60 },
+    });
+
+    expect(result).toEqual({
+      enabled: true,
+      domain: 'sites.example.test',
+      port: 65535,
+      hostPrefix: 'preview',
+      ttl: { enabled: false, defaultDays: 30, extensionDays: 14 },
+      upload: {
+        maxUploadBytes: 20,
+        maxExtractedBytes: 40,
+        maxFiles: 2,
+        allowedExtensions: ['html'],
+      },
+      storage: {
+        backend: 's3',
+        bucket: 'sites-bucket',
+        prefix: 'published/assets',
+        region: 'us-east-1',
+        endpoint: 'https://objects.example.test',
+        forcePathStyle: false,
+      },
+      cleanup: { enabled: false, intervalMinutes: 60 },
+    });
+    expect(mockGetConfig).toHaveBeenCalledWith('sites');
+  });
+
   describe('port', () => {
     it('keeps a valid in-range port', async () => {
       expect((await normalizeViaGetConfig({ port: 8080 })).port).toBe(8080);
@@ -93,15 +142,61 @@ describe('SitesConfigService normalization', () => {
       });
       expect(result.upload?.allowedExtensions).toEqual(DEFAULT_SITES_CONFIG.upload?.allowedExtensions);
     });
+
+    it('normalizes the legacy allowedTypes field when allowedExtensions is absent', async () => {
+      const result = await normalizeViaGetConfig({
+        upload: {
+          ...DEFAULT_SITES_CONFIG.upload!,
+          allowedExtensions: undefined,
+          allowedTypes: ['.HTML', ' css ', 'HTML'],
+        },
+      });
+
+      expect(result.upload?.allowedExtensions).toEqual(['html', 'css']);
+    });
   });
 
   describe('upload positive integers', () => {
+    it('coerces numeric strings from persisted configuration', async () => {
+      const result = await normalizeViaGetConfig({
+        ttl: { defaultDays: '30' as unknown as number, extensionDays: '14' as unknown as number },
+        upload: {
+          ...DEFAULT_SITES_CONFIG.upload!,
+          maxUploadBytes: '20' as unknown as number,
+          maxExtractedBytes: '40' as unknown as number,
+          maxFiles: '2' as unknown as number,
+        },
+        cleanup: { intervalMinutes: '60' as unknown as number },
+      });
+
+      expect(result.ttl).toEqual({ enabled: true, defaultDays: 30, extensionDays: 14 });
+      expect(result.upload).toEqual({
+        ...DEFAULT_SITES_CONFIG.upload,
+        maxUploadBytes: 20,
+        maxExtractedBytes: 40,
+        maxFiles: 2,
+      });
+      expect(result.cleanup).toEqual({ enabled: true, intervalMinutes: 60 });
+    });
+
     it('falls back to defaults for non-positive / non-integer values', async () => {
       const result = await normalizeViaGetConfig({
         upload: { ...DEFAULT_SITES_CONFIG.upload!, maxFiles: 0, maxUploadBytes: -5 },
       });
       expect(result.upload?.maxFiles).toBe(DEFAULT_SITES_CONFIG.upload?.maxFiles);
       expect(result.upload?.maxUploadBytes).toBe(DEFAULT_SITES_CONFIG.upload?.maxUploadBytes);
+    });
+
+    it('falls back independently for invalid ttl, upload, and cleanup values', async () => {
+      const result = await normalizeViaGetConfig({
+        ttl: { defaultDays: 1.5, extensionDays: 0 },
+        upload: { ...DEFAULT_SITES_CONFIG.upload!, maxExtractedBytes: Number.NaN },
+        cleanup: { intervalMinutes: -1 },
+      });
+
+      expect(result.ttl).toEqual(DEFAULT_SITES_CONFIG.ttl);
+      expect(result.upload?.maxExtractedBytes).toBe(DEFAULT_SITES_CONFIG.upload?.maxExtractedBytes);
+      expect(result.cleanup).toEqual(DEFAULT_SITES_CONFIG.cleanup);
     });
   });
 
@@ -164,6 +259,14 @@ describe('SitesConfigService normalization', () => {
         'sites',
         expect.objectContaining({ hostPrefix: 'my-site', port: null })
       );
+    });
+
+    it('surfaces persistence failures instead of returning an unpersisted config', async () => {
+      const error = new Error('config store unavailable');
+      mockSetConfig.mockRejectedValueOnce(error);
+
+      await expect(SitesConfigService.getInstance().setConfig(DEFAULT_SITES_CONFIG)).rejects.toBe(error);
+      expect(mockSetConfig).toHaveBeenCalledWith('sites', DEFAULT_SITES_CONFIG);
     });
   });
 });

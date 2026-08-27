@@ -113,6 +113,82 @@ describe('Metrics', () => {
     );
   });
 
+  it('should not emit any metric type when disabled', () => {
+    const client = {
+      increment: jest.fn(),
+      timing: jest.fn(),
+      gauge: jest.fn(),
+      event: jest.fn(),
+    };
+    const disabled = new Metrics('disabled-type', { client, disable: true });
+
+    expect(disabled.increment('count')).toBe(disabled);
+    expect(disabled.timing('duration', 12)).toBe(disabled);
+    expect(disabled.gauge('depth', 3)).toBe(disabled);
+    expect(disabled.event('title', 'description')).toBe(disabled);
+    expect(client.increment).not.toHaveBeenCalled();
+    expect(client.timing).not.toHaveBeenCalled();
+    expect(client.gauge).not.toHaveBeenCalled();
+    expect(client.event).not.toHaveBeenCalled();
+  });
+
+  it('should emit exact caller tags when requested', () => {
+    const exactTags = { only: 'this-tag' };
+
+    metrics.increment('count', exactTags, { forceExactTags: true });
+    metrics.timing('duration', 12, exactTags, { forceExactTags: true });
+    metrics.gauge('depth', 3, exactTags, { forceExactTags: true });
+    metrics.event('title', 'description', exactTags, { forceExactTags: true });
+
+    expect(mockClient.increment).toHaveBeenCalledWith('lifecycle.test-type.count', exactTags);
+    expect(mockClient.timing).toHaveBeenCalledWith('lifecycle.test-type.duration', 12, exactTags);
+    expect(mockClient.gauge).toHaveBeenCalledWith('lifecycle.test-type.depth', 3, exactTags);
+    expect(mockClient.event).toHaveBeenCalledWith(
+      'title',
+      'description',
+      { aggregation_key: 'test-type', alert_type: 'info', source_type_name: 'lifecycle-job' },
+      exactTags
+    );
+  });
+
+  it('should merge event details and config tags and return the same metrics instance', () => {
+    metrics.config.eventDetails = { title: 'original', description: 'description' };
+
+    expect(metrics.updateEventDetails({ title: 'updated', description: 'new description' })).toBe(metrics);
+    expect(metrics.config.eventDetails).toEqual({ title: 'updated', description: 'new description' });
+
+    expect(metrics.updateConfigTags({ region: 'west', branchName: 'overridden' })).toBe(metrics);
+    metrics.increment('count');
+    expect(mockClient.increment).toHaveBeenCalledWith(
+      'lifecycle.test-type.count',
+      expect.objectContaining({ region: 'west', branchName: 'overridden' })
+    );
+  });
+
+  it('should expose configured namespace and event options through public emissions', () => {
+    const client = new StatsD();
+    const configured = new Metrics('build', {
+      client,
+      namespace: 'custom',
+      alert_type: 'warning',
+      source_type_name: 'worker',
+    });
+
+    configured.increment('started');
+    configured.event('Build', 'Started');
+
+    expect(client.increment).toHaveBeenCalledWith(
+      'custom.build.started',
+      expect.objectContaining({ uuid: '', sha: '' })
+    );
+    expect(client.event).toHaveBeenCalledWith(
+      'Build',
+      'Started',
+      { aggregation_key: 'build', alert_type: 'warning', source_type_name: 'worker' },
+      expect.any(Object)
+    );
+  });
+
   it('should construct tags correctly', () => {
     const tags = internals(metrics).constructTags({ tag1: 'value1' });
     expect(tags).toMatchObject({

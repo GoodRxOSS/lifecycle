@@ -140,6 +140,21 @@ describe('POST /api/v2/environments', () => {
     expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
   });
 
+  it('400s malformed JSON before touching the service', async () => {
+    writeToken();
+    const res = await createEnvironment(
+      new NextRequest('http://localhost/api/v2/environments', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: '{',
+      })
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
+  });
+
   it('400s arrays, malformed services, scalar type mismatches, and non-integer TTLs', async () => {
     writeToken();
     const base = { repository: 'org/repo', branch: 'main' };
@@ -206,6 +221,26 @@ describe('POST /api/v2/environments', () => {
     expect(nestedBody.error.message).toContain('services[0]');
     expect(nestedBody.error.message).toContain('"branch"');
 
+    expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
+  });
+
+  it('names every unknown service-override field in the validation error', async () => {
+    writeToken();
+
+    const res = await createEnvironment(
+      request('POST', {
+        repository: 'org/repo',
+        branch: 'main',
+        services: [{ name: 'web', branch: 'feature', enabled: true }],
+      })
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toMatchObject({ code: 'invalid_body' });
+    expect(body.error.message).toContain('unknown fields');
+    expect(body.error.message).toContain('"branch"');
+    expect(body.error.message).toContain('"enabled"');
     expect(mockCreateApiEnvironment).not.toHaveBeenCalled();
   });
 
@@ -301,6 +336,100 @@ describe('POST /api/v2/environments', () => {
     );
   });
 
+  it('forwards every explicit create option and attributes a session-created environment to the user', async () => {
+    getIdentity.mockReturnValue({ userId: 'u-1', roles: ['user'], githubUsername: 'octocat' });
+    mockCreateApiEnvironment.mockResolvedValue({
+      build: { uuid: 'configured-env-1', status: 'queued', namespace: 'env-configured-env-1' },
+      replayed: false,
+    });
+    const body = {
+      repository: 'org/repo',
+      branch: 'feature',
+      sha: 'abc123',
+      environmentId: 42,
+      name: 'configured-preview',
+      services: [{ name: 'web', active: false, branchOrExternalUrl: 'web-feature' }, { name: 'worker' }],
+      env: { LOG_LEVEL: 'debug' },
+      initEnv: { MIGRATE: 'true' },
+      deployEnabled: false,
+      trackDefaultBranches: true,
+      autoTrack: false,
+      ttlHours: 24,
+      idempotencyKey: 'configured-request',
+    };
+
+    const res = await createEnvironment(
+      new NextRequest('http://localhost/api/v2/environments', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
+
+    expect(res.status).toBe(202);
+    expect((await res.json()).data).toMatchObject({
+      uuid: 'configured-env-1',
+      expiresAt: null,
+      replayed: false,
+    });
+    expect(mockCreateApiEnvironment).toHaveBeenCalledWith(
+      {
+        repositoryFullName: 'org/repo',
+        branch: 'feature',
+        sha: 'abc123',
+        environmentId: 42,
+        name: 'configured-preview',
+        services: [{ name: 'web', active: false, branchOrExternalUrl: 'web-feature' }, { name: 'worker' }],
+        env: { LOG_LEVEL: 'debug' },
+        initEnv: { MIGRATE: 'true' },
+        deployEnabled: false,
+        trackDefaultBranches: true,
+        autoTrack: false,
+        ttlHours: 24,
+        idempotencyKey: 'configured-request',
+        createdByTokenId: null,
+        createdBy: 'u-1',
+        createdByUserId: 'u-1',
+        createdByGithubLogin: 'octocat',
+      },
+      { repositoryAllowlistRepoIds: null, repositoryAllowlist: null }
+    );
+  });
+
+  it('preserves explicit nulls for nullable create options', async () => {
+    writeToken();
+    mockCreateApiEnvironment.mockResolvedValue({
+      build: { uuid: 'nullable-env-1', status: 'queued', namespace: 'env-nullable-env-1' },
+      replayed: false,
+    });
+
+    const res = await createEnvironment(
+      request('POST', {
+        repository: 'org/repo',
+        branch: 'main',
+        sha: null,
+        environmentId: null,
+        name: null,
+        services: null,
+        ttlHours: null,
+        idempotencyKey: null,
+      })
+    );
+
+    expect(res.status).toBe(202);
+    expect(mockCreateApiEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sha: null,
+        environmentId: null,
+        name: null,
+        services: null,
+        ttlHours: null,
+        idempotencyKey: null,
+      }),
+      expect.any(Object)
+    );
+  });
+
   it('forwards a repository-constrained key allowlist so an idempotent replay is re-authorized', async () => {
     verifyToken.mockResolvedValue({
       id: 7,
@@ -389,6 +518,25 @@ describe('GET /api/v2/environments', () => {
 
     expect(res.status).toBe(400);
     expect(mockListEnvironments).not.toHaveBeenCalled();
+  });
+
+  it('forwards an explicit false ready-service filter without owner scoping', async () => {
+    writeToken();
+    mockListEnvironments.mockResolvedValue({ data: [], paginationMetadata: { page: 1 } });
+
+    const res = await listEnvironments(
+      request('GET', undefined, 'http://localhost/api/v2/environments?hasReadyActiveService=false')
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockListEnvironments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hasReadyActiveService: false,
+        createdByTokenId: null,
+        ownerUserId: null,
+        githubLogin: null,
+      })
+    );
   });
 });
 
@@ -526,6 +674,22 @@ describe('PATCH /api/v2/environments/{uuid}', () => {
     expect(mockApplyApiEnvironmentPatch).not.toHaveBeenCalled();
   });
 
+  it('400s malformed JSON before looking up the build', async () => {
+    writeToken();
+    const malformedRequest = new NextRequest('http://localhost/api/v2/environments/x', {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: '{',
+    });
+
+    const res = await patchEnvironment(malformedRequest, { params: { uuid: 'x' } });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockBuildFindOne).not.toHaveBeenCalled();
+    expect(mockApplyApiEnvironmentPatch).not.toHaveBeenCalled();
+  });
+
   it('400s arrays, malformed services, and non-boolean flags before looking up the build', async () => {
     writeToken();
     const invalidBodies = [
@@ -608,6 +772,35 @@ describe('PATCH /api/v2/environments/{uuid}', () => {
       expect.objectContaining({ deployEnabled: false, env: { A: 'b' } })
     );
     expect(mockGetEnvironmentDetail).toHaveBeenCalledWith('x', 101);
+  });
+
+  it('forwards service and init-environment overrides without replacing them with null', async () => {
+    writeToken();
+    const build = { uuid: 'x', pullRequest: null, deploys: [] };
+    mockBuildLookup(build);
+    mockGetEnvironmentDetail.mockResolvedValue({ uuid: 'x', status: 'deployed' });
+
+    const res = await patchEnvironment(
+      request(
+        'PATCH',
+        {
+          services: [{ name: 'web', active: false }],
+          initEnv: { MIGRATE: 'true' },
+        },
+        'http://localhost/api/v2/environments/x'
+      ),
+      { params: { uuid: 'x' } }
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockApplyApiEnvironmentPatch).toHaveBeenCalledWith(build, expect.anything(), {
+      services: [{ name: 'web', active: false }],
+      env: null,
+      initEnv: { MIGRATE: 'true' },
+      deployEnabled: undefined,
+      autoTrack: undefined,
+      trackDefaultBranches: undefined,
+    });
   });
 
   it('keeps omitted PATCH fields as no-ops', async () => {
@@ -965,6 +1158,23 @@ describe('POST /api/v2/environments/{uuid}/extend', () => {
 
     expect(res.status).toBe(400);
     expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockExtendApiEnvironment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'null', body: null },
+    { label: 'an array', body: [] },
+    { label: 'a scalar', body: '12' },
+  ])('400s when the extension body is $label', async ({ body }) => {
+    writeToken();
+
+    const res = await extendEnvironment(request('POST', body, 'http://localhost/api/v2/environments/x/extend'), {
+      params: { uuid: 'x' },
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockBuildFindOne).not.toHaveBeenCalled();
     expect(mockExtendApiEnvironment).not.toHaveBeenCalled();
   });
 

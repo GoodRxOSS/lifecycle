@@ -135,6 +135,38 @@ describe('POST /api/v2/telemetry/events', () => {
     );
   });
 
+  it('accepts each documented attribute value type', async () => {
+    const attributes = {
+      command: 'builds list',
+      resultCount: 3,
+      cached: true,
+      flags: ['--json', '--verbose'],
+    };
+
+    const response = await POST(makeRequest({ ...validPayload, attributes }));
+
+    expect(response.status).toBe(201);
+    expect(mockInsertEvent).toHaveBeenCalledWith(expect.objectContaining({ attributes }));
+  });
+
+  it('returns a null creation timestamp when persistence does not provide one', async () => {
+    mockInsertEvent.mockResolvedValue({ id: 43 });
+
+    const response = await POST(makeRequest(validPayload));
+
+    expect(response.status).toBe(201);
+    expect((await response.json()).data.event).toEqual({ id: 43, createdAt: null });
+  });
+
+  it('maps a persistence failure to 500', async () => {
+    mockInsertEvent.mockRejectedValue(new Error('telemetry storage unavailable'));
+
+    const response = await POST(makeRequest(validPayload));
+
+    expect(response.status).toBe(500);
+    expect(mockInsertEvent).toHaveBeenCalledTimes(1);
+  });
+
   it('never forwards unknown fields such as user identity', async () => {
     const response = await POST(
       makeRequest({
@@ -170,6 +202,9 @@ describe('POST /api/v2/telemetry/events', () => {
     ['string attributes', { ...validPayload, attributes: 'flags' }],
     ['object attribute value', { ...validPayload, attributes: { nested: { deep: true } } }],
     ['non-string array attribute value', { ...validPayload, attributes: { flags: [1, 2] } }],
+    ['overlong string attribute value', { ...validPayload, attributes: { value: 'x'.repeat(501) } }],
+    ['overlong string-array item', { ...validPayload, attributes: { values: ['x'.repeat(501)] } }],
+    ['null attributes', { ...validPayload, attributes: null }],
     [
       'oversized attributes',
       {
@@ -188,8 +223,18 @@ describe('POST /api/v2/telemetry/events', () => {
     ['missing status', { ...validPayload, status: undefined }],
     ['invalid status', { ...validPayload, status: 'failed' }],
     ['non-integer exitCode', { ...validPayload, exitCode: 1.5 }],
+    ['non-string errorClass', { ...validPayload, errorClass: 500 }],
+    ['overlong errorClass', { ...validPayload, errorClass: 'x'.repeat(201) }],
     ['non-integer errorHttpStatus', { ...validPayload, errorHttpStatus: 'oops' }],
+    ['non-string errorCode', { ...validPayload, errorCode: true }],
+    ['overlong errorCode', { ...validPayload, errorCode: 'x'.repeat(201) }],
     ['missing clientVersion', { ...validPayload, clientVersion: undefined }],
+    ['non-string runtimeVersion', { ...validPayload, runtimeVersion: 20 }],
+    ['overlong runtimeVersion', { ...validPayload, runtimeVersion: 'x'.repeat(201) }],
+    ['non-string platform', { ...validPayload, platform: false }],
+    ['overlong platform', { ...validPayload, platform: 'x'.repeat(201) }],
+    ['non-string arch', { ...validPayload, arch: [] }],
+    ['overlong arch', { ...validPayload, arch: 'x'.repeat(201) }],
     ['array body', [validPayload]],
     ['string body', 'hello'],
   ])('rejects %s with 400', async (_name, payload) => {

@@ -78,30 +78,39 @@ function makeRequest(
   } as unknown as NextRequest;
 }
 
+function makeConnectorConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+    slug: 'sample-oauth',
+    scope: 'global',
+    enabled: true,
+    timeout: 30000,
+    preset: 'oauth-http',
+    transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
+    sharedConfig: {},
+    authConfig: {
+      mode: 'oauth',
+      provider: 'generic-oauth2.1',
+      scope: 'sample.read',
+    },
+    ...overrides,
+  };
+}
+
+function definitionFingerprintFor(config: ReturnType<typeof makeConnectorConfig>): string {
+  return buildMcpDefinitionFingerprint({
+    preset: config.preset as string,
+    transport: config.transport as never,
+    sharedConfig: config.sharedConfig as never,
+    authConfig: config.authConfig as never,
+  });
+}
+
 describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    const connectorConfig = {
-      id: 7,
-      slug: 'sample-oauth',
-      scope: 'global',
-      enabled: true,
-      timeout: 30000,
-      preset: 'oauth-http',
-      transport: { type: 'http', url: 'https://mcp.example.com/v1/mcp', headers: {} },
-      sharedConfig: {},
-      authConfig: {
-        mode: 'oauth',
-        provider: 'generic-oauth2.1',
-        scope: 'sample.read',
-      },
-    } as const;
-    const definitionFingerprint = buildMcpDefinitionFingerprint({
-      preset: connectorConfig.preset,
-      transport: connectorConfig.transport,
-      sharedConfig: connectorConfig.sharedConfig,
-      authConfig: connectorConfig.authConfig,
-    });
+    const connectorConfig = makeConnectorConfig();
+    const definitionFingerprint = definitionFingerprintFor(connectorConfig);
     mockGetBySlugAndScope.mockResolvedValue(connectorConfig);
     mockConsumeFlow.mockResolvedValue({
       flowId: 'flow-123',
@@ -308,5 +317,203 @@ describe('GET /api/v2/ai/agent/mcp-connections/[slug]/oauth/callback', () => {
     expect(response.status).toBe(410);
     expect(mockConsumeFlow).not.toHaveBeenCalled();
     expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects callbacks with no OAuth state', async () => {
+    const response = await GET(
+      makeRequest('http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?code=sample-code'),
+      { params: Promise.resolve({ slug: 'sample-oauth' }) }
+    );
+
+    expect(response.status).toBe(410);
+    expect(mockConsumeFlow).not.toHaveBeenCalled();
+    expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'missing', config: null },
+    { label: 'disabled', config: makeConnectorConfig({ enabled: false }) },
+  ])('rejects a callback when its MCP definition is $label', async ({ config }) => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(config);
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+
+    expect(response.status).toBe(404);
+    expect(html).toContain('Enabled MCP connection &#39;sample-oauth&#39; was not found.');
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ validationError: "Enabled MCP connection 'sample-oauth' was not found." })
+    );
+  });
+
+  it('rejects a callback when the MCP definition no longer uses OAuth', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(
+      makeConnectorConfig({ authConfig: { mode: 'api_key', header: 'authorization' } })
+    );
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(html).toContain('does not use OAuth');
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ validationError: "MCP connection 'sample-oauth' does not use OAuth." })
+    );
+  });
+
+  it('rejects an OAuth callback for a stdio transport before token exchange', async () => {
+    mockGetBySlugAndScope.mockResolvedValueOnce(
+      makeConnectorConfig({ transport: { type: 'stdio', command: 'sample-mcp', args: [] } })
+    );
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(html).toContain('must use HTTP or SSE transport');
+    expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it('expires a callback when the MCP definition changed during authorization', async () => {
+    mockConsumeFlow.mockResolvedValueOnce({
+      flowId: 'flow-123',
+      userId: 'sample-user',
+      ownerGithubUsername: 'sample-user',
+      slug: 'sample-oauth',
+      scope: 'global',
+      definitionFingerprint: 'stale-definition-fingerprint',
+      appOrigin: 'https://app.example.com',
+      createdAt: '2026-04-08T00:00:00.000Z',
+    });
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ slug: 'sample-oauth' }),
+    });
+    const html = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(html).toContain('This MCP changed while sign-in was in progress.');
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        definitionFingerprint: 'stale-definition-fingerprint',
+        validationError: 'This MCP changed while sign-in was in progress. Start the connection again.',
+      })
+    );
+  });
+
+  it('persists a provider-declared OAuth error and safely escapes it in the callback page', async () => {
+    mockGetDecryptedConnection.mockResolvedValue({
+      state: {
+        type: 'oauth',
+        codeVerifier: 'sample-code-verifier',
+        oauthState: 'flow-123.sample-state',
+      },
+      definitionFingerprint: 'sample-definition-fingerprint',
+      stale: false,
+      discoveredTools: [],
+      validationError: null,
+      validatedAt: null,
+      updatedAt: null,
+    });
+    const oauthError = encodeURIComponent('<script>&"\'');
+
+    const response = await GET(
+      makeRequest(
+        `http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?error=${oauthError}&state=flow-123.sample-state`
+      ),
+      { params: Promise.resolve({ slug: 'sample-oauth' }) }
+    );
+    const html = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(html).toContain('OAuth provider returned: &lt;script&gt;&amp;&quot;&#39;');
+    expect(html).toContain('OAuth provider returned: \\u003cscript>&\\"\'');
+    expect(html).not.toContain('OAuth provider returned: <script>');
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        validationError: 'OAuth provider returned: <script>&"\'',
+        validatedAt: expect.any(String),
+      })
+    );
+  });
+
+  it('rejects a callback without an authorization code', async () => {
+    const response = await GET(
+      makeRequest(
+        'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?state=flow-123.sample-state'
+      ),
+      { params: Promise.resolve({ slug: 'sample-oauth' }) }
+    );
+    const html = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(html).toContain('Missing OAuth authorization code.');
+    expect(mockAuth).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ validationError: 'Missing OAuth authorization code.' })
+    );
+  });
+
+  it('does not create a connection row while clearing a failure when no OAuth state exists', async () => {
+    mockGetDecryptedConnection.mockResolvedValueOnce(null);
+
+    const response = await GET(
+      makeRequest(
+        'http://localhost/api/v2/ai/agent/mcp-connections/other-oauth/oauth/callback?code=sample-code&state=flow-123.sample-state'
+      ),
+      { params: Promise.resolve({ slug: 'other-oauth' }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+    expect(mockAuth).not.toHaveBeenCalled();
+  });
+
+  it('supports SSE OAuth definitions with no saved connection state or shared config', async () => {
+    const connectorConfig = makeConnectorConfig({
+      preset: 'oauth-sse',
+      transport: { type: 'sse', url: 'https://mcp.example.com/v1/events', headers: {} },
+      sharedConfig: undefined,
+    });
+    const definitionFingerprint = definitionFingerprintFor(connectorConfig);
+    mockGetBySlugAndScope.mockResolvedValueOnce(connectorConfig);
+    mockConsumeFlow.mockResolvedValueOnce({
+      flowId: 'flow-123',
+      userId: 'sample-user',
+      ownerGithubUsername: null,
+      slug: 'sample-oauth',
+      scope: 'global',
+      definitionFingerprint,
+      appOrigin: 'https://app.example.com',
+      createdAt: '2026-04-08T00:00:00.000Z',
+    });
+    mockGetDecryptedConnection.mockResolvedValueOnce(null);
+
+    const response = await GET(
+      makeRequest(
+        'http://localhost/api/v2/ai/agent/mcp-connections/sample-oauth/oauth/callback?code=sample-code&state=flow-123.sample-state'
+      ),
+      { params: Promise.resolve({ slug: 'sample-oauth' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockAuth).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ serverUrl: 'https://mcp.example.com/v1/events' })
+    );
+    expect(mockDiscoverTools).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'sse', url: 'https://mcp.example.com/v1/events' }),
+      30000
+    );
   });
 });

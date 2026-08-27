@@ -229,6 +229,17 @@ describe('InstructionTemplateService', () => {
     );
   });
 
+  it('does not rewrite release-owned defaults that already match the seeded definitions', async () => {
+    await InstructionTemplateService.seedSystemTemplates();
+    mockUpsert.mockClear();
+
+    const templates = await InstructionTemplateService.seedSystemTemplates();
+
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(templates.map((template) => template.ref)).toEqual(['system:debug', 'system:develop', 'system:freeform']);
+    expect(templates.every((template) => template.effective.source === 'default')).toBe(true);
+  });
+
   it('updates overrides with base default metadata and increments override versions', async () => {
     await InstructionTemplateService.seedSystemTemplates();
 
@@ -267,6 +278,38 @@ describe('InstructionTemplateService', () => {
         baseDefaultHash: first.default.hash,
       })
     );
+  });
+
+  it('rejects blank override content before reading or writing persistence', async () => {
+    await expect(
+      InstructionTemplateService.updateOverride('system:debug', {
+        content: '   ',
+      })
+    ).rejects.toMatchObject({
+      name: InstructionTemplateServiceError.name,
+      code: 'instruction_template_content_invalid',
+      templateCode: 'invalid_content',
+      httpStatus: 400,
+      statusCode: 400,
+    });
+
+    expect(mockFindOne).not.toHaveBeenCalled();
+    expect(mockPatchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('reports an override update race when the template disappears before persistence returns it', async () => {
+    await InstructionTemplateService.seedSystemTemplates();
+    mockPatchAndFetchById.mockResolvedValueOnce(undefined);
+
+    await expect(
+      InstructionTemplateService.updateOverride('system:debug', {
+        content: 'Use the sample admin debug instructions.',
+      })
+    ).rejects.toMatchObject({
+      code: 'instruction_template_not_found',
+      templateCode: 'unknown_ref',
+      details: { ref: 'system:debug' },
+    });
   });
 
   it('reseeds changed release defaults without overwriting admin overrides', async () => {
@@ -329,6 +372,17 @@ describe('InstructionTemplateService', () => {
         hash: computeInstructionTemplateContentHash(updatedDefault),
       })
     );
+  });
+
+  it('reports an override reset race when the template disappears before persistence returns it', async () => {
+    await InstructionTemplateService.seedSystemTemplates();
+    mockPatchAndFetchById.mockResolvedValueOnce(undefined);
+
+    await expect(InstructionTemplateService.resetOverride('system:debug')).rejects.toMatchObject({
+      code: 'instruction_template_not_found',
+      templateCode: 'unknown_ref',
+      details: { ref: 'system:debug' },
+    });
   });
 
   it('preserves a Debug override across the default migration and reset returns to the current Debug default', async () => {

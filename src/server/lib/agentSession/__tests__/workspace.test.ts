@@ -18,6 +18,7 @@ import {
   buildSessionWorkspaceEditorContents,
   buildSessionWorkspaceRepoMountPath,
   normalizeSessionWorkspaceRepo,
+  rewriteWorkspacePathForRepo,
   SESSION_WORKSPACE_REPOS_ROOT,
   SESSION_WORKSPACE_ROOT,
 } from '../workspace';
@@ -33,6 +34,20 @@ describe('workspace', () => {
         useWorkspaceRootForPrimary: false,
       })
     ).toBe(`${SESSION_WORKSPACE_REPOS_ROOT}/example-org/api`);
+  });
+
+  it.each(['example-org', '/api', 'example-org/'])('rejects an invalid repository full name: %s', (repo) => {
+    expect(() => buildSessionWorkspaceRepoMountPath(repo)).toThrow(`Invalid repository full name: ${repo}`);
+  });
+
+  it('rewrites workspace-relative paths without changing blank or unrelated absolute paths', () => {
+    const repoRoot = `${SESSION_WORKSPACE_REPOS_ROOT}/example-org/api`;
+
+    expect(rewriteWorkspacePathForRepo('   ', repoRoot)).toBe('   ');
+    expect(rewriteWorkspacePathForRepo(SESSION_WORKSPACE_ROOT, repoRoot)).toBe(repoRoot);
+    expect(rewriteWorkspacePathForRepo('/workspace/src/index.ts', repoRoot)).toBe(`${repoRoot}/src/index.ts`);
+    expect(rewriteWorkspacePathForRepo('/tmp/generated.txt', repoRoot)).toBe('/tmp/generated.txt');
+    expect(rewriteWorkspacePathForRepo('src/index.ts', repoRoot)).toBe(`${repoRoot}/src/index.ts`);
   });
 
   it('normalizes multi-repo primary paths consistently', () => {

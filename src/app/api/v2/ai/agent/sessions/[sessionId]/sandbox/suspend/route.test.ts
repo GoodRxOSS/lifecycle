@@ -90,6 +90,24 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/suspend', () => {
     });
   });
 
+  it('suspends the sandbox and returns the serialized session', async () => {
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockSuspendChatRuntime).toHaveBeenCalledWith({
+      sessionId: 'sample-session',
+      userId: 'sample-user',
+    });
+    expect(mockSerializeSessionRecord).toHaveBeenCalledWith({ uuid: 'sample-session' });
+    expect(body.data).toEqual({
+      session: { id: 'sample-session', userId: 'sample-user' },
+      sandbox: { status: 'hibernated' },
+    });
+  });
+
   it('maps canonical workspace action blockers to 409', async () => {
     mockSuspendChatRuntime.mockRejectedValueOnce(
       new WorkspaceActionBlockedError(

@@ -122,4 +122,53 @@ describe('DatabaseClient diagnostic schema', () => {
     expect(dataQuery.where).toHaveBeenCalledWith({ uuid: 'sample-build' });
     expect(countQuery.resultSize).not.toHaveBeenCalled();
   });
+
+  it('propagates count-query failures before applying projection or result limits', async () => {
+    const queryError = new Error('count query failed');
+    const countQuery = createQuery([]);
+    countQuery.resultSize.mockRejectedValueOnce(queryError);
+    const dataQuery = createQuery([]);
+    const { client } = createClientWithQueries(dataQuery, countQuery);
+    client.setBuildScope({
+      buildId: 1,
+      buildUuid: 'sample-build',
+      pullRequestId: 11,
+      environmentId: 1,
+      repositoryIds: [1],
+    });
+
+    await expect(
+      client.queryTable({
+        table: 'builds',
+        select: ['uuid'],
+        limit: 5,
+      })
+    ).rejects.toBe(queryError);
+
+    expect(countQuery.resultSize).toHaveBeenCalledTimes(1);
+    expect(dataQuery.select).not.toHaveBeenCalled();
+    expect(dataQuery.limit).not.toHaveBeenCalled();
+  });
+
+  it('propagates data-query failures after a successful bounded count', async () => {
+    const queryError = new Error('data query failed');
+    const countQuery = createQuery([]);
+    const dataQuery = createQuery([]);
+    dataQuery.then = jest.fn((resolve: (records: any[]) => unknown, reject: (error: unknown) => unknown) =>
+      Promise.reject(queryError).then(resolve, reject)
+    );
+    const { client } = createClientWithQueries(dataQuery, countQuery);
+    client.setBuildScope({
+      buildId: 1,
+      buildUuid: 'sample-build',
+      pullRequestId: 11,
+      environmentId: 1,
+      repositoryIds: [1],
+    });
+
+    await expect(client.queryTable({ table: 'builds', limit: 5 })).rejects.toBe(queryError);
+
+    expect(countQuery.resultSize).toHaveBeenCalledTimes(1);
+    expect(dataQuery.limit).toHaveBeenCalledWith(5);
+  });
 });

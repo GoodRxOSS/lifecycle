@@ -55,8 +55,16 @@ jest.mock('../build', () => ({
   })),
 }));
 
-import OverrideService, { ApplyBuildOverridesArgs, BuildConfigPatchInput, BuildOverrideInput } from '../override';
+import OverrideService, {
+  ApplyBuildOverridesArgs,
+  BuildConfigPatchInput,
+  BuildOverrideInput,
+  BuildUuidValidationError,
+  ServiceOverrideNotFoundError,
+  isBranchOrExternalUrlEditable,
+} from '../override';
 import { DeployTypes } from 'shared/constants';
+import * as k8s from 'server/lib/kubernetes';
 
 const createPatchable = () => {
   const patch = jest.fn().mockResolvedValue(undefined);
@@ -961,5 +969,296 @@ describe('OverrideService.applyBuildConfigPatch', () => {
       buildId: 42,
       runUUID: 'run-uuid',
     });
+  });
+});
+
+describe('OverrideService boundary behavior', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (k8s.deleteNamespace as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  it('reports deployment-type editability through the exported contract', () => {
+    expect(isBranchOrExternalUrlEditable()).toBe(false);
+    expect(isBranchOrExternalUrlEditable(DeployTypes.GITHUB)).toBe(true);
+    expect(isBranchOrExternalUrlEditable(DeployTypes.HELM)).toBe(true);
+    expect(isBranchOrExternalUrlEditable(DeployTypes.EXTERNAL_HTTP)).toBe(true);
+    expect(isBranchOrExternalUrlEditable(DeployTypes.DOCKER)).toBe(false);
+  });
+
+  it('renders supported service override display values and filters unsupported deploy types', async () => {
+    const { service } = createService();
+    const deploy = (name: string, type: DeployTypes, values: Record<string, any> = {}) => {
+      const { deployable: deployableValues, ...deployValues } = values;
+      return {
+        active: true,
+        status: 'deployed',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        deployable: { name, type, active: true, buildId: 42, buildUUID: 'build-1', ...deployableValues },
+        ...deployValues,
+      };
+    };
+
+    const states = await service.getServiceOverrideStates([
+      deploy('helm', DeployTypes.HELM, { branchName: '1.2.3' }),
+      deploy('codefresh', DeployTypes.CODEFRESH, { branchName: null }),
+      deploy('configuration', DeployTypes.CONFIGURATION, { branchName: 'config-branch' }),
+      deploy('external', DeployTypes.EXTERNAL_HTTP, {
+        publicUrl: null,
+        deployable: { defaultPublicUrl: 'https://external.example.test' },
+      }),
+      deploy('docker-pinned', DeployTypes.DOCKER, {
+        deployable: { dockerImage: 'registry.test/app', defaultTag: 'sha-123' },
+      }),
+      deploy('docker-tag', DeployTypes.DOCKER, { deployable: { defaultTag: 'latest' } }),
+      deploy('unsupported', 'unsupported' as DeployTypes),
+    ] as any);
+
+    expect(states.map(({ name, branchOrExternalUrl }) => [name, branchOrExternalUrl])).toEqual([
+      ['codefresh', null],
+      ['configuration', 'config-branch'],
+      ['docker-pinned', 'registry.test/app@sha-123'],
+      ['docker-tag', 'latest'],
+      ['external', 'https://external.example.test'],
+      ['helm', '1.2.3'],
+    ]);
+  });
+
+  it('ignores comment overrides when the build has no persisted id', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createFullYamlArgs();
+    args.build.id = undefined as any;
+
+    await service.applyBuildOverrides(args);
+
+    expect(args.build.$query().patch).not.toHaveBeenCalled();
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+  });
+
+  it('rejects API config and service patches when the build has no persisted id', async () => {
+    const { service } = createService();
+    const configArgs = createBuildConfigPatchArgs({ isStatic: true });
+    configArgs.build.id = undefined as any;
+    await expect(service.applyBuildConfigPatch(configArgs)).rejects.toThrow('Build id is required');
+
+    await expect(
+      service.applyServiceOverrides({
+        build: { id: undefined, uuid: 'build-1' } as any,
+        deploys: [],
+        serviceOverrides: [{ name: 'api', active: true }],
+        runUuid: 'run-1',
+      })
+    ).rejects.toThrow('Build id is required');
+  });
+
+  it('rejects empty service override requests and requests with no mutable field', async () => {
+    const { service } = createService();
+    const build = { id: 42, uuid: 'build-1' } as any;
+
+    await expect(
+      service.applyServiceOverrides({ build, deploys: [], serviceOverrides: [], runUuid: 'run-1' })
+    ).rejects.toThrow('serviceOverrides is required');
+    await expect(service.validateServiceOverrides(build, [], [])).rejects.toThrow('serviceOverrides is required');
+    await expect(service.validateServiceOverrides(build, [], [{ name: 'api' }])).rejects.toThrow(
+      'active or branchOrExternalUrl is required'
+    );
+  });
+
+  it('returns success without patching when a non-editable display value is unchanged', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const deploy = {
+      active: true,
+      deployable: {
+        name: 'image',
+        type: DeployTypes.DOCKER,
+        active: true,
+        dockerImage: 'registry.test/app',
+        defaultTag: 'sha-123',
+      },
+      $query: jest.fn(() => ({ patch: jest.fn() })),
+    } as any;
+
+    await expect(
+      service.applyServiceOverrides({
+        build: { id: 42, uuid: 'build-1' } as any,
+        deploys: [deploy],
+        serviceOverrides: [{ name: 'image', branchOrExternalUrl: 'registry.test/app@sha-123' }],
+        runUuid: 'run-1',
+      })
+    ).resolves.toEqual({ buildUuid: 'build-1', queued: false, status: 'success' });
+
+    expect(deploy.$query().patch).not.toHaveBeenCalled();
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+  });
+
+  it('rejects a present service that has no supported override state', async () => {
+    const { service } = createService();
+    const deploy = {
+      deployable: { name: 'unsupported', type: 'unsupported', active: true },
+    } as any;
+
+    await expect(
+      service.validateServiceOverrides(
+        { id: 42 } as any,
+        [deploy],
+        [{ name: 'unsupported', branchOrExternalUrl: 'main' }]
+      )
+    ).rejects.toBeInstanceOf(ServiceOverrideNotFoundError);
+  });
+
+  it('keeps a stale comment service name best-effort while applying the rest of the build override', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createFullYamlArgs({
+      serviceOverrides: [{ active: true, serviceName: 'removed-service', branchOrExternalUrl: 'main' }],
+    });
+
+    await service.applyBuildOverrides(args);
+
+    expect(args.build.$query().patch).toHaveBeenCalled();
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).toHaveBeenCalledWith('Deploy: not found service=removed-service');
+  });
+
+  it('returns a safe validation failure when the UUID uniqueness query fails', async () => {
+    const whereNull = jest.fn().mockRejectedValue(new Error('database unavailable'));
+    const service = new OverrideService(
+      {
+        models: {
+          Build: { query: jest.fn(() => ({ findOne: jest.fn(() => ({ whereNull })) })) },
+        },
+      } as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+
+    await expect(service.validateUuid('available-name-123456', 42)).resolves.toEqual({
+      valid: false,
+      error: 'Unable to validate UUID',
+    });
+  });
+});
+
+describe('OverrideService.updateBuildUuid', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (k8s.deleteNamespace as jest.Mock).mockResolvedValue(undefined);
+  });
+
+  function updateHarness() {
+    const trx = { name: 'transaction' };
+    const buildPatch = jest.fn().mockResolvedValue(1);
+    const deployablePatch = jest.fn().mockResolvedValue(2);
+    const namedDeployPatch = jest.fn().mockResolvedValue(1);
+    const unnamedDeployPatch = jest.fn();
+    const namedDeploy = {
+      id: 51,
+      uuid: 'api-old-build',
+      deployable: { name: 'api' },
+      $query: jest.fn(() => ({ patch: namedDeployPatch })),
+    };
+    const unnamedDeploy = {
+      id: 52,
+      uuid: 'unnamed-old-build',
+      deployable: {},
+      $query: jest.fn(() => ({ patch: unnamedDeployPatch })),
+    };
+    const updatedBuild = { id: 42, uuid: 'new-build', namespace: 'env-new-build' };
+    const deployQuery = {
+      where: jest.fn(),
+      withGraphFetched: jest.fn().mockResolvedValue([namedDeploy, unnamedDeploy]),
+    };
+    deployQuery.where.mockReturnValue(deployQuery);
+    const deployableQuery = { where: jest.fn(), patch: deployablePatch };
+    deployableQuery.where.mockReturnValue(deployableQuery);
+    const buildQuery = { findById: jest.fn().mockResolvedValue(updatedBuild) };
+    const transact = jest.fn(async (callback) => callback(trx));
+    const db = {
+      models: {
+        Build: { transact, query: jest.fn(() => buildQuery) },
+        Deployable: { query: jest.fn(() => deployableQuery) },
+        Deploy: { query: jest.fn(() => deployQuery) },
+      },
+    };
+    const build = {
+      id: 42,
+      uuid: 'old-build',
+      namespace: 'env-old-build',
+      $query: jest.fn(() => ({ patch: buildPatch })),
+    } as any;
+    const service = new OverrideService(db as any, {} as any, {} as any, {} as any);
+    jest.spyOn(service, 'validateUuid').mockResolvedValue({ valid: true });
+    return {
+      service,
+      db,
+      build,
+      trx,
+      transact,
+      buildPatch,
+      deployablePatch,
+      namedDeploy,
+      namedDeployPatch,
+      unnamedDeployPatch,
+      updatedBuild,
+    };
+  }
+
+  it('atomically updates the build, deployable and named deploy records, then retires the old namespace', async () => {
+    const harness = updateHarness();
+
+    await expect(harness.service.updateBuildUuid(harness.build, 'new-build')).resolves.toEqual({
+      build: harness.updatedBuild,
+      deploysUpdated: 2,
+    });
+
+    expect(harness.buildPatch).toHaveBeenCalledWith({ uuid: 'new-build', namespace: 'env-new-build' });
+    expect(harness.db.models.Deployable.query).toHaveBeenCalledWith(harness.trx);
+    expect(harness.deployablePatch).toHaveBeenCalledWith({ buildUUID: 'new-build' });
+    expect(harness.namedDeploy.uuid).toBe('api-new-build');
+    expect(harness.namedDeployPatch).toHaveBeenCalledWith({
+      uuid: 'api-new-build',
+      internalHostname: 'api-new-build',
+      publicUrl: 'deployable-host',
+    });
+    expect(harness.unnamedDeployPatch).not.toHaveBeenCalled();
+    expect(k8s.deleteNamespace).toHaveBeenCalledWith('env-old-build');
+  });
+
+  it('keeps a successful UUID transaction when old namespace cleanup fails asynchronously', async () => {
+    const harness = updateHarness();
+    (k8s.deleteNamespace as jest.Mock).mockRejectedValue(new Error('Kubernetes unavailable'));
+
+    await expect(harness.service.updateBuildUuid(harness.build, 'new-build')).resolves.toEqual(
+      expect.objectContaining({ deploysUpdated: 2 })
+    );
+    await Promise.resolve();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.any(Error) }),
+      'Namespace: delete failed name=env-old-build'
+    );
+  });
+
+  it('rejects an unavailable UUID before opening a transaction', async () => {
+    const harness = updateHarness();
+    jest.spyOn(harness.service, 'validateUuid').mockResolvedValue({ valid: false, error: 'UUID is not available' });
+
+    await expect(harness.service.updateBuildUuid(harness.build, 'new-build')).rejects.toBeInstanceOf(
+      BuildUuidValidationError
+    );
+
+    expect(harness.transact).not.toHaveBeenCalled();
+  });
+
+  it('logs and propagates a transaction failure', async () => {
+    const harness = updateHarness();
+    harness.transact.mockRejectedValue(new Error('transaction failed'));
+
+    await expect(harness.service.updateBuildUuid(harness.build, 'new-build')).rejects.toThrow('transaction failed');
+
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.any(Error) }),
+      'UUID: update failed newUuid=new-build'
+    );
   });
 });

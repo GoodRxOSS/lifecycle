@@ -16,7 +16,14 @@
 
 import type { NextRequest } from 'next/server';
 
-import { getRequestUserIdentity, getRequestUserSub, getUser } from '../get-user';
+import { UnauthorizedError } from '../appError';
+import {
+  getIdentityFromClaims,
+  getRequestUserIdentity,
+  getRequestUserSub,
+  getUser,
+  requireRequestUserIdentity,
+} from '../get-user';
 
 function makeRequest(userClaims?: Record<string, unknown>): NextRequest {
   const headers = new Headers();
@@ -53,6 +60,20 @@ describe('get-user helpers', () => {
     const payload = getUser(makeRequest({ sub: 'user-123', github_username: 'sample-user' }));
     expect(payload?.sub).toBe('user-123');
     expect(payload?.github_username).toBe('sample-user');
+  });
+
+  it('returns null for an x-user header that is not valid JSON', () => {
+    const request = makeRequest();
+    request.headers.set('x-user', Buffer.from('{invalid-json', 'utf8').toString('base64url'));
+
+    expect(getUser(request)).toBeNull();
+  });
+
+  it('trims a request subject and rejects a blank subject when auth is enabled', () => {
+    process.env.ENABLE_AUTH = 'true';
+
+    expect(getRequestUserSub(makeRequest({ sub: '  user-123  ' }))).toBe('user-123');
+    expect(getRequestUserSub(makeRequest({ sub: '   ' }))).toBeNull();
   });
 
   it('returns null when auth is enabled and no user is present', () => {
@@ -109,6 +130,76 @@ describe('get-user helpers', () => {
         gitUserName: 'local-dev-user',
         gitUserEmail: 'local-dev-user@users.noreply.github.com',
         roles: ['admin'],
+      })
+    );
+  });
+
+  it('builds an identity directly from verified claims', () => {
+    expect(
+      getIdentityFromClaims({
+        sub: 'claims-user',
+        name: 'Claims User',
+        email: 'claims-user@example.com',
+        realm_access: { roles: ['user'] },
+      })
+    ).toEqual(
+      expect.objectContaining({
+        userId: 'claims-user',
+        displayName: 'Claims User',
+        gitUserEmail: 'claims-user@example.com',
+        roles: ['user'],
+      })
+    );
+  });
+
+  it.each([
+    ['developer/one', 'developer-one@local.lifecycle'],
+    ['***', '-@local.lifecycle'],
+  ])('builds the local Git fallback email for configured identifier %p', (userId, gitUserEmail) => {
+    process.env.ENABLE_AUTH = 'false';
+    process.env.LOCAL_DEV_USER_ID = userId;
+
+    expect(getIdentityFromClaims(null)).toEqual(
+      expect.objectContaining({
+        userId,
+        displayName: userId,
+        gitUserEmail,
+        roles: ['admin'],
+      })
+    );
+  });
+
+  it('returns null from claims when authentication is required and no subject exists', () => {
+    process.env.ENABLE_AUTH = 'true';
+
+    expect(getIdentityFromClaims(null)).toBeNull();
+  });
+
+  it('requires an authenticated identity and exposes the coded unauthorized error', () => {
+    process.env.ENABLE_AUTH = 'true';
+    let failure: unknown;
+
+    try {
+      requireRequestUserIdentity(makeRequest());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(UnauthorizedError);
+    expect(failure).toMatchObject({
+      httpStatus: 401,
+      code: 'unauthorized',
+      message: 'Authentication is required.',
+    });
+  });
+
+  it('returns the required identity when a valid subject is present', () => {
+    process.env.ENABLE_AUTH = 'true';
+
+    expect(requireRequestUserIdentity(makeRequest({ sub: 'required-user', name: 'Required User' }))).toEqual(
+      expect.objectContaining({
+        userId: 'required-user',
+        displayName: 'Required User',
       })
     );
   });

@@ -14,9 +14,47 @@
  * limitations under the License.
  */
 
+var mockExtract: jest.Mock;
+var mockStartSpan: jest.Mock;
+var mockSetTag: jest.Mock;
+var mockFinish: jest.Mock;
+var mockActivate: jest.Mock;
+var mockActive: jest.Mock;
+var mockInject: jest.Mock;
+var mockScope: jest.Mock;
+
+jest.mock('dd-trace', () => {
+  mockExtract = jest.fn();
+  mockSetTag = jest.fn();
+  mockFinish = jest.fn();
+  mockStartSpan = jest.fn(() => ({ setTag: mockSetTag, finish: mockFinish }));
+  mockActivate = jest.fn((_span, callback) => callback());
+  mockActive = jest.fn();
+  mockInject = jest.fn();
+  mockScope = jest.fn(() => ({ activate: mockActivate, active: mockActive }));
+  return {
+    __esModule: true,
+    default: {
+      extract: (...args: unknown[]) => mockExtract(...args),
+      startSpan: (...args: unknown[]) => mockStartSpan(...args),
+      scope: (...args: unknown[]) => mockScope(...args),
+      inject: (...args: unknown[]) => mockInject(...args),
+    },
+  };
+});
+
 import { getLogContext, withLogContext, updateLogContext, extractContextForQueue } from '../context';
 
 describe('Logger Context', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExtract.mockReturnValue(null);
+    mockStartSpan.mockReturnValue({ setTag: mockSetTag, finish: mockFinish });
+    mockActivate.mockImplementation((_span, callback) => callback());
+    mockActive.mockReturnValue(null);
+    mockScope.mockReturnValue({ activate: mockActivate, active: mockActive });
+  });
+
   describe('getLogContext', () => {
     it('should return empty object when no context is set', () => {
       const context = getLogContext();
@@ -85,6 +123,58 @@ describe('Logger Context', () => {
 
       expect(result).toBe('async-result');
     });
+
+    it('continues without a child span when propagated trace context cannot be extracted', () => {
+      mockExtract.mockReturnValueOnce(null);
+
+      const result = withLogContext({ correlationId: 'corr-1', _ddTraceContext: { traceparent: 'invalid' } }, () =>
+        getLogContext()
+      );
+
+      expect(result).toMatchObject({ correlationId: 'corr-1' });
+      expect(mockExtract).toHaveBeenCalledWith('text_map', { traceparent: 'invalid' });
+      expect(mockStartSpan).not.toHaveBeenCalled();
+    });
+
+    it('activates and finishes a child span around synchronous work', () => {
+      const parentSpanContext = { traceId: 'parent' };
+      mockExtract.mockReturnValueOnce(parentSpanContext);
+
+      const result = withLogContext(
+        {
+          correlationId: 'corr-1',
+          buildUuid: 'build-1',
+          deployUuid: 'deploy-1',
+          _ddTraceContext: { traceparent: 'valid' },
+        },
+        () => 'sync-result'
+      );
+
+      expect(result).toBe('sync-result');
+      expect(mockStartSpan).toHaveBeenCalledWith('queue.process', { childOf: parentSpanContext });
+      expect(mockSetTag).toHaveBeenNthCalledWith(1, 'correlationId', 'corr-1');
+      expect(mockSetTag).toHaveBeenNthCalledWith(2, 'buildUuid', 'build-1');
+      expect(mockSetTag).toHaveBeenNthCalledWith(3, 'deployUuid', 'deploy-1');
+      expect(mockActivate).toHaveBeenCalledWith(expect.any(Object), expect.any(Function));
+      expect(mockFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it('finishes a propagated child span after asynchronous success and failure', async () => {
+      mockExtract.mockReturnValue({ traceId: 'parent' });
+
+      await expect(
+        withLogContext({ correlationId: 'corr-success', _ddTraceContext: { traceparent: 'valid' } }, async () => 'ok')
+      ).resolves.toBe('ok');
+      expect(mockFinish).toHaveBeenCalledTimes(1);
+
+      const failure = new Error('worker failed');
+      await expect(
+        withLogContext({ correlationId: 'corr-failure', _ddTraceContext: { traceparent: 'valid' } }, async () => {
+          throw failure;
+        })
+      ).rejects.toBe(failure);
+      expect(mockFinish).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('updateLogContext', () => {
@@ -143,6 +233,38 @@ describe('Logger Context', () => {
 
       expect(queueData.correlationId).toBeUndefined();
       expect(queueData.buildUuid).toBeUndefined();
+    });
+
+    it('injects the active trace span into queue context', async () => {
+      const activeSpan = { spanId: 'active' };
+      mockActive.mockReturnValueOnce(activeSpan);
+      mockInject.mockImplementationOnce((_span, _format, carrier) => {
+        carrier.traceparent = '00-trace-parent';
+      });
+
+      await withLogContext(
+        {
+          correlationId: 'corr-123',
+          serviceName: 'api',
+          sender: 'webhook',
+        },
+        async () => {
+          expect(extractContextForQueue()).toEqual({
+            correlationId: 'corr-123',
+            buildUuid: undefined,
+            deployUuid: undefined,
+            serviceName: 'api',
+            sender: 'webhook',
+            repo: undefined,
+            pr: undefined,
+            branch: undefined,
+            sha: undefined,
+            _ddTraceContext: { traceparent: '00-trace-parent' },
+          });
+        }
+      );
+
+      expect(mockInject).toHaveBeenCalledWith(activeSpan, 'text_map', expect.any(Object));
     });
   });
 });

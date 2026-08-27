@@ -84,3 +84,59 @@ it('compares locked-state hashes without string short-circuiting', () => {
   expect(confirmationStateMatches('a'.repeat(32), 'b'.repeat(32))).toBe(false);
   expect(confirmationStateMatches('not-a-hash', 'not-a-hash')).toBe(false);
 });
+
+it.each([
+  ['a non-positive environment', { environmentId: 0, userId: 'user-1', stateHash: 'a'.repeat(32) }, 1_000],
+  ['an empty user', { environmentId: 42, userId: '', stateHash: 'a'.repeat(32) }, 1_000],
+  ['an oversized user', { environmentId: 42, userId: 'x'.repeat(256), stateHash: 'a'.repeat(32) }, 1_000],
+  ['an invalid state hash', { environmentId: 42, userId: 'user-1', stateHash: 'not-a-state-hash' }, 1_000],
+  ['a negative issue time', { environmentId: 42, userId: 'user-1', stateHash: 'a'.repeat(32) }, -1],
+])('rejects claims with %s before creating a token', (_label, input, nowSeconds) => {
+  expect(() => createDestroyConfirmation(input, nowSeconds)).toThrow('Destroy confirmation claims are invalid');
+});
+
+it.each([
+  ['an oversized token', 'x'.repeat(4097)],
+  ['missing authenticated segments', 'lfcmcp_destroy_v1.only-two-segments'],
+  ['the wrong prefix', 'wrong-prefix.a.b.c'],
+  ['an extra segment', 'lfcmcp_destroy_v1.a.b.c.extra'],
+  [
+    'invalid IV length',
+    `lfcmcp_destroy_v1.${Buffer.alloc(1).toString('base64url')}.${Buffer.alloc(1).toString('base64url')}.${Buffer.alloc(
+      16
+    ).toString('base64url')}`,
+  ],
+])('rejects malformed framing with %s', (_label, token) => {
+  expect(() => verifyDestroyConfirmation(token, { environmentId: 42, userId: 'user-1' }, 1_001)).toThrow(
+    'confirmation is invalid'
+  );
+});
+
+it('maps canonical ciphertext tampering to the public invalid-confirmation error', () => {
+  const token = createDestroyConfirmation({ environmentId: 42, userId: 'user-1', stateHash: 'd'.repeat(32) }, 1_000);
+  const [prefix, iv, ciphertext, tag] = token.split('.');
+  const changedFirstCharacter = ciphertext[0] === 'A' ? 'B' : 'A';
+  const tampered = [prefix, iv, `${changedFirstCharacter}${ciphertext.slice(1)}`, tag].join('.');
+
+  expect(() => verifyDestroyConfirmation(tampered, { environmentId: 42, userId: 'user-1' }, 1_001)).toThrow(
+    'confirmation is invalid'
+  );
+});
+
+it('uses the current clock when issue and verification times are omitted', () => {
+  const dateNow = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+  try {
+    const token = createDestroyConfirmation({
+      environmentId: 42,
+      userId: 'user-1',
+      stateHash: 'e'.repeat(32),
+    });
+
+    expect(verifyDestroyConfirmation(token, { environmentId: 42, userId: 'user-1' })).toMatchObject({
+      iat: 1_000,
+      exp: 1_300,
+    });
+  } finally {
+    dateNow.mockRestore();
+  }
+});

@@ -16,8 +16,10 @@
 
 import {
   assertNoHelmSecretValueRefs,
+  buildHelmSecretVolumeName,
   buildHelmSecretVolumeMounts,
   buildHelmSecretVolumes,
+  formatSecretRef,
   generateHelmSecretKey,
   HELM_SECRET_MOUNT_ROOT,
   splitHelmSecretValueRefs,
@@ -63,6 +65,20 @@ describe('helm secret value refs', () => {
     expect(result.secretSetFiles).toEqual([]);
   });
 
+  it('preserves flag-style values that do not contain an equals sign', () => {
+    expect(splitHelmSecretValueRefs(['feature.enabled'], 'example-db')).toEqual({
+      plainValues: ['feature.enabled'],
+      secretRefs: [],
+      secretSetFiles: [],
+    });
+  });
+
+  it('rejects a secret ref that is not attached to a Helm key', () => {
+    expect(() => splitHelmSecretValueRefs(['{{gcp:projects/sample/secrets/token}}'], 'example-db')).toThrow(
+      'contains a secret ref but is not a key=value entry'
+    );
+  });
+
   it('rejects partial secret interpolation', () => {
     expect(() =>
       splitHelmSecretValueRefs(
@@ -79,6 +95,26 @@ describe('helm secret value refs', () => {
         'Codefresh Helm deploy path'
       )
     ).toThrow('Codefresh Helm deploy path does not support helm.chart.values secret refs');
+  });
+
+  it('adds malformed-ref details when validating an unsupported deploy path', () => {
+    expect(() =>
+      assertNoHelmSecretValueRefs(
+        ['auth.url=postgres://{{aws:repo/example/database:PASSWORD}}@host/db'],
+        'Legacy Helm deploy path'
+      )
+    ).toThrow(
+      "Legacy Helm deploy path does not support helm.chart.values secret refs: Helm custom value 'auth.url' uses unsupported partial or malformed secret interpolation"
+    );
+  });
+
+  it('formats refs without keys and generates safe deterministic key and volume names', () => {
+    const ref = { provider: 'gcp', path: 'projects/sample/secrets/token' };
+
+    expect(formatSecretRef(ref)).toBe('{{gcp:projects/sample/secrets/token}}');
+    expect(generateHelmSecretKey('***', ref)).toMatch(/^helm\.value\.[a-f0-9]{10}$/);
+    expect(buildHelmSecretVolumeName('...')).toMatch(/^helm-secret-secret-[a-f0-9]{8}$/);
+    expect(buildHelmSecretVolumeName('My Secret/Name')).toMatch(/^helm-secret-my-secret-name-[a-f0-9]{8}$/);
   });
 
   it('builds secret volumes and mounts for only the required Helm keys', () => {

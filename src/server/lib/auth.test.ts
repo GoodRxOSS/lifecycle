@@ -87,6 +87,41 @@ describe('verifyBearerToken', () => {
 
     warnSpy.mockRestore();
   });
+
+  it('fails closed when required Keycloak configuration is missing', async () => {
+    delete process.env.KEYCLOAK_CLIENT_ID;
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const result = await verifyBearerToken('some.jwt.token');
+
+    expect(result).toEqual({
+      success: false,
+      error: { message: 'Server configuration error', status: 500 },
+    });
+    expect(errorSpy).toHaveBeenCalledWith('Auth: missing Keycloak environment variables');
+    expect(mockCreateRemoteJWKSet).not.toHaveBeenCalled();
+    expect(mockJwtVerify).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('fails safely when the runtime cannot construct the configured JWKS URL', async () => {
+    process.env.KEYCLOAK_JWKS_URL = 'https://identity.example.test/unique-jwks';
+    const originalUrl = globalThis.URL;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      (globalThis as { URL?: typeof URL }).URL = undefined;
+
+      await expect(verifyBearerToken('some.jwt.token')).resolves.toEqual({
+        success: false,
+        error: { message: 'Authentication failed: URL constructor is not available', status: 401 },
+      });
+      expect(mockJwtVerify).not.toHaveBeenCalled();
+    } finally {
+      globalThis.URL = originalUrl;
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe('verifyAuth bearer extraction', () => {
@@ -122,6 +157,19 @@ describe('verifyAuth bearer extraction', () => {
 
     expect(result.success).toBe(false);
     expect(result.error?.message).toBe('Authorization header is missing');
+    expect(mockJwtVerify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing headers', {}],
+    ['headers without a get method', { headers: {} }],
+  ])('treats requests with %s as missing the Authorization header', async (_label, request) => {
+    const result = await verifyAuth(request as any);
+
+    expect(result).toEqual({
+      success: false,
+      error: { message: 'Authorization header is missing', status: 401 },
+    });
     expect(mockJwtVerify).not.toHaveBeenCalled();
   });
 });

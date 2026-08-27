@@ -96,6 +96,27 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/sandbox/resume', () => {
     });
   });
 
+  it('resumes the sandbox and returns the serialized session', async () => {
+    const response = await POST(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mockResolveRequestGitHubToken).toHaveBeenCalledWith(expect.anything());
+    expect(mockResumeChatRuntime).toHaveBeenCalledWith({
+      sessionId: 'sample-session',
+      userId: 'sample-user',
+      userIdentity,
+      githubToken: 'sample-token',
+    });
+    expect(mockSerializeSessionRecord).toHaveBeenCalledWith({ uuid: 'sample-session' });
+    expect(body.data).toEqual({
+      session: { id: 'sample-session', userId: 'sample-user' },
+      sandbox: { status: 'ready' },
+    });
+  });
+
   it('maps canonical workspace action blockers to 409', async () => {
     mockResumeChatRuntime.mockRejectedValueOnce(
       new WorkspaceActionBlockedError(
