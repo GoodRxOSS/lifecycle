@@ -15,8 +15,38 @@
  */
 
 import { getLogger } from './logger';
-import { CommentParser } from 'shared/constants';
+import { BuildKind, CommentParser } from 'shared/constants';
 import { compact, flatten, set } from 'lodash';
+import type Service from 'server/services/_service';
+import type { Build, PullRequest } from 'server/models';
+
+/**
+ * Only build and deploy status transitions normally rebuild the Mission Control comment, so a
+ * config change that queues no redeploy would leave it stale — and editing that stale comment
+ * would then reapply the old state. Callers decide when this applies, since the environments
+ * patch aggregates its sub-calls while the per-build routes refresh per call.
+ */
+export async function refreshMissionControlComment(
+  service: Service,
+  build: Build,
+  pullRequest: PullRequest | null | undefined = build?.pullRequest
+): Promise<void> {
+  if (!pullRequest || build?.kind === BuildKind.SANDBOX) {
+    return;
+  }
+
+  try {
+    const { db, redis, redlock, queueManager } = service;
+    const activityStream =
+      db.services?.ActivityStream ??
+      new (await import('server/services/activityStream')).default(db, redis, redlock, queueManager);
+
+    // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
+    await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
+  } catch (error) {
+    getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
+  }
+}
 
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{

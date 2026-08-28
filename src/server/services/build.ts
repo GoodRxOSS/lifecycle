@@ -17,6 +17,7 @@
 import { createHash } from 'crypto';
 import Haikunator from 'haikunator';
 import * as k8s from 'server/lib/kubernetes';
+import { refreshMissionControlComment } from 'server/lib/comment';
 import * as cli from 'server/lib/cli';
 import * as github from 'server/lib/github';
 import { uninstallHelmReleases } from 'server/lib/helm';
@@ -1861,7 +1862,7 @@ export default class BuildService extends BaseService {
         };
       });
 
-    return this.withBuildDeploymentLock(build.id, async () => {
+    const result = await this.withBuildDeploymentLock(build.id, async (): Promise<ApplyApiEnvironmentPatchResult> => {
       const persisted = await persistPatch();
       if (persisted.queueRedeploy) {
         await this.enqueueResolveAndDeployBuild({
@@ -1872,6 +1873,13 @@ export default class BuildService extends BaseService {
       }
       return { mode: 'applied', changed: persisted.changed, build: persisted.build };
     });
+
+    // Outside the deployment lock: the refresh takes its own lock on the same build, so holding
+    // both would let a slow comment update block every other operation on this build.
+    if (result.mode === 'applied' && result.changed) {
+      await refreshMissionControlComment(this, result.build);
+    }
+    return result;
   }
 
   /** Shared enqueue-delete helper: the expiry sweep and the TTL scanner drift-repair both call this. */

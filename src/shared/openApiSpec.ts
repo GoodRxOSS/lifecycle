@@ -708,6 +708,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        EnvironmentPatchResult: {
+          allOf: [
+            { $ref: '#/components/schemas/EnvironmentDetail' },
+            {
+              type: 'object',
+              properties: {
+                redeployQueued: {
+                  type: 'boolean',
+                  description: 'Whether this request queued a redeploy for the environment.',
+                },
+                deployId: {
+                  type: 'string',
+                  description:
+                    'Identifier of the redeploy queued by this request. Present only when redeployQueued is true.',
+                },
+              },
+              required: ['redeployQueued'],
+            },
+          ],
+        },
+
         EnvironmentCreateResult: {
           type: 'object',
           properties: {
@@ -885,6 +906,17 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             {
               type: 'object',
               properties: { data: { $ref: '#/components/schemas/EnvironmentDetail' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentPatchSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentPatchResult' } },
               required: ['data'],
             },
           ],

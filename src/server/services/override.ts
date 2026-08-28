@@ -17,6 +17,7 @@
 import BaseService from './_service';
 import { getLogger, updateLogContext } from 'server/lib/logger';
 import { isDeployEnabled } from 'server/lib/buildSource';
+import { refreshMissionControlComment } from 'server/lib/comment';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { Build, Deploy, PullRequest } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
@@ -267,7 +268,10 @@ export default class OverrideService extends BaseService {
     }
 
     if (enqueueRedeploy) {
-      await this.enqueueRedeployIfEnabled(updatedBuild, pullRequest, runUuid);
+      const queued = await this.enqueueRedeployIfEnabled(updatedBuild, pullRequest, runUuid);
+      if (!queued) {
+        await refreshMissionControlComment(this, updatedBuild, pullRequest);
+      }
     }
     return updatedBuild;
   }
@@ -316,6 +320,9 @@ export default class OverrideService extends BaseService {
     );
 
     const queued = enqueueRedeploy ? await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid) : false;
+    if (enqueueRedeploy && !queued) {
+      await refreshMissionControlComment(this, build, pullRequest);
+    }
     return {
       buildUuid: build.uuid,
       queued,
@@ -531,6 +538,8 @@ export default class OverrideService extends BaseService {
     });
     return true;
   }
+
+  /** A config change with no redeploy leaves the Mission Control comment stale, since only build/deploy status transitions normally refresh it. */
 
   /**
    * Validate UUID format and uniqueness

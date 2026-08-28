@@ -62,7 +62,9 @@ import {
  *     description: >
  *       Applies config overrides on top of lifecycle.yaml via the same override
  *       machinery PR comments and the UI use. Secret references are rejected in
- *       env values. Optionally pauses/resumes deploys via deployEnabled.
+ *       env values. Optionally pauses/resumes deploys via deployEnabled. The
+ *       response reports whether this request queued a redeploy, since a
+ *       service-override change can be a no-op if it matches the current state.
  *     tags: [Environments]
  *     operationId: patchEnvironment
  *     parameters:
@@ -94,10 +96,10 @@ import {
  *               trackDefaultBranches: { type: boolean }
  *     responses:
  *       '200':
- *         description: Updated environment detail.
+ *         description: Updated environment detail, plus whether this request queued a redeploy.
  *         content:
  *           application/json:
- *             schema: { $ref: '#/components/schemas/EnvironmentDetailSuccessResponse' }
+ *             schema: { $ref: '#/components/schemas/EnvironmentPatchSuccessResponse' }
  *       '400': { description: Invalid request body (invalid_body). }
  *       '404': { description: Environment not found. }
  *       '409': { description: Teardown already owns the environment (env_tearing_down). }
@@ -182,7 +184,7 @@ const patchHandler = createPrincipalApiHandler(
       });
     }
 
-    await buildService.applyApiEnvironmentPatch(build, override, {
+    const patchResult = await buildService.applyApiEnvironmentPatch(build, override, {
       services: services ?? null,
       env: env ?? null,
       initEnv: initEnv ?? null,
@@ -195,7 +197,16 @@ const patchHandler = createPrincipalApiHandler(
     if (!detail) {
       throw new NotFoundError(`Environment ${uuid} was not found.`, 'env_not_found');
     }
-    return successResponse(detail, { status: 200 }, req);
+    const redeployQueued = patchResult.mode === 'redeploy_queued';
+    return successResponse(
+      {
+        ...detail,
+        redeployQueued,
+        ...(redeployQueued ? { deployId: patchResult.deployId } : {}),
+      },
+      { status: 200 },
+      req
+    );
   }
 );
 
