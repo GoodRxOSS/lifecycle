@@ -1861,7 +1861,7 @@ export default class BuildService extends BaseService {
         };
       });
 
-    const result = await this.withBuildDeploymentLock(build.id, async () => {
+    const result = await this.withBuildDeploymentLock(build.id, async (): Promise<ApplyApiEnvironmentPatchResult> => {
       const persisted = await persistPatch();
       if (persisted.queueRedeploy) {
         await this.enqueueResolveAndDeployBuild({
