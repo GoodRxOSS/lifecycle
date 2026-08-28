@@ -5096,7 +5096,17 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               example: 123456789,
             },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels'],
+          required: [
+            'id',
+            'title',
+            'fullName',
+            'githubLogin',
+            'pullRequestNumber',
+            'branchName',
+            'status',
+            'labels',
+            'commentId',
+          ],
         },
 
         /**
