@@ -595,6 +595,7 @@ describe('PATCH /api/v2/environments/{uuid}', () => {
     const build = { uuid: 'x', pullRequest: null, deploys: [] };
     mockBuildLookup(build);
     mockGetEnvironmentDetail.mockResolvedValue({ uuid: 'x', status: 'deployed' });
+    mockApplyApiEnvironmentPatch.mockResolvedValue({ mode: 'applied', changed: true, build });
 
     const res = await patchEnvironment(
       request('PATCH', { deployEnabled: false, env: { A: 'b' } }, 'http://localhost/api/v2/environments/x'),
@@ -610,11 +611,53 @@ describe('PATCH /api/v2/environments/{uuid}', () => {
     expect(mockGetEnvironmentDetail).toHaveBeenCalledWith('x', 101);
   });
 
+  it('reports redeployQueued as false with no deployId when the patch is applied without queueing', async () => {
+    writeToken();
+    const build = { uuid: 'x', pullRequest: null, deploys: [] };
+    mockBuildLookup(build);
+    mockGetEnvironmentDetail.mockResolvedValue({ uuid: 'x', status: 'deployed' });
+    mockApplyApiEnvironmentPatch.mockResolvedValue({ mode: 'applied', changed: true, build });
+
+    const res = await patchEnvironment(
+      request('PATCH', { env: { A: 'b' } }, 'http://localhost/api/v2/environments/x'),
+      { params: { uuid: 'x' } }
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.redeployQueued).toBe(false);
+    expect(body.data).not.toHaveProperty('deployId');
+  });
+
+  it('reports redeployQueued and the deployId when the patch queues a redeploy', async () => {
+    writeToken();
+    const build = { uuid: 'x', pullRequest: null, deploys: [] };
+    mockBuildLookup(build);
+    mockGetEnvironmentDetail.mockResolvedValue({ uuid: 'x', status: 'deployed' });
+    mockApplyApiEnvironmentPatch.mockResolvedValue({
+      mode: 'redeploy_queued',
+      changed: true,
+      deployId: 'run-123',
+      build,
+    });
+
+    const res = await patchEnvironment(
+      request('PATCH', { services: [{ name: 'web', active: false }] }, 'http://localhost/api/v2/environments/x'),
+      { params: { uuid: 'x' } }
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.redeployQueued).toBe(true);
+    expect(body.data.deployId).toBe('run-123');
+  });
+
   it('keeps omitted PATCH fields as no-ops', async () => {
     writeToken();
     const build = { id: 606, uuid: 'x', pullRequest: null, deploys: [] };
     mockBuildLookup(build);
     mockGetEnvironmentDetail.mockResolvedValue({ uuid: 'x', status: 'deployed' });
+    mockApplyApiEnvironmentPatch.mockResolvedValue({ mode: 'applied', changed: false, build });
 
     const res = await patchEnvironment(request('PATCH', {}, 'http://localhost/api/v2/environments/x'), {
       params: { uuid: 'x' },
