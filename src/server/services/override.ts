@@ -17,12 +17,13 @@
 import BaseService from './_service';
 import { getLogger, updateLogContext } from 'server/lib/logger';
 import { isDeployEnabled } from 'server/lib/buildSource';
+import { refreshMissionControlComment } from 'server/lib/comment';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
 import { Build, Deploy, PullRequest } from 'server/models';
 import * as k8s from 'server/lib/kubernetes';
 import DeployService from './deploy';
 import * as psl from 'psl';
-import { BuildKind, DeployTypes } from 'shared/constants';
+import { DeployTypes } from 'shared/constants';
 import type { Transaction } from 'objection';
 
 export interface ValidationResult {
@@ -269,7 +270,7 @@ export default class OverrideService extends BaseService {
     if (enqueueRedeploy) {
       const queued = await this.enqueueRedeployIfEnabled(updatedBuild, pullRequest, runUuid);
       if (!queued) {
-        await this.refreshMissionControlCommentIfNoRedeploy(updatedBuild, pullRequest);
+        await refreshMissionControlComment(this, updatedBuild, pullRequest);
       }
     }
     return updatedBuild;
@@ -320,7 +321,7 @@ export default class OverrideService extends BaseService {
 
     const queued = enqueueRedeploy ? await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid) : false;
     if (enqueueRedeploy && !queued) {
-      await this.refreshMissionControlCommentIfNoRedeploy(build, pullRequest);
+      await refreshMissionControlComment(this, build, pullRequest);
     }
     return {
       buildUuid: build.uuid,
@@ -539,25 +540,6 @@ export default class OverrideService extends BaseService {
   }
 
   /** A config change with no redeploy leaves the Mission Control comment stale, since only build/deploy status transitions normally refresh it. */
-  private async refreshMissionControlCommentIfNoRedeploy(
-    build: Build,
-    pullRequest: PullRequest | null | undefined
-  ): Promise<void> {
-    if (!pullRequest || build.kind === BuildKind.SANDBOX) {
-      return;
-    }
-
-    try {
-      const activityStream =
-        this.db.services?.ActivityStream ??
-        new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
-
-      // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
-      await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
-    } catch (error) {
-      getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
-    }
-  }
 
   /**
    * Validate UUID format and uniqueness

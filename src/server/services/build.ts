@@ -17,6 +17,7 @@
 import { createHash } from 'crypto';
 import Haikunator from 'haikunator';
 import * as k8s from 'server/lib/kubernetes';
+import { refreshMissionControlComment } from 'server/lib/comment';
 import * as cli from 'server/lib/cli';
 import * as github from 'server/lib/github';
 import { uninstallHelmReleases } from 'server/lib/helm';
@@ -1876,28 +1877,9 @@ export default class BuildService extends BaseService {
     // Outside the deployment lock: the refresh takes its own lock on the same build, so holding
     // both would let a slow comment update block every other operation on this build.
     if (result.mode === 'applied' && result.changed) {
-      await this.refreshMissionControlCommentIfNoRedeploy(result.build);
+      await refreshMissionControlComment(this, result.build);
     }
     return result;
-  }
-
-  /** A patch that changes config but skips redeploy (e.g. deploy disabled) would otherwise leave the Mission Control comment stale. */
-  private async refreshMissionControlCommentIfNoRedeploy(build: Build): Promise<void> {
-    const pullRequest = build.pullRequest;
-    if (!pullRequest || build.kind === BuildKind.SANDBOX) {
-      return;
-    }
-
-    try {
-      const activityStream =
-        this.db.services?.ActivityStream ??
-        new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
-
-      // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
-      await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
-    } catch (error) {
-      getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
-    }
   }
 
   /** Shared enqueue-delete helper: the expiry sweep and the TTL scanner drift-repair both call this. */
