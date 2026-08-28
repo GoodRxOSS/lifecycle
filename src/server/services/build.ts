@@ -1870,8 +1870,30 @@ export default class BuildService extends BaseService {
         });
         return { mode: 'redeploy_queued', changed: true, deployId: runUuid, build: persisted.build };
       }
+      if (persisted.changed) {
+        await this.refreshMissionControlCommentIfNoRedeploy(persisted.build);
+      }
       return { mode: 'applied', changed: persisted.changed, build: persisted.build };
     });
+  }
+
+  /** A patch that changes config but skips redeploy (e.g. deploy disabled) would otherwise leave the Mission Control comment stale. */
+  private async refreshMissionControlCommentIfNoRedeploy(build: Build): Promise<void> {
+    const pullRequest = build.pullRequest;
+    if (!pullRequest || build.kind === BuildKind.SANDBOX) {
+      return;
+    }
+
+    const activityStream =
+      this.db.services?.ActivityStream ??
+      new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
+
+    // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
+    await activityStream
+      .updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true)
+      .catch((error) => {
+        getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
+      });
   }
 
   /** Shared enqueue-delete helper: the expiry sweep and the TTL scanner drift-repair both call this. */
