@@ -17,18 +17,8 @@
 import { getLogger } from './logger';
 import { BuildKind, CommentParser } from 'shared/constants';
 import { compact, flatten, set } from 'lodash';
-import type { Redis } from 'ioredis';
-import type Redlock from 'redlock';
-import type Database from 'server/database';
-import type QueueManager from 'server/lib/queueManager';
+import type Service from 'server/services/_service';
 import type { Build, PullRequest } from 'server/models';
-
-interface MissionControlRefreshDeps {
-  db: Database;
-  redis: Redis;
-  redlock: Redlock;
-  queueManager: QueueManager;
-}
 
 /**
  * Only build and deploy status transitions normally rebuild the Mission Control comment, so a
@@ -37,7 +27,7 @@ interface MissionControlRefreshDeps {
  * patch aggregates its sub-calls while the per-build routes refresh per call.
  */
 export async function refreshMissionControlComment(
-  { db, redis, redlock, queueManager }: MissionControlRefreshDeps,
+  service: Service,
   build: Build,
   pullRequest: PullRequest | null | undefined = build?.pullRequest
 ): Promise<void> {
@@ -46,6 +36,7 @@ export async function refreshMissionControlComment(
   }
 
   try {
+    const { db, redis, redlock, queueManager } = service;
     const activityStream =
       db.services?.ActivityStream ??
       new (await import('server/services/activityStream')).default(db, redis, redlock, queueManager);
