@@ -510,7 +510,8 @@ export default class BuildService extends BaseService {
           'branchName',
           'status',
           'labels',
-          'deployOnUpdate'
+          'deployOnUpdate',
+          'commentId'
         );
       })
       .modifyGraph('baseBuild', (b) => {

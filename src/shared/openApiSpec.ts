@@ -5089,8 +5089,24 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'array',
               items: { type: 'string', example: 'lifecycle-deploy!' },
             },
+            commentId: {
+              type: 'integer',
+              nullable: true,
+              description: "GitHub comment ID of Lifecycle's mission control comment on this PR, if posted yet.",
+              example: 123456789,
+            },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels'],
+          required: [
+            'id',
+            'title',
+            'fullName',
+            'githubLogin',
+            'pullRequestNumber',
+            'branchName',
+            'status',
+            'labels',
+            'commentId',
+          ],
         },
 
         /**
