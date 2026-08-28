@@ -1861,7 +1861,7 @@ export default class BuildService extends BaseService {
         };
       });
 
-    return this.withBuildDeploymentLock(build.id, async () => {
+    const result = await this.withBuildDeploymentLock(build.id, async () => {
       const persisted = await persistPatch();
       if (persisted.queueRedeploy) {
         await this.enqueueResolveAndDeployBuild({
@@ -1870,11 +1870,15 @@ export default class BuildService extends BaseService {
         });
         return { mode: 'redeploy_queued', changed: true, deployId: runUuid, build: persisted.build };
       }
-      if (persisted.changed) {
-        await this.refreshMissionControlCommentIfNoRedeploy(persisted.build);
-      }
       return { mode: 'applied', changed: persisted.changed, build: persisted.build };
     });
+
+    // Outside the deployment lock: the refresh takes its own lock on the same build, so holding
+    // both would let a slow comment update block every other operation on this build.
+    if (result.mode === 'applied' && result.changed) {
+      await this.refreshMissionControlCommentIfNoRedeploy(result.build);
+    }
+    return result;
   }
 
   /** A patch that changes config but skips redeploy (e.g. deploy disabled) would otherwise leave the Mission Control comment stale. */
@@ -1884,16 +1888,16 @@ export default class BuildService extends BaseService {
       return;
     }
 
-    const activityStream =
-      this.db.services?.ActivityStream ??
-      new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
+    try {
+      const activityStream =
+        this.db.services?.ActivityStream ??
+        new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
 
-    // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
-    await activityStream
-      .updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true)
-      .catch((error) => {
-        getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
-      });
+      // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
+      await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
+    } catch (error) {
+      getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
+    }
   }
 
   /** Shared enqueue-delete helper: the expiry sweep and the TTL scanner drift-repair both call this. */

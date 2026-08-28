@@ -547,16 +547,16 @@ export default class OverrideService extends BaseService {
       return;
     }
 
-    const activityStream =
-      this.db.services?.ActivityStream ??
-      new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
+    try {
+      const activityStream =
+        this.db.services?.ActivityStream ??
+        new (await import('./activityStream')).default(this.db, this.redis, this.redlock, this.queueManager);
 
-    // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
-    await activityStream
-      .updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true)
-      .catch((error) => {
-        getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
-      });
+      // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
+      await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
+    } catch (error) {
+      getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
+    }
   }
 
   /**
