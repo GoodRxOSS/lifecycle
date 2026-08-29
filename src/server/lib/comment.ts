@@ -48,9 +48,7 @@ export async function refreshMissionControlComment(
   }
 }
 
-// Anchored to the task-list line itself, not the heading: clicking a checkbox rewrites only the box,
-// and prose elsewhere in the comment must never be mistaken for the option. Quoted lines are excluded
-// because GitHub does not render those as checkboxes.
+// Matches the list-item line only; quoted lines are not checkboxes on GitHub.
 const REDEPLOY_ON_PUSH_LINE = /^[ \t]*[-*+] \[([ xX])\] Redeploy on pushes to default branches[ \t]*\r?$/m;
 
 export class CommentHelper {
@@ -77,10 +75,7 @@ export class CommentHelper {
     return compact(flatten(serviceBranches));
   }
 
-  /**
-   * Undefined means the option line is absent, which is a stale or hand-trimmed comment body
-   * rather than an explicit "off". Callers must not persist that as false.
-   */
+  /** Undefined means the line is absent, which callers must not persist as false. */
   public static parseRedeployOnPushes(comment: string): boolean | undefined {
     const match = REDEPLOY_ON_PUSH_LINE.exec(comment ?? '');
     if (!match) {

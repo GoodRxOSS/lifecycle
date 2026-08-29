@@ -153,9 +153,7 @@ export default class ActivityStream extends BaseService {
           return;
         }
 
-        // handle all environment/service overrides
-        // Applied before the redeploy so a single edit that changes options and ticks Redeploy keeps both,
-        // and a body we cannot parse still lets the redeploy through.
+        // Runs first so one edit can change options and redeploy, and a bad body still redeploys.
         await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid }).catch((error) => {
           getLogger().error({ error }, 'Comment: override apply failed');
         });
