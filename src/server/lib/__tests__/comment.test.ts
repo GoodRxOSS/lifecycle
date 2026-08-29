@@ -108,9 +108,8 @@ describe('CommentHelper.parseRedeployOnPushes', () => {
     expect(CommentHelper.parseRedeployOnPushes(line('x'))).toBe(true);
   });
 
-  test('tolerates uppercase, quoting, indentation and carriage returns', () => {
+  test('tolerates uppercase, indentation and carriage returns', () => {
     expect(CommentHelper.parseRedeployOnPushes(line('X'))).toBe(true);
-    expect(CommentHelper.parseRedeployOnPushes(`> ${line('x')}`)).toBe(true);
     expect(CommentHelper.parseRedeployOnPushes(`  ${line('x')}`)).toBe(true);
     expect(CommentHelper.parseRedeployOnPushes(`${line('x')}\r\nnext line`)).toBe(true);
   });
@@ -127,5 +126,20 @@ describe('CommentHelper.parseRedeployOnPushes', () => {
     ].join('\n');
 
     expect(CommentHelper.parseRedeployOnPushes(comment)).toBe(false);
+  });
+});
+
+describe('CommentHelper.parseRedeployOnPushes conflicting lines', () => {
+  test('reads the real list item, not a quoted copy', () => {
+    const comment = [
+      '> - [x] Redeploy on pushes to default branches',
+      '- [ ] Redeploy on pushes to default branches',
+    ].join('\n');
+
+    expect(CommentHelper.parseRedeployOnPushes(comment)).toBe(false);
+  });
+
+  test('ignores a quoted line when no real list item exists', () => {
+    expect(CommentHelper.parseRedeployOnPushes('> - [x] Redeploy on pushes to default branches')).toBeUndefined();
   });
 });

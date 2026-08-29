@@ -337,9 +337,10 @@ describe('ActivityStream comment edit ordering', () => {
     await service.updateBuildsAndDeploysFromCommentEdit(pullRequest, '- [x] Redeploy Environment');
 
     expect(calls).toEqual(['overrides', 'redeploy']);
+    const overrideArgs = applyCommentOverrides.mock.calls[0][0] as { runUuid: string };
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
-      runUUID: applyCommentOverrides.mock.calls[0][0].runUuid,
+      runUUID: overrideArgs.runUuid,
     });
   });
 
@@ -350,6 +351,20 @@ describe('ActivityStream comment edit ordering', () => {
     await service.updateBuildsAndDeploysFromCommentEdit(pullRequest, '- [x] Redeploy Environment');
 
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it('still redeploys when a cache purge is requested in the same edit', async () => {
+    const { service, pullRequest, enqueueResolveAndDeployBuild } = createCommentEditFixture();
+    const purge = jest.spyOn(service as any, 'purgeFastlyServiceCache').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'applyCommentOverrides').mockResolvedValue(undefined);
+
+    await service.updateBuildsAndDeploysFromCommentEdit(
+      pullRequest,
+      '- [x] Redeploy Environment\n- [x] Purge Fastly Service Cache'
+    );
+
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(1);
+    expect(purge).not.toHaveBeenCalled();
   });
 
   it('does not redeploy when no redeploy checkbox is ticked', async () => {

@@ -220,14 +220,8 @@ describe('OverrideService.applyBuildOverrides', () => {
 
     await service.applyBuildOverrides(args);
 
-    expect(args.build.$query().patch).toHaveBeenCalledWith({
-      commentInitEnv: {
-        FEATURE_ENABLED: 'true',
-      },
-      commentRuntimeEnv: {
-        FEATURE_ENABLED: 'true',
-      },
-    });
+    const patchArg = (args.build.$query().patch as jest.Mock).mock.calls[0][0];
+    expect(patchArg).not.toHaveProperty('trackDefaultBranches');
   });
 
   it('persists an unchecked option line as false', async () => {

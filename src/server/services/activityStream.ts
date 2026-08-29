@@ -145,7 +145,8 @@ export default class ActivityStream extends BaseService {
       const isFastlyPurgeRequested = commentBody.includes(PURGE_FASTLY_CHECKBOX);
 
       try {
-        if (isFastlyPurgeRequested) {
+        // A redeploy request still takes precedence over a purge, as it did before overrides moved first.
+        if (isFastlyPurgeRequested && !isRedeployRequested) {
           // if fastly purge is requested from comment, we do not have to update the status
           await this.purgeFastlyServiceCache(buildUuid);
           shouldUpdateStatus = false;
@@ -469,7 +470,7 @@ export default class ActivityStream extends BaseService {
       }
     }
 
-    if (build.status !== BuildStatus.TORN_DOWN && build.status !== BuildStatus.TEARING_DOWN) {
+    if (build.status !== BuildStatus.TORN_DOWN) {
       message += '### Options\n*(Toggle options by clicking the checkboxes)*\n';
       message += `- [${build.trackDefaultBranches ? 'x' : ' '}] Redeploy on pushes to default branches\n\n`;
     }

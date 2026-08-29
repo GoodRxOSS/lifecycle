@@ -49,9 +49,9 @@ export async function refreshMissionControlComment(
 }
 
 // Anchored to the task-list line itself, not the heading: clicking a checkbox rewrites only the box,
-// and prose elsewhere in the comment must never be mistaken for the option.
-const REDEPLOY_ON_PUSH_LINE = /^[ \t>]*[-*+] \[[ xX]\] Redeploy on pushes to default branches[ \t]*\r?$/m;
-const REDEPLOY_ON_PUSH_CHECKED = /^[ \t>]*[-*+] \[[xX]\] Redeploy on pushes to default branches[ \t]*\r?$/m;
+// and prose elsewhere in the comment must never be mistaken for the option. Quoted lines are excluded
+// because GitHub does not render those as checkboxes.
+const REDEPLOY_ON_PUSH_LINE = /^[ \t]*[-*+] \[([ xX])\] Redeploy on pushes to default branches[ \t]*\r?$/m;
 
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{
@@ -82,10 +82,11 @@ export class CommentHelper {
    * rather than an explicit "off". Callers must not persist that as false.
    */
   public static parseRedeployOnPushes(comment: string): boolean | undefined {
-    if (!REDEPLOY_ON_PUSH_LINE.test(comment ?? '')) {
+    const match = REDEPLOY_ON_PUSH_LINE.exec(comment ?? '');
+    if (!match) {
       return undefined;
     }
-    return REDEPLOY_ON_PUSH_CHECKED.test(comment);
+    return match[1].toLowerCase() === 'x';
   }
 
   public static parseVanityUrl(comment: string): string {
