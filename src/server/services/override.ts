@@ -46,7 +46,8 @@ export interface BuildOverrideInput {
   serviceOverrides: ServiceOverrideInput[];
   vanityUrl: string | null;
   envOverrides: Record<string, any>;
-  redeployOnPush: boolean;
+  /** Undefined when the comment has no option line; the stored value is then left untouched. */
+  redeployOnPush?: boolean;
 }
 
 export interface BuildConfigPatchInput {
@@ -201,7 +202,7 @@ export default class OverrideService extends BaseService {
     await build.$query().patch({
       commentInitEnv: overrides.envOverrides,
       commentRuntimeEnv: overrides.envOverrides,
-      trackDefaultBranches: overrides.redeployOnPush,
+      ...(overrides.redeployOnPush === undefined ? {} : { trackDefaultBranches: overrides.redeployOnPush }),
     });
 
     getLogger().debug(`Service overrides: ${JSON.stringify(overrides.serviceOverrides)}`);

@@ -48,6 +48,11 @@ export async function refreshMissionControlComment(
   }
 }
 
+// Anchored to the task-list line itself, not the heading: clicking a checkbox rewrites only the box,
+// and prose elsewhere in the comment must never be mistaken for the option.
+const REDEPLOY_ON_PUSH_LINE = /^[ \t>]*[-*+] \[[ xX]\] Redeploy on pushes to default branches[ \t]*\r?$/m;
+const REDEPLOY_ON_PUSH_CHECKED = /^[ \t>]*[-*+] \[[xX]\] Redeploy on pushes to default branches[ \t]*\r?$/m;
+
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{
     active: boolean;
@@ -72,8 +77,15 @@ export class CommentHelper {
     return compact(flatten(serviceBranches));
   }
 
-  public static parseRedeployOnPushes(comment: string): boolean {
-    return comment.match(/\[x\] Redeploy on pushes to default branches/g) != null;
+  /**
+   * Undefined means the option line is absent, which is a stale or hand-trimmed comment body
+   * rather than an explicit "off". Callers must not persist that as false.
+   */
+  public static parseRedeployOnPushes(comment: string): boolean | undefined {
+    if (!REDEPLOY_ON_PUSH_LINE.test(comment ?? '')) {
+      return undefined;
+    }
+    return REDEPLOY_ON_PUSH_CHECKED.test(comment);
   }
 
   public static parseVanityUrl(comment: string): string {

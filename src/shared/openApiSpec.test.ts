@@ -352,6 +352,9 @@ describe('OpenAPI v2 agent session contract', () => {
         additionalProperties: true,
       })
     );
+    expect(schemas.Build.properties.trackDefaultBranches).toEqual({ type: 'boolean', example: false });
+    // The column is nullable, so requiring it would make the spec lie about degraded responses.
+    expect(schemas.Build.required).not.toContain('trackDefaultBranches');
     expect(schemas.UpdateBuildServiceOverrideRequest).toBeUndefined();
     expect(schemas.UpdateBuildEnvironmentOverridesRequest).toBeUndefined();
     expect(schemas.UpdateBuildOptionsRequest).toBeUndefined();
