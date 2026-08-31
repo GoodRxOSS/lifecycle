@@ -4696,6 +4696,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             kind: { $ref: '#/components/schemas/BuildKind' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
+            trackDefaultBranches: { type: 'boolean', example: false },
             baseBuildId: { type: 'integer', nullable: true },
             commentRuntimeEnv: {
               type: 'object',

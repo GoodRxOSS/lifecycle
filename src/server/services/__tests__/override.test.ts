@@ -214,6 +214,25 @@ describe('OverrideService.applyBuildOverrides', () => {
     });
   });
 
+  it('leaves trackDefaultBranches untouched when the comment has no option line', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs({ redeployOnPush: undefined });
+
+    await service.applyBuildOverrides(args);
+
+    const patchArg = (args.build.$query().patch as jest.Mock).mock.calls[0][0];
+    expect(patchArg).not.toHaveProperty('trackDefaultBranches');
+  });
+
+  it('persists an unchecked option line as false', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs({ redeployOnPush: false });
+
+    await service.applyBuildOverrides(args);
+
+    expect(args.build.$query().patch).toHaveBeenCalledWith(expect.objectContaining({ trackDefaultBranches: false }));
+  });
+
   it('patches unchecked services as inactive while preserving branch override behavior', async () => {
     const { service } = createService();
     const args = createFullYamlArgs({

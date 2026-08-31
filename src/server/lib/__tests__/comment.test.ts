@@ -87,3 +87,59 @@ describe('CommentHelper.parseEnvironmentOverrides', () => {
     });
   });
 });
+
+describe('CommentHelper.parseRedeployOnPushes', () => {
+  const line = (box: string) => `- [${box}] Redeploy on pushes to default branches`;
+
+  test('returns undefined when the option line is absent', () => {
+    const comment = ['Status comment', CommentParser.HEADER, '- [x] api: main', CommentParser.FOOTER].join('\n');
+
+    expect(CommentHelper.parseRedeployOnPushes(comment)).toBeUndefined();
+  });
+
+  test('returns undefined for prose mentioning the option without a checkbox', () => {
+    const comment = 'We should enable Redeploy on pushes to default branches for this environment.';
+
+    expect(CommentHelper.parseRedeployOnPushes(comment)).toBeUndefined();
+  });
+
+  test('distinguishes unchecked from checked', () => {
+    expect(CommentHelper.parseRedeployOnPushes(line(' '))).toBe(false);
+    expect(CommentHelper.parseRedeployOnPushes(line('x'))).toBe(true);
+  });
+
+  test('tolerates uppercase, indentation and carriage returns', () => {
+    expect(CommentHelper.parseRedeployOnPushes(line('X'))).toBe(true);
+    expect(CommentHelper.parseRedeployOnPushes(`  ${line('x')}`)).toBe(true);
+    expect(CommentHelper.parseRedeployOnPushes(`${line('x')}\r\nnext line`)).toBe(true);
+  });
+
+  test('finds the option when it follows the rest of the comment body', () => {
+    const comment = [
+      CommentParser.HEADER,
+      '- [x] api: main',
+      CommentParser.FOOTER,
+      '## Actions',
+      '- [ ] Redeploy Environment',
+      '### Options',
+      line(' '),
+    ].join('\n');
+
+    expect(CommentHelper.parseRedeployOnPushes(comment)).toBe(false);
+  });
+});
+
+describe('CommentHelper.parseRedeployOnPushes conflicting lines', () => {
+  test('reads the real list item, not a quoted copy', () => {
+    const comment = [
+      '> - [x] Redeploy on pushes to default branches',
+      '- [ ] Redeploy on pushes to default branches',
+    ].join('\n');
+
+    expect(CommentHelper.parseRedeployOnPushes(comment)).toBe(false);
+  });
+
+  test('ignores a quoted line when no real list item exists', () => {
+    expect(CommentHelper.parseRedeployOnPushes('> - [x] Redeploy on pushes to default branches')).toBeUndefined();
+  });
+});

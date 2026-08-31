@@ -307,3 +307,72 @@ describe('ActivityStream comment overrides', () => {
     expect(block).not.toContain('undefined');
   });
 });
+
+describe('ActivityStream comment edit ordering', () => {
+  function createCommentEditFixture() {
+    const service = createActivityStream();
+    const enqueueResolveAndDeployBuild = jest.fn().mockResolvedValue(undefined);
+    (service as any).db.services.BuildService = { enqueueResolveAndDeployBuild };
+    jest.spyOn(service as any, 'updatePullRequestActivityStream').mockResolvedValue(undefined);
+
+    const pullRequest = {
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      build: { id: 42, uuid: 'current-build', deploys: [] },
+      repository: {},
+    } as any;
+
+    return { service, pullRequest, enqueueResolveAndDeployBuild };
+  }
+
+  it('applies overrides before the redeploy and shares one run uuid', async () => {
+    const { service, pullRequest, enqueueResolveAndDeployBuild } = createCommentEditFixture();
+    const calls: string[] = [];
+    const applyCommentOverrides = jest.spyOn(service as any, 'applyCommentOverrides').mockImplementation(async () => {
+      calls.push('overrides');
+    });
+    enqueueResolveAndDeployBuild.mockImplementation(async () => {
+      calls.push('redeploy');
+    });
+
+    await service.updateBuildsAndDeploysFromCommentEdit(pullRequest, '- [x] Redeploy Environment');
+
+    expect(calls).toEqual(['overrides', 'redeploy']);
+    const overrideArgs = applyCommentOverrides.mock.calls[0][0] as { runUuid: string };
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
+      buildId: 42,
+      runUUID: overrideArgs.runUuid,
+    });
+  });
+
+  it('still redeploys when the comment body cannot be parsed', async () => {
+    const { service, pullRequest, enqueueResolveAndDeployBuild } = createCommentEditFixture();
+    jest.spyOn(service as any, 'applyCommentOverrides').mockRejectedValue(new Error('unparseable body'));
+
+    await service.updateBuildsAndDeploysFromCommentEdit(pullRequest, '- [x] Redeploy Environment');
+
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it('still redeploys when a cache purge is requested in the same edit', async () => {
+    const { service, pullRequest, enqueueResolveAndDeployBuild } = createCommentEditFixture();
+    const purge = jest.spyOn(service as any, 'purgeFastlyServiceCache').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'applyCommentOverrides').mockResolvedValue(undefined);
+
+    await service.updateBuildsAndDeploysFromCommentEdit(
+      pullRequest,
+      '- [x] Redeploy Environment\n- [x] Purge Fastly Service Cache'
+    );
+
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(1);
+    expect(purge).not.toHaveBeenCalled();
+  });
+
+  it('does not redeploy when no redeploy checkbox is ticked', async () => {
+    const { service, pullRequest, enqueueResolveAndDeployBuild } = createCommentEditFixture();
+    jest.spyOn(service as any, 'applyCommentOverrides').mockResolvedValue(undefined);
+
+    await service.updateBuildsAndDeploysFromCommentEdit(pullRequest, '- [ ] Redeploy Environment');
+
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+  });
+});

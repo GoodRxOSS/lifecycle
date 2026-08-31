@@ -48,6 +48,9 @@ export async function refreshMissionControlComment(
   }
 }
 
+// Matches the list-item line only; quoted lines are not checkboxes on GitHub.
+const REDEPLOY_ON_PUSH_LINE = /^[ \t]*[-*+] \[([ xX])\] Redeploy on pushes to default branches[ \t]*\r?$/m;
+
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{
     active: boolean;
@@ -72,8 +75,13 @@ export class CommentHelper {
     return compact(flatten(serviceBranches));
   }
 
-  public static parseRedeployOnPushes(comment: string): boolean {
-    return comment.match(/\[x\] Redeploy on pushes to default branches/g) != null;
+  /** Undefined means the line is absent, which callers must not persist as false. */
+  public static parseRedeployOnPushes(comment: string): boolean | undefined {
+    const match = REDEPLOY_ON_PUSH_LINE.exec(comment ?? '');
+    if (!match) {
+      return undefined;
+    }
+    return match[1].toLowerCase() === 'x';
   }
 
   public static parseVanityUrl(comment: string): string {
